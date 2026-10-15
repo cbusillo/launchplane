@@ -88,6 +88,18 @@ def docker(*args):
         raise RuntimeError("resource operation failed")
     return result.stdout
 
+def port_conflicts(binding, ports):
+    value = str(binding.get("HostPort") or "")
+    if not value:
+        return False
+    bounds = value.split("-")
+    if len(bounds) not in (1, 2) or any(not bound.isdigit() for bound in bounds):
+        raise ValueError("unqualified port inventory")
+    low, high = int(bounds[0]), int(bounds[-1])
+    if not 0 <= low <= high <= 65535:
+        raise ValueError("unqualified port inventory")
+    return any(low <= port <= high for port in ports)
+
 def main():
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     namespace = spec["namespace"]
@@ -135,18 +147,23 @@ def main():
         row = rows[0]
         if (row.get("Config", {}).get("Labels") or {}).get("com.docker.compose.project") == spec["project"]:
             raise ValueError("recipient already has containers")
-        for bindings in row["HostConfig"]["PortBindings"].values():
-            if any(int(binding["HostPort"]) in spec["ports"] for binding in (bindings or [])):
-                raise ValueError("port already referenced")
+        for inventory in (row["HostConfig"]["PortBindings"], row.get("NetworkSettings", {}).get("Ports") or {}):
+            for bindings in inventory.values():
+                if any(port_conflicts(binding, spec["ports"]) for binding in (bindings or [])):
+                    raise ValueError("port already referenced")
         for mount in row["Mounts"]:
             if mount.get("Type") == "tmpfs":
+                continue
+            if mount.get("Name") in spec["volumes"].values():
+                raise ValueError("storage already referenced")
+            if not mount.get("Source"):
                 continue
             source = Path(mount["Source"]).resolve()
             if mount.get("Type") == "bind" and mount.get("RW") is False and not any(source == path or path in source.parents for path in paths):
                 # A host monitor's read-only parent is not a writable alias.
                 # Exact resource paths and their children remain consumers.
                 continue
-            if mount.get("Name") in spec["volumes"].values() or any(source == path or path in source.parents or source in path.parents for path in paths):
+            if any(source == path or path in source.parents or source in path.parents for path in paths):
                 raise ValueError("storage already referenced")
     sockets = []
     try:

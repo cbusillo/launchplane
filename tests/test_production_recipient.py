@@ -273,7 +273,6 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertTrue(saved.qualified_at)
         output = json.dumps(plan(saved))
         self.assertNotIn(self.values["DB_PASSWORD"], output)
-        self.assertFalse(plan(saved)["bootstrap_eligible"])
         self.assertFalse(
             any("deploy" in path or "delete" in path or "remove" in path for path in self.effects)
         )
@@ -300,6 +299,11 @@ class ProductionRecipientTests(unittest.TestCase):
             self.assertEqual(self.run_operation().response_status_code, 409)
             self.assertEqual(self.run_operation("another-key").response_status_code, 409)
         self.assertEqual(self.effects, effects)
+        self.adapter.request = self.body.model_copy(
+            update={"reason": "Changed intent after unknown effect"}
+        )
+        with self.assertRaises(ValueError):
+            self.adapter.current()
         self.assertIsNotNone(custody(self.store, self.product, self.context))
         self.assertIn("new-recipient", self.provider)
         self.assert_old_preserved()
@@ -430,6 +434,64 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertEqual(self.run_operation().response_status_code, 202)
         self.assertEqual(self.effects.count("/api/compose.create"), 1)
         self.assert_old_preserved()
+
+    def test_zero_effect_drift_can_replan_with_retained_history_and_a_new_key(self) -> None:
+        original = self.adapter.require_unchanged
+
+        def drift_before_effect(record: Any) -> None:
+            if record.phase == "create_project":
+                self.store.write_product_profile_record(
+                    self.profile.model_copy(
+                        update={"updated_at": self.profile.updated_at + "-changed"}
+                    )
+                )
+            original(record)
+
+        with patch.object(self.adapter, "require_unchanged", side_effect=drift_before_effect):
+            with self.assertRaises(ValueError):
+                self.run_operation()
+        prior = custody(self.store, self.product, self.context)
+        assert prior is not None
+        self.assertFalse(self.effects)
+        with self.assertRaises(ValueError):
+            self.adapter.current()
+        self.adapter.original_key = "reviewed-correction-key"
+        self.adapter.request = self.body.model_copy(update={"reason": "Corrected reviewed intent"})
+        replacement = self.adapter.current()
+        self.adapter.request = self.adapter.request.model_copy(
+            update={"reviewed_plan_sha256": replacement.plan_sha256}
+        )
+        self.body = self.adapter.request
+        self.assertEqual(self.run_operation("reviewed-correction-key").response_status_code, 202)
+        current = custody(self.store, self.product, self.context)
+        assert current is not None
+        self.assertEqual(
+            current.prior_attempts, [prior.model_dump(mode="json", exclude={"prior_attempts"})]
+        )
+        self.assertEqual(current.supersedes_plan_sha256, prior.plan_sha256)
+        self.assertEqual(self.effects.count("/api/compose.create"), 1)
+        self.assert_old_preserved()
+
+    def test_command_memory_aliases_and_separate_values_cannot_override_the_bound(self) -> None:
+        record = self.adapter.current()
+        from control_plane.production_recipient import runtime_values
+
+        values = runtime_values(self.store, self.root, record)
+        for arguments in (
+            ["--innodb_buffer_pool_size", "512M"],
+            ["--innodb-buffer-pool-size=512M", "--innodb_buffer_pool_size=8G"],
+            ["--innodb-buffer-pool-size=512M", "--innodb_buffer_pool_size", "8G"],
+            ["--innodb_buffer_pool_size=8G"],
+        ):
+            with self.subTest(arguments=arguments):
+                document = deepcopy(self.document)
+                document["services"]["database"]["command"] = arguments
+                changed = record.model_copy(update={"compose_source": json.dumps(document)})
+                if arguments == ["--innodb_buffer_pool_size", "512M"]:
+                    qualified_render(changed, values)
+                else:
+                    with self.assertRaises(ValueError):
+                        qualified_render(changed, values)
 
     def test_provider_status_observations_do_not_change_binding_authority(self) -> None:
         original = self.provider_write

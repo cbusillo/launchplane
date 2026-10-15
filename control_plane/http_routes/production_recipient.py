@@ -140,14 +140,6 @@ def register_production_recipient_routes(
                     ):
                         raise ValueError("A completed qualified recipient is required.")
                     adapter.verify(record)
-                    from control_plane.production_recipient_resources import inspect_resources
-
-                    inspect_resources(
-                        root,
-                        record,
-                        prepare=False,
-                        checkpoint=lambda phase: adapter.require_unchanged(record),
-                    )
                 return plan(record)
 
             result_payload = await run_in_worker_thread(read)

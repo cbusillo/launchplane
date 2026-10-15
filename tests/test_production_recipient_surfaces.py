@@ -125,6 +125,26 @@ class HostProgramTests(unittest.TestCase):
         mounts[0]["Source"] = self.fixture.volumes[name]["Mountpoint"]
         self.assertNotEqual(self.run_program()[0], 0)
 
+    def test_dynamic_and_ranged_port_inventory_checks_actual_allocations(self) -> None:
+        requested = self.spec["ports"][0]
+        row: dict[str, Any] = {
+            "Config": {"Labels": {}},
+            "HostConfig": {"PortBindings": {"80/tcp": [{"HostPort": ""}]}},
+            "NetworkSettings": {"Ports": {"80/tcp": [{"HostPort": "18001"}]}},
+            "Mounts": [{"Type": "bind", "Source": ""}],
+        }
+        self.fixture.containers["dynamic"] = row
+        self.assertEqual(self.run_program()[0], 0)
+        row["NetworkSettings"]["Ports"]["80/tcp"][0]["HostPort"] = str(requested)
+        self.assertNotEqual(self.run_program()[0], 0)
+        row["NetworkSettings"]["Ports"] = {}
+        row["HostConfig"]["PortBindings"]["80/tcp"][0]["HostPort"] = (
+            f"{requested - 1}-{requested + 1}"
+        )
+        self.assertNotEqual(self.run_program()[0], 0)
+        row["HostConfig"]["PortBindings"]["80/tcp"][0]["HostPort"] = "18000-18002"
+        self.assertEqual(self.run_program()[0], 0)
+
 
 class HttpBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -203,6 +223,24 @@ class HttpBoundaryTests(unittest.TestCase):
             422,
         )
         self.mutate.assert_not_awaited()
+
+    def test_readback_uses_only_provider_reads_without_a_host_schedule(self) -> None:
+        self.assertEqual(self.fixture.run_operation().response_status_code, 202)
+        self.allowed_effects = {"read", "plan"}
+        before = list(self.fixture.effects)
+        with (
+            patch(
+                "control_plane.http_routes.production_recipient.idempotency_scope",
+                return_value=self.fixture.adapter.scope,
+            ),
+            patch("control_plane.production_recipient_resources.inspect_resources") as host_check,
+        ):
+            response = self.post(
+                self.fixture.body.model_copy(update={"mode": "readback"}).model_dump(mode="json")
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        host_check.assert_not_called()
+        self.assertEqual(self.fixture.effects, before)
 
 
 class TerminalClientTests(unittest.TestCase):

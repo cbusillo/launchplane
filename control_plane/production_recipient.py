@@ -208,9 +208,15 @@ def qualified_render(record: ProductionRecipientRecord, values: dict[str, str]) 
         arguments = shlex.split(command) if isinstance(command, str) else command
         for argument_name, maximum in required.command_memory_limits.items():
             configured = [
-                str(argument).split("=", 1)[1]
-                for argument in arguments
-                if str(argument).startswith(argument_name + "=")
+                (
+                    str(argument).split("=", 1)[1]
+                    if "=" in str(argument)
+                    else str(arguments[index + 1])
+                    if index + 1 < len(arguments)
+                    else ""
+                )
+                for index, argument in enumerate(arguments)
+                if str(argument).split("=", 1)[0].replace("_", "-") == argument_name
             ]
             if len(configured) != 1 or not 0 < memory_bytes(configured[0]) <= maximum:
                 raise ValueError("Product source must enforce its reviewed command memory limit.")
@@ -263,12 +269,8 @@ def build_recipient(
 ) -> ProductionRecipientRecord:
     existing = custody(store, product, request.context)
     intent = request.model_copy(update={"mode": "dry-run", "reviewed_plan_sha256": ""})
-    if existing:
-        if (existing.actor, existing.scope, existing.request) != (actor, scope, intent) or (
-            original_key and original_key != existing.original_key
-        ):
-            raise ValueError("Retain the original production-recipient intent, caller and key.")
-        return existing
+    if existing and (existing.actor, existing.scope) != (actor, scope):
+        raise ValueError("Retain the original production-recipient caller.")
     snapshot = authority_snapshot(store, product, request.context)
     from control_plane.contracts.dokploy_target_record import DokployTargetRecord
     from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -282,6 +284,35 @@ def build_recipient(
     )
     if old.get("composeId") != target_id.target_id:
         raise ValueError("The provider returned a different production recipient.")
+    if existing:
+        if (
+            existing.request == intent
+            and existing.authority_snapshot == snapshot
+            and existing.retained_provider_sha256 == provider_binding_digest(old)
+        ):
+            if original_key and original_key != existing.original_key:
+                raise ValueError("Retain the original production-recipient key.")
+            return existing
+        reservation = store.read_idempotency_record(
+            scope=existing.scope,
+            route_path=ROUTE.format(product=product),
+            idempotency_key=existing.original_key,
+        )
+        if (
+            any(
+                (
+                    existing.project_id,
+                    existing.environment_id,
+                    existing.target_id,
+                    existing.qualified_at,
+                )
+            )
+            or reservation is not None
+            or original_key == existing.original_key
+        ):
+            raise ValueError(
+                "Retain custody with any possible provider effect under its original key."
+            )
     plan_digest = canonical_sha256(
         {
             "product": product,
@@ -311,6 +342,12 @@ def build_recipient(
             target.compose_path or str(old.get("composePath") or ""),
         ),
         image_reference=verified_product_image(store, product, request.source_commit),
+        supersedes_plan_sha256=existing.plan_sha256 if existing else "",
+        prior_attempts=(
+            [*existing.prior_attempts, existing.model_dump(mode="json", exclude={"prior_attempts"})]
+            if existing
+            else []
+        ),
     )
     values = runtime_values(store, root, record)
     qualified_render(record, values)
@@ -611,7 +648,8 @@ class ProductionRecipientAdapter:
             if record.plan_sha256 != self.request.reviewed_plan_sha256:
                 raise ValueError("Review the current production recipient plan.")
             existing = custody(self.store, self.product, record.context)
-            if existing is not None:
+            superseding = existing is not None and record.plan_sha256 != existing.plan_sha256
+            if existing is not None and not superseding:
                 reservation = self.store.read_idempotency_record(
                     scope=self.scope,
                     route_path=ROUTE.format(product=self.product),
@@ -635,14 +673,15 @@ class ProductionRecipientAdapter:
             self.require_unchanged(record)
             lease.assert_current()
             host, token = source.read_dokploy_config(control_plane_root=self.root)
-            if existing is None:
+            if existing is None or superseding:
                 if any(
                     row.get("name") == record.namespace
                     for row in api.fetch_dokploy_projects(host=host, token=token)
                 ):
                     raise ValueError("A preparation namespace already exists without custody.")
                 self.store.write_production_recipient(
-                    expected=None, replacement=record.model_dump(mode="json")
+                    expected=existing.model_dump(mode="json") if existing else None,
+                    replacement=record.model_dump(mode="json"),
                 )
             for phase, path, field, body in (
                 (

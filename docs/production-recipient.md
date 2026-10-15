@@ -14,7 +14,8 @@ recipient for a product that explicitly has no public website. Its `instance`
 is always `prod`; the context remains the product's existing production context.
 The existing `dokploy_target.setup` service authority is required for apply.
 Terminal identities retain the existing production-setup refusal. Pure planning,
-readback and receipt reads use the existing product read authority. No new grant,
+provider readback and receipt reads use the existing product read authority. Host
+resource checks run only in leased apply/reconciliation. No new grant,
 credential, workflow or identity fallback is introduced.
 
 The request names one immutable product build/source commit, the explicitly
@@ -42,14 +43,25 @@ It requalifies their labels, backing identities and emptiness, inspects every
 container including stopped containers for mount and port references, and checks
 port availability. Existing storage is never adopted or deleted. A partial
 provider effect retains the original key and custody. A matching complete
-configuration can be adopted by readback after a lost reply; an uncertain create
+configuration can be adopted by original-key apply/reconciliation after a lost reply; an uncertain create
 is fenced and never repeated with another key.
+
+Before any provider effect, a rejected attempt may be replaced by a fresh reviewed
+plan and a new key only when its reservation is gone and it has no provider IDs.
+The compare-and-write retains the complete prior attempt in custody history.
+Any possible provider effect keeps the original plan and key fenced. A real
+authority change after provider effects invalidates qualification; the later
+cutover/recovery continuation must reconcile it, rather than automatically
+rebasing an existing recipient onto new authority.
 
 Use `scripts/prepare-production-recipient.py` with the installed
 `launchplane-write-action.py` transport. Keep its request and evidence outside
 the checkout. Run `dry-run` with a fresh evidence path, then `apply` with
 `--reviewed-dry-run --idempotency-key ORIGINAL`. Use `receipt` for the original
-completed receipt and `readback` for fresh provider/resource qualification.
+completed receipt and `readback` for fresh provider configuration verification.
+Readback returns the original host-qualification timestamp; it does not run a
+host command or renew resource qualification. Leased apply/reconciliation owns
+that evidence, and later bootstrap must qualify resources again.
 Evidence files are private, exclusive-created and preserved across retries.
 The request file never accepts a secret value or an alternate credential source.
 The installed transport retains its existing private caller configuration.

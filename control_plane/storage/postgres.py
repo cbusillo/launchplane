@@ -9201,6 +9201,8 @@ class PostgresRecordStore(HumanSessionStore):
             )
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            if promotion_recovery_inventory is not None:
+                self._lock_product_authority_bundle_write(session)
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
@@ -10465,7 +10467,8 @@ class PostgresRecordStore(HumanSessionStore):
             self._lock_product_authority_bundle_write(session)
             from control_plane.production_recipient import authority_snapshot
 
-            if (expected is None or record.qualified_at) and (
+            superseding = expected is not None and expected.get("plan_sha256") != record.plan_sha256
+            if (expected is None or superseding or record.qualified_at) and (
                 authority_snapshot(self, record.product, record.context)
                 != record.authority_snapshot
             ):
@@ -10481,6 +10484,47 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 raise ValueError("Production recipient custody changed.")
             if previous is not None:
+                if superseding:
+                    from control_plane.production_recipient import ROUTE
+
+                    old_reservation = session.scalar(
+                        self._idempotency_statement(
+                            scope=previous.scope,
+                            route_path=ROUTE.format(product=previous.product),
+                            idempotency_key=previous.original_key,
+                            for_update=True,
+                        )
+                    )
+                    if (
+                        any(
+                            (
+                                previous.project_id,
+                                previous.environment_id,
+                                previous.target_id,
+                                previous.qualified_at,
+                            )
+                        )
+                        or old_reservation is not None
+                        or record.original_key == previous.original_key
+                        or (record.actor, record.scope) != (previous.actor, previous.scope)
+                        or record.supersedes_plan_sha256 != previous.plan_sha256
+                        or record.prior_attempts
+                        != [
+                            *previous.prior_attempts,
+                            previous.model_dump(mode="json", exclude={"prior_attempts"}),
+                        ]
+                        or any(
+                            (
+                                record.project_id,
+                                record.environment_id,
+                                record.target_id,
+                                record.qualified_at,
+                            )
+                        )
+                    ):
+                        raise ValueError(
+                            "Only proven pre-effect custody may be superseded, retaining its complete history."
+                        )
                 mutable = {
                     "project_id",
                     "environment_id",
@@ -10490,9 +10534,11 @@ class PostgresRecordStore(HumanSessionStore):
                     "phase",
                     "qualified_at",
                 }
-                if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
+                if not superseding and previous.model_dump(exclude=mutable) != record.model_dump(
+                    exclude=mutable
+                ):
                     raise ValueError("Production recipient intent and old custody are immutable.")
-                for key in mutable - {"phase"}:
+                for key in (mutable - {"phase"}) if not superseding else ():
                     if getattr(previous, key) and getattr(previous, key) != getattr(record, key):
                         raise ValueError(
                             "Production recipient identities and receipts are immutable."
@@ -13813,6 +13859,8 @@ class PostgresRecordStore(HumanSessionStore):
         inventory: EnvironmentInventory,
     ) -> None:
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             session.merge(
                 LaunchplanePromotionRow(
                     record_id=promotion_record.record_id,

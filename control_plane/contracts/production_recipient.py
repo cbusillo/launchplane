@@ -90,6 +90,8 @@ class ProductionRecipientRecord(BaseModel):
     before_configuration_sha256: str = ""
     phase: str = "prepared"
     qualified_at: str = ""
+    supersedes_plan_sha256: str = ""
+    prior_attempts: list[dict[str, Any]] = Field(default_factory=list)
 
     @property
     def volumes(self) -> dict[str, str]:

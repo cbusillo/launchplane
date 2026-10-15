@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -10586,9 +10587,39 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
         fixture.assert_old_preserved()
 
     def test_custody_snapshot_is_guarded_until_its_transaction_commits(self) -> None:
+        self.assert_authority_writer_exclusion("profile")
+
+    def test_promotion_inventory_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("promotion")
+
+    def test_promotion_recovery_inventory_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("recovery")
+
+    def test_zero_effect_replan_retains_history_on_postgres(self) -> None:
+        self.fixture.test_zero_effect_drift_can_replan_with_retained_history_and_a_new_key()
+
+    def assert_authority_writer_exclusion(self, kind: str) -> None:
         from control_plane.production_recipient import authority_snapshot
+        from control_plane.contracts.environment_inventory import EnvironmentInventory
+        from control_plane.contracts.promotion_record import PromotionRecord
 
         fixture = self.fixture
+        inventory = EnvironmentInventory.model_validate(
+            {
+                "context": fixture.context,
+                "instance": "prod",
+                "source_git_ref": "old-ref",
+                "deploy": {
+                    "target_name": fixture.old.target_name,
+                    "target_type": "compose",
+                    "deploy_mode": "compose",
+                },
+                "updated_at": fixture.old.updated_at,
+                "deployment_record_id": "original-deploy",
+            }
+        )
+        if kind != "profile":
+            fixture.store.write_environment_inventory(inventory)
         original = fixture.adapter.current()
         entered, release = threading.Event(), threading.Event()
         url = make_url(fixture.database_url)
@@ -10610,6 +10641,49 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
         changed = fixture.profile.model_copy(
             update={"updated_at": fixture.profile.updated_at + "-changed"}
         )
+        write: Callable[[], Any] = partial(second.write_product_profile_record, changed)
+        changed_inventory = inventory.model_copy(
+            update={"updated_at": inventory.updated_at + "-changed"}
+        )
+        if kind == "promotion":
+            promotion = PromotionRecord.model_validate(
+                {
+                    "record_id": "fixture-promotion",
+                    "artifact_identity": {"artifact_id": "fixture-artifact"},
+                    "context": fixture.context,
+                    "from_instance": "stable",
+                    "to_instance": "prod",
+                    "deploy": inventory.deploy.model_dump(mode="json"),
+                }
+            )
+            write = partial(
+                second.write_promotion_evidence_records,
+                promotion_record=promotion,
+                inventory=changed_inventory,
+            )
+        elif kind == "recovery":
+            reservation = fixture.store.reserve_mutation(
+                scope="fixture-promotion",
+                route_path="/fixture-promotion-recovery",
+                idempotency_key="original-promotion",
+                request_fingerprint="f" * 64,
+                lease_owner="fixture-worker",
+                reconciliation_key="r" * 64,
+            ).record
+            assert reservation is not None
+            reconciled = fixture.store.mark_mutation_reconcile_required(
+                reservation=reservation, reconciliation_key=reservation.reconciliation_key
+            ).record
+            assert reconciled is not None
+            write = partial(
+                second.adopt_reconciled_mutation,
+                reservation=reconciled,
+                response_status_code=202,
+                response_trace_id="launchplane_req_recovery",
+                response_payload={},
+                expected_promotion_evidence=(inventory,),
+                promotion_recovery_inventory=changed_inventory,
+            )
         with ThreadPoolExecutor(max_workers=2) as executor:
             with patch(
                 "control_plane.production_recipient.authority_snapshot", side_effect=read_snapshot
@@ -10620,7 +10694,7 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
                     replacement=original.model_dump(mode="json"),
                 )
                 self.assertTrue(entered.wait(5))
-                writer = executor.submit(second.write_product_profile_record, changed)
+                writer = executor.submit(write)
                 try:
                     deadline = time.monotonic() + 5
                     waiting = 0
