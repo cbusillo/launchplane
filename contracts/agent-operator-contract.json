@@ -46,6 +46,37 @@
     },
     "operations": [
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "prepare_testing_replacement_resources",
+        "path": "/v1/products/{product}/testing-replacement-resources",
+        "purpose": "Prepare fresh empty Odoo testing resources while preserving the retained target, then qualify their actual backing storage; this never restores data or starts web.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "e276d8778bb63a5a90a42f957fee3c63adb089ad2a5fc3affb737dc2ba8ec52b",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_browser_mutation_identity"
@@ -533,8 +564,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "3db8ee5ff499b9c21d9949b6f5bed49957a2e15a"
+    "source_commit_sha": "6e44966038788b55affbad806d96798ccee38caf"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "e202457e7e77d577c2bceed1b49b6d8bddf0842dadec1f6c2c82838f02ce9ca9"
+  "semantic_digest_sha256": "5ba21d66960e19b6f8383fffc6bbf2022f42f522d9b7a6063bccd86bcf8ee1c8"
 }
