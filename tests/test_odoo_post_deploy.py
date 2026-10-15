@@ -4,7 +4,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
@@ -686,6 +686,111 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
 
     def test_fresh_copy_includes_deploy_bootstrap_in_restore_payload(self) -> None:
         self._restore_overrides(fresh=True)
+
+    def test_fresh_copy_refusal_records_failure_before_environment_or_schedule_effects(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_target_replacement_failures import (
+            OdooFreshTestingIntentRefusedError,
+            deploy_failure_description,
+        )
+        from tests.test_odoo_testing_restore import generation
+        from tests.test_odoo_testing_native_source import descriptor
+        from tests.test_odoo_stable_target_replacement import _UPSTREAM_RESTORE_ENV
+
+        cases: tuple[tuple[Literal["deploy", "restore"], bool], ...] = (
+            ("deploy", False),
+            ("restore", False),
+            ("deploy", True),
+            ("restore", True),
+        )
+        for phase, native in cases:
+            with self.subTest(phase=phase, native=native), TemporaryDirectory() as directory:
+                root = Path(directory)
+                store = FilesystemRecordStore(state_dir=root / "state")
+                store.write_odoo_instance_override_record(
+                    OdooInstanceOverrideRecord(
+                        context="opw",
+                        instance="testing",
+                        apply_on=(phase,),
+                        config_parameters=(
+                            OdooConfigParameterOverride(
+                                key="google_analytics.private_fixture",
+                                value=OdooOverrideValue(
+                                    source="literal", value="private-override-value"
+                                ),
+                            ),
+                        ),
+                        updated_at="2026-10-15T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                effects = Mock()
+                with (
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                        return_value=self._source_of_truth(),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                        return_value=("host", "token"),
+                    ),
+                    patch.object(
+                        dokploy_api,
+                        "fetch_dokploy_target_payload",
+                        return_value={
+                            "env": "ODOO_DB_NAME=fixture\nODOO_INSTALL_MODULES=website\n",
+                            "serverId": "registered-testing",
+                        },
+                    ),
+                    patch.object(
+                        dokploy_api,
+                        "update_dokploy_target_env",
+                        side_effect=AssertionError(
+                            "Provider environment mutation preceded preflight."
+                        ),
+                    ) as update,
+                    patch.object(dokploy_api, "trigger_deployment") as deploy,
+                    patch.object(dokploy_api, "upsert_dokploy_schedule") as schedule,
+                    patch.object(dokploy_api, "dokploy_request") as provider,
+                    patch(
+                        "control_plane.odoo_testing_native_source.prepare_native_testing_delivery"
+                    ) as prepare_native,
+                    self.assertRaises(OdooFreshTestingIntentRefusedError) as caught,
+                ):
+                    execute_odoo_post_deploy(
+                        control_plane_root=root,
+                        record_store=store,
+                        request=OdooPostDeployRequest(
+                            context="opw", instance="testing", phase="restore"
+                        ),
+                        run_destructive_restore=True,
+                        fresh_testing_generation=generation().model_copy(
+                            update={
+                                "target_id": "compose-123",
+                                "context": "opw",
+                                "source_mode": "container-export" if native else "ssh",
+                            }
+                        ),
+                        fresh_restore_source_environment=_UPSTREAM_RESTORE_ENV,
+                        fresh_native_source=descriptor() if native else None,
+                        provider_effect_checkpoint=effects,
+                        hold_uncertain_effects=True,
+                    )
+                update.assert_not_called()
+                deploy.assert_not_called()
+                schedule.assert_not_called()
+                provider.assert_not_called()
+                effects.assert_not_called()
+                prepare_native.assert_not_called()
+                record = store.read_odoo_instance_override_record(
+                    context_name="opw", instance_name="testing"
+                )
+                self.assertEqual(record.last_apply.status, "fail")
+                self.assertEqual(
+                    record.last_apply.detail, deploy_failure_description(caught.exception.code)
+                )
+                self.assertNotIn("private-override-value", str(caught.exception))
 
     def _restore_overrides(self, *, fresh: bool) -> None:
         from tests.test_odoo_testing_restore import generation
