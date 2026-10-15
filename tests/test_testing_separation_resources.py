@@ -238,6 +238,15 @@ class SeparationResourceTests(unittest.TestCase):
             schedule.assert_not_called()
         self.assert_retained()
 
+    def test_retired_product_cannot_allocate_resources(self) -> None:
+        profile = self.store.read_product_profile_record(self.product)
+        retired = profile.model_copy(deep=True)
+        retired.lifecycle_state = "retired"
+        retired.preview.enabled = False
+        self.store.write_product_profile_record(retired)
+        with self.assertRaises(SeparationResourcesRefused):
+            self.adapter.plan()
+
     def test_real_key_evaluator_protects_production_binding_without_a_schedule(self) -> None:
         from control_plane.contracts.secret_record import SecretRecord, SecretBinding
         from control_plane.contracts.runtime_key_safety_policy import (

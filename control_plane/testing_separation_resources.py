@@ -52,7 +52,9 @@ def preparation_binding(
     store: PostgresRecordStore, product: str, context: str, actor: str
 ) -> tuple[str, str]:
     bindings = _bind(store, product, context, "testing")
-    _, target, target_id, provider = bindings
+    profile, target, target_id, provider = bindings
+    if not profile.is_active:
+        raise SeparationResourcesRefused("Preparation requires an active product.")
     hold = target.policies.staff_testing_hold
     # This does not reinterpret a legacy hold. Even a genuine staff hold remains
     # in force: preparation cannot change its target, configuration or dispatch.
