@@ -51,6 +51,7 @@ from control_plane.contracts.updater_proposal import (
 from control_plane.http_routes.updater_proposal import register_updater_proposal_route
 from control_plane.http_route_preparation import PreparedAPIRoute
 from control_plane.http_routes.support import run_in_worker_thread
+from control_plane.http_routes.health_alert_drill import register_health_alert_drill_routes
 from fastapi.exceptions import RequestValidationError
 from control_plane.github_request_timing import github_request_tally
 from control_plane.http_routes.owner_secret_inputs import (
@@ -5438,6 +5439,9 @@ def create_launchplane_fastapi_app(
         read_role_products=resolved_authz_policy_runtime.read_role_products,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
+    )
+    register_health_alert_drill_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_write_identity
     )
     privileged_operation_route_dependencies = PrivilegedOperationRouteDependencies(
         common=read_route_dependencies,

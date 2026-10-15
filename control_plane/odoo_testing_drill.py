@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import logging
 import re
 from threading import Event, Thread
@@ -29,9 +29,6 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.disposable_lanes import (
-    DisposableLaneStore,
-    DisposableLaneSafetyUnknown,
-    require_disposable_lane,
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
 )
@@ -46,6 +43,11 @@ from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     generation_binding,
     read_current_testing_generation,
+)
+from control_plane.odoo_testing_drill_usage import (
+    read_drill_recent_signins,
+    testing_drill_environment,
+    DrillCopyAlreadyServing,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_lane_hold import read_staff_testing_hold
@@ -140,6 +142,88 @@ class PreparedDrill:
     runtime: RuntimeEnvironmentRecord
     safety: DisposableLaneSafety
     operation: OdooStableTargetReplacementOperationRecord
+    previous_database: str
+
+
+def require_drill_use_unprotected(store: PostgresRecordStore, product: str, context: str) -> None:
+    try:
+        # Missing tracked authority is an unreadable hold check, never no hold.
+        store.read_dokploy_target_record(context_name=context, instance_name="testing")
+        hold = read_staff_testing_hold(record_store=store, context=context)
+        recorded = store.read_disposable_lane_safety(product, context, "testing")
+    except Exception as error:
+        raise DrillSkipped("staff_hold_or_protection_check_unreadable") from error
+    if hold is not None:
+        raise DrillSkipped("staff_testing_hold")
+    if recorded is not None and (recorded.usage == "in_use" or recorded.data == "only_copy"):
+        raise DrillSkipped("lane_use_or_only_copy_protected")
+    if recorded is not None and recorded.production_resources in {"shared", "separation_ready"}:
+        raise DrillSkipped("testing_resources_protected")
+
+
+def collect_drill_admission(
+    store: PostgresRecordStore,
+    generation: FreshOdooTestingGeneration,
+    now: float,
+    *,
+    history_generation: FreshOdooTestingGeneration | None = None,
+    history_database: str = "",
+) -> DisposableLaneSafety:
+    """Q347 evidence belongs to this drill, never the universal observation API."""
+    require_drill_use_unprotected(store, generation.product, generation.context)
+    if (
+        read_current_testing_generation(
+            store, product=generation.product, context=generation.context, instance="testing"
+        )
+        != generation
+    ):
+        raise DrillSkipped("drill_admission_snapshot_changed")
+    try:
+        used = read_drill_recent_signins(
+            store,
+            generation,
+            now,
+            history_generation=history_generation,
+            history_database=history_database,
+        )
+    except DrillCopyAlreadyServing as error:
+        raise DrillSkipped("new_testing_copy_already_serving") from error
+    except Exception as error:
+        raise DrillSkipped("successful_login_check_unreadable") from error
+    if used:
+        raise DrillSkipped("recent_successful_signin")
+    require_drill_use_unprotected(store, generation.product, generation.context)
+    profile = store.read_product_profile_record(generation.product)
+    target = store.read_dokploy_target_record(
+        context_name=generation.context, instance_name="testing"
+    )
+    target_id = store.read_dokploy_target_id_record(
+        context_name=generation.context, instance_name="testing"
+    )
+    binding = disposable_lane_binding_sha256(
+        profile,
+        target,
+        target_id,
+        configuration=disposable_lane_configuration(store, generation.context, "testing"),
+    )
+    reference = "service:odoo-testing-drill:" + generation_binding(generation)
+    observed = datetime.fromtimestamp(now, timezone.utc)
+    return DisposableLaneSafety(
+        product=generation.product,
+        context=generation.context,
+        instance="testing",
+        observed_by="service:odoo-testing-drill",
+        observer_kind="director_agent",
+        binding_sha256=binding,
+        usage="unused",
+        data="reproducible",
+        production_resources="isolated",
+        usage_evidence=reference,
+        data_evidence=reference,
+        isolation_evidence=reference,
+        observed_at=observed,
+        expires_at=observed + timedelta(minutes=5),
+    )
 
 
 def prepare_drill(
@@ -152,22 +236,8 @@ def prepare_drill(
     database: str = "",
     prepared_at: str = "",
 ) -> PreparedDrill:
-    """Called under the lane and authority locks; nothing here writes or calls a provider."""
-    if read_staff_testing_hold(record_store=store, context=context) is not None:
-        raise DrillSkipped("staff_testing_hold")
-    try:
-        require_disposable_lane(
-            cast(DisposableLaneStore, store),
-            product=product,
-            context=context,
-            instance="testing",
-            now=datetime.fromtimestamp(now, timezone.utc),
-        )
-    except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
-        safety = store.read_disposable_lane_safety(product, context, "testing")
-        if safety is not None and (safety.usage == "in_use" or safety.data == "only_copy"):
-            raise DrillSkipped("lane_use_or_only_copy_protected") from error
-        raise DrillPrerequisite("usage_custody_or_isolation_unverified") from error
+    """Build a read-only candidate; the caller revalidates it under authority locks."""
+    require_drill_use_unprotected(store, product, context)
     profile = store.read_product_profile_record(product)
     if profile.driver_id != "odoo" or not profile.is_active:
         raise DrillSkipped("not_active_odoo")
@@ -188,6 +258,7 @@ def prepare_drill(
     )
     if previous is None or not previous.completed_at:
         raise DrillPrerequisite("completed_qualified_testing_generation_required")
+    safety = collect_drill_admission(store, previous, now)
     target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
     if "ODOO_DB_NAME" in target.env:
         raise DrillPrerequisite("target_database_override_requires_migration")
@@ -256,11 +327,15 @@ def prepare_drill(
             product=product, context=context, authorized_at=timestamp(now)
         ),
     )
-    # Preserve the original observed binding. The operation's activation receipt
-    # records admission; it does not rewrite or renew the collector's observation.
-    safety = store.read_disposable_lane_safety(product, context, "testing")
-    assert safety is not None
-    return PreparedDrill(previous, generation, runtime, safety, operation)
+    # The scoped receipt never rewrites or renews the general observation row.
+    return PreparedDrill(
+        previous,
+        generation,
+        runtime,
+        safety,
+        operation,
+        testing_drill_environment(store, context).get("ODOO_DB_NAME", ""),
+    )
 
 
 def require_drill_checkpoint(
@@ -270,15 +345,13 @@ def require_drill_checkpoint(
         return
     if not isinstance(store, PostgresRecordStore) or operation.instance != "testing":
         raise DrillPrerequisite("testing_drill_storage_unavailable")
-    if read_staff_testing_hold(record_store=store, context=operation.context) is not None:
-        raise DrillSkipped("staff_testing_hold")
+    require_drill_use_unprotected(store, operation.product, operation.context)
     receipt = store.read_idempotency_record(
         scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
     )
     generation = read_current_testing_generation(
         store, product=operation.product, context=operation.context, instance="testing"
     )
-    safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
     if (
         receipt is None
         or receipt.response_payload.get("operation_id") != operation.operation_id
@@ -286,34 +359,18 @@ def require_drill_checkpoint(
         or receipt.response_payload.get("generation_binding") != generation_binding(generation)
     ):
         raise DrillPrerequisite("testing_drill_binding_changed")
-    if (
-        safety is None
-        or safety.usage != "unused"
-        or safety.data != "reproducible"
-        or safety.production_resources != "isolated"
-    ):
-        raise DrillSkipped("testing_drill_use_evidence_changed")
     admitted = DisposableLaneSafety.model_validate(
         receipt.response_payload.get("activation_safety")
     )
-    stable = {
-        "usage",
-        "data",
-        "production_resources",
-        "binding_sha256",
-        "replaces_operation_id",
-        "replaced_target_id",
-    }
-    if safety.model_dump(include=stable) != admitted.model_dump(include=stable):
-        try:
-            require_disposable_lane(
-                cast(DisposableLaneStore, store),
-                product=operation.product,
-                context=operation.context,
-                instance="testing",
-            )
-        except (ValueError, FileNotFoundError) as error:
-            raise DrillSkipped("testing_drill_use_evidence_changed") from error
+    if (
+        (admitted.product, admitted.context, admitted.instance)
+        != (operation.product, operation.context, "testing")
+        or admitted.usage != "unused"
+        or admitted.data != "reproducible"
+        or admitted.production_resources != "isolated"
+        or receipt.response_payload.get("activation_attempt") != operation.attempt
+    ):
+        raise DrillSkipped("testing_drill_use_evidence_changed")
 
 
 class OdooTestingDrillScheduler:

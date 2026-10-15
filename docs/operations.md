@@ -962,6 +962,8 @@ Current implementation scope:
 - `POST /v1/product-onboarding/apply`
 - `POST /v1/product-profiles/stable-lane-repair/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
+- `GET /v1/health-alert-drills` and `POST /v1/health-alert-drills` —
+  [current routing and isolated Discord test alerts](health-alert-drills.md)
 - `POST /v1/every-code/notification-policies/apply`
 - `POST /v1/public-ingress/notification-policies/apply`
 - `POST /v1/previews/lifecycle-plan`
