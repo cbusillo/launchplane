@@ -29,6 +29,7 @@ from control_plane.integration_readback import (
     INTEGRATION_READBACK_PASSED_PATH,
     integration_readback_policy,
 )
+from control_plane.odoo_preview_import_source import FISHBOWL_CONNECTION_PARAMETERS
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
@@ -217,6 +218,9 @@ class _Cursor:
         tables = self.database.get("tables", {})
         if query == "SET TRANSACTION READ ONLY":
             self.rows = []
+        elif query == "DELETE FROM ir_config_parameter WHERE key = ANY(%s)":
+            for key in params[0]:
+                config.pop(key, None)
         elif query.startswith("INSERT INTO ir_config_parameter"):
             config[params[0]] = params[1]
         elif query.startswith("SELECT count(*) FROM ir_config_parameter WHERE (key, value)"):
@@ -244,6 +248,14 @@ class _Cursor:
 
 
 class _Connection:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        if exc_info[0] is None:
+            self.commit()
+        return False
+
     def __init__(self, database):
         self.database = database
 
@@ -406,6 +418,7 @@ def _render_post_deploy_script(
     bootstrap_missing_database: bool = False,
     instance: str = "testing",
     workflow_environment_overrides: dict[str, str] | None = None,
+    clear_preview_fishbowl_source: bool = False,
 ) -> str:
     schedule_payloads: list[dict[str, object]] = []
 
@@ -479,6 +492,7 @@ def _render_post_deploy_script(
             run_destructive_restore=run_destructive_restore,
             bootstrap_missing_database=bootstrap_missing_database,
             workflow_environment_overrides=workflow_environment_overrides,
+            clear_preview_fishbowl_source=clear_preview_fishbowl_source,
         )
     if len(schedule_payloads) != 1:
         raise AssertionError(f"expected one schedule upsert, got {len(schedule_payloads)}")
@@ -597,6 +611,36 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         )
         docker_log = tuple(log_path.read_text().splitlines()) if log_path.exists() else ()
         return ScriptRun(completed.returncode, completed.stdout, completed.stderr, docker_log)
+
+    def test_previously_sourced_preview_cleans_settings_before_readback_and_web_start(self) -> None:
+        source_keys = {f"fishbowl.{name}": "fixture" for name in FISHBOWL_CONNECTION_PARAMETERS}
+        fixture = json.loads(_fake_database())
+        fixture["config"].update(source_keys)
+        fixture["config"]["fixture.unrelated"] = "preserve"
+        ordinary = self._run(
+            _render_post_deploy_script(None, instance="pr-42"),
+            PLATFORM_INSTANCE="preview",
+            FAKE_ODOO_DB=json.dumps(fixture),
+        )
+        self.assert_refused_and_web_stopped(ordinary, "fishbowl/fishbowl.host")
+        script = _render_post_deploy_script(
+            None,
+            instance="pr-42",
+            clear_preview_fishbowl_source=True,
+        )
+        cleared = self._run(script, PLATFORM_INSTANCE="preview", FAKE_ODOO_DB=json.dumps(fixture))
+        self.assertEqual(cleared.returncode, 0, cleared.stdout + cleared.stderr)
+        self.assertTrue(cleared.web_restarted, cleared.docker_log)
+        remaining = json.loads((self.root / "database.json").read_text())["config"]
+        self.assertFalse(set(source_keys).intersection(remaining))
+        self.assertEqual(remaining["fixture.unrelated"], "preserve")
+        repeated = self._run(
+            script,
+            PLATFORM_INSTANCE="preview",
+            FAKE_ODOO_DB=(self.root / "database.json").read_text(),
+        )
+        self.assertEqual(repeated.returncode, 0, repeated.stdout + repeated.stderr)
+        self.assertTrue(repeated.web_restarted, repeated.docker_log)
 
     def test_sender_contract_is_probed_from_the_running_artifact(self) -> None:
         script = dokploy_post_deploy._build_dokploy_data_workflow_script(

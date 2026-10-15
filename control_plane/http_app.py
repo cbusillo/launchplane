@@ -559,6 +559,7 @@ from control_plane.odoo_post_deploy_http import (
 )
 from control_plane import odoo_addon_settings_override as control_plane_odoo_addon_settings
 from control_plane import integration_allowances as control_plane_integration_allowances
+from control_plane.odoo_preview_import_source import PreviewImportSourceError
 from control_plane import testing_lane_hold as control_plane_testing_lane_hold
 from control_plane.odoo_app_maintenance_http import (
     ODOO_APP_MAINTENANCE_ROUTE as _ODOO_APP_MAINTENANCE_ROUTE,
@@ -6827,6 +6828,45 @@ def create_launchplane_fastapi_app(
             },
         )
 
+    def require_preview_import_source_read(
+        *,
+        identity: LaunchplaneIdentity,
+        product: str,
+        source: object,
+        trace_id: str,
+    ) -> None:
+        from control_plane.product_secret_copy import ProductSecretCopyFrom
+
+        if source is None:
+            return
+        reference = ProductSecretCopyFrom.model_validate(source)
+        target = AuthorizationTarget(scope="instance", instances=(reference.instance,))
+        # Match managed copy_from: metadata-read inheritance cannot move a value.
+        if not (
+            resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="secret.read",
+                product="launchplane",
+                context=reference.context,
+                target=target,
+                inherit_agent_read_role=False,
+            )
+            or resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action="product_environment.read",
+                product=product,
+                context=reference.context,
+                target=target,
+                inherit_agent_read_role=False,
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Preview import source requires existing source-value read authority.",
+            )
+
     async def write_odoo_preview_apply_inputs(
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
@@ -6901,6 +6941,13 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+        require_preview_import_source_read(
+            identity=identity,
+            product=product_profile.product,
+            source=inputs_request.inputs.fishbowl_source,
+            trace_id=trace_id,
+        )
+
         normalized_idempotency_key = idempotency_key.strip()
         if not normalized_idempotency_key:
             raise _launchplane_http_error(
@@ -6949,6 +6996,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="not_found",
                 message=f"No Launchplane route for {_ODOO_PREVIEW_APPLY_INPUTS_ROUTE}.",
+            ) from error
+        except PreviewImportSourceError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="odoo_preview_source_" + error.code,
+                message=str(error),
             ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
@@ -7120,6 +7174,13 @@ def create_launchplane_fastapi_app(
                 code=error.code,
                 message=str(error),
             ) from error
+        require_preview_import_source_read(
+            identity=identity,
+            product=product_profile.product,
+            source=issued_plan.plan_request.fishbowl_source,
+            trace_id=trace_id,
+        )
+
         payload_fingerprint = idempotency_request_fingerprint(
             route_path=_ODOO_PREVIEW_APPLY_ROUTE,
             payload=raw_payload,
