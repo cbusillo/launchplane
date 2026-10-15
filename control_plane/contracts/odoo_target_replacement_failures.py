@@ -66,6 +66,9 @@ DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
     "override_secret_keys_missing": (
         "The lane's setting overrides need secrets that the deploy does not carry."
     ),
+    "fresh_testing_intent_invalid": (
+        "The fresh testing restore intent must use exact modules and keep live connections disabled."
+    ),
 }
 
 # LiveTargetRuntimeError codes, mapped onto the checks above.
@@ -106,3 +109,12 @@ def deploy_failure_description(code: str) -> str:
 
 class OdooProviderEffectUncertainError(RuntimeError):
     """A release provider write may still be running; retain its lane for reconciliation."""
+
+
+class OdooFreshTestingIntentRefusedError(OdooProviderSafetyRefusedError):
+    """A predictable fresh-copy refusal, with no override values in its public detail."""
+
+    code = deploy_blocked_code("fresh_testing_intent_invalid")
+
+    def __init__(self) -> None:
+        super().__init__(deploy_failure_description(self.code))

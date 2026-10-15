@@ -26,6 +26,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideValue,
     OdooOverrideApplyResult,
@@ -3428,6 +3429,156 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             for key in store.last_provider_env
                         )
                     )
+
+    def test_fresh_restore_preflights_forbidden_overrides_and_rechecks_plan_drift(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        fresh = generation().model_copy(
+            update={
+                "product": "odoo-tenant-opw",
+                "context": "opw",
+                "target_id": "compose-opw",
+                "reconcile_requested_at": "2026-10-15T00:00:00Z",
+            }
+        )
+        valid = _opw_website_override_record().model_copy(update={"instance": "testing"})
+        for key in ("shopify.api_token", "google_analytics.private_fixture", "shopify"):
+            invalid = valid.model_copy(
+                update={
+                    "config_parameters": (
+                        OdooConfigParameterOverride(
+                            key=key,
+                            value=OdooOverrideValue(
+                                source="literal", value="private-override-value"
+                            ),
+                        ),
+                    )
+                }
+            )
+            if key == "shopify":
+                from control_plane.odoo_instance_overrides import SHOPIFY_REQUIRED_SETTINGS
+
+                invalid = valid.model_copy(
+                    update={
+                        "addon_settings": tuple(
+                            OdooAddonSettingOverride(
+                                addon="shopify",
+                                setting=setting,
+                                value=OdooOverrideValue(
+                                    source="literal", value="fixture-" + setting
+                                ),
+                            )
+                            for setting in SHOPIFY_REQUIRED_SETTINGS
+                        ),
+                    }
+                )
+            for drift in (False, True):
+                with self.subTest(key=key, drift=drift):
+                    stores: list[_Store] = []
+                    plans: list[object] = []
+                    effects: list[str] = []
+
+                    def plan_then_change(**kwargs: object) -> object:
+                        store = cast(_Store, kwargs["record_store"])
+                        stores.append(store)
+                        plan = build_odoo_stable_target_replacement_plan(**kwargs)  # type: ignore[arg-type]
+                        plans.append(plan)
+                        if drift:
+                            store.odoo_instance_override_record = invalid
+                        return plan
+
+                    with patch(
+                        "control_plane.workflows.odoo_stable_target_replacement.build_odoo_stable_target_replacement_plan",
+                        side_effect=plan_then_change,
+                    ):
+                        if drift:
+                            result, post_deploy, _, _ = self._apply_upstream_restore(
+                                override_record=valid,
+                                post_deploy_results=(),
+                                test_instance="testing",
+                                fresh_generation=fresh,
+                                external_checkpoint=effects.append,
+                            )
+                            self.assertEqual(result.deploy_status, "fail")
+                            self.assertEqual(
+                                result.error_code,
+                                deploy_blocked_code("fresh_testing_intent_invalid"),
+                            )
+                            post_deploy.assert_not_called()
+                            assert stores[0].deployment_records[-1].failure is not None
+                            self.assertEqual(
+                                stores[0].deployment_records[-1].failure.code, result.error_code
+                            )
+                        else:
+                            with self.assertRaises(OdooTargetReplacementStageError) as caught:
+                                self._apply_upstream_restore(
+                                    override_record=invalid,
+                                    post_deploy_results=(),
+                                    test_instance="testing",
+                                    fresh_generation=fresh,
+                                    external_checkpoint=effects.append,
+                                )
+                            self.assertEqual(
+                                caught.exception.code,
+                                "plan_not_ready.compose_or_override_render_failed",
+                            )
+                        self.assertFalse(effects)
+                        self.assertFalse(stores[0].last_provider_env)
+                        self.assertFalse(stores[0].environment_inventories)
+                        self.assertNotIn("private-override-value", str(plans))
+                        self.assertNotIn(
+                            "private-override-value", str(stores[0].deployment_records)
+                        )
+
+    def test_fresh_restore_post_deploy_drift_publishes_classified_failure(self) -> None:
+        from control_plane.contracts.odoo_target_replacement_failures import (
+            OdooFreshTestingIntentRefusedError,
+        )
+        from tests.test_odoo_testing_restore import generation
+
+        stores: list[_Store] = []
+
+        def change_override(store: _Store) -> None:
+            stores.append(store)
+            assert store.odoo_instance_override_record is not None
+            store.odoo_instance_override_record = store.odoo_instance_override_record.model_copy(
+                update={
+                    "config_parameters": (
+                        OdooConfigParameterOverride(
+                            key="google_analytics.private_fixture",
+                            value=OdooOverrideValue(
+                                source="literal", value="private-override-value"
+                            ),
+                        ),
+                    )
+                }
+            )
+
+        with self.assertRaises(OdooFreshTestingIntentRefusedError) as caught:
+            self._apply_upstream_restore(
+                override_record=_opw_website_override_record().model_copy(
+                    update={"instance": "testing"}
+                ),
+                post_deploy_results=(),
+                test_instance="testing",
+                fresh_generation=generation().model_copy(
+                    update={
+                        "product": "odoo-tenant-opw",
+                        "context": "opw",
+                        "target_id": "compose-opw",
+                        "reconcile_requested_at": "2026-10-15T00:00:00Z",
+                    }
+                ),
+                mutate_before_restore=change_override,
+                real_post_deploy=True,
+            )
+        failure = stores[0].deployment_records[-1].failure
+        assert failure is not None
+        self.assertEqual(failure.code, caught.exception.code)
+        self.assertEqual(_unexpected_error_code(caught.exception), failure.code)
+        self.assertEqual(stores[0].deployment_records[-1].deploy.status, "fail")
+        self.assertFalse(stores[0].environment_inventories)
+        self.assertNotIn("private-override-value", str(stores[0].deployment_records))
 
     def test_real_restore_schedule_does_not_trigger_after_authorization_revocation(self) -> None:
         from control_plane.contracts.durable_operation_authorization import (
