@@ -9,6 +9,12 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+from control_plane.workflows.dokploy_target_adoption import (
+    COMPOSE_CREATE_PATH,
+    ENVIRONMENT_CREATE_PATH,
+    PROJECT_CREATE_PATH,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -65,16 +71,18 @@ class DirectorTestingTargetCreationTests(unittest.IsolatedAsyncioTestCase):
             "environment_name": "testing",
             "server_id": "testing-server",
             "healthcheck_path": "/health",
-            "confirmation": "APPLY DOKPLOY TARGET SETUP",
             "reason": "Stage isolated empty testing resources.",
         }
+        self.payload["confirmation"] = DokployTargetSetupEnvelope.model_validate(
+            self.payload
+        ).expected_confirmation
         self.provider = self.enterContext(
             patch(
                 "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup",
                 side_effect=lambda _host, _token, path, _payload: {
-                    "/api/project.create": {"projectId": "created-project"},
-                    "/api/environment.create": {"environmentId": "created-environment"},
-                    "/api/compose.create": {"composeId": "created-compose"},
+                    PROJECT_CREATE_PATH: {"projectId": "created-project"},
+                    ENVIRONMENT_CREATE_PATH: {"environmentId": "created-environment"},
+                    COMPOSE_CREATE_PATH: {"composeId": "created-compose"},
                 }[path],
             )
         )
@@ -142,7 +150,7 @@ class DirectorTestingTargetCreationTests(unittest.IsolatedAsyncioTestCase):
         effects = self.provider.call_args_list.copy()
         self.assertEqual(
             [call.args[2] for call in effects],
-            ["/api/project.create", "/api/environment.create", "/api/compose.create"],
+            [PROJECT_CREATE_PATH, ENVIRONMENT_CREATE_PATH, COMPOSE_CREATE_PATH],
         )
         self.assertEqual(
             self.store.read_provider_target_record(
@@ -170,7 +178,7 @@ class DirectorTestingTargetCreationTests(unittest.IsolatedAsyncioTestCase):
                 )
             },
             {"domains": ["production.example.invalid"]},
-            {"runtime_port": 8787},
+            {"runtime_port": 8787, "domains": ["testing.example.invalid"]},
             {"source_type": "git"},
             {"custom_git_branch": "main", "compose_path": "docker-compose.yml"},
         ):
@@ -185,6 +193,17 @@ class DirectorTestingTargetCreationTests(unittest.IsolatedAsyncioTestCase):
             result = await self.post()
         self.assertEqual(result.status_code, 403, result.text)
         self.provider.assert_not_called()
+
+    async def test_read_role_can_still_plan_a_target_with_routes_without_apply_authority(
+        self,
+    ) -> None:
+        result = await self.post(
+            mode="dry-run", runtime_port=8787, domains=["testing.example.invalid"]
+        )
+        self.assertEqual(result.status_code, 202, result.text)
+        self.assertFalse(result.json()["result"]["applied"])
+        self.provider.assert_not_called()
+        self.assert_production_unchanged()
 
     async def test_director_terminal_stages_testing_but_cannot_create_production(self) -> None:
         self.app = self.make_app(
