@@ -715,7 +715,8 @@ qualification before broad activation; this source proof does not establish them
 
 Launchplane's existing stable-operation worker inspects stranded replacements
 from its own event reconciler. Recovery applies only to testing,
-`recreate-in-place`, existing-data attempts with the service reconcile grant.
+`recreate-in-place`, existing-data or upstream-restore attempts with the service
+reconcile grant.
 Production, Client releases and caller-started operations keep their existing
 recovery rules.
 Those other manual cancellation routes trust the authorized caller's external
