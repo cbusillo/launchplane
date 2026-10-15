@@ -1,6 +1,7 @@
 """Immutable custody of a new generic-web testing recipient and its old fence."""
 
 from typing import Literal
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -8,6 +9,32 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+
+
+class TestingActivationRefusalCode(StrEnum):
+    QUALIFICATION_UNVERIFIED = "testing_activation_unverified"
+    DEPENDENCY_UNVERIFIED = "testing_activation_dependency_unverified"
+    ROUTES_REQUIRE_CUTOVER = "testing_activation_routes_require_cutover"
+    AUTHORITY_CHANGED = "testing_activation_authority_changed"
+    RECEIPT_UNAVAILABLE = "testing_activation_receipt_unavailable"
+    RECIPIENT_UNQUALIFIED = "testing_activation_recipient_unqualified"
+
+
+class TestingActivationRefusal(ValueError):
+    """Public codes come from a closed vocabulary, never exception text."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: TestingActivationRefusalCode = TestingActivationRefusalCode.QUALIFICATION_UNVERIFIED,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def public_code(self) -> str:
+        return self.code.value
 
 
 class TestingActivationRequest(BaseModel):
@@ -44,6 +71,7 @@ class TestingActivationRecord(BaseModel):
     retained_provider: ProviderTargetRecord
     retained_reservations: tuple[LaunchplaneIdempotencyRecord, ...]
     configuration_sha256: str
+    configuration_version: Literal[1, 2] = Field(default=1, exclude_if=lambda value: value == 1)
     compose_source: str
     image_reference: str
     host_ports: tuple[int, ...] = ()

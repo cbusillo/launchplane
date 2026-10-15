@@ -22,6 +22,14 @@ recipient and retained in immutable old-target custody; its purpose is not relab
 Choose existing, unretired lane setting keys for the volume roles; activation
 refuses a retired key rather than reviving a setting that runtime sync removes.
 
+For a product explicitly declaring no public website, retained origin-domain
+records stay on the old recipient and in custody. The replacement has no domains
+or public routes. Declared public hosts, pending public-host effects, or origin
+domains on a public product still require their own accepted cutover. Changing
+the website declaration after review invalidates activation.
+Custody records version the configuration digest. Records created before website
+authority was included retain their original digest and supported continuation.
+
 The service reads the product's Compose source and local includes from one
 immutable repository commit through its existing source reader, verifies that
 commit's product-owned release build, and carries only the lane's managed
@@ -94,6 +102,13 @@ Keep the new volumes and both recipients if qualification or deployment fails.
 Rollback never restores shared production settings or starts the old containers.
 Read back the original operation and fix the supported testing continuation.
 The migration is additive and its downgrade preserves custody for recovery.
+Older service code cannot continue versioned custody created by this build;
+roll forward to a compatible build before resuming instead of editing records.
+Qualification refusals use a closed set of public error categories, including
+route cutover and changed authority; provider or unexpected exception text
+remains private. The testing-hold continuation preserves those same categories.
+Keep the request trace
+and original allocation/key while addressing that check, then plan again.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.
