@@ -1,3 +1,4 @@
+from contextlib import AbstractContextManager, nullcontext
 import base64
 import json
 import re
@@ -413,25 +414,35 @@ def run_manual_data_schedule(
     schedule_payload: api.JsonObject,
     resolved_schedule_execution_timeout_seconds: int,
     before_provider_mutation: Callable[[str], None] | None = None,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> dict[str, str]:
-    if before_provider_mutation is not None:
-        before_provider_mutation("post_deploy_schedule_upsert")
-    schedule = api.upsert_dokploy_schedule(
-        host=host,
-        token=token,
-        target_id=schedule_lookup_id,
-        schedule_type=schedule_type,
-        schedule_name=schedule_name,
-        app_name=schedule_app_name,
-        schedule_payload=schedule_payload,
-    )
+    with (provider_mutation_guard or nullcontext)():
+        if before_provider_mutation is not None:
+            before_provider_mutation("post_deploy_schedule_upsert")
+        schedule = api.upsert_dokploy_schedule(
+            host=host,
+            token=token,
+            target_id=schedule_lookup_id,
+            schedule_type=schedule_type,
+            schedule_name=schedule_name,
+            app_name=schedule_app_name,
+            schedule_payload=schedule_payload,
+        )
     schedule_id = api.schedule_key(schedule)
     if not schedule_id:
         raise click.ClickException(
             f"Dokploy schedule {schedule_name!r} for {target_definition.context}/{target_definition.instance} did not expose a schedule id."
         )
-    if before_provider_mutation is not None:
+    if before_provider_mutation is not None and provider_mutation_guard is None:
         before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+    dispatch: api.ScheduleMutationGuardOptions = {}
+    if provider_mutation_guard is not None:
+        dispatch = {
+            "provider_mutation_guard": provider_mutation_guard,
+            "before_trigger": (lambda: before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER))
+            if before_provider_mutation
+            else None,
+        }
     try:
         completed_schedule_deployment_key = api.deployment_key_from_wait_result(
             api.run_dokploy_schedule(
@@ -439,6 +450,7 @@ def run_manual_data_schedule(
                 token=token,
                 schedule_id=schedule_id,
                 timeout_seconds=resolved_schedule_execution_timeout_seconds,
+                **dispatch,
             )
         )
     except api.DokployScheduleExecutionFailed as error:
@@ -493,6 +505,7 @@ def run_compose_post_deploy_update(
     run_destructive_restore: bool = False,
     bootstrap_missing_database: bool = False,
     before_provider_mutation: Callable[[str], None] | None = None,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     deployment_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
@@ -595,58 +608,43 @@ def run_compose_post_deploy_update(
         requested_timeout_seconds=schedule_execution_timeout_seconds,
     )
     if desired_env_map != current_env_map:
-        if before_provider_mutation is not None:
-            before_provider_mutation("post_deploy_target_update")
-        api.update_dokploy_target_env(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-            target_payload=target_payload,
-            env_text=api.serialize_dokploy_env_text(desired_env_map),
-        )
+        with (provider_mutation_guard or nullcontext)():
+            if before_provider_mutation is not None:
+                before_provider_mutation("post_deploy_target_update")
+            api.update_dokploy_target_env(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                target_payload=target_payload,
+                env_text=api.serialize_dokploy_env_text(desired_env_map),
+            )
         latest_compose_deployment = api.latest_deployment_for_target(
             host=host,
             token=token,
             target_type="compose",
             target_id=compose_id,
         )
-        if before_provider_mutation is not None:
-            before_provider_mutation("post_deploy_deploy_trigger")
-        if deployment_title:
+        with (provider_mutation_guard or nullcontext)():
+            if before_provider_mutation is not None:
+                before_provider_mutation("post_deploy_deploy_trigger")
             api.trigger_deployment(
                 host=host,
                 token=token,
                 target_type="compose",
                 target_id=compose_id,
                 no_cache=False,
-                title=deployment_title,
+                **({"title": deployment_title} if deployment_title else {}),
             )
-            api.wait_for_target_deployment(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=compose_id,
-                before_key=api.deployment_key(latest_compose_deployment),
-                timeout_seconds=schedule_timeout_seconds,
-                deployment_title=deployment_title,
-            )
-        else:
-            api.trigger_deployment(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=compose_id,
-                no_cache=False,
-            )
-            api.wait_for_target_deployment(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=compose_id,
-                before_key=api.deployment_key(latest_compose_deployment),
-                timeout_seconds=schedule_timeout_seconds,
-            )
+        api.wait_for_target_deployment(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            before_key=api.deployment_key(latest_compose_deployment),
+            timeout_seconds=schedule_timeout_seconds,
+            **({"deployment_title": deployment_title} if deployment_title else {}),
+        )
         target_payload = api.fetch_dokploy_target_payload(
             host=host,
             token=token,
@@ -753,6 +751,11 @@ def run_compose_post_deploy_update(
         schedule_payload=schedule_payload,
         resolved_schedule_execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
         before_provider_mutation=before_provider_mutation,
+        **(
+            {"provider_mutation_guard": provider_mutation_guard}
+            if provider_mutation_guard is not None
+            else {}
+        ),
     )
     if run_destructive_restore:
         require_odoo_restore_readback_evidence(evidence)

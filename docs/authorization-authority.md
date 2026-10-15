@@ -238,8 +238,7 @@ no source produces. This does not publish either fact. An active, unique service
 preview is required. A staff hold or recorded `in_use`, `only_copy` or shared
 resource report refuses refresh even after that report expires or its binding
 changes. Resolve the real exception first through the existing target-policy or
-`/v1/disposable-lanes/observations` clear path; expiry never clears it. Existing
-positive observations, when present, still must be fresh and match their binding.
+`/v1/disposable-lanes/observations` clear path; expiry never clears it. Positive reports confer no admission on this path and are not required.
 Destroy and stable testing retain their existing qualification requirements.
 
 Before changing an existing preview compose and again before deployment, the
@@ -247,12 +246,12 @@ service runs a fixed read-only Docker inspector on that compose's actual server
 through its manual-only, disabled data schedule. Its spec contains only target,
 project and resource identifiers. It requires all three current/proposed volume
 names to agree, actual local volumes without external backing options, distinct
-resolved backing directories, and complete container mount inventory (including
+Docker-reported backing directories, and complete container mount inventory (including
 stopped containers). Foreign consumers, writable parent mounts, unknown backing,
 host networking or published ports refuse. Read-only administrative parent mounts
 are allowed; exact/child consumers are protected. Existing data is inspected,
-never emptied or deleted. The generated preview compose has no host ports or host
-SSH mounts. Managed integration-key filtering and exact managed-source authority
+never emptied or deleted. The qualified Director refresh generates a compose with no host ports or host
+SSH mounts. Existing scoped/source-reconciler SSH behavior is unchanged. Managed integration-key filtering and exact managed-source authority
 remain in force; no template source allowance is inherited.
 
 The schedule receipt binds the target/project/volumes, is consumed immediately,
@@ -263,14 +262,27 @@ inspection refuses before new application effects. The same operation/key observ
 an uncertain effect without redispatch; preserve it and use normal reconciliation.
 A refused or expired issued plan requires fresh plan/apply inputs.
 
+The inspector reads Docker's daemon metadata, not filesystem paths in the schedule's
+mount namespace. Only default local volumes without backing options qualify;
+image-declared anonymous volumes are inspected and checked for foreign consumers
+too. Unrelated vanished containers and stale disjoint bind sources are not usage.
+There is no inode or arbitrary host-symlink attestation. Managed resource identities
+and Docker's reported backing/mount relationships are the inspection authority.
+
 PostgreSQL excludes managed configuration, first global/instance settings, aliases,
-secret metadata, bootstrap overrides, key policy and safety-evidence writers during
-the synchronous refresh. Preview-record writes are excluded too. The guard is
-acquired after the preview executor/reservation and released before lifecycle
-finalization. Its service-wide authority fence can delay configuration writers for
-the bounded refresh/deploy timeout; it does not lock out direct external host
-administration. Current profile/configuration equality and protective reports are
-checked at every provider checkpoint; a late refusal retains uncertain outcomes.
+secret metadata, bootstrap overrides, key policy, safety-evidence and preview-record
+writers for each bounded provider dispatch. It acquires after the executor, with a
+five-second lock wait. Deploy/job polling and smoke checks hold no authority fence.
+Guarded schedule triggers have a short request deadline and then use the existing
+exact-job observation without retriggering. Profile/configuration equality and
+protective reports are checked inside each dispatch guard and before lifecycle
+publication; a late refusal retains uncertain outcomes. Direct external host
+administration is outside this transaction.
+
+Inspection commands time out and the fixed script exits within its own deadline.
+If a previous inspection still runs, wait for its terminal provider job, then retry
+the original apply/key; an inspection-only refusal releases the pre-effect
+reservation. It never permits a second application dispatch to settle uncertainty.
 SQLite remains a rehearsal backend and cannot enable this live qualification.
 No production, backup, promotion or Client-access boundary changes.
 

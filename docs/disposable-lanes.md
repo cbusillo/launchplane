@@ -19,6 +19,8 @@ reference and a timezone-aware observation/expiry window of at most fifteen
 minutes. A changed binding, expired observation, positive
 staff-testing hold or any required unknown fact refuses the new permission.
 A target ID also bound to another lane refuses it independently of the observation.
+The existing Odoo preview-refresh exception below uses direct resource inspection
+and protected-use reports instead of positive occupancy/custody observations.
 Global and lane runtime configuration and secret metadata participate in the binding.
 For an Odoo preview, the binding also includes its copied template-lane runtime
 settings, secret metadata and bootstrap override. Changing those inputs
@@ -44,7 +46,7 @@ stores usage, custody and isolation as `unknown`, even if the request asserts
 `unused`, `reproducible` or `isolated`. Those assertions never permit an apply.
 `clear` removes this product's exact-scope observation, including stale preview
 observations; it changes no staff hold, custody inventory, provider resource or
-historical operation. Missing observations continue to refuse disposable writes. The
+historical operation. Missing observations continue to refuse writes requiring positive facts. The
 generic profile-write API retains its original payload and behavior; it cannot
 write these separate records. This change grants no profile-write access.
 An absent preview can be inspected and
@@ -56,6 +58,33 @@ been verified independent, all existing execution is excluded, and nothing
 shared with production changes. It permits runtime sync with deployment
 disabled and the bounded empty replacement staging below. Starting a lane requires `isolated`; normal key-safety and sanitized
 restore checks remain in their existing drivers.
+
+## Existing Odoo preview refresh
+
+A bounded Director-agent refresh of an active, uniquely owned PR preview collects
+actual Docker resource evidence inside the normal service-issued plan/apply path.
+It requires no invented `unused` or `reproducible` fact. A staff hold or recorded
+`in_use`, `only_copy` or shared-resource exception still refuses, even after expiry.
+Positive observations do not grant admission. Destroy and testing retain their
+existing qualification paths.
+
+The fixed inspector checks the daemon's default local-volume backing metadata,
+complete container mounts (including stopped consumers and image-declared anonymous
+volumes), current/proposed storage agreement, and absence of host ports/networking.
+It runs on the target's placement, with no dependency on the schedule process's
+filesystem namespace. Unsupported backing options, shared consumers, incomplete
+or conflicting inspection and changed target placement/resources refuse. Unrelated
+container churn and disjoint stale bind sources are not protected use. It neither
+clears existing data nor creates a positive custody report. The qualified Director
+refresh omits host SSH mounts and retains managed integration/source filtering.
+
+Managed settings, aliases, protection reports, overrides and key policy are frozen
+for each bounded dispatch, with a lock timeout. Deploy/job waits hold no global
+transaction. A pre-effect admission refusal releases its reservation; a late
+refusal preserves the original uncertain key for read-only reconciliation. A new
+apply repeats inspection automatically. The inspection script has its own deadline;
+wait for an existing inspection to finish before original-key retry. See the full
+[authorization and recovery contract](authorization-authority.md#reviewed-never-live-classification-and-preview-execution).
 
 ## Preparing a testing production-copy policy
 
@@ -216,8 +245,9 @@ projection before advertising its own support.
 complete authoritative occupancy or only-copy inventory and no supported
 inspection that proves every writable mount/backing store, live database,
 published port and credential relation. The schema does not pretend to supply
-that inspection. There is no supported producer of facts permitting a disposable
-apply. The assertion API cannot create one and a direct DB write is not a
+that inspection. There is no universal producer of positive occupancy/custody facts permitting a
+disposable apply. The bounded existing-preview refresh above uses its own real
+resource inspection and protected-use rule instead. The assertion API cannot create one and a direct DB write is not a
 qualification procedure. Until a server-backed collector is available, the new apply path
 returns `disposable_lane_safety_unknown`; absent observations never mean unused,
 reproducible or isolated. Operational qualification records the missing sources

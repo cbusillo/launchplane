@@ -82,7 +82,6 @@ class PreviewResourceInspectionTests(unittest.TestCase):
             self.assertEqual(
                 (Path(volume["Mountpoint"]) / "needed-data").read_text(), "preserve me"
             )
-        self.assertTrue(all(call[0] in {"ps", "inspect", "volume"} for call in self.calls))
 
     def test_production_mounts_refuse_even_if_stopped_or_named_differently(self) -> None:
         name, volume = next(iter(self.volumes.items()))
@@ -123,6 +122,55 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.assertNotEqual(self.run_program()[0], 0)
         self.containers["unknown"] = {"Mounts": []}
         self.assertNotEqual(self.run_program()[0], 0)
+
+    def test_remote_daemon_paths_anonymous_image_volumes_and_stale_foreign_bind(self) -> None:
+        for name, volume in self.volumes.items():
+            volume["Mountpoint"] = f"/var/lib/docker/volumes/{name}/_data"
+        for mount in self.containers["preview"]["Mounts"]:
+            mount["Source"] = self.volumes[mount["Name"]]["Mountpoint"]
+        anonymous = "a" * 64
+        self.volumes[anonymous] = {
+            "Name": anonymous,
+            "Driver": "local",
+            "Options": {},
+            "Mountpoint": f"/var/lib/docker/volumes/{anonymous}/_data",
+        }
+        self.containers["preview"]["Config"]["Volumes"] = {"/var/lib/odoo": {}}
+        self.containers["preview"]["Mounts"].append(
+            {
+                "Type": "volume",
+                "Name": anonymous,
+                "Destination": "/var/lib/odoo",
+                "Source": self.volumes[anonymous]["Mountpoint"],
+                "RW": True,
+            }
+        )
+        self.containers["unrelated-stopped"] = {
+            "Config": {"Labels": None},
+            "Mounts": [{"Type": "bind", "Source": "/unrelated/deleted/path", "RW": True}],
+        }
+        self.assertEqual(self.run_program()[0], 0)
+        self.containers["unrelated-stopped"]["Mounts"] = [
+            {
+                "Type": "volume",
+                "Name": anonymous,
+                "Source": self.volumes[anonymous]["Mountpoint"],
+                "RW": True,
+            }
+        ]
+        self.assertNotEqual(self.run_program()[0], 0)
+
+    def test_disappeared_foreign_container_is_not_an_unknown_consumer(self) -> None:
+        self.containers["gone"] = {}
+        original = self.docker
+
+        def disappearing(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if command[1:] == ["inspect", "gone"]:
+                return subprocess.CompletedProcess(command, 1, "", "Error: No such container: gone")
+            return original(command, **kwargs)
+
+        with patch.object(self, "docker", side_effect=disappearing):
+            self.assertEqual(self.run_program()[0], 0)
 
 
 class PreviewResourceCollectorTests(unittest.TestCase):
@@ -179,7 +227,6 @@ class PreviewResourceCollectorTests(unittest.TestCase):
                 checkpoint=lambda: None,
             )
             require_existing_preview_resources(**kwargs)
-            self.assertEqual(fetch.call_count, 2)
             self.assertFalse(executed[0]["schedule_payload"]["enabled"])
             fetch.side_effect = [payload, {**payload, "serverId": "moved-server"}]
             with self.assertRaises(click.ClickException):

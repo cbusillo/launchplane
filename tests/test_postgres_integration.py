@@ -10838,6 +10838,10 @@ class RealPostgresExistingPreviewQualificationTests(unittest.TestCase):
     def test_refresh_guard_excludes_new_alias_configuration_hold_and_protection_writers(
         self,
     ) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooInstanceOverrideRecord,
+            OdooWebsiteBootstrapPayload,
+        )
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
         from control_plane.contracts.runtime_key_safety_policy import (
             RuntimeKeySafetyPolicyRecord,
@@ -10855,6 +10859,7 @@ class RealPostgresExistingPreviewQualificationTests(unittest.TestCase):
             "new-alias",
             "staff-hold",
             "key-policy",
+            "bootstrap",
             "protection",
             "preview",
         ):
@@ -10919,6 +10924,17 @@ class RealPostgresExistingPreviewQualificationTests(unittest.TestCase):
                                     updated_at=fixture.profile.updated_at,
                                 )
                             )
+                        elif change == "bootstrap":
+                            second.write_odoo_instance_override_record(
+                                OdooInstanceOverrideRecord(
+                                    context=preview.context,
+                                    instance=fixture.profile.preview.template_instance,
+                                    updated_at=fixture.profile.updated_at,
+                                    website_bootstrap=OdooWebsiteBootstrapPayload(
+                                        name="Changed preview fixture"
+                                    ),
+                                )
+                            )
                         elif change == "protection":
                             record_safety(
                                 second,
@@ -10945,9 +10961,30 @@ class RealPostgresExistingPreviewQualificationTests(unittest.TestCase):
                     ):
                         with first.serialize_existing_preview_refresh():
                             future = pool.submit(write)
-                            self.assertTrue(at_write.wait(10))
-                            with self.assertRaises(TimeoutError):
-                                future.result(timeout=0.1)
+                            if not at_write.wait(10):
+                                future.result(timeout=1)
+                                self.fail("The competing writer did not reach the database")
+                            deadline = time.monotonic() + 5
+                            waiting = 0
+                            while not future.done() and time.monotonic() < deadline:
+                                with first._engine.connect() as observer:
+                                    waiting = (
+                                        observer.scalar(
+                                            text(
+                                                "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'"
+                                            )
+                                        )
+                                        or 0
+                                    )
+                                if waiting:
+                                    break
+                                time.sleep(0.01)
+                            self.assertGreater(
+                                waiting,
+                                0,
+                                "The competing writer must reach an actual database wait",
+                            )
+                            self.assertFalse(future.done())
                         future.result(timeout=10)
                     if change == "preview":
                         self.assertEqual(

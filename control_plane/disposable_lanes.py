@@ -204,18 +204,6 @@ def require_disposable_lane(
             preview,
             disposable_lane_configuration(store, context, instance),
         )
-        if evidence is not None and any(
-            fact != "unknown"
-            for fact in (evidence.usage, evidence.data, evidence.production_resources)
-        ):
-            current_time = now or datetime.now(timezone.utc)
-            if (
-                not evidence.observed_at <= current_time < evidence.expires_at
-                or evidence.binding_sha256 != binding
-            ):
-                raise DisposableLaneSafetyUnknown(
-                    "Recorded preview qualification is stale or changed."
-                )
         return binding
     if retirement:
         # Prelaunch is the product's authoritative disposable classification.

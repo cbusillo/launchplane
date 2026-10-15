@@ -4,7 +4,7 @@ import base64
 import hashlib
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
 import click
 
@@ -104,9 +104,19 @@ def require_existing_preview_resources(
     latest = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=compose_id
     )
+
     # No provider-side write is accepted as inspection. A changed placement or
     # environment needs a new read, not reuse of a successful old schedule log.
-    if latest != payload:
+    def binding(value: Mapping[str, object]) -> tuple[object, ...]:
+        env = api.parse_dokploy_env_text(str(value.get("env") or ""))
+        return (
+            value.get("composeId"),
+            value.get("serverId"),
+            value.get("appName"),
+            *(env.get(key) for key in RESOURCE_KEYS),
+        )
+
+    if binding(latest) != binding(payload):
         raise click.ClickException("Preview target changed during resource inspection.")
 
 
@@ -117,13 +127,15 @@ PREVIEW_RESOURCE_PROGRAM = r"""
 import base64
 import hashlib
 import json
-from pathlib import Path
+from pathlib import PurePosixPath
+import re
+import signal
 import subprocess
 import sys
 
 
 def docker(*arguments):
-    result = subprocess.run(["docker", *arguments], check=False, capture_output=True, text=True)
+    result = subprocess.run(["docker", *arguments], check=False, capture_output=True, text=True, timeout=15)
     if result.returncode:
         raise RuntimeError("Resource inventory unavailable")
     return result.stdout
@@ -136,72 +148,113 @@ def one(*arguments):
     return rows[0]
 
 
+def container(identifier):
+    result = subprocess.run(["docker", "inspect", identifier], check=False, capture_output=True, text=True, timeout=15)
+    if result.returncode:
+        if re.search(r"No such (?:container|object):", result.stderr, re.IGNORECASE):
+            return None
+        raise RuntimeError("Container inspection unavailable")
+    rows = json.loads(result.stdout)
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        raise RuntimeError("Incomplete container inspection")
+    return rows[0]
+
+
+def backing_path(value):
+    # These are the Docker daemon's Linux paths, not the schedule's local paths.
+    if not isinstance(value, str) or not value.startswith("/"):
+        raise RuntimeError("Backing path unavailable")
+    path = PurePosixPath(value)
+    if ".." in path.parts:
+        raise RuntimeError("Backing path is not canonical")
+    return path
+
+
 def main():
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
-    names = spec["volumes"]
-    if len(names) != 3 or len(set(names)) != 3 or not spec["project"]:
+    names = set(spec["volumes"])
+    if len(spec["volumes"]) != 3 or len(names) != 3 or not spec["project"]:
         raise RuntimeError("Invalid inspection scope")
-    paths = []
-    identities = set()
-    for name in names:
+    paths = {}
+
+    def add_volume(name):
+        if name in paths:
+            return
         volume = one("volume", "inspect", name)
+        # Docker's default local allocation has no remote/bind backing options.
         if volume.get("Name") != name or volume.get("Driver") != "local" or volume.get("Options") not in (None, {}):
             raise RuntimeError("Unsupported storage backing")
-        raw = Path(volume["Mountpoint"])
-        if not raw.is_absolute():
-            raise RuntimeError("Unavailable backing path")
-        path = raw.resolve(strict=True)
-        if not path.is_dir() or path.name != "_data" or path.parent.name != name:
-            raise RuntimeError("Unexpected backing path")
-        identity = (path.stat().st_dev, path.stat().st_ino)
-        if identity in identities:
-            raise RuntimeError("Aliased storage")
-        paths.append(path)
-        identities.add(identity)
-    own = 0
-    ids = docker("ps", "-aq").splitlines()
-    for identifier in ids:
-        container = one("inspect", identifier)
-        config = container.get("Config")
-        labels = config.get("Labels") if isinstance(config, dict) else None
-        if not isinstance(config, dict) or (labels is not None and not isinstance(labels, dict)):
-            raise RuntimeError("Container ownership unavailable")
-        ours = (labels or {}).get("com.docker.compose.project") == spec["project"]
-        mounts = container.get("Mounts")
-        if not isinstance(mounts, list):
-            raise RuntimeError("Mount inventory unavailable")
-        if ours:
-            own += 1
-            host = container.get("HostConfig")
-            if not isinstance(host, dict) or host.get("PortBindings") not in (None, {}) or host.get("NetworkMode") == "host":
-                raise RuntimeError("Preview has shared host networking")
-        for mount in mounts:
-            if mount.get("Type") == "tmpfs":
+        path = backing_path(volume.get("Mountpoint"))
+        if path.name != "_data" or path.parent.name != name or any(path == old or path in old.parents or old in path.parents for old in paths.values()):
+            raise RuntimeError("Aliased storage backing")
+        paths[name] = path
+
+    for name in names:
+        add_volume(name)
+    # Re-read complete inventory to include new consumers. An unrelated helper
+    # disappearing is gone, not evidence of a hidden writable consumer.
+    for _ in range(2):
+        containers = []
+        own = 0
+        for identifier in docker("ps", "-aq").splitlines():
+            item = container(identifier)
+            if item is None:
                 continue
-            raw = mount.get("Source")
-            if not isinstance(raw, str) or not raw.startswith("/"):
-                raise RuntimeError("Backing mount unavailable")
-            path = Path(raw).resolve(strict=True)
-            overlap = any(path == candidate or path in candidate.parents or candidate in path.parents for candidate in paths)
+            config = item.get("Config")
+            labels = config.get("Labels") if isinstance(config, dict) else None
+            if not isinstance(config, dict) or (labels is not None and not isinstance(labels, dict)):
+                raise RuntimeError("Container ownership unavailable")
+            ours = (labels or {}).get("com.docker.compose.project") == spec["project"]
+            mounts = item.get("Mounts")
+            if not isinstance(mounts, list):
+                raise RuntimeError("Mount inventory unavailable")
             if ours:
-                if mount.get("RW") is not False and (mount.get("Type") != "volume" or mount.get("Name") not in names or path not in paths):
-                    raise RuntimeError("Preview has an unexpected writable mount")
-            elif overlap or mount.get("Name") in names:
-                # A read-only administrative parent mount is not a consumer of
-                # this volume; exact/child mounts and writable parents are.
-                if mount.get("Type") == "bind" and mount.get("RW") is False and all(path != candidate and candidate not in path.parents for candidate in paths):
+                own += 1
+                host = item.get("HostConfig")
+                if not isinstance(host, dict) or host.get("PortBindings") not in (None, {}) or host.get("NetworkMode") == "host":
+                    raise RuntimeError("Preview has shared host networking")
+                declared = config.get("Volumes") or {}
+                if not isinstance(declared, dict):
+                    raise RuntimeError("Image volume declarations unavailable")
+                for mount in mounts:
+                    name = mount.get("Name", "")
+                    if mount.get("Type") == "volume" and name not in names:
+                        if not re.fullmatch(r"[a-f0-9]{64}", name) or mount.get("Destination") not in declared:
+                            raise RuntimeError("Unexpected preview volume")
+                        add_volume(name)
+            containers.append((ours, mounts))
+        if not own:
+            raise RuntimeError("Existing preview containers unavailable")
+        for ours, mounts in containers:
+            for mount in mounts:
+                if mount.get("Type") == "tmpfs":
                     continue
-                raise RuntimeError("Storage is used outside this preview")
-    if not own or docker("ps", "-aq").splitlines() != ids:
-        raise RuntimeError("Preview is absent or container inventory changed")
+                path = backing_path(mount.get("Source"))
+                overlap = any(path == candidate or path in candidate.parents or candidate in path.parents for candidate in paths.values())
+                if ours:
+                    if mount.get("RW") is not False and (mount.get("Type") != "volume" or paths.get(mount.get("Name")) != path):
+                        raise RuntimeError("Unexpected writable preview mount")
+                elif overlap or mount.get("Name") in paths:
+                    if mount.get("Type") == "bind" and mount.get("RW") is False and all(path != candidate and candidate not in path.parents for candidate in paths.values()):
+                        continue
+                    raise RuntimeError("Storage is used outside this preview")
     digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
     print("preview_resources_binding_sha256=" + digest)
     print("preview_resources_ok=true")
 
 
+def expired(*_args):
+    raise TimeoutError("Inspection deadline")
+
+
+old_handler = signal.signal(signal.SIGALRM, expired)
+signal.alarm(100)
 try:
     main()
 except Exception:
     print("preview_resources_ok=false")
     sys.exit(1)
+finally:
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, old_handler)
 """

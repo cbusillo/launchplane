@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import time
+from contextlib import AbstractContextManager, nullcontext
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1096,6 +1097,7 @@ def execute_odoo_preview_dokploy_apply(
     propagate_domain_lookup_error: bool = False,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     if plan.status != "ready":
@@ -1140,6 +1142,7 @@ def execute_odoo_preview_dokploy_apply(
         expected_runtime_identity=expected_runtime_identity,
         integration_allowances=integration_allowances,
         qualify_existing_refresh=qualify_existing_refresh,
+        provider_mutation_guard=provider_mutation_guard,
     )
 
 
@@ -1522,7 +1525,9 @@ def _execute_refresh(
     expected_runtime_identity: RuntimeIdentity | None,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
     qualify_existing_refresh: bool = False,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> OdooPreviewDokployApplyResult:
+    guard = provider_mutation_guard or nullcontext
     plan = request.dry_run_plan
     creating_compose = plan.compose_ref.startswith("${created.composeId:")
     created_compose_id = ""
@@ -1577,7 +1582,7 @@ def _execute_refresh(
             domain_hosts=(plan.domain_host,),
             runtime_port=plan.runtime_port,
             publish_host_ports=False,
-            mount_workflow_ssh=False,
+            mount_workflow_ssh=not qualify_existing_refresh,
             domain_certificate_type=plan.domain_certificate_type,
         )
 
@@ -1585,8 +1590,6 @@ def _execute_refresh(
             if qualify_existing_refresh:
                 from control_plane.odoo_preview_resources import require_existing_preview_resources
 
-                if creating_compose:
-                    raise click.ClickException("Existing-preview refresh cannot create a target.")
                 require_existing_preview_resources(
                     host=host,
                     token=token,
@@ -1599,15 +1602,16 @@ def _execute_refresh(
                 )
 
         qualify_resources()
-        checkpoint_provider_effect("compose_update")
-        dokploy_compose.sync_dokploy_compose_raw_source(
-            host=host,
-            token=token,
-            compose_id=compose_id,
-            compose_name=plan.compose_name,
-            target_payload=target_payload,
-            compose_file=compose_file,
-        )
+        with guard():
+            checkpoint_provider_effect("compose_update")
+            dokploy_compose.sync_dokploy_compose_raw_source(
+                host=host,
+                token=token,
+                compose_id=compose_id,
+                compose_name=plan.compose_name,
+                target_payload=target_payload,
+                compose_file=compose_file,
+            )
         steps.append(_step("compose_update_raw_source", compose_id))
 
         environment_values = _preview_refresh_environment_values(request=request)
@@ -1623,26 +1627,28 @@ def _execute_refresh(
             environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "source-free"
 
         env_text = dokploy_api.serialize_dokploy_env_text(environment_values)
-        checkpoint_provider_effect("compose_update")
-        dokploy_api.update_dokploy_target_env(
-            host=host,
-            token=token,
-            target_type="compose",
-            target_id=compose_id,
-            target_payload=target_payload,
-            env_text=env_text,
-        )
+        with guard():
+            checkpoint_provider_effect("compose_update")
+            dokploy_api.update_dokploy_target_env(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                target_payload=target_payload,
+                env_text=env_text,
+            )
         steps.append(_step("compose_update_env", compose_id))
 
-        checkpoint_provider_effect("domain_ensure")
-        domain_id = dokploy_compose.ensure_compose_web_domain_route(
-            host=host,
-            token=token,
-            compose_id=compose_id,
-            domain_host=plan.domain_host,
-            runtime_port=plan.runtime_port,
-            certificate_type=plan.domain_certificate_type,
-        )
+        with guard():
+            checkpoint_provider_effect("domain_ensure")
+            domain_id = dokploy_compose.ensure_compose_web_domain_route(
+                host=host,
+                token=token,
+                compose_id=compose_id,
+                domain_host=plan.domain_host,
+                runtime_port=plan.runtime_port,
+                certificate_type=plan.domain_certificate_type,
+            )
         steps.append(_step("domain_create_or_update", plan.domain_host))
 
         latest_before = dokploy_api.latest_deployment_for_target(
@@ -1652,25 +1658,26 @@ def _execute_refresh(
             target_id=compose_id,
         )
         qualify_resources()
-        checkpoint_provider_effect("deploy_trigger")
-        deploy_triggered = True
-        if provider_operation_title:
-            dokploy_api.trigger_deployment(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=compose_id,
-                no_cache=plan.no_cache,
-                title=provider_operation_title,
-            )
-        else:
-            dokploy_api.trigger_deployment(
-                host=host,
-                token=token,
-                target_type="compose",
-                target_id=compose_id,
-                no_cache=plan.no_cache,
-            )
+        with guard():
+            checkpoint_provider_effect("deploy_trigger")
+            deploy_triggered = True
+            if provider_operation_title:
+                dokploy_api.trigger_deployment(
+                    host=host,
+                    token=token,
+                    target_type="compose",
+                    target_id=compose_id,
+                    no_cache=plan.no_cache,
+                    title=provider_operation_title,
+                )
+            else:
+                dokploy_api.trigger_deployment(
+                    host=host,
+                    token=token,
+                    target_type="compose",
+                    target_id=compose_id,
+                    no_cache=plan.no_cache,
+                )
         steps.append(_step("compose_deploy", compose_id))
         if request.wait_for_deploy:
             if provider_operation_title:
@@ -1714,6 +1721,7 @@ def _execute_refresh(
             bootstrap_missing_database=True,
             clear_preview_fishbowl_source=clear_previous_source,
             before_provider_mutation=checkpoint_provider_effect,
+            provider_mutation_guard=provider_mutation_guard,
             deployment_title=provider_operation_title,
         )
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(

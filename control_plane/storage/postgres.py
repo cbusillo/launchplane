@@ -6199,6 +6199,7 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneSecretRow
                 | LaunchplaneSecretVersionRow
                 | LaunchplaneSecretBindingRow
+                | LaunchplaneOdooInstanceOverrideRow
                 | LaunchplaneRuntimeKeySafetyPolicyRow
                 | LaunchplaneDisposableLaneSafetyRow
                 | LaunchplaneDisposableReplacementPreparationRow
@@ -7899,17 +7900,28 @@ class PostgresRecordStore(HumanSessionStore):
 
     @contextmanager
     def serialize_existing_preview_refresh(self) -> Iterator[None]:
-        """Exclude first-record inserts, aliases, holds and config/evidence drift.
+        """Exclude authority/preview inserts and updates for one bounded dispatch.
 
-        The preview reservation/executor is acquired first. This guard covers
-        the synchronous refresh only; lifecycle evidence commits after release.
-        SQLite is a rehearsal backend and cannot qualify this live path.
+        The executor is held first. No deploy/job wait or smoke check runs
+        inside this guard. SQLite cannot qualify the live path.
         """
-        with self.serialize_disposable_testing_resources() as checkpoint:
-            session = self._disposable_authority_context.session
-            session.execute(text("LOCK TABLE launchplane_preview_records IN SHARE MODE"))
-            checkpoint()
+        if self.database_dialect_name != "postgresql":
+            raise ValueError("Existing preview qualification requires PostgreSQL.")
+        held = getattr(self._disposable_authority_context, "session", None)
+        if held is not None:
+            held.execute(text("SELECT 1"))
             yield
+            return
+        with self._session_factory() as session:
+            session.execute(text("SET LOCAL lock_timeout = '5s'"))
+            self._lock_product_authority_bundle_write(session)
+            session.execute(text("LOCK TABLE launchplane_preview_records IN SHARE MODE"))
+            self._disposable_authority_context.session = session
+            try:
+                yield
+            finally:
+                self._disposable_authority_context.session = None
+                session.rollback()
 
     @contextmanager
     def capture_disposable_resource_adoption(

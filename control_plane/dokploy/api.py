@@ -1,3 +1,4 @@
+from contextlib import AbstractContextManager, nullcontext
 import json
 import re
 import time
@@ -7,7 +8,7 @@ from dataclasses import dataclass
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Literal, TypedDict
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -1104,6 +1105,15 @@ def wait_for_dokploy_schedule_deployment(
     )
 
 
+class ScheduleMutationGuardOptions(TypedDict, total=False):
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None
+    before_trigger: Callable[[], None] | None
+
+
+class ScheduleTriggerGuardOptions(ScheduleMutationGuardOptions, total=False):
+    trigger_timeout_seconds: int
+
+
 def trigger_dokploy_schedule_and_wait(
     *,
     host: str,
@@ -1115,6 +1125,8 @@ def trigger_dokploy_schedule_and_wait(
     readback_grace_seconds: float = _DOKPLOY_SCHEDULE_READBACK_GRACE_SECONDS,
     readback_interval_seconds: float = _DOKPLOY_SCHEDULE_READBACK_INTERVAL_SECONDS,
     observation_interval_seconds: float = _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    before_trigger: Callable[[], None] | None = None,
 ) -> str:
     """Trigger a schedule exactly once and wait for the provider job it started.
 
@@ -1131,14 +1143,17 @@ def trigger_dokploy_schedule_and_wait(
     started_monotonic = time.monotonic()
     trigger_started_at = time.time()
     try:
-        dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.runManually",
-            method="POST",
-            payload={"scheduleId": schedule_id},
-            timeout_seconds=max(1, min(trigger_timeout_seconds, execution_timeout_seconds)),
-        )
+        with (provider_mutation_guard or nullcontext)():
+            if before_trigger is not None:
+                before_trigger()
+            dokploy_request(
+                host=host,
+                token=token,
+                path="/api/schedule.runManually",
+                method="POST",
+                payload={"scheduleId": schedule_id},
+                timeout_seconds=max(1, min(trigger_timeout_seconds, execution_timeout_seconds)),
+            )
     except DokployRequestFailed as error:
         if error.remote_command_failed:
             # The provider answered: the job ran and its command exited non-zero.
@@ -1371,6 +1386,8 @@ def run_dokploy_schedule(
     token: str,
     schedule_id: str,
     timeout_seconds: int,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
+    before_trigger: Callable[[], None] | None = None,
 ) -> str:
     latest_before = latest_deployment_for_schedule(
         host=host,
@@ -1378,6 +1395,13 @@ def run_dokploy_schedule(
         schedule_id=schedule_id,
     )
     before_key = deployment_key(latest_before)
+    dispatch: ScheduleTriggerGuardOptions = {}
+    if provider_mutation_guard is not None:
+        dispatch = {
+            "provider_mutation_guard": provider_mutation_guard,
+            "before_trigger": before_trigger,
+            "trigger_timeout_seconds": 10,
+        }
     try:
         return trigger_dokploy_schedule_and_wait(
             host=host,
@@ -1385,6 +1409,7 @@ def run_dokploy_schedule(
             schedule_id=schedule_id,
             before_key=before_key,
             execution_timeout_seconds=timeout_seconds,
+            **dispatch,
         )
     except DokployScheduleExecutionFailed as error:
         if not error.deployment_id:
