@@ -168,12 +168,6 @@ class _FailingActivationStore(PostgresRecordStore):
             raise RuntimeError("injected event failure")
 
 
-class _FailingDerivedActivationStore(PostgresRecordStore):
-    def _after_ordinary_agent_delivery_activation_write_step(self, step_name: str) -> None:
-        if step_name == "derived_event_inserted":
-            raise RuntimeError("injected derived event failure")
-
-
 class OrdinaryAgentDeliveryActivationStorageTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary_directory = TemporaryDirectory()
