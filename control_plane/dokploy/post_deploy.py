@@ -439,7 +439,10 @@ def run_compose_post_deploy_update(
         desired_env_map.pop("ODOO_ADDONS_PATH", None)
     resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
     require_company_email = False
-    apply_website_settings = target_definition.instance not in {"prod", "production"}
+    apply_website_settings = target_definition.instance.strip().lower() not in {
+        "prod",
+        "production",
+    }
     encoded_payload = resolved_workflow_environment_overrides.get(
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
     )
@@ -640,7 +643,9 @@ def run_compose_post_deploy_update(
         ),
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
-        website_settings_instance=target_definition.instance if apply_website_settings else "",
+        website_settings_instance=target_definition.instance.strip().lower()
+        if apply_website_settings
+        else "",
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -2690,7 +2695,7 @@ if [ "${{web_status}}" = "running" ]; then
     start_web_after_workflow=1
     echo "Stopping web container ${{web_container_id}}"
     docker stop "${{web_container_id}}" >/dev/null
-elif [ "${{integration_readback_required}}" = "1" ]; then
+elif [ "${{integration_readback_required}}" = "1" ] || [ -n "${{website_settings_instance}}" ]; then
     # An earlier read-back refusal leaves web stopped. Once the setting is cleared
     # or allowed, this run brings web back only if the read-back passes.
     start_web_after_workflow=1

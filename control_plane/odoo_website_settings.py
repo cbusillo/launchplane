@@ -65,6 +65,13 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
         context=request.context,
         instance=request.instance,
     )
+    production = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    if production is None or request.website_settings.settings.public_origin.rstrip(
+        "/"
+    ) != production.base_url.rstrip("/"):
+        raise ValueError(
+            "Website settings origin must match the product's recorded production URL."
+        )
     testing = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if testing is None:
         raise ValueError("Website settings require the product's testing candidate.")

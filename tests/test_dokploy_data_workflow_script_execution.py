@@ -417,6 +417,10 @@ def _render_post_deploy_script(
                     ODOO_UPSTREAM_DB_USER=odoo
                     ODOO_UPSTREAM_FILESTORE_PATH=/source/filestore
                     """
+                )
+                + "".join(
+                    f"\n{key}={value}"
+                    for key, value in (workflow_environment_overrides or {}).items()
                 ),
                 "appName": "example-testing-app",
                 "serverId": "server-123",
@@ -996,6 +1000,30 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         )
         self.assertNotEqual(still_refused.returncode, 0)
         self.assertFalse(still_refused.web_restarted, still_refused.docker_log)
+
+    def test_native_settings_retry_can_start_previously_stopped_production_web(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+        from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+        from tests.test_odoo_website_settings import intent
+
+        payload = OdooPostDeployPayload(
+            context="example", instance="prod", website_settings=intent().settings
+        )
+        script = _render_post_deploy_script(
+            None,
+            instance="prod",
+            workflow_environment_overrides={
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    payload.to_wire_json_bytes()
+                ).decode()
+            },
+        )
+        for failed in ("0", "1"):
+            with self.subTest(failed=failed):
+                run = self._run(script, web_status="exited", FAKE_WEBSITE_SETTINGS_FAILURE=failed)
+                self.assertEqual(run.returncode == 0, failed == "0", run.stdout + run.stderr)
+                self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
 
     def test_stopped_web_without_a_readback_still_fails(self) -> None:
         run = self._run(_render_script(instance="prod"), web_status="exited")

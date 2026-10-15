@@ -254,9 +254,14 @@ def execute_odoo_post_deploy(
                     raise click.ClickException(
                         "Website settings require recorded artifact identity."
                     )
-                artifact_id = release_reader(
-                    context_name=request.context, channel_name=request.instance
-                ).artifact_id
+                try:
+                    artifact_id = release_reader(
+                        context_name=request.context, channel_name=request.instance
+                    ).artifact_id
+                except FileNotFoundError as error:
+                    raise click.ClickException(
+                        "Website settings require the current production release record."
+                    ) from error
             if release_operation:
                 if (
                     release_website_settings is not None
@@ -268,6 +273,14 @@ def execute_odoo_post_deploy(
                 accepted_settings = release_website_settings
             else:
                 applied = rendering_record.last_apply.website_settings
+                if (
+                    rendering_record.last_apply.status == "fail"
+                    and applied is not None
+                    and applied.artifact_id != artifact_id
+                ):
+                    raise click.ClickException(
+                        "Unverified website settings require recovery through the recorded release or rollback operation; ordinary maintenance cannot change its artifact."
+                    )
                 accepted_settings = (
                     applied if applied is not None and applied.artifact_id == artifact_id else None
                 )

@@ -213,6 +213,46 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                     ),
                 )
 
+    def test_website_snapshot_refuses_two_slot_before_provider_effects(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+        from tests.test_odoo_website_settings import intent
+
+        selected = cast(
+            ReleaseReviewDecisionRecord,
+            SimpleNamespace(
+                product="odoo-tenant-cm",
+                checklist=SimpleNamespace(
+                    candidate=SimpleNamespace(artifact_id="artifact-cm-new"),
+                    website_settings=intent(),
+                    production_website_settings=None,
+                ),
+            ),
+        )
+        store = _promotion_store()
+        effects = Mock()
+        with patch(
+            "control_plane.workflows.odoo_prod_promotion.require_release_approval",
+            return_value=selected,
+        ):
+            result = execute_odoo_prod_promotion(
+                control_plane_root=Path("."),
+                state_dir=Path("state"),
+                database_url=None,
+                record_store=store,
+                request=OdooProdPromotionRequest(
+                    context="cm",
+                    product="odoo-tenant-cm",
+                    artifact_id="artifact-cm-new",
+                    backup_record_id="backup-test",
+                ),
+                cutover_plan=Mock(),
+                provider_effect_checkpoint=effects,
+            )
+        self.assertEqual(result.promotion_status, "fail")
+        effects.assert_not_called()
+        store.read_artifact_manifest.assert_not_called()
+
     def test_promotion_delegates_deployment_to_target_replacement(self) -> None:
         record_store = _promotion_store()
         record_store.read_artifact_manifest.return_value = _artifact_manifest()

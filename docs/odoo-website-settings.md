@@ -9,7 +9,9 @@ ownership. Preparation changes no Odoo database, deployment or access grant.
 
 The request names the product/context, `instance: prod`, a reason, and
 `website_settings: {artifact_id, settings}`. The artifact must be the product's
-current recorded testing artifact. Settings contain the native `website_id`,
+current recorded testing artifact. The origin must match the production lane's
+recorded HTTPS base URL; configure that URL through the existing product-profile
+service API/UI before preparing settings if it is absent. Settings contain the native `website_id`,
 `public_origin` (HTTPS), `public_indexing_enabled`, `google_analytics_key`
 (`G-…` or empty), `cookies_bar` and `block_third_party_domains`. Empty analytics
 supports preparing indexing before the stream is supplied. GA4 requires both
@@ -28,7 +30,7 @@ The Client release checklist shows these exact settings and includes their
 digest in the candidate identity. Changing a setting invalidates that release's
 acceptance even when the artifact is unchanged. Production application selects
 the exact decision authorizing the durable operation (including a recorded hotfix or override) for the artifact being deployed; newer
-prepared settings cannot alter an accepted release. The native consumer checks
+prepared settings cannot alter an accepted release. For full application the native consumer checks
 that the selected website's domain equals the reviewed public origin, writes
 and reads back native analytics/consent fields and
 `cm_website.public_indexing_enabled` in its transaction. Launchplane requires
@@ -41,7 +43,8 @@ A failed consumer, including the recovery path after a failed workflow, keeps
 web stopped. No new credential or provider interface is introduced.
 
 Rollback selects the production snapshot retained in that operation's decision. Historical
-artifacts without a website snapshot disable indexing and analytics; they do
+artifacts without a website snapshot disable CM indexing and native analytics
+across the database, without depending on the unverified new selector; they do
 not retain forward-release settings. Collection-only historical rollback preserves existing cookie and third-party controls. Successful readback retains the actually
 applied snapshot separately from pending intent, so subsequent review compares
 against production's applied settings. A failed maintenance retains its exact attempted snapshot as unverified, outside the production checklist; the existing maintenance or durable operation retry must verify it before a new release review.

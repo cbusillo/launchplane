@@ -1,6 +1,8 @@
 """Execute the generated consumer through the legacy runtime's native shell API."""
 
 import base64
+import hashlib
+import json
 import io
 import configparser
 from pathlib import Path
@@ -12,14 +14,19 @@ from contextlib import redirect_stdout
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
+from control_plane._odoo_website_settings_program import (
+    WEBSITE_SETTINGS_PROGRAM,
+    WEBSITE_SETTINGS_SOURCE_REVISION,
+    WEBSITE_INDEXING_PARAMETER,
+)
+from scripts.generate_odoo_website_settings_program import render
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
 from tests.test_odoo_website_settings import intent
 
 
 class NativeWebsite:
     _fields = {"google_analytics_key", "cookies_bar", "block_third_party_domains"}
-    domain = "https://site.example"
+    domain = intent().settings.public_origin
     google_analytics_key = "G-COPIED"
     cookies_bar = False
     block_third_party_domains = False
@@ -92,6 +99,27 @@ def run_legacy_shell(
 
 
 class GeneratedWebsiteConsumerTests(unittest.TestCase):
+    def test_immutable_native_artifacts_and_generated_consumer_agree(self) -> None:
+        root = Path(__file__).parent / "fixtures/website-settings"
+        records = json.loads((root / "artifacts.json").read_text())
+        for record in records.values():
+            data = (root / record["artifact_path"]).read_bytes()
+            blob = hashlib.sha1(b"blob " + str(len(data)).encode() + b"\0" + data).hexdigest()
+            self.assertEqual(blob, record["git_blob"])
+        consumer = records["consumer"]
+        namespace: dict[str, object] = {}
+        exec(
+            render(
+                commit=consumer["revision"], source=(root / consumer["artifact_path"]).read_text()
+            ),
+            namespace,
+        )
+        self.assertEqual(namespace["WEBSITE_SETTINGS_PROGRAM"], WEBSITE_SETTINGS_PROGRAM)
+        self.assertEqual(
+            namespace["WEBSITE_SETTINGS_SOURCE_REVISION"], WEBSITE_SETTINGS_SOURCE_REVISION
+        )
+        self.assertEqual(namespace["WEBSITE_INDEXING_PARAMETER"], WEBSITE_INDEXING_PARAMETER)
+
     def test_old_runtime_without_consumer_applies_and_commits_the_typed_payload(self) -> None:
         env = NativeEnvironment()
         output = run_legacy_shell(env)

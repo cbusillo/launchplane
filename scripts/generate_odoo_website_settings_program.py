@@ -1,6 +1,8 @@
 """Generate the maintenance consumer from one committed devkit source."""
 
 import argparse
+import ast
+import json
 import subprocess
 from pathlib import Path
 
@@ -25,7 +27,27 @@ def generate(*, devkit_repo: Path, revision: str, output: Path, check: bool = Fa
         text=True,
         check=True,
     ).stdout
+    generated = render(commit=commit, source=source)
+    if check:
+        if output.read_text(encoding="utf-8") != generated:
+            raise ValueError(
+                "Generated website settings program differs from its immutable source."
+            )
+    else:
+        output.write_text(generated, encoding="utf-8")
+
+
+def render(*, commit: str, source: str) -> str:
     compile(source, "odoo_website_settings.py", "exec")
+    indexing_parameter = next(
+        ast.literal_eval(node.value)
+        for node in ast.parse(source).body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "INDEXING_PARAMETER"
+            for target in node.targets
+        )
+    )
     native = (
         source
         + """
@@ -56,15 +78,11 @@ with tempfile.TemporaryDirectory(prefix="launchplane-website-settings-") as conf
         "# Generated from committed odoo-devkit source; do not edit.\n"
         f"# Source revision: {commit}\n"
         "# Regenerate with scripts/generate_odoo_website_settings_program.py.\n"
+        f"WEBSITE_SETTINGS_SOURCE_REVISION = {json.dumps(commit)}\n"
+        f"WEBSITE_INDEXING_PARAMETER = {json.dumps(indexing_parameter)}\n"
         f"WEBSITE_SETTINGS_PROGRAM = {wrapper!r}\n"
     )
-    if check:
-        if output.read_text(encoding="utf-8") != generated:
-            raise ValueError(
-                "Generated website settings program differs from its immutable source."
-            )
-    else:
-        output.write_text(generated, encoding="utf-8")
+    return generated
 
 
 if __name__ == "__main__":

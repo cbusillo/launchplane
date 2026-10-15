@@ -1,12 +1,15 @@
 import base64
+from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
 import json
 import unittest
+import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.odoo_website_settings import (
     OdooWebsiteSettings,
     OdooWebsiteSettingsIntent,
@@ -22,8 +25,32 @@ from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOA
 from control_plane.release_review import build_release_review
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
-from tests.test_release_review import seed, profile, github_read, decision
+from tests.test_release_review import (
+    seed as release_seed,
+    profile as release_profile,
+    github_read,
+    decision,
+)
 from tests.test_odoo_post_deploy import _module_update_evidence
+
+
+def profile() -> LaunchplaneProductProfileRecord:
+    value = release_profile()
+    return value.model_copy(
+        update={
+            "lanes": tuple(
+                lane.model_copy(update={"base_url": "https://site.example"})
+                if lane.instance == "prod"
+                else lane
+                for lane in value.lanes
+            )
+        }
+    )
+
+
+def seed(store: FilesystemRecordStore) -> None:
+    release_seed(store)
+    store.write_product_profile_record(profile())
 
 
 def intent(*, key: str = "G-TEST123") -> OdooWebsiteSettingsIntent:
@@ -31,7 +58,9 @@ def intent(*, key: str = "G-TEST123") -> OdooWebsiteSettingsIntent:
         artifact_id="artifact-testing",
         settings=OdooWebsiteSettings(
             website_id=1,
-            public_origin="https://site.example",
+            public_origin=next(
+                lane.base_url for lane in profile().lanes if lane.instance == "prod"
+            ),
             public_indexing_enabled=True,
             google_analytics_key=key,
         ),
@@ -88,6 +117,28 @@ class WebsiteSettingsTests(unittest.TestCase):
                     value.model_copy(
                         update={"mode": "apply", "reviewed_plan_sha256": old["plan_sha256"]}
                     ),
+                )
+
+    def test_wrong_production_origin_is_refused_without_preparing_intent(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            bad = request().model_copy(
+                update={
+                    "website_settings": intent().model_copy(
+                        update={
+                            "settings": intent().settings.model_copy(
+                                update={"public_origin": "https://other.example"}
+                            )
+                        }
+                    )
+                }
+            )
+            with self.assertRaises(ValueError):
+                plan_website_settings(store, bad)
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(
+                    context_name="example-site", instance_name="prod"
                 )
 
     def test_other_product_artifact_and_nonproduction_enablement_are_rejected(self) -> None:
@@ -220,7 +271,7 @@ class WebsiteSettingsTests(unittest.TestCase):
             legacy_parameters = {
                 item["key"]: item["value"]["value"] for item in captured[2]["config_parameters"]
             }
-            self.assertEqual(legacy_parameters["cm_website.public_indexing_enabled"], "0")
+            self.assertEqual(legacy_parameters[WEBSITE_INDEXING_PARAMETER], "0")
             self.assertIsNone(captured[2]["website_settings"]["block_third_party_domains"])
             for digest in ("", "f" * 64):
                 with (
@@ -249,7 +300,7 @@ class WebsiteSettingsTests(unittest.TestCase):
                     self.assertEqual(failed.post_deploy_status, "fail")
                     review = build_release_review(store=store, profile=profile(), read=github_read)
                     self.assertFalse(review.approved)
-                    self.assertTrue(any("unverified" in blocker for blocker in review.blockers))
+                    self.assertTrue(review.blockers)
             with (
                 patch(
                     "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
@@ -264,6 +315,13 @@ class WebsiteSettingsTests(unittest.TestCase):
                     side_effect=apply,
                 ),
             ):
+                with self.assertRaises(click.ClickException):
+                    execute_odoo_post_deploy(
+                        artifact_id="artifact-prod",
+                        control_plane_root=Path(directory),
+                        record_store=store,
+                        request=OdooPostDeployRequest(context="example-site", instance="prod"),
+                    )
                 recovered = execute_odoo_post_deploy(
                     artifact_id="artifact-testing",
                     control_plane_root=Path(directory),

@@ -1,4 +1,3 @@
-# Immutable odoo-devkit startup artifact at a06d347; retained for native-shell compatibility proof.
 #!/usr/bin/env python3
 """Initialize Odoo state if needed before launching the long-running web server.
 
