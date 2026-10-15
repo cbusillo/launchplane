@@ -17,6 +17,7 @@ from typing import Any, Callable, Protocol, cast
 from pydantic import BaseModel
 from control_plane.lane_movement import LaneMovementRefused
 from control_plane.odoo_testing_drill import DrillSkipped
+from control_plane.odoo_testing_restore import read_current_testing_generation
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -2233,6 +2234,12 @@ def _execute_target_replacement_with_checkpoint(
                 cast(TestingRestoreHistoryStore, record_store),
                 context=operation.context,
                 instance=operation.instance,
+                generation=read_current_testing_generation(
+                    record_store,
+                    product=operation.product,
+                    context=operation.context,
+                    instance=operation.instance,
+                ),
             )
             is not None
         ):

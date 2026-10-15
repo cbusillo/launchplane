@@ -38,13 +38,13 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
+import click
+from sqlalchemy.exc import SQLAlchemyError
+
 from control_plane.testing_restore_prerequisite import (
     TestingRestoreHistoryStore,
     incomplete_testing_restore,
 )
-
-import click
-from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.dependency_update_review import pure_dependabot_update
@@ -641,6 +641,7 @@ def reconcile_testing_target(
             cast(TestingRestoreHistoryStore, record_store),
             context=lane.context,
             instance=lane.instance,
+            generation=generation,
         )
         if incomplete_restore is not None:
             plan.update(

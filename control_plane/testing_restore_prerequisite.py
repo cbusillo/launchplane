@@ -4,6 +4,7 @@ from typing import Protocol
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 
 
 class TestingRestoreHistoryStore(Protocol):
@@ -17,7 +18,11 @@ class TestingRestoreHistoryStore(Protocol):
 
 
 def incomplete_testing_restore(
-    record_store: TestingRestoreHistoryStore, *, context: str, instance: str
+    record_store: TestingRestoreHistoryStore,
+    *,
+    context: str,
+    instance: str,
+    generation: FreshOdooTestingGeneration | None = None,
 ) -> DeploymentRecord | None:
     """A deploy cannot repair data lost by a failed restore. A governed restore can.
 
@@ -46,6 +51,21 @@ def incomplete_testing_restore(
         if record.resolved_target is not None
         and record.resolved_target.target_id == target.target_id
     ]
+    if (
+        generation is not None
+        and generation.completed_at
+        and (generation.context, generation.instance, generation.target_id)
+        == (context, instance, target.target_id)
+    ):
+        # A no-effect drill can put the prior completed database back on the
+        # same provider target. Its untouched candidate is not that database.
+        # Untagged historical restores still require completion proof.
+        restores = [
+            record
+            for record in restores
+            if not record.runtime_source.get("testing_drill_database")
+            or record.runtime_source["testing_drill_database"] == generation.drill_database
+        ]
     if not restores:
         return None
     latest = max(restores, key=lambda record: (record.deploy.started_at, record.record_id))

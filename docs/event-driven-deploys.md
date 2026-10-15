@@ -94,6 +94,10 @@ reservation. The webhook request never waits on a deploy.
     or prepare an isolated fresh testing generation through the supported bootstrap
     path. These remain separate operations with their normal safety checks; the
     automatic deploy does not create an empty database or replay the failed restore.
+    Drill records name their selected database. When a no-effect drill restores
+    the prior completed generation on the same target, its unused candidate
+    database does not hold maintenance of the restored selection. Untagged
+    historical restore records still require completion proof.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
     the artifact id, so a crashed or repeated reconcile can't queue it twice.

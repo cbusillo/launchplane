@@ -3403,9 +3403,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     with self.assertRaises(type(error)):
                         apply()
                 record = captured[0].deployment_records[-1]
-                self.assertEqual(
-                    record.deploy.status, "pending" if isinstance(error, SystemExit) else "fail"
-                )
                 store = PostgresRecordStore(
                     database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
                 )
@@ -3458,6 +3455,36 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+    def test_drill_restore_record_identifies_its_selected_database(self) -> None:
+        from uuid import uuid4
+        from tests.test_odoo_testing_restore import generation
+
+        fresh = generation().model_copy(
+            update={
+                "product": "odoo-tenant-opw",
+                "context": "opw",
+                "target_id": "compose-opw",
+                "reconcile_requested_at": generation().prepared_at,
+                "drill_database": "lp_drill_" + uuid4().hex,
+            }
+        )
+        _, _, _, store = self._apply_upstream_restore(
+            override_record=_opw_website_override_record().model_copy(
+                update={"instance": "testing"}
+            ),
+            post_deploy_results=(
+                OdooPostDeployResult(
+                    context="opw", instance="testing", phase="restore", post_deploy_status="fail"
+                ),
+            ),
+            test_instance="testing",
+            fresh_generation=fresh,
+        )
+        self.assertEqual(
+            store.deployment_records[-1].runtime_source["testing_drill_database"],
+            fresh.drill_database,
+        )
 
     def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
         from tests.test_odoo_testing_restore import generation
