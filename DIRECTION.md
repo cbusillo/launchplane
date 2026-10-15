@@ -87,6 +87,15 @@ blocks that run is the next piece of work.
   reusable Launchplane workflows, and Launchplane-held build settings
 - caller-grant rules for the preview and testing deploys Launchplane starts
   from source-control events
+- GitHub workflows as the way to run an operation a person or agent decides
+  on, such as runtime sync, target setup, onboarding, restore or retirement:
+  it runs in Launchplane as the signed-in admin or an agent identity, within
+  the stop boundaries above. Its workflow, workflow-identity grant and the
+  GitHub secrets only that workflow uses are deleted once the deployed
+  service does every mode the workflow covered. Until then, that workflow is
+  the supported way to run it. CI stays on GitHub, and so
+  does `deploy-launchplane.yml`, whose `emergency-dokploy-rollback` job
+  rolls Launchplane back while Launchplane is down
 
 A retired concept comes back only through a direction change, in a shape that
 fits this file.
