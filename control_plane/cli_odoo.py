@@ -42,6 +42,7 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     execute_odoo_prod_backup_gate,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
 )
@@ -223,9 +224,12 @@ def _write_reviewed_odoo_override(
         context_name=record.context,
         instance_name=record.instance,
     )
-    store.write_odoo_instance_override_record(
-        record, expected_record=expected, require_absent=expected is None
-    )
+    try:
+        store.write_odoo_instance_override_record(
+            record, expected_record=expected, require_absent=expected is None
+        )
+    except OdooInstanceOverrideConflictError as error:
+        raise click.ClickException("Odoo overrides changed; re-run the command.") from error
 
 
 def _build_odoo_instance_override_record_with_config_parameter(
@@ -479,7 +483,7 @@ def _migrate_odoo_override_secret_transport_record(
             updated_at=utc_now_timestamp(),
             source_label=source_label.strip() or "odoo-secret-transport-migration",
         )
-        record_store.write_odoo_instance_override_record(updated_record)
+        record_store.write_odoo_instance_override_record(updated_record, expected_record=record)
     return updated_record, changes
 
 

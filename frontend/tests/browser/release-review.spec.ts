@@ -589,6 +589,11 @@ test("Client sees website settings before accepting the bound release", { tag: "
     settings: { operation: "apply", website_id: 1, public_origin: "https://site.example", public_indexing_enabled: true,
       google_analytics_key: "G-TEST123", cookies_bar: true, block_third_party_domains: true },
   };
+  const productionSettings = {
+    artifact_id: review.review.checklist!.production.artifact_id,
+    settings: { ...review.review.checklist!.website_settings.settings, public_indexing_enabled: false, google_analytics_key: "G-PREVIOUS" },
+  };
+  review.review.checklist!.production_website_settings = productionSettings;
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", route => route.fulfill({ json: review }));
   let submittedDigest = "";
@@ -597,11 +602,13 @@ test("Client sees website settings before accepting the bound release", { tag: "
     return route.fulfill({ json: { ...review, review: { ...review.review, approved: true } } });
   });
   await page.goto("/ui/owner-review?product=example-site");
-  const settings = page.getByRole("region", { name: "Website settings in this release" });
+  const settings = page.locator("[data-website-settings]");
   await expect(settings).toContainText(review.review.checklist!.website_settings.settings.public_origin);
   await expect(settings).toContainText(review.review.checklist!.website_settings.settings.google_analytics_key);
-  await expect(settings).toContainText("Cookie consent bar: enabled");
-  await expect(settings).toContainText("Third-party blocking: enabled");
+  await expect(settings.locator("[data-setting='google_analytics_key'] td").first()).toHaveText(productionSettings.settings.google_analytics_key);
+  await expect(settings.locator("[data-setting='public_indexing_enabled']")).toHaveAttribute("data-change", "changed");
+  await expect(settings.locator("[data-setting='cookies_bar']")).toHaveAttribute("data-change", "kept");
+  await expect(settings.locator("[data-setting='cookies_bar']")).toHaveAttribute("data-state", "enabled");
   await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("website-settings-before-accept.png"), fullPage: true });
   await page.getByRole("button", { name: "Accept release", exact: true }).click();
@@ -612,9 +619,12 @@ test("Client sees website settings before accepting the bound release", { tag: "
     cookies_bar: null, block_third_party_domains: null,
   };
   await page.reload();
-  await expect(settings).toContainText("Search indexing: disabled");
-  await expect(settings).toContainText("Google Analytics: disabled");
-  await expect(settings).toContainText("Cookie consent bar: unchanged");
-  await expect(settings).toContainText("Third-party blocking: unchanged");
+  await expect(settings.locator("[data-setting='public_indexing_enabled']")).toHaveAttribute("data-state", "disabled");
+  await expect(settings.locator("[data-setting='google_analytics_key']")).toHaveAttribute("data-state", "disabled");
+  for (const field of ["cookies_bar", "block_third_party_domains"]) {
+    await expect(settings.locator(`[data-setting='${field}']`)).toHaveAttribute("data-state", "preserved");
+    await expect(settings.locator(`[data-setting='${field}']`)).toHaveAttribute("data-change", "kept");
+  }
+  await page.screenshot({ path: testInfo.outputPath("website-settings-preserved.png"), fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

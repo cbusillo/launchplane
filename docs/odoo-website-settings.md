@@ -34,7 +34,8 @@ To switch collection off, prepare explicit disabled settings for acceptance.
 Withdrawal remains available without a testing candidate
 and on a two-slot lane; preparing new settings on that unsupported driver is refused.
 
-The Client release checklist shows these exact settings and includes their
+The Client release checklist compares recorded production values with these
+exact candidate choices, identifies kept/changed fields, and includes their
 digest in the candidate identity. Changing a setting invalidates that release's
 acceptance even when the artifact is unchanged. Production application selects
 the exact decision authorizing the durable operation (including a recorded hotfix or override) for the artifact being deployed; newer
