@@ -136,6 +136,18 @@ def _backup_binding(store: object, request: object) -> object:
 
 
 class ClientReleaseTests(unittest.TestCase):
+    def test_failure_before_step_creation_creates_delivery_attention(self) -> None:
+        self.switch("promote")
+        accepted = self.accept()
+        with patch(
+            "control_plane.client_release._advance", side_effect=RuntimeError("private-error")
+        ):
+            with self.assertLogs("control_plane.client_release", level="ERROR"):
+                self.assertEqual(self.advance(), ())
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.assertIn(accepted.record_id, incident.summary)
+        self.assertNotIn("private-error", incident.summary)
+
     def test_business_hours_hold_resumes_the_exact_acceptance_and_rechecks_before_promotion(
         self,
     ) -> None:

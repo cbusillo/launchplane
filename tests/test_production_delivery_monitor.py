@@ -5,10 +5,12 @@ import unittest
 from unittest.mock import Mock
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
     HealthcheckEvidence,
+    PromotionRecord,
 )
 from control_plane.contracts.product_profile_record import ProductLaneHealthMonitoringPolicy
 from control_plane.contracts.public_ingress_monitoring import (
@@ -22,6 +24,7 @@ from control_plane.production_delivery_monitor import (
     DELIVERY_LAG_CHECK,
     monitor_production_delivery_once,
     record_production_delivery_failure,
+    _record_rejected_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
@@ -232,10 +235,22 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.monitor()
         self.now += timedelta(seconds=61)
         self.monitor()
+        original = self.store.list_public_ingress_incident_records(status="open")[0]
         self.transport.get_json.side_effect = RuntimeError("source unavailable")
         with self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"):
             self.monitor()
-        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+        incidents = self.store.list_public_ingress_incident_records(status="open")
+        self.assertIn(original.incident_id, {incident.incident_id for incident in incidents})
+        self.assertEqual(len(incidents), 2)
+        self.transport.get_json.side_effect = self.read_source
+        self.monitor()
+        self.assertEqual(
+            {
+                incident.incident_id
+                for incident in self.store.list_public_ingress_incident_records(status="open")
+            },
+            {original.incident_id},
+        )
 
     def test_testing_rejection_is_ignored(self) -> None:
         record_production_delivery_failure(
@@ -332,3 +347,98 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.monitor()
         self.factory.assert_not_called()
         self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+
+    def test_new_failure_stage_updates_existing_attention_and_replays_do_not_spam(self) -> None:
+        self.reject()
+        original = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=1)
+        for _attempt in range(2):
+            record_production_delivery_failure(
+                self.store,
+                self.profile,
+                self.lane,
+                candidate="image@" + self.head,
+                reason="provider_mutation_failed",
+                trace_id="launchplane_req_new_stage",
+                observed_at=self.timestamp(),
+            )
+        incidents = self.store.list_public_ingress_incident_records(status="open")
+        self.assertEqual({incident.incident_id for incident in incidents}, {original.incident_id})
+        self.assertIn("launchplane_req_new_stage", incidents[0].summary)
+        self.assertEqual(len(self.store.list_outbox_delivery_records()), 2)
+
+    def test_explicit_lifecycle_change_retires_lag_attention(self) -> None:
+        self.monitor()
+        self.now += timedelta(seconds=61)
+        self.monitor()
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"production_use": "prelaunch"})
+        )
+        self.now += timedelta(seconds=1)
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        incident = self.store.list_public_ingress_incident_records()[0]
+        self.assertEqual(incident.resolution_reason, "monitoring_intent_changed")
+
+    def test_merged_source_time_counts_before_first_observation(self) -> None:
+        merged_at = self.now - timedelta(minutes=5)
+        self.transport.get_json.side_effect = lambda _path: {
+            "sha": self.head,
+            "commit": {"committer": {"date": merged_at.isoformat()}},
+        }
+        self.monitor()
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+
+    def test_unidentified_rollback_is_not_cleared_by_promoting_testing(self) -> None:
+        testing = self.lane.model_copy(update={"instance": "testing"})
+        self.profile = self.profile.model_copy(update={"lanes": (self.lane, testing)})
+        self.store.write_product_profile_record(self.profile)
+        reference = self.store.list_deployment_records()[0]
+        testing_source = "d" * 40
+        self.store.write_environment_inventory(
+            EnvironmentInventory(
+                context=testing.context,
+                instance="testing",
+                source_git_ref=testing_source,
+                artifact_identity=ArtifactIdentityReference(artifact_id="image@" + testing_source),
+                deploy=reference.deploy,
+                updated_at=self.timestamp(),
+                deployment_record_id="testing-deploy",
+            )
+        )
+        _record_rejected_payload(
+            self.store,
+            product=self.profile.product,
+            instance="prod",
+            candidate="",
+            authorized_scope=(self.profile.product, self.lane.context, "prod"),
+            path="/v1/odoo-prod-rollbacks",
+            reason="rollback_target_missing",
+            trace_id="launchplane_req_rollback",
+            request_key="rollback-request",
+        )
+        self.now += timedelta(seconds=1)
+        self.deploy(testing_source)
+        self.monitor()
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.assertIn("launchplane_req_rollback", incident.summary)
+
+    def test_first_scan_does_not_page_for_a_promotion_older_than_running_production(self) -> None:
+        reference = self.store.list_deployment_records()[0]
+        old = (self.now - timedelta(hours=2)).isoformat()
+        failed = PromotionRecord(
+            record_id="historical-promotion",
+            artifact_identity=ArtifactIdentityReference(artifact_id="image@" + self.head),
+            context=self.lane.context,
+            from_instance="testing",
+            to_instance="prod",
+            deploy=reference.deploy.model_copy(update={"status": "fail", "finished_at": old}),
+        )
+        self.store.write_promotion_record(failed)
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        self.store.write_promotion_record(
+            failed.model_copy(update={"record_id": "late-ingested-promotion"})
+        )
+        self.monitor()
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)

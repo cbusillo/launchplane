@@ -455,6 +455,7 @@ def register_odoo_prod_release_operation_routes(
             rollback.context,
             rollback.instance,
         )
+        http_request.state.production_delivery_candidate = rollback.artifact_id
         normalized_key = require_idempotency_key(idempotency_key, trace_id)
         require_wait(rollback.wait, trace_id)
         fingerprint = odoo_prod_rollback_request_fingerprint(product=product, request=rollback)

@@ -36,7 +36,11 @@ from control_plane.drivers.generic_web_preview_dispatch import (
 )
 from control_plane.generic_web_promotion_http import GenericWebProdPromotionResponse
 from control_plane.generic_web_preview_http import _destroy_result_with_record_outcome
-from control_plane.http_app import LaunchplaneAuthzPolicyRuntime, idempotency_request_fingerprint
+from control_plane.http_app import (
+    LaunchplaneAuthzPolicyRuntime,
+    idempotency_request_fingerprint,
+    _launchplane_http_error,
+)
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -489,6 +493,36 @@ class GenericWebHttpTests(unittest.TestCase):
                                 status="open"
                             )
                         )
+                    )
+                    previous_incidents = store.list_public_ingress_incident_records()
+                    with patch(
+                        "control_plane.http_routes.generic_web.require_unchanged_production_artifact",
+                        side_effect=_launchplane_http_error(
+                            status_code=409,
+                            trace_id="launchplane_req_busy",
+                            code="mutation_in_progress",
+                            message="The same request is already running.",
+                        ),
+                    ):
+                        busy_status, _busy_payload = _invoke_app(
+                            app,
+                            method="POST",
+                            path="/v1/drivers/generic-web/deploy",
+                            payload={
+                                "product": "sellyouroutboard",
+                                "deploy": {
+                                    "product": "sellyouroutboard",
+                                    "instance": "prod",
+                                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:"
+                                    + "e" * 64,
+                                    "source_git_ref": "e" * 40,
+                                },
+                            },
+                            headers={"Idempotency-Key": "running-production-request"},
+                        )
+                    self.assertEqual(busy_status, 409)
+                    self.assertEqual(
+                        store.list_public_ingress_incident_records(), previous_incidents
                     )
                 else:
                     deploy.assert_called_once()

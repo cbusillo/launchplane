@@ -4475,7 +4475,8 @@ def create_launchplane_fastapi_app(
             try:
                 response = cast(Response, await call_next(request))
             except Exception:
-                if getattr(request.state, "production_delivery_scope", None) is None:
+                scope = getattr(request.state, "production_delivery_scope", None)
+                if scope is None or scope[2] != "prod":
                     raise
                 trace_id = next_trace_id()
                 logging.exception("Production delivery crashed; trace_id=%s", trace_id)

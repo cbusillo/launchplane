@@ -280,6 +280,8 @@ class HealthMonitorScheduler:
             if heartbeat is None or self._read(key) is not None:
                 return False
             self.run_delivery_monitor()
+            if self._stop.is_set():
+                raise MonitorRunCancelled()
             heartbeat.assert_current()
             self._write_completion(key, self.clock())
         return True

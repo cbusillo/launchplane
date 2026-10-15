@@ -7,7 +7,6 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 import re
-from urllib.parse import quote
 
 from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
@@ -27,6 +26,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     build_public_ingress_observation_id,
 )
 from control_plane.product_reconcile import resolve_build_provenance_transport
+from control_plane.source_control_change import read_branch_revision, revision_contains
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.public_ingress_monitor import _store_monitor_observation
@@ -39,6 +39,18 @@ DELIVERY_LAG_CHECK = DELIVERY_CHECK_PREFIX + "lag"
 _SCOPE = "launchplane:production-delivery-monitor"
 _ROUTE = "service:production-delivery-monitor"
 _LOGGER = logging.getLogger(__name__)
+_NONTERMINAL_CODES = frozenset(
+    {
+        "mutation_in_progress",
+        "lane_busy",
+        "promotion_already_active",
+        "rollback_already_active",
+        "odoo_stable_lane_operation_active",
+        "idempotency_key_required",
+        "missing_idempotency_key",
+        "idempotency_key_reused",
+    }
+)
 
 
 def _candidate_key(candidate: str) -> str:
@@ -54,6 +66,8 @@ def _observe(
     failed: bool,
     summary: str,
     observed_at: str,
+    reason: str = "delivery_failed",
+    retired: bool = False,
 ) -> None:
     observation = PublicIngressObservationRecord(
         record_id=build_public_ingress_observation_id(
@@ -78,18 +92,27 @@ def _observe(
         targets=(
             PublicIngressTargetObservation(
                 target="provider",
-                url="provider://launchplane/production-delivery",
+                url="provider://launchplane/production-delivery/" + reason,
                 status="fail" if failed else "pass",
                 failure_code="production_delivery_failed" if failed else None,
                 summary=summary,
             ),
         ),
     )
+    if retired:
+        observation = observation.model_copy(
+            update={
+                "status": "skipped",
+                "failure_code": "monitoring_intent_changed",
+                "purpose": "reconciliation",
+                "targets": (),
+            }
+        )
     # On the service store, observation, incident and notification outbox commit together.
     result = _store_monitor_observation(
         record_store=store,
         record=observation,
-        incident_eligible=True,
+        incident_eligible=not retired,
         expected_profile_sha256=product_profile_record_sha256(profile),
         recovery_observation_threshold=1,
         notify=True,
@@ -112,16 +135,24 @@ def record_production_delivery_failure(
     if lane.instance != "prod" or not profile.is_active:
         return
     check_name = DELIVERY_CHECK_PREFIX + _candidate_key(candidate)
-    # Retain the original actionable trace. Replays must not produce material-change spam.
-    if store.list_public_ingress_incident_records(
+    safe_reason = reason if re.fullmatch(r"[a-z][a-z0-9_]{0,99}", reason) else "delivery_failed"
+    existing = store.list_public_ingress_incident_records(
         product=profile.product,
         context_name=lane.context,
         instance_name=lane.instance,
         check_name=check_name,
         status="open",
+    )
+    # New stages update the same incident; exact retries retain their original trace.
+    if (
+        existing
+        and existing[0].material_fingerprint is not None
+        and (
+            existing[0].material_fingerprint.route_authority.provider_check
+            == "production-delivery/" + safe_reason
+        )
     ):
         return
-    safe_reason = reason if re.fullmatch(r"[a-z][a-z0-9_]{0,99}", reason) else "delivery_failed"
     safe_trace = trace_id if re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", trace_id) else "unavailable"
     _observe(
         store,
@@ -132,6 +163,7 @@ def record_production_delivery_failure(
         summary=f"Production delivery blocked: {safe_reason}; trace: {safe_trace}. "
         "The previous runtime may still be healthy. Inspect the supported release path.",
         observed_at=observed_at or utc_now_timestamp(),
+        reason=safe_reason,
     )
 
 
@@ -147,7 +179,7 @@ async def record_rejected_production_request(
     # This diagnostic scope is set only after the route's existing authorization check.
     # It supplies no authorization and is never accepted from a request body/header.
     authorized_scope = getattr(request.state, "production_delivery_scope", None)
-    if request.method != "POST" or authorized_scope is None:
+    if request.method != "POST" or authorized_scope is None or reason in _NONTERMINAL_CODES:
         return
     if not isinstance(store, (PostgresRecordStore, FilesystemRecordStore)):
         return
@@ -213,7 +245,7 @@ def _record_rejected_payload(
     lane = next((lane for lane in profile.lanes if lane.instance == instance), None)
     if lane is None or authorized_scope != (profile.product, lane.context, lane.instance):
         return
-    if not candidate:
+    if not candidate and "rollback" not in path:
         testing = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
         if testing is not None:
             try:
@@ -227,10 +259,13 @@ def _record_rejected_payload(
                     candidate = inventory.artifact_identity.artifact_id
                 elif inventory.runtime_identity is not None:
                     candidate = inventory.runtime_identity.artifact_id
-        if not candidate:
-            # Unknown intent stays actionable; separate requests/reasons cannot swallow each other.
-            candidate = "request:" + _candidate_key(request_key or trace_id) + ":" + reason
-    if path == "/v1/drivers/generic-web/deploy":
+    if not candidate:
+        # Unknown intent stays actionable; no later testing promotion can prove a rollback.
+        candidate = "request:" + _candidate_key(request_key or trace_id) + ":" + reason
+    if path in {
+        "/v1/drivers/generic-web/deploy",
+        "/v1/drivers/generic-web/prod-promotion",
+    } and not candidate.startswith("request:"):
         from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
 
         candidate = normalize_generic_web_artifact_id(profile=profile, artifact_id=candidate)
@@ -256,18 +291,46 @@ def monitor_production_delivery_once(
 ) -> None:
     now = observed_at or utc_now_timestamp()
     for profile in store.list_product_profile_records():
-        if not profile.is_active:
-            continue
         for lane in profile.lanes:
             if should_stop():
                 return
             if lane.instance != "prod":
                 continue
+            if not profile.is_active or profile.production_use != "live":
+                for incident in store.list_public_ingress_incident_records(
+                    product=profile.product,
+                    context_name=lane.context,
+                    instance_name="prod",
+                    status="open",
+                ):
+                    if incident.check_name in {
+                        DELIVERY_LAG_CHECK,
+                        DELIVERY_CHECK_PREFIX + _candidate_key("monitor:source"),
+                        DELIVERY_CHECK_PREFIX + _candidate_key("monitor:evidence"),
+                    } or (
+                        not profile.is_active
+                        and incident.check_name.startswith(DELIVERY_CHECK_PREFIX)
+                    ):
+                        _observe(
+                            store,
+                            profile,
+                            lane,
+                            check_name=incident.check_name,
+                            failed=False,
+                            summary="Production delivery monitoring was retired by product lifecycle configuration.",
+                            observed_at=now,
+                            retired=True,
+                        )
+                if not profile.is_active:
+                    continue
             try:
                 _monitor_lane(store, profile, lane, now, transport_factory, max_age_seconds)
             except Exception:
                 # A failed source read is unknown, never recovery; other products still run.
                 _LOGGER.exception("Production delivery monitor failed for %s", profile.product)
+                _monitor_availability(
+                    store, profile, lane, now, component="source", available=False
+                )
 
 
 def _monitor_lane(
@@ -286,19 +349,28 @@ def _monitor_lane(
         _scan_failures(store, profile, lane, now, deployments)
     except Exception:
         _LOGGER.exception("Production delivery failure scan failed for %s", profile.product)
+        _monitor_availability(store, profile, lane, now, component="evidence", available=False)
+    else:
+        _monitor_availability(store, profile, lane, now, component="evidence", available=True)
     if profile.production_use != "live":
         return
 
     transport = transport_factory(store, profile)
-    repository_path = "/repos/" + quote(profile.repository, safe="/")
-    source = transport.get_json(
-        repository_path + "/commits/" + quote(profile.default_branch, safe="")
+    source = read_branch_revision(
+        repository=profile.repository,
+        branch=profile.default_branch,
+        read=transport.get_json,
     )
-    if not isinstance(source, dict) or not re.fullmatch(
-        r"[0-9a-f]{40}", str(source.get("sha", ""))
-    ):
+    if source is None:
         raise ValueError("Source head is unavailable")
-    head = str(source["sha"])
+    head = source.commit
+    source_seen_at = now
+    if source.committed_at:
+        try:
+            if _time(source.committed_at) <= _time(now):
+                source_seen_at = source.committed_at
+        except ValueError:
+            pass
     current = (
         latest.source_git_ref if latest is not None and deployment_record_passed(latest) else ""
     )
@@ -318,38 +390,28 @@ def _monitor_lane(
     pending = str(receipt.response_payload.get("pending_commit", "")) if receipt else ""
     since = str(receipt.response_payload.get("pending_since", "")) if receipt else ""
     reached_pending = bool(pending and pending == current)
+    source_available = True
     if pending and current and pending != current:
         try:
-            comparison = transport.get_json(
-                repository_path + f"/compare/{pending}...{quote(current, safe='')}"
+            comparison = revision_contains(
+                repository=profile.repository,
+                ancestor=pending,
+                head=current,
+                read=transport.get_json,
             )
-            reached_pending = isinstance(comparison, dict) and comparison.get("status") in {
-                "ahead",
-                "identical",
-            }
+            reached_pending = comparison is True
+            source_available = comparison is not None
         except Exception:
             # Unknown comparison cannot resolve attention or stop the overdue check.
             _LOGGER.warning("Production source comparison unavailable for %s", profile.product)
+            source_available = False
     if reached_pending or current == head:
         pending, since = "", ""
-        if store.list_public_ingress_incident_records(
-            product=profile.product,
-            context_name=lane.context,
-            instance_name="prod",
-            check_name=DELIVERY_LAG_CHECK,
-            status="open",
-        ):
-            _observe(
-                store,
-                profile,
-                lane,
-                check_name=DELIVERY_LAG_CHECK,
-                failed=False,
-                summary="Production reached the source that triggered delivery attention.",
-                observed_at=now,
-            )
     if current != head and not pending:
-        pending, since = head, now
+        pending, since = head, source_seen_at
+    _monitor_availability(store, profile, lane, now, component="source", available=source_available)
+    if not source_available:
+        return
     _write_receipt(
         store,
         key=profile.product,
@@ -364,7 +426,7 @@ def _monitor_lane(
         check_name=DELIVERY_LAG_CHECK,
         status="open",
     )
-    if overdue or (not pending and open_lag):
+    if overdue or ((not pending or reached_pending) and open_lag):
         _observe(
             store,
             profile,
@@ -395,6 +457,21 @@ def _scan_failures(
     seen = dict(scan.response_payload.get("seen", {})) if scan else {}
     # Evidence times are not ingestion watermarks: a runner can post a record late.
     events: list[tuple[str, str, str, str, str, bool]] = []
+    passing_times = [
+        record.deploy.finished_at
+        for record in deployments
+        if deployment_record_passed(record) and record.deploy.finished_at
+    ]
+    latest_success = max((_time(value) for value in passing_times), default=None)
+
+    def eligible_at_start(finished: str, latest: bool) -> bool:
+        if not latest or latest_success is None:
+            return latest
+        try:
+            return bool(finished and _time(finished) >= latest_success)
+        except ValueError:
+            return False
+
     promotions = store.list_promotion_records(context_name=lane.context, to_instance_name="prod")
     histories: tuple[tuple[DeploymentRecord | PromotionRecord, ...], ...] = (
         deployments,
@@ -421,7 +498,9 @@ def _scan_failures(
                         record.failure.code if record.failure else "deployment_failed",
                         record.record_id,
                         record.deploy.finished_at or record.deploy.started_at,
-                        index == 0,
+                        eligible_at_start(
+                            record.deploy.finished_at or record.deploy.started_at, index == 0
+                        ),
                     )
                 )
     if isinstance(store, PostgresRecordStore):
@@ -440,7 +519,7 @@ def _scan_failures(
                 continue
             for step in steps:
                 release_candidates[step.operation_id] = decision.checklist.candidate.artifact_id
-                if step.failure is not None:
+                if step.failure is not None and step.status != "cancelled":
                     failure = step.failure
                     events.append(
                         (
@@ -449,7 +528,7 @@ def _scan_failures(
                             failure.code,
                             failure.trace_id or failure.record_id,
                             failure.recorded_at,
-                            index == 0,
+                            eligible_at_start(failure.recorded_at, index == 0),
                         )
                     )
         for index, operation in enumerate(
@@ -461,12 +540,10 @@ def _scan_failures(
         ):
             if operation.operation_id in release_candidates:
                 continue
-            if operation.status in {"fail", "cancelled"}:
+            if operation.status == "fail":
                 candidate = (
-                    release_candidates.get(operation.operation_id)
-                    or (operation.result.artifact_id if operation.result else "")
-                    or operation.request.expected_artifact_id
-                )
+                    operation.result.artifact_id if operation.result else ""
+                ) or operation.request.expected_artifact_id
                 events.append(
                     (
                         operation.operation_id,
@@ -474,7 +551,9 @@ def _scan_failures(
                         operation.error_code or "promotion_failed",
                         operation.runner_trace_id or operation.operation_id,
                         operation.finished_at or operation.updated_at,
-                        index == 0,
+                        eligible_at_start(
+                            operation.finished_at or operation.updated_at, index == 0
+                        ),
                     )
                 )
     for record_id, candidate, reason, trace, finished, initial_eligible in events:
@@ -507,6 +586,11 @@ def _scan_failures(
         if (
             not incident.check_name.startswith(DELIVERY_CHECK_PREFIX)
             or incident.check_name == DELIVERY_LAG_CHECK
+            or incident.check_name
+            in {
+                DELIVERY_CHECK_PREFIX + _candidate_key("monitor:source"),
+                DELIVERY_CHECK_PREFIX + _candidate_key("monitor:evidence"),
+            }
         ):
             continue
         for deployment in deployments:
@@ -528,6 +612,62 @@ def _scan_failures(
                     observed_at=now,
                 )
                 break
+        else:
+            if incident.latest_observed_at == now:
+                continue
+            reason = (
+                incident.material_fingerprint.route_authority.provider_check.rsplit("/", 1)[-1]
+                if incident.material_fingerprint
+                else "delivery_failed"
+            )
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=incident.check_name,
+                failed=True,
+                summary=incident.summary,
+                observed_at=now,
+                reason=reason,
+            )
+
+
+def _monitor_availability(
+    store: Store,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    now: str,
+    *,
+    component: str,
+    available: bool,
+) -> None:
+    candidate = "monitor:" + component
+    if not available:
+        record_production_delivery_failure(
+            store,
+            profile,
+            lane,
+            candidate=candidate,
+            reason="delivery_" + component + "_unavailable",
+            trace_id="production-delivery-monitor:" + _candidate_key(profile.product),
+            observed_at=now,
+        )
+    elif store.list_public_ingress_incident_records(
+        product=profile.product,
+        context_name=lane.context,
+        instance_name="prod",
+        check_name=DELIVERY_CHECK_PREFIX + _candidate_key(candidate),
+        status="open",
+    ):
+        _observe(
+            store,
+            profile,
+            lane,
+            check_name=DELIVERY_CHECK_PREFIX + _candidate_key(candidate),
+            failed=False,
+            summary="Production delivery " + component + " observation recovered.",
+            observed_at=now,
+        )
 
 
 def _time(value: str) -> datetime:

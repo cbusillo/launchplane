@@ -1908,21 +1908,33 @@ promotion and queued Odoo release failures once per minute, including products
 without HTTP health checks. As with other incidents, existing matching
 notification policies select the Discord destination; no credential or new
 destination is created by monitoring. Check-scoped HTTP-only policies do not
-match provider incidents. Confirm the product's existing Director notification policy covers
-provider incidents when qualifying notification delivery.
+match provider incidents. Confirm the product's existing Director notification
+policy covers provider incidents when qualifying notification delivery. The
+route must have passed its existing product-scope authorization check; ordinary
+in-progress retries and idempotency-protocol errors do not open delivery incidents.
 
-The same monitor compares each active product's recorded default branch with
-production through the existing read-only source adapter. A durable first-pending
+The same monitor compares each Live product's recorded default branch with
+production through the existing read-only source adapter. A durable pending
 source receipt raises attention after one hour (`PRODUCTION_DELIVERY_LAG_SECONDS`),
 including missing/failed builds, testing qualification, held Client acceptance,
 backup refusals and stalled promotion. New merges and service restarts do not
-reset an outstanding deadline. Source-read failure is unknown and cannot resolve
-an incident. This is notification evidence, never acceptance or a release gate.
+reset an outstanding deadline. The source's recorded merge-commit time starts the
+deadline when available, otherwise first observation does. Source-read failure
+opens separate monitoring-unavailable attention and cannot resolve a delivery
+incident. A later verified source read resolves only that monitoring incident.
+Explicit lifecycle retirement resolves automatic delivery monitoring; prelaunch
+products have no automatic production deadline. This is notification evidence,
+never acceptance or a release gate.
 
-Replays of an unresolved candidate retain its original reason and trace and
-reuse the incident/outbox; healthy checks of the old artifact cannot clear it.
+Exact replays of an unresolved candidate retain its original reason and trace and
+reuse the incident/outbox. A different failure stage updates that incident, and
+the existing policy controls reminders. Healthy checks of the old artifact cannot clear it.
 A later successful delivery clears only the matching candidate. Production-lag
 attention clears when production reaches the observed default-branch source.
+Unidentified requests retain their request identity rather than borrowing a
+testing artifact, especially for rollback; they require matching recovery
+evidence and are never cleared by an unrelated promotion. Unexpected Client
+release failures before a step record exists also create delivery attention.
 Runtime-health observations stay independent. Inspect the product environment's
 incident detail for material events, delivery attempts and outbox state; transport
 recovery does not resolve a delivery failure. Existing outbox retry and
