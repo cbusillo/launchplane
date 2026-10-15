@@ -7253,6 +7253,49 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_repair_keeps_authorization_and_production_boundary(self) -> None:
+        for instance, action, expected_status in (
+            ("testing", "odoo_post_deploy.execute", 202),
+            ("testing", "product_environment.read", 403),
+            ("prod", "odoo_post_deploy.execute", 400),
+        ):
+            with self.subTest(instance=instance, action=action), TemporaryDirectory() as directory:
+                root = Path(directory)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._identity()),
+                    authz_policy=self._policy(action=action),
+                    record_store_factory=lambda: self._store_with_opw_profile(root / "state"),
+                    control_plane_root_path=root,
+                )
+                with patch(
+                    "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy",
+                    return_value=OdooPostDeployResult(
+                        context="opw",
+                        instance="testing",
+                        phase="deploy",
+                        post_deploy_status="pass",
+                        override_evidence={"connection_isolation_ok": "true"},
+                    ),
+                ) as execute:
+                    response = await _post_odoo_post_deploy(
+                        app,
+                        {
+                            "product": "odoo-tenant-opw",
+                            "post_deploy": {
+                                "context": "opw",
+                                "instance": instance,
+                                "connection_isolation": "dry-run",
+                            },
+                        },
+                    )
+                self.assertEqual(response.status_code, expected_status)
+                if expected_status == 202:
+                    self.assertEqual(
+                        execute.call_args.kwargs["request"].connection_isolation, "dry-run"
+                    )
+                else:
+                    execute.assert_not_called()
+
     def _identity(
         self,
         *,

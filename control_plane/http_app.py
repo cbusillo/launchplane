@@ -7612,7 +7612,10 @@ def create_launchplane_fastapi_app(
                 product=authorization_product,
                 context=post_deploy_request.post_deploy.context,
                 instance=post_deploy_request.post_deploy.instance,
-                reserve=post_deploy_request.post_deploy.instance == "prod",
+                reserve=(
+                    post_deploy_request.post_deploy.instance == "prod"
+                    or post_deploy_request.post_deploy.connection_isolation is not None
+                ),
             ):
                 records, driver_result = execute_odoo_post_deploy_result(
                     control_plane_root=resolved_control_plane_root,

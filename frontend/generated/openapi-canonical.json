@@ -58870,6 +58870,22 @@
                   "OdooPostDeployRequest": {
                     "additionalProperties": false,
                     "properties": {
+                      "connection_isolation": {
+                        "anyOf": [
+                          {
+                            "enum": [
+                              "dry-run",
+                              "apply",
+                              "readback"
+                            ],
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Connection Isolation"
+                      },
                       "context": {
                         "title": "Context",
                         "type": "string"
@@ -58888,6 +58904,22 @@
                           "manual"
                         ],
                         "title": "Phase",
+                        "type": "string"
+                      },
+                      "reason": {
+                        "default": "",
+                        "maxLength": 500,
+                        "title": "Reason",
+                        "type": "string"
+                      },
+                      "reviewed_dry_run": {
+                        "default": false,
+                        "title": "Reviewed Dry Run",
+                        "type": "boolean"
+                      },
+                      "reviewed_plan_sha256": {
+                        "default": "",
+                        "title": "Reviewed Plan Sha256",
                         "type": "string"
                       },
                       "schema_version": {
