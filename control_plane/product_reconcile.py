@@ -788,6 +788,12 @@ def _deploy_generic_web_testing(
                     and reservation.idempotency_key.startswith(lane_prefix)
                     and reservation.idempotency_key != idempotency_key
                 ):
+                    from control_plane.testing_activation import retained_fence_is_separated
+
+                    if retained_fence_is_separated(record_store, reservation):
+                        # This exact old recipient remains fenced. The qualified
+                        # new recipient has its own executor and reservation key.
+                        continue
                     if (
                         reservation.provider_target_key == adapter.target_key()
                         and reservation.request_fingerprint == request_fingerprint
