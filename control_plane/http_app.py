@@ -25054,7 +25054,9 @@ def create_launchplane_fastapi_app(
                 target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
             )
         )
-        first_testing_setup = first_testing_setup and not (service_scoped or lane_scoped_only)
+        first_testing_setup = first_testing_setup and (
+            isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
+        )
         can_setup_target = (
             service_scoped or lane_scoped_only or disposable_rebuild_setup or first_testing_setup
         )

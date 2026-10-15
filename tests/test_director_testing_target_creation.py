@@ -9,7 +9,11 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    LaunchplaneAuthzPolicy,
+    TerminalAgentPolicyRule,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import scoped_agent_transport
@@ -93,10 +97,12 @@ class DirectorTestingTargetCreationTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-    def make_app(self, config: BearerIdentityConfig) -> Any:
+    def make_app(
+        self, config: BearerIdentityConfig, policy: LaunchplaneAuthzPolicy | None = None
+    ) -> Any:
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=LaunchplaneAuthzPolicy(),
+            authz_policy=policy or LaunchplaneAuthzPolicy(),
             bearer_identity_config=config,
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
@@ -189,10 +195,26 @@ class DirectorTestingTargetCreationTests(unittest.IsolatedAsyncioTestCase):
                     "terminal_agent_subject": "fixture-director",
                     "terminal_agent_token_label": "fixture-terminal",
                 }
-            )
+            ),
+            LaunchplaneAuthzPolicy(
+                schema_version=2,
+                terminal_agents=(
+                    TerminalAgentPolicyRule(
+                        subjects=("fixture-director",),
+                        token_labels=("fixture-terminal",),
+                        products=(self.profile.product,),
+                        contexts=(self.context,),
+                        instances=("testing", "prod"),
+                        actions=("dokploy_target.lane_setup",),
+                    ),
+                ),
+            ),
         )
         denied = await self.post(instance="prod")
         self.assertEqual(denied.status_code, 403, denied.text)
+        self.provider.assert_not_called()
+        source = await self.post(custom_git_branch="main", compose_path="docker-compose.yml")
+        self.assertEqual(source.status_code, 400, source.text)
         self.provider.assert_not_called()
         result = await self.post()
         self.assertEqual(result.status_code, 202, result.text)
