@@ -4,10 +4,15 @@ Use the deployed service's `GET /v1/health-alert-drills` to inspect failure-aler
 routing for one existing `product`, `context`, `instance`, and `check_name`.
 These four query parameters select a declared lane check; no destination,
 webhook, endpoint URL or policy override is accepted. The read reports routing
-as `enabled`, `missing`, `disabled` or `unavailable`, plus the count of enabled
+as `enabled`, `missing`, `disabled`, `unavailable` or `unknown_check`, plus the count of enabled
 matching Discord destinations. Matching uses the real incident policy matcher,
 including product/lane/check-kind selectors and wildcard policies. Inactive
 products, disabled checks and checks ineligible for real incidents cannot drill.
+The monitor's own target selection determines whether the check is effective.
+`unknown_check` means that the product/lane/check is not declared; `missing`
+means that a declared effective check has no matching Discord route. Only
+declared lane checks are drillable; monitor-created TLS, deploy-fence and
+production-delivery targets are outside this capability.
 This read does not decrypt notification credentials or prove delivery.
 
 `POST /v1/health-alert-drills` accepts the same four fields in JSON. Its default

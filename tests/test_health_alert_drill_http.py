@@ -114,6 +114,30 @@ class HealthAlertDrillHttpTests(unittest.IsolatedAsyncioTestCase):
                 stale = await client.post(
                     DRILL_ROUTE, json={**payload, "window": 0}, headers=headers
                 )
+                with patch.object(
+                    fixture.store,
+                    "read_idempotency_record",
+                    side_effect=ValueError("private-value"),
+                ):
+                    unavailable = await client.get(
+                        DRILL_ROUTE, params=fixture.scope.model_dump(), headers=headers
+                    )
+        monitor_only = policy.model_copy(
+            update={
+                "local_operators": tuple(
+                    rule.model_copy(update={"actions": ("public_ingress_monitor.run_once",)})
+                    for rule in policy.local_operators
+                )
+            }
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=monitor_only,
+            record_store_factory=lambda: fixture.store,
+            bearer_identity_config=_local_operator_bearer_config(),
+        )
+        async with lifespan_client(app) as client:
+            no_lane_read = await client.post(DRILL_ROUTE, json=payload, headers=headers)
         self.assertEqual(missing_window.status_code, 400)
         self.assertEqual(injected.status_code, 400)
         self.assertEqual(first.status_code, 200)
@@ -122,3 +146,6 @@ class HealthAlertDrillHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(receipt.json()["drill"]["receipt"], first.json()["drill"]["receipt"])
         self.assertEqual(len(fixture.posts), len(fixture.policy.destinations))
         self.assertEqual(stale.status_code, 400)
+        self.assertEqual(unavailable.status_code, 503)
+        self.assertNotIn("private-value", unavailable.text)
+        self.assertEqual(no_lane_read.status_code, 403)

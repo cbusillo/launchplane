@@ -399,14 +399,7 @@ def discover_public_ingress_monitor_targets(
     for profile in product_profiles:
         for lane in profile.lanes:
             for check in lane.health_monitoring.checks:
-                if not check.enabled or not product_lane_monitoring_probe_effective(
-                    monitoring_intent=lane.health_monitoring.monitoring_intent,
-                    check_kind=check.kind,
-                ):
-                    continue
-                if check.kind == "public_http" and not _profile_uses_generic_web(profile):
-                    continue
-                target = _health_check_monitor_target(
+                target = effective_health_check_monitor_target(
                     profile=profile,
                     lane=lane,
                     check=check,
@@ -555,6 +548,28 @@ def _deploy_fence_monitor_target(
         provider=DEPLOY_FENCE_PROVIDER,
         provider_check=DEPLOY_FENCE_CHECK_NAME,
         deploy_fence=fence,
+    )
+
+
+def effective_health_check_monitor_target(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    check: ProductLaneHealthCheck,
+    record_store: object,
+) -> PublicIngressMonitorTarget | None:
+    if (
+        not profile.is_active
+        or not check.enabled
+        or not product_lane_monitoring_probe_effective(
+            monitoring_intent=lane.health_monitoring.monitoring_intent, check_kind=check.kind
+        )
+    ):
+        return None
+    if check.kind == "public_http" and not _profile_uses_generic_web(profile):
+        return None
+    return _health_check_monitor_target(
+        profile=profile, lane=lane, check=check, record_store=record_store
     )
 
 

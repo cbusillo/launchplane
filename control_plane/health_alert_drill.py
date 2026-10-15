@@ -9,9 +9,6 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.product_profile_record import (
-    product_lane_monitoring_incident_eligible,
-)
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentRecord,
     PublicIngressNotificationDestination,
@@ -21,6 +18,7 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,
+    effective_health_check_monitor_target,
     public_ingress_notification_drivers,
 )
 
@@ -28,6 +26,10 @@ DRILL_WINDOW_SECONDS = 600
 DRILL_ROUTE = "/v1/health-alert-drills"
 _SCOPE = "launchplane:health-alert-drill"
 _FINGERPRINT = "health-alert-drill-v1"
+
+
+class HealthAlertDrillWindowError(ValueError):
+    """The caller's window cannot be read or sent."""
 
 
 class HealthAlertDrillScope(BaseModel):
@@ -66,7 +68,7 @@ class HealthAlertDrillEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     scope: HealthAlertDrillScope
-    routing: Literal["enabled", "missing", "disabled", "unavailable"]
+    routing: Literal["enabled", "missing", "disabled", "unavailable", "unknown_check"]
     enabled_discord_destinations: int = 0
     window: int
     window_seconds: int = DRILL_WINDOW_SECONDS
@@ -88,14 +90,14 @@ def _window_key(scope: HealthAlertDrillScope, window: int) -> str:
 def _routing(
     store: PostgresRecordStore, scope: HealthAlertDrillScope, now: float
 ) -> tuple[
-    Literal["enabled", "missing", "disabled"],
+    Literal["enabled", "missing", "disabled", "unknown_check"],
     PublicIngressIncidentRecord | None,
     tuple[PublicIngressNotificationDestination, ...],
 ]:
     try:
         profile = store.read_product_profile_record(scope.product)
     except FileNotFoundError:
-        return "missing", None, ()
+        return "unknown_check", None, ()
     lane = next(
         (
             lane
@@ -113,14 +115,11 @@ def _routing(
         else None
     )
     if lane is None or check is None:
-        return "missing", None, ()
-    if (
-        not profile.is_active
-        or not check.enabled
-        or not product_lane_monitoring_incident_eligible(
-            monitoring_intent=lane.health_monitoring.monitoring_intent, check_kind=check.kind
-        )
-    ):
+        return "unknown_check", None, ()
+    target = effective_health_check_monitor_target(
+        profile=profile, lane=lane, check=check, record_store=store
+    )
+    if target is None or not target.incident_eligible:
         return "disabled", None, ()
     # These are in-memory envelopes for the existing matcher and driver only.
     # Neither envelope ever enters observation/incident storage or the outbox.
@@ -169,7 +168,9 @@ def health_alert_drill(
     current_window = int(now // DRILL_WINDOW_SECONDS)
     selected_window = current_window if window is None else window
     if not 0 <= selected_window <= current_window or (send and selected_window != current_window):
-        raise ValueError("Read a current or past drill window; send only in the current window.")
+        raise HealthAlertDrillWindowError(
+            "Read a current or past drill window; send only in the current window."
+        )
     evidence = HealthAlertDrillEvidence(
         scope=scope,
         routing="unavailable",

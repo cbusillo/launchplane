@@ -12599,7 +12599,8 @@
               "enabled",
               "missing",
               "disabled",
-              "unavailable"
+              "unavailable",
+              "unknown_check"
             ],
             "title": "Routing",
             "type": "string"

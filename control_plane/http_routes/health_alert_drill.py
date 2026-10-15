@@ -10,6 +10,7 @@ from control_plane.health_alert_drill import (
     HealthAlertDrillEvidence,
     HealthAlertDrillRequest,
     HealthAlertDrillScope,
+    HealthAlertDrillWindowError,
     health_alert_drill,
 )
 from control_plane.http_routes.support import (
@@ -79,7 +80,7 @@ def register_health_alert_drill_routes(
                     store, scope=scope, now=time.time(), send=send, window=window
                 )
             )
-        except ValueError as error:
+        except HealthAlertDrillWindowError as error:
             raise dependencies.http_error(
                 status_code=400,
                 trace_id=trace,

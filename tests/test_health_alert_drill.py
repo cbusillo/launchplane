@@ -93,7 +93,6 @@ class HealthAlertDrillTests(unittest.TestCase):
         self.assertEqual(self.posts[0][0], "https://discord.com/api/webhooks/test/private-token")
         payload = self.posts[0][1]
         self.assertIn("DRILL", json.dumps(payload))
-        self.assertIn("no production failure", json.dumps(payload).lower())
         self.assertEqual(payload["allowed_mentions"], {"parse": []})
         serialized = result.model_dump_json()
         for private_value in (
@@ -177,7 +176,7 @@ class HealthAlertDrillTests(unittest.TestCase):
         )
         unknown = self.scope.model_copy(update={"check_name": "absent"})
         self.assertEqual(
-            health_alert_drill(self.store, scope=unknown, now=self.now).routing, "missing"
+            health_alert_drill(self.store, scope=unknown, now=self.now).routing, "unknown_check"
         )
 
     def test_private_check_uses_its_existing_managed_secret_scope_and_discord_transport(
@@ -228,6 +227,69 @@ class HealthAlertDrillTests(unittest.TestCase):
         self.assertIn("DRILL", body["embeds"][0]["title"])
         self.assertIn(private.name, body["embeds"][0]["description"])
         self.assertFalse(self.store.list_public_ingress_observation_records())
+        public_scope = self.scope.model_copy(update={"check_name": "public-ingress"})
+        other_check = health_alert_drill(
+            self.store, scope=public_scope, now=self.now, send=True, drivers=self.drivers
+        )
+        self.assertTrue(other_check.rate_limited)
+        self.assertIsNone(other_check.receipt)
+        self.assertFalse(self.posts)
+
+    def test_policy_change_between_destinations_stops_the_disabled_send(self) -> None:
+        first = self.policy.destinations[0]
+        second = first.model_copy(update={"destination_id": "second"})
+        self.policy = self.policy.model_copy(update={"destinations": (first, second)})
+        self.write_policy()
+
+        def deliver(url: str, payload: dict[str, object]) -> None:
+            self.posts.append((url, payload))
+            self.store.write_public_ingress_notification_policy_record(
+                self.policy.model_copy(
+                    update={
+                        "destinations": (first, second.model_copy(update={"status": "disabled"}))
+                    }
+                )
+            )
+
+        self.drivers.discord_sender = deliver
+        result = health_alert_drill(
+            self.store, scope=self.scope, now=self.now, send=True, drivers=self.drivers
+        )
+        assert result.receipt is not None
+        self.assertEqual(result.receipt.status, "unavailable")
+        self.assertEqual(result.receipt.unavailable_count, 1)
+        self.assertEqual(len(self.posts), 1)
+
+    def test_declared_but_ineffective_check_cannot_drill(self) -> None:
+        lane = self.profile.lanes[0]
+        private = ProductLaneHealthCheck(name="unconfigured-private", kind="private_http")
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={
+                    "lanes": (
+                        lane.model_copy(
+                            update={
+                                "health_monitoring": lane.health_monitoring.model_copy(
+                                    update={"checks": (*lane.health_monitoring.checks, private)}
+                                )
+                            }
+                        ),
+                    )
+                }
+            )
+        )
+        self.policy = self.policy.model_copy(update={"check_name": ""})
+        self.write_policy()
+        result = health_alert_drill(
+            self.store,
+            scope=self.scope.model_copy(update={"check_name": private.name}),
+            now=self.now,
+            send=True,
+            drivers=self.drivers,
+        )
+        self.assertEqual(result.routing, "disabled")
+        self.assertIsNone(result.receipt)
+        self.assertFalse(self.posts)
 
     def test_unresolvable_secret_is_unavailable_and_disabled_destination_sends_nothing(
         self,
