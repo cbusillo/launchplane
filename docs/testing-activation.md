@@ -22,6 +22,12 @@ recipient and retained in immutable old-target custody; its purpose is not relab
 Choose existing, unretired lane setting keys for the volume roles; activation
 refuses a retired key rather than reviving a setting that runtime sync removes.
 
+For a product explicitly declaring no public website, retained origin-domain
+records stay on the old recipient and in custody. The replacement has no domains
+or public routes. Declared public hosts, pending public-host effects, or origin
+domains on a public product still require their own accepted cutover. Changing
+the website declaration after review invalidates activation.
+
 The service reads the product's Compose source and local includes from one
 immutable repository commit through its existing source reader, verifies that
 commit's product-owned release build, and carries only the lane's managed

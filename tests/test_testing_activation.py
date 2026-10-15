@@ -138,6 +138,13 @@ class ActivationTests(unittest.TestCase):
         fixture.retained.env.update(
             DB_PORT="3307", CONFIG_VOLUME="production-config", OLD_RECIPIENT_ONLY="old"
         )
+        fixture.retained.domains = ("old-origin.example.invalid",)
+        profile = fixture.fixture.profile.model_dump()
+        profile["public_website"] = "none"
+        for lane in profile["lanes"]:
+            lane.update(base_url="", health_url="")
+        fixture.fixture.profile = type(fixture.fixture.profile).model_validate(profile)
+        self.store.write_product_profile_record(fixture.fixture.profile)
         self.store.write_dokploy_target_record(fixture.retained)
         self.product, self.context, self.scope = (
             fixture.product,
@@ -407,6 +414,9 @@ class ActivationTests(unittest.TestCase):
             set(self.planned_record.host_ports),
         )
         self.assertNotIn("OLD_RECIPIENT_ONLY", current.env)
+        self.assertEqual(current.domains, ())
+        self.assertEqual(current.public_hosts, ())
+        self.assertEqual(current.pending_public_host_effects, ())
         self.assertEqual(
             self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
             production,
@@ -543,7 +553,7 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(self.run_activation().response_status_code, 202)
         self.assertEqual(sum(path == "/api/compose.create" for path, _ in self.writes), 1)
 
-    def test_existing_domain_refuses_dry_run_without_provider_effects_or_custody(self) -> None:
+    def test_declared_public_host_refuses_without_provider_effects_or_custody(self) -> None:
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
         )
@@ -556,6 +566,25 @@ class ActivationTests(unittest.TestCase):
             self.adapter.current()
         self.assertEqual(self.writes, [])
         self.assertIsNone(activation_record(self.store, self.product, self.context))
+
+    def test_public_product_origin_domain_requires_accepted_cutover(self) -> None:
+        profile = self.store.read_product_profile_record(self.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"public_website": "required"})
+        )
+        with self.assertRaisesRegex(ValueError, "Existing routes"):
+            self.adapter.current()
+        self.assertEqual(self.writes, [])
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+
+    def test_public_website_authority_change_after_review_refuses_before_effects(self) -> None:
+        profile = self.store.read_product_profile_record(self.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"public_website": "required"})
+        )
+        with self.assertRaisesRegex(ValueError, "configuration or key policy changed"):
+            self.adapter.require_unchanged(self.planned_record)
+        self.assertEqual(self.writes, [])
 
     def test_configuration_drift_after_effect_keeps_fences_and_never_publishes(self) -> None:
         original = self.inspect

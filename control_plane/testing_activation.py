@@ -129,6 +129,7 @@ def configuration_digest(store: PostgresRecordStore, product: str, context: str)
                 "product": profile.product,
                 "repository": profile.repository,
                 "driver_id": profile.driver_id,
+                "public_website": profile.public_website,
                 "is_active": profile.is_active,
                 "image": profile.image.model_dump(mode="json"),
                 "lane": lane.model_dump(mode="json"),
@@ -458,7 +459,11 @@ def build_activation(
         raise TestingActivationRefusal(
             "Explicit staging-interlock identification no longer matches."
         )
-    if target.domains or target.public_hosts or target.pending_public_host_effects:
+    if (
+        target.public_hosts
+        or target.pending_public_host_effects
+        or (target.domains and profile.public_website != "none")
+    ):
         raise TestingActivationRefusal("Existing routes require their own accepted cutover.")
     hold = target.policies.staff_testing_hold
     if hold is None or hold.recorded_by != actor:
@@ -602,14 +607,14 @@ try:
         item = json.loads(docker("inspect", identifier))[0]
         bindings = item.get("HostConfig", {}).get("PortBindings")
         if bindings is not None and not isinstance(bindings, dict):
-            raise TestingActivationRefusal()
+            raise ValueError()
         for entries in (bindings or {}).values():
             for entry in entries or []:
                 if int(entry.get("HostPort", "0")) in ports:
-                    raise TestingActivationRefusal()
+                    raise ValueError()
     for port in ports:
         if not isinstance(port, int) or not 1024 <= port <= 65535:
-            raise TestingActivationRefusal()
+            raise ValueError()
         listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sockets.append(listener)
         listener.bind(("0.0.0.0", port))
@@ -911,6 +916,11 @@ class TestingActivationAdapter:
                     "compose_path": "docker-compose.yml",
                     "custom_git_url": "",
                     "custom_git_branch": "",
+                    # A private product may retain origin domains on its old
+                    # recipient. They stay in custody, never on the replacement.
+                    "domains": (),
+                    "public_hosts": (),
+                    "pending_public_host_effects": (),
                     "env": {
                         **{
                             key: resources.volumes[role]
@@ -922,14 +932,6 @@ class TestingActivationAdapter:
                     "source_label": "service:testing-activation",
                 }
             )
-            if (
-                new_target.domains
-                or new_target.public_hosts
-                or new_target.pending_public_host_effects
-            ):
-                raise TestingActivationRefusal(
-                    "Existing routes require their own accepted cutover."
-                )
             new_id = DokployTargetIdRecord(
                 context=record.context,
                 instance="testing",
