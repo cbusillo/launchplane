@@ -284,12 +284,20 @@ def disposable_lane_configuration(
     instances = {"", instance}
     overrides: list[OdooInstanceOverrideRecord] = []
     policies: tuple[RuntimeKeySafetyPolicyRecord, ...] = ()
-    profiles = [
-        profile
-        for profile in store.list_product_profile_records(driver_id="odoo")
-        if profile.preview.context == context
-        and not any((lane.context, lane.instance) == (context, instance) for lane in profile.lanes)
-    ]
+    # Stable testing recovery uses an atomic lane snapshot, not a preview's
+    # template. Keep that snapshot independent of the product catalog.
+    profiles = (
+        []
+        if instance == "testing"
+        else [
+            profile
+            for profile in store.list_product_profile_records(driver_id="odoo")
+            if profile.preview.context == context
+            and not any(
+                (lane.context, lane.instance) == (context, instance) for lane in profile.lanes
+            )
+        ]
+    )
     if len(profiles) == 1:
         policies = store.list_runtime_key_safety_policy_records(status="active", limit=1)
         template = profiles[0].preview.template_instance
