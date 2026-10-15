@@ -144,6 +144,7 @@ class OdooInstanceOverrideStore(Protocol):
         record: OdooInstanceOverrideRecord,
         *,
         expected_record: OdooInstanceOverrideRecord | None = None,
+        require_absent: bool = False,
     ) -> object: ...
 
 
@@ -267,7 +268,9 @@ def write_odoo_config_parameter_override_record(
         updated_at=_utc_now_timestamp(),
         source_label=request.source_label,
     )
-    record_store.write_odoo_instance_override_record(record, expected_record=existing_record)
+    record_store.write_odoo_instance_override_record(
+        record, expected_record=existing_record, require_absent=existing_record is None
+    )
     return record
 
 
@@ -305,7 +308,9 @@ def write_odoo_website_bootstrap_override_record(
         updated_at=_utc_now_timestamp(),
         source_label=request.source_label,
     )
-    record_store.write_odoo_instance_override_record(record, expected_record=existing_record)
+    record_store.write_odoo_instance_override_record(
+        record, expected_record=existing_record, require_absent=existing_record is None
+    )
     return record
 
 

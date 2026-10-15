@@ -93,6 +93,7 @@ class OdooAddonSettingsStore(Protocol):
         required_context_owner: tuple[str, str] | None = None,
         required_product_config_target: tuple[str, str, str] | None = None,
         expected_record: OdooInstanceOverrideRecord | None = None,
+        require_absent: bool = False,
     ) -> object: ...
 
     def read_dokploy_target_record(
@@ -632,6 +633,7 @@ def apply_odoo_addon_settings_plan(
         record_store.write_odoo_instance_override_record(
             replacement.model_copy(update={"updated_at": _utc_now_timestamp()}),
             expected_record=_existing,
+            require_absent=_existing is None,
             **(
                 LaneProductConfigWriteRequirements(
                     required_context_owner=required_context_owner,
