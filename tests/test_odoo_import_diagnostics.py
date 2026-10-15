@@ -1,6 +1,8 @@
 import contextlib
 import io
 import json
+import os
+import struct
 import subprocess
 import unittest
 from pathlib import Path
@@ -8,6 +10,8 @@ from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI, HTTPException
+import pymysql
+from pymysql.constants import CLIENT, CR
 
 from control_plane import odoo_import_diagnostics as diagnostic
 from control_plane import odoo_runtime_reads as reads
@@ -302,9 +306,13 @@ class DiagnosticTests(unittest.TestCase):
 
     def test_same_account_password_mismatch_does_not_attempt_login(self) -> None:
         self.fixture.applied["cm_data.db.password"] = "new-upstream-password-fixture"
-        result = self.run_diagnostic()
-        self.assertEqual(result.sources[0].managed_connection_grants, "unknown")
-        self.assertEqual(self.mocks[-1].call_count, 2)
+        for user in ("fixture_reader", " fixture_reader "):
+            with self.subTest(user=user):
+                self.fixture.applied["cm_data.db.user"] = user
+                self.mocks[-1].reset_mock()
+                result = self.run_diagnostic()
+                self.assertEqual(result.sources[0].managed_connection_grants, "unknown")
+                self.assertEqual(self.mocks[-1].call_count, 2)
 
     def test_runtime_and_config_drift_discard_evidence(self) -> None:
         for kind in ("runtime", "settings", "binding", "container", "applied", "nonsecret_binding"):
@@ -415,6 +423,63 @@ class GrantTests(unittest.TestCase):
         self.cache.start()
         self.addCleanup(self.cache.stop)
 
+    def wire_result(self, result: probe.GrantStatus) -> str:
+        with (
+            patch.object(probe, "probe", return_value=result),
+            patch("control_plane.odoo_source_probe.sys.stdin", io.StringIO("{}")),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            probe.main()
+        return output.getvalue()
+
+    def test_only_configured_ca_paths_reach_child(self) -> None:
+        settings = {"host": "source.invalid", "user": "reader", "password": PRIVATE}
+        trust = {"SSL_CERT_FILE": "/fixture/ca.pem", "SSL_CERT_DIR": "/fixture/ca"}
+        with (
+            patch.dict(os.environ, {**trust, "LAUNCHPLANE_MASTER_KEY": PRIVATE}, clear=True),
+            patch(
+                "control_plane.odoo_import_diagnostics.subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=self.wire_result("read_only")
+                ),
+            ) as run,
+        ):
+            self.assertEqual(
+                diagnostic.managed_grants(
+                    settings, binding_id="fixture-binding", version_id="fixture-version"
+                ),
+                "read_only",
+            )
+        self.assertEqual(run.call_args.kwargs["env"], trust)
+        self.assertNotIn(PRIVATE, repr(run.call_args.kwargs["env"]))
+
+    def test_server_without_tls_receives_no_authentication(self) -> None:
+        # MySQL protocol-10 handshake: normal auth capabilities, with SSL absent.
+        capabilities = CLIENT.PROTOCOL_41 | CLIENT.SECURE_CONNECTION | CLIENT.PLUGIN_AUTH
+        handshake = (
+            b"\x0a8.0.36\0"
+            + struct.pack("<I", 1)
+            + b"12345678\0"
+            + struct.pack("<H", capabilities & 0xFFFF)
+            + b"\x21"
+            + struct.pack("<H", 2)
+            + struct.pack("<H", capabilities >> 16)
+            + b"\x15"
+            + b"\0" * 10
+            + b"abcdefghijkl\0mysql_native_password\0"
+        )
+        transport = MagicMock()
+        transport.makefile.return_value = io.BytesIO(
+            len(handshake).to_bytes(3, "little") + b"\0" + handshake
+        )
+        with (
+            patch("socket.create_connection", return_value=transport),
+            self.assertRaises(pymysql.OperationalError) as raised,
+        ):
+            probe.probe({"host": "source.invalid", "user": "reader", "password": PRIVATE})
+        self.assertEqual(raised.exception.args[0], CR.CR_SSL_CONNECTION_ERROR)
+        transport.sendall.assert_not_called()
+
     def test_failed_login_polling_is_cooled_down_but_success_is_fresh(self) -> None:
         settings = {"host": "source.invalid", "user": "reader", "password": PRIVATE}
         with (
@@ -441,7 +506,9 @@ class GrantTests(unittest.TestCase):
             self.assertNotIn(PRIVATE, repr(diagnostic._FAILED_PROBES))
             clock.return_value = 1000
             run.side_effect = None
-            run.return_value = subprocess.CompletedProcess([], 0, stdout='{"grants":"read_only"}')
+            run.return_value = subprocess.CompletedProcess(
+                [], 0, stdout=self.wire_result("read_only")
+            )
             self.assertEqual(
                 diagnostic.managed_grants(
                     settings, binding_id="fixture-binding", version_id="fixture-version"
@@ -466,7 +533,7 @@ class GrantTests(unittest.TestCase):
                 ),
                 "unknown",
             )
-            return subprocess.CompletedProcess([], 0, stdout='{"grants":"read_only"}')
+            return subprocess.CompletedProcess([], 0, stdout=self.wire_result("read_only"))
 
         with patch(
             "control_plane.odoo_import_diagnostics.subprocess.run", side_effect=concurrent
@@ -538,7 +605,9 @@ class GrantTests(unittest.TestCase):
         connection.close.assert_called_once()
 
     def test_child_masks_auth_dns_and_driver_failures(self) -> None:
-        for error in (OSError(PRIVATE), ValueError(PRIVATE), RuntimeError(PRIVATE)):
+        for index, error in enumerate(
+            (OSError(PRIVATE), ValueError(PRIVATE), RuntimeError(PRIVATE))
+        ):
             with (
                 patch.object(probe, "probe", side_effect=error),
                 patch(
@@ -553,7 +622,19 @@ class GrantTests(unittest.TestCase):
                 contextlib.redirect_stderr(io.StringIO()) as stderr,
             ):
                 probe.main()
-            self.assertEqual(json.loads(stdout.getvalue()), {"grants": "unknown"})
+            with patch(
+                "control_plane.odoo_import_diagnostics.subprocess.run",
+                return_value=subprocess.CompletedProcess([], 0, stdout=stdout.getvalue()),
+            ):
+                self.assertEqual(
+                    diagnostic.managed_grants(
+                        {"host": "source.invalid", "user": "reader", "password": PRIVATE},
+                        binding_id="fixture-binding",
+                        version_id=f"failure-{index}",
+                    ),
+                    "unknown",
+                )
+            self.assertNotIn(PRIVATE, stdout.getvalue())
             self.assertEqual(stderr.getvalue(), "")
 
     def test_parent_timeout_and_malformed_response_never_leak(self) -> None:
@@ -564,7 +645,11 @@ class GrantTests(unittest.TestCase):
                 OSError(PRIVATE),
                 subprocess.CompletedProcess([], 0, stdout=PRIVATE),
                 subprocess.CompletedProcess(
-                    [], 0, stdout='{"grants":"read_only","secret":"' + PRIVATE + '"}'
+                    [],
+                    0,
+                    stdout=json.dumps(
+                        {**json.loads(self.wire_result("read_only")), "unexpected": PRIVATE}
+                    ),
                 ),
             )
         ):

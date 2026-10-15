@@ -4592,12 +4592,16 @@ grants unknown without attempting a login.
 
 Each source's selected managed connection is independently inspected using
 `SHOW GRANTS`, without reading customer tables or trying a write. Connections
-require verified TLS. A separate process bounds each attempt, including DNS,
+require verified TLS. Only the configured `SSL_CERT_FILE` and `SSL_CERT_DIR`
+trust paths are inherited by the child; service secrets and other environment
+variables are excluded. A separate process bounds each attempt, including DNS,
 to ten seconds and discards stderr. Repeated unqualified probes have a 60-second
-process-local cooldown; concurrent requests for that credential return unknown.
+cooldown in each service process/replica; concurrent requests for that credential return unknown.
 At most four source probes run concurrently per process. Successful grant results
 are never cached. Retry a cooled-down unknown after the interval; no read can
 guarantee that source authentication does not update its own audit/failure counters.
+Odoo authentication can also produce Odoo login audit records; the read does not
+write business records.
 Only SELECT, SHOW VIEW, SHOW DATABASES and
 USAGE are accepted; grant options or other privileges are unsafe. Role grants,
 partial revokes, unrecognized syntax and incomplete results stay unknown.

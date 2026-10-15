@@ -2,6 +2,7 @@
 
 import hmac
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -331,7 +332,11 @@ def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsaf
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            env={},
+            env={
+                name: os.environ[name]
+                for name in ("SSL_CERT_FILE", "SSL_CERT_DIR")
+                if os.environ.get(name)
+            },
             timeout=10,
             check=False,
         )
@@ -429,7 +434,7 @@ def diagnose_imports(
                             for key in ("host", "port")
                         )
                         and not (
-                            settings["user"] == applied.get(prefix + ".user")
+                            settings["user"].strip() == applied.get(prefix + ".user", "").strip()
                             and parameter_agreement(
                                 "password", password, applied.get(prefix + ".password", "")
                             )
