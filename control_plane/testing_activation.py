@@ -830,7 +830,7 @@ class TestingActivationAdapter:
                     value for key, value in values.items() if looks_like_credential(key, value)
                 },
             )
-        except TestingActivationRefusal as error:
+        except (ValueError, TypeError, AttributeError) as error:
             raise TestingActivationRefusal(
                 "The actual provider render has unqualified resources.",
                 code=TestingActivationRefusalCode.RECIPIENT_RENDER_UNVERIFIED,

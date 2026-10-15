@@ -1209,6 +1209,10 @@ class ActivationTests(unittest.TestCase):
         changed_command["services"]["web"]["command"] = private
         routed = deepcopy(converted)
         routed["services"]["web"]["labels"] = {"traefik.enable": "true"}
+        malformed_mounts = deepcopy(converted)
+        malformed_mounts["services"]["web"]["volumes"] = 5
+        malformed_environment = deepcopy(converted)
+        malformed_environment["services"]["web"]["environment"] = [1]
         code = TestingActivationRefusalCode
         cases: tuple[tuple[dict[str, Any], Any, TestingActivationRefusalCode], ...] = (
             ({"appName": private}, None, code.RECIPIENT_IDENTITY_UNVERIFIED),
@@ -1223,6 +1227,8 @@ class ActivationTests(unittest.TestCase):
             ({}, unsafe_network, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, "services: [" + private, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, {"services": {"web": private}}, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, malformed_mounts, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, malformed_environment, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, changed_command, code.RECIPIENT_RENDER_CHANGED),
             ({}, ValueError(private), code.DEPENDENCY_UNVERIFIED),
             ({}, None, code.RECIPIENT_UNQUALIFIED),
@@ -1303,6 +1309,85 @@ class ActivationTests(unittest.TestCase):
                     production,
                 )
         self.payloads[record.target_id] = payload
+
+        # Ownership/request checks and the recorded phase bound diagnosis before
+        # any provider fetch, even when a recipient id is already recorded.
+        denied: tuple[tuple[dict[str, Any], dict[str, Any], TestingActivationRefusalCode], ...] = (
+            ({}, {"reason": private}, code.QUALIFICATION_UNVERIFIED),
+            ({"phase": "recipient_ready"}, {}, code.RECIPIENT_UNQUALIFIED),
+        )
+        for updates, request_changes, expected_code in denied:
+            with self.subTest(record_changes=updates, request_changes=request_changes):
+                retained = record.model_copy(update=updates)
+                self.store.write_testing_activation(
+                    expected=record.model_dump(mode="json"),
+                    replacement=retained.model_dump(mode="json"),
+                )
+                with patch(
+                    "control_plane.testing_activation.api.fetch_dokploy_target_payload",
+                    side_effect=AssertionError(
+                        "Unqualified diagnosis must not fetch a provider target"
+                    ),
+                ):
+                    response = asyncio.run(
+                        request(
+                            app,
+                            "POST",
+                            ROUTE.format(product=self.product),
+                            headers={"Authorization": "Bearer local-operator-token"},
+                            payload={**draft, **request_changes},
+                        )
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], expected_code.value)
+                self.assertNotIn(private, response.text)
+                self.assertEqual(
+                    activation_record(self.store, self.product, self.context), retained
+                )
+                self.assertEqual(self.writes, writes)
+                self.assertEqual(self.inspections, inspections)
+                self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
+                self.store.write_testing_activation(
+                    expected=retained.model_dump(mode="json"),
+                    replacement=record.model_dump(mode="json"),
+                )
+
+        for identity_changes in (
+            {"local_operator_subject": private},
+            {"local_operator_token_label": private},
+        ):
+            with self.subTest(identity_changes=identity_changes):
+                foreign_app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(),
+                    bearer_identity_config=_local_operator_bearer_config(
+                        token_label="local-owner-write"
+                    ).model_copy(update=identity_changes),
+                    record_store_factory=lambda: self.store,
+                    control_plane_root_path=self.root,
+                )
+                with patch(
+                    "control_plane.testing_activation.api.fetch_dokploy_target_payload",
+                    side_effect=AssertionError("Foreign custody must refuse before provider reads"),
+                ):
+                    response = asyncio.run(
+                        request(
+                            foreign_app,
+                            "POST",
+                            ROUTE.format(product=self.product),
+                            headers={"Authorization": "Bearer local-operator-token"},
+                            payload=draft,
+                        )
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], code.QUALIFICATION_UNVERIFIED.value
+                )
+                self.assertNotIn(private, response.text)
+                self.assertEqual(activation_record(self.store, self.product, self.context), record)
+                self.assertEqual(self.writes, writes)
+                self.assertEqual(self.inspections, inspections)
+                self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
 
     def test_route_reports_real_carried_key_refusal_before_provider_effects(self) -> None:
         import asyncio
