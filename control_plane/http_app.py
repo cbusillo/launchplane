@@ -864,6 +864,7 @@ from control_plane.storage.product_authority_bundle import (
     RuntimeEnvironmentConflictError,
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
+from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -4278,6 +4279,7 @@ def create_launchplane_fastapi_app(
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
+    testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4356,6 +4358,8 @@ def create_launchplane_fastapi_app(
         try:
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
+            if testing_drill_scheduler is not None:
+                await run_in_threadpool(testing_drill_scheduler.start)
             startup_record_store = (
                 record_store_factory() if record_store_factory is not None else shared_record_store
             )
@@ -4365,6 +4369,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
+            if testing_drill_scheduler is not None:
+                await run_in_threadpool(testing_drill_scheduler.stop)
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.stop)
             if isinstance(shared_record_store, PostgresRecordStore):
@@ -10003,6 +10009,21 @@ def create_launchplane_fastapi_app(
             )
         cancelled_at = utc_now_timestamp()
         if operation.status == "reconciliation_required":
+            if read_method_name == "read_odoo_stable_target_replacement_operation_record":
+                from control_plane.testing_replacement_recovery import service_testing_operation
+
+                if service_testing_operation(operation):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="service_testing_recovery_required",
+                        message=(
+                            "Held service-owned testing replacements require worker recovery with "
+                            "execution exclusion and original-effect proof, or a verified isolated "
+                            "replacement generation. Read the operation's recovery classification; "
+                            "a caller attestation cannot release this fence."
+                        ),
+                    )
             reconciliation_attestation = cancellation_request.reconciliation_attestation
             if reconciliation_attestation is None:
                 raise _launchplane_http_error(
@@ -16735,6 +16756,7 @@ def create_launchplane_fastapi_app(
             )
         if (
             isinstance(identity, LocalOperatorIdentity)
+            and (product_config_request.mode == "apply" or not director_agent_identity(identity))
             and config_profile.production_use == "live"
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
