@@ -9,6 +9,17 @@ admission. That observation cannot be converted into an admission or a successfu
 Launchplane landing outcome. The existing controller keeps the affected plan
 fenced until a supported disposition exists.
 
+## Native writes and retained ordinary effects
+
+Native merge-train writes refuse unresolved historical ordinary-agent effects
+for the same repository and base branch. Repository identity is compared without
+regard to case, including when the historical target preserves mixed-case
+spelling; branch case stays exact. The comparison leaves historical payloads
+and digests unchanged. Terminal effects and effects for other repositories or
+branches do not create this unresolved-effect fence. The historical-completion
+recovery preflight below has its own stricter exclusion, including terminal
+effects.
+
 ## Read-only applicability preflight
 
 The existing `POST /v1/work-graph/merge-train/controller/run-once` route accepts

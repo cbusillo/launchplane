@@ -7,6 +7,9 @@ from tempfile import TemporaryDirectory
 
 from pydantic import ValidationError
 
+from control_plane.contracts.canonical_json import canonical_json_bytes, canonical_json_sha256
+from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
+from control_plane.ordinary_agent_session_lifecycle import OrdinaryAgentSessionAdmissionDenied
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchEntry,
@@ -141,6 +144,125 @@ def _record(
         landing_plan=plan,
         historical_completion=_historical_completion(plan) if historical else None,
     )
+
+
+class HistoricalEffectRepositoryFenceTests(unittest.TestCase):
+    def database_url(self) -> str:
+        return "sqlite+pysqlite:///:memory:"
+
+    def setUp(self) -> None:
+        self.normal = _record(plan=_landing_plan())
+
+    def assert_effect_fence(
+        self, *, repository: str, base_branch: str, state: str, refused: bool
+    ) -> None:
+        store = PostgresRecordStore(database_url=self.database_url())
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        target = OrdinaryAgentTarget(
+            repository_id=123, repository=repository, base_branch=base_branch
+        )
+        command_digest = "e" * 64
+        payload = {
+            "effect_id": "legacy-effect",
+            "lease_id": "legacy-lease",
+            "request_id": "legacy-request",
+            "scope_sha256": "d" * 64,
+            "binding_revision": 1,
+            "action_ordinal": 1,
+            "revision": 1,
+            "target": target.model_dump(mode="json"),
+            "state": state,
+            "command_sha256": command_digest,
+        }
+        original_bytes = canonical_json_bytes(payload)
+        original_digest = canonical_json_sha256(payload)
+        with store._session_factory() as session:
+            session.add(
+                LaunchplaneOrdinaryAgentEffectRow(
+                    effect_id="legacy-effect",
+                    lease_id="legacy-lease",
+                    request_id="legacy-request",
+                    scope_sha256="d" * 64,
+                    binding_revision=1,
+                    action_ordinal=1,
+                    semantic_key="merge-train",
+                    command_sha256=command_digest,
+                    revision=1,
+                    payload=payload,
+                )
+            )
+            session.commit()
+        if refused:
+            with self.assertRaises(OrdinaryAgentSessionAdmissionDenied) as denial:
+                store.write_merge_train_batch_landing_plan_record(self.normal)
+            self.assertEqual(
+                denial.exception.reason_code, "ordinary_effect_requires_reconciliation"
+            )
+            self.assertEqual(store.list_merge_train_batch_landing_plan_records(), ())
+        else:
+            store.write_merge_train_batch_landing_plan_record(self.normal)
+            self.assertEqual(store.list_merge_train_batch_landing_plan_records(), (self.normal,))
+        with store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentEffectRow, "legacy-effect")
+            assert row is not None
+            self.assertEqual(canonical_json_bytes(row.payload), original_bytes)
+            self.assertEqual(canonical_json_sha256(row.payload), original_digest)
+            self.assertEqual(row.command_sha256, payload["command_sha256"])
+            self.assertEqual(row.revision, 1)
+
+    def test_native_write_refuses_unresolved_effect_for_equivalent_repository_case(self) -> None:
+        plan = self.normal.landing_plan
+        for repository in (
+            plan.repository,
+            plan.repository.upper(),
+            plan.repository.title(),
+        ):
+            for state in (
+                "reserved",
+                "dispatching",
+                "waiting_provider",
+                "reconciliation_required",
+                "rebind_pending",
+            ):
+                with self.subTest(repository=repository, state=state):
+                    self.assert_effect_fence(
+                        repository=repository,
+                        base_branch=plan.base_branch,
+                        state=state,
+                        refused=True,
+                    )
+
+    def test_native_write_preserves_terminal_history_and_unrelated_target_isolation(self) -> None:
+        plan = self.normal.landing_plan
+        for state in (
+            "not_dispatched",
+            "completed",
+            "completed_observed",
+            "terminal_conflict",
+            "exhausted",
+            "retained_no_conditional_delete",
+        ):
+            with self.subTest(state=state):
+                self.assert_effect_fence(
+                    repository=plan.repository.upper(),
+                    base_branch=plan.base_branch,
+                    state=state,
+                    refused=False,
+                )
+        for repository, base_branch in (
+            ("other/repository", plan.base_branch),
+            ("example/other", plan.base_branch),
+            (plan.repository.upper(), plan.base_branch.upper()),
+            (plan.repository.upper(), "other-branch"),
+        ):
+            with self.subTest(repository=repository, base_branch=base_branch):
+                self.assert_effect_fence(
+                    repository=repository,
+                    base_branch=base_branch,
+                    state="reconciliation_required",
+                    refused=False,
+                )
 
 
 class HistoricalCompletionContractTests(unittest.TestCase):
