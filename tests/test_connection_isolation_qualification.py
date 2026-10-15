@@ -62,7 +62,7 @@ def resource_fixture() -> tuple[dict[str, Any], str]:
             "ports": {},
             "environment": {} if service == "database" else dict(environment),
             "networks": {"private-network": f"172.24.0.{index}"},
-            "mounts": [mount("db", "/var/lib/postgresql/data")]
+            "mounts": [mount("db", compose["services"]["database"]["volumes"][0].split(":")[1])]
             if service == "database"
             else [mount("filestore", "/var/lib/odoo")],
         }

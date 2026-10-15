@@ -7757,6 +7757,19 @@ class RealPostgresProviderOperationTests(unittest.TestCase):
             "test_uncertain_apply_retains_fence_for_same_and_new_keys",
         ):
             with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                policy = LaunchplaneAuthzPolicy()
+                digest = authz_policy_sha256(policy)
+                store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+                        revision=1,
+                        status="active",
+                        source="connection-isolation-tests",
+                        updated_at="2026-10-14T00:00:00Z",
+                        policy_sha256=digest,
+                        policy=policy,
+                    )
+                )
                 with patch.object(fixtures, "PostgresRecordStore", return_value=store):
                     case = fixtures.ConnectionIsolationAuthorityTests(scenario)
                     try:

@@ -2827,7 +2827,7 @@ Every isolation mode accepts only the exact `testing` lane. Apply is a separate
 a DB grant after operation-specific qualification. This fixed SQL preserves
 application records; it does not require declaring an existing copy disposable,
 unused or reproducible. Staff holds, target aliases, recorded protected usage,
-only-copy data and shared production resources still refuse with
+only-copy data, shared production resources and staged `separation_ready` lanes still refuse with
 `disposable_lane_safety_unknown`, including expired protective observations.
 Before SQL, the service checks the actual testing web/database/runner identity,
 their private project network, the database endpoint and local writable volumes.
@@ -2835,12 +2835,19 @@ Published database ports, foreign network members, overlapping foreign writable
 mounts, unsupported storage and unverified metadata refuse. The script pins SQL
 to the verified database address for that execution. It neither inspects other
 containers' environment nor executes their code.
+Collection failures, oversized metadata or a changed container inventory return
+named refusal markers. The qualifier uses isolated Python standard-library imports.
 General maintenance retains `odoo_post_deploy.execute`; observing a copy gives
 no maintenance, production, grant or credential authority.
 
 Every isolation mode rejects production before provider access and reserves
 the lane against concurrent release work. Apply rechecks recorded protections
 inside the reservation and immediately before dispatching the provider repair.
+Testing/preview data workflows and isolation use the same host `flock` through
+SQL, readback and web restart. The supported Linux schedule host needs `flock`
+and a writable `/var/lock`; a busy execution refuses before Docker or SQL.
+The remote job retains this lock when the service's wait times out. Isolation
+also refuses an existing shared workflow admitted before this lock was deployed.
 It operates on the current tracked target and database. No SQL,
 credentials, carrier requests, notification probes, staff-account changes,
 addon upgrades, or restore inputs are accepted.
@@ -2874,8 +2881,11 @@ receipt and key. This reads schedule history for the original operation marker;
 it does not dispatch the repair again. A unique terminal matching job settles
 success only with qualified resources, isolation and complete integration
 readback. A terminal failed job settles failure, allowing a newly reviewed
-dry-run and new key. A reservation checkpointed only at disabled schedule upsert
-can settle as not triggered. Missing, queued, active, ambiguous or unverified
+dry-run and new key. A single terminal job with missing logs can settle failure
+only when its disabled, operation-specific script and reviewed plan still match;
+this does not establish isolation success. A reservation checkpointed only at
+disabled schedule upsert can settle as not triggered only with empty history.
+Missing, queued, active, ambiguous or unverified
 trigger evidence keeps the fence. A lease lost before any provider checkpoint
 can retry safely under the same key after current protections are rechecked.
 An independent readback cannot clear a triggered operation.

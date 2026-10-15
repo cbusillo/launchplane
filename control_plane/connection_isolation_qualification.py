@@ -6,6 +6,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
     disposable_lane_configuration,
 )
+from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 
 
 def require_connection_isolation_lane(
@@ -36,7 +37,7 @@ def require_connection_isolation_lane(
     if protection is not None and (
         protection.usage == "in_use"
         or protection.data == "only_copy"
-        or protection.production_resources == "shared"
+        or protection.production_resources in {"shared", "separation_ready"}
     ):
         raise DisposableLaneSafetyUnknown(
             "A recorded use, needed-copy or sharing protection applies."
@@ -51,7 +52,9 @@ def require_connection_isolation_lane(
 
 # Executed inside the lane runner. Inputs are Docker metadata, never SQL or
 # caller-provided commands. It emits only fixed refusal names and a digest.
-RESOURCE_QUALIFICATION_LIBRARY = r"""
+RESOURCE_QUALIFICATION_LIBRARY = (
+    f"DATABASE_DATA_DIRECTORY = {ODOO_DATABASE_DATA_DIRECTORY!r}\n"
+    + r"""
 import hashlib
 import ipaddress
 import json
@@ -120,7 +123,7 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
                 raise ValueError("testing_resources/unsupported_volume")
             writable.append(mount)
     if not any(
-        mount["RW"] and mount["Destination"] == "/var/lib/postgresql/data"
+        mount["RW"] and mount["Destination"] == DATABASE_DATA_DIRECTORY
         for mount in db["mounts"]
     ):
         raise ValueError("testing_resources/database_storage")
@@ -151,6 +154,7 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
     digest = hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return digest, address
 """
+)
 
 RESOURCE_QUALIFICATION_PROGRAM = (
     RESOURCE_QUALIFICATION_LIBRARY
@@ -206,24 +210,27 @@ def resource_inventory_script(*, program: str) -> str:
     import shlex
 
     return r"""
+inventory_refused() {
+    printf 'connection_isolation_resources_ok=false\nintegration_readback_refused=testing_resources/%s\n' "$1" >&2
+    exit 1
+}
 mapfile -t inventory_ids < <(docker ps -aq | sort)
-[ "${#inventory_ids[@]}" -gt 0 ] && [ "${#inventory_ids[@]}" -le 256 ] || exit 1
+[ "${#inventory_ids[@]}" -gt 0 ] || inventory_refused inventory_unverified
 mapfile -t volume_ids < <(docker volume ls -q | sort)
 mapfile -t network_ids < <(docker network ls -q | sort)
-[ "${#volume_ids[@]}" -le 1024 ] && [ "${#network_ids[@]}" -le 256 ] || exit 1
 snapshot=$(set -e
-    docker inspect --format '{"kind":"container","id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"image":{{json .Image}},"running":{{json .State.Running}},"mounts":{{json .Mounts}},"ports":{{json .HostConfig.PortBindings}},"networks":{{json .NetworkSettings.Networks}}}' "${inventory_ids[@]}"
-    docker inspect --format '{"kind":"environment","id":{{json .Id}},"environment":{{json .Config.Env}}}' "$web" "$runner"
+    docker inspect --format '{"kind":"container","id":{{json .Id}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"image":{{json .Image}},"running":{{json .State.Running}},"mounts":{{json .Mounts}},"ports":{{json .HostConfig.PortBindings}},"networks":{{json .NetworkSettings.Networks}}}' "${inventory_ids[@]}" || exit 1
+    docker inspect --format '{"kind":"environment","id":{{json .Id}},"environment":{{json .Config.Env}}}' "$web" "$runner" || exit 1
     if [ "${#volume_ids[@]}" -gt 0 ]; then
-        docker volume inspect --format '{"kind":"volume","name":{{json .Name}},"driver":{{json .Driver}},"has_options":{{if .Options}}true{{else}}false{{end}},"mountpoint":{{json .Mountpoint}}}' "${volume_ids[@]}"
+        docker volume inspect --format '{"kind":"volume","name":{{json .Name}},"driver":{{json .Driver}},"has_options":{{if .Options}}true{{else}}false{{end}},"mountpoint":{{json .Mountpoint}}}' "${volume_ids[@]}" || exit 1
     fi
     if [ "${#network_ids[@]}" -gt 0 ]; then
-        docker network inspect --format '{"kind":"network","id":{{json .Id}},"project":{{json (index .Labels "com.docker.compose.project")}},"members":{{json .Containers}}}' "${network_ids[@]}"
+        docker network inspect --format '{"kind":"network","id":{{json .Id}},"project":{{json (index .Labels "com.docker.compose.project")}},"members":{{json .Containers}}}' "${network_ids[@]}" || exit 1
     fi
-)
-[ "$(docker ps -aq | sort)" = "$(printf '%s\n' "${inventory_ids[@]}")" ] || exit 1
+) || inventory_refused inventory_unverified
+[ "$(docker ps -aq | sort)" = "$(printf '%s\n' "${inventory_ids[@]}")" ] || inventory_refused inventory_changed
 """ + (
-        'qualification=$(printf \'%s\n\' "$snapshot" | docker exec -i "$runner" python3 -c '
+        'qualification=$(printf \'%s\n\' "$snapshot" | docker exec -i "$runner" python3 -I -c '
         + shlex.quote(program)
         + ' "$project" "$database" "$context" "$runtime_identity" "$reviewed_resources")\n'
         + 'read -r resource_digest database_address <<< "$qualification"\n'

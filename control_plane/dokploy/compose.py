@@ -12,6 +12,7 @@ from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
+ODOO_DATABASE_DATA_DIRECTORY = "/var/lib/postgresql/data"
 
 
 def _traefik_route_name(*, domain_host: str) -> str:
@@ -233,7 +234,7 @@ services:
       - -c
       - effective_io_concurrency=${{POSTGRES_EFFECTIVE_IO_CONCURRENCY:-1}}
     volumes:
-      - odoo_db:/var/lib/postgresql/data
+      - odoo_db:{ODOO_DATABASE_DATA_DIRECTORY}
     environment:
       - POSTGRES_DB=postgres
       - POSTGRES_PASSWORD=${{ODOO_DB_PASSWORD}}

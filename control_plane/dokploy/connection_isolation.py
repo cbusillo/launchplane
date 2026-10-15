@@ -1,4 +1,4 @@
-"""Bounded repair/readback on the existing Odoo data-workflow schedule."""
+"""Bounded repair/readback on dedicated, mutually excluded testing schedules."""
 
 import shlex
 import hashlib
@@ -16,6 +16,7 @@ from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import (
     INTEGRATION_READBACK_PASSED_PATH,
     INTEGRATION_READBACK_PROGRAM,
+    IntegrationReadbackPolicy,
     integration_readback_policy,
     web_held_until_integration_readback,
 )
@@ -75,6 +76,7 @@ fi
 if [ "$mode" = apply ]; then
     [[ "$reviewed_resources" =~ ^[a-f0-9]{{64}}$ ]] || exit 1
 fi
+{post_deploy.odoo_testing_schedule_lock_script(compose_app_name)}
 resolve() {{
     local ids
     ids=$(docker ps -aq --filter "label=com.docker.compose.project=$project" \\
@@ -150,28 +152,7 @@ def run_connection_isolation(
         policies=target_definition.policies,
         workflow_mode="maintenance",
     )
-    plan_digest = canonical_json_sha256(
-        {
-            "context": target_definition.context,
-            "instance": target_definition.instance,
-            "target_id": target_definition.target_id,
-            "database": database,
-            "app_name": payload.get("appName"),
-            "runtime_identity": environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
-            "execution_program": hashlib.sha256(
-                isolation_script(
-                    compose_app_name=str(payload.get("appName") or ""),
-                    database_name=database,
-                    instance=target_definition.instance,
-                    mode="apply",
-                    readback_spec=policy.encoded_spec(),
-                    context=target_definition.context,
-                    runtime_identity=environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
-                ).encode()
-            ).hexdigest(),
-            "readback_spec": policy.encoded_spec(),
-        }
-    )
+    plan_digest = connection_isolation_plan_sha256(target_definition, payload, environment, policy)
     if mode == "apply" and reviewed_plan_sha256 != plan_digest:
         raise ConnectionIsolationPreconditionFailed("plan_changed")
     schedule_type, lookup_id, compose_app_name, server_id = (
@@ -183,6 +164,20 @@ def run_connection_isolation(
             target_payload=payload,
         )
     )
+    # A job admitted before this service revision may predate the execution lock.
+    shared_workflow = api.find_matching_dokploy_schedule(
+        host=host,
+        token=token,
+        target_id=lookup_id,
+        schedule_type=schedule_type,
+        schedule_name=post_deploy.DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME,
+        app_name=post_deploy._build_dokploy_data_workflow_schedule_app_name(
+            context_name=target_definition.context,
+            instance_name=target_definition.instance,
+        ),
+    )
+    if post_deploy._has_running_schedule_deployment(shared_workflow):
+        raise ConnectionIsolationPreconditionFailed("workflow_active")
     app_name = isolation_schedule_app_name(
         target_definition.context,
         target_definition.instance,
@@ -244,16 +239,44 @@ def run_connection_isolation(
     if mode != "dry-run":
         if evidence.get("connection_isolation_ok") != "true":
             raise post_deploy.OdooPostDeployReadbackFailure(
-                "Connection isolation did not prove success.",
-                evidence=evidence,
+                "Connection isolation did not prove success.", evidence=evidence
             )
         post_deploy.require_integration_readback_evidence(evidence, policy)
     elif evidence.get("connection_isolation_ok") not in {"true", "false"}:
         raise post_deploy.OdooPostDeployReadbackFailure(
-            "Connection isolation dry-run returned no evidence.",
-            evidence=evidence,
+            "Connection isolation dry-run returned no evidence.", evidence=evidence
         )
     return evidence
+
+
+def connection_isolation_plan_sha256(
+    target_definition: DokployTargetDefinition,
+    payload: api.JsonObject,
+    environment: dict[str, str],
+    policy: IntegrationReadbackPolicy,
+) -> str:
+    return canonical_json_sha256(
+        {
+            "context": target_definition.context,
+            "instance": target_definition.instance,
+            "target_id": target_definition.target_id,
+            "database": environment.get("ODOO_DB_NAME", "").strip(),
+            "app_name": payload.get("appName"),
+            "runtime_identity": environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
+            "execution_program": hashlib.sha256(
+                isolation_script(
+                    compose_app_name=str(payload.get("appName") or ""),
+                    database_name=environment.get("ODOO_DB_NAME", "").strip(),
+                    instance=target_definition.instance,
+                    mode="apply",
+                    readback_spec=policy.encoded_spec(),
+                    context=target_definition.context,
+                    runtime_identity=environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
+                ).encode()
+            ).hexdigest(),
+            "readback_spec": policy.encoded_spec(),
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -271,6 +294,8 @@ def observe_connection_isolation_operation(
     target_definition: DokployTargetDefinition,
     provider_operation_key: str,
     provider_effect_phase: str,
+    reviewed_plan_sha256: str = "",
+    reviewed_resource_sha256: str = "",
 ) -> ConnectionIsolationObservation:
     """Settle only a terminal deployment bearing this exact operation's marker."""
     unknown = ConnectionIsolationObservation("unknown", {})
@@ -283,12 +308,14 @@ def observe_connection_isolation_operation(
             target_type="compose",
             target_id=target_definition.target_id,
         )
-        schedule_type, lookup_id, _, _ = post_deploy._resolve_dokploy_schedule_runtime(
-            host=host,
-            token=token,
-            compose_id=target_definition.target_id,
-            compose_name=target_definition.target_name,
-            target_payload=payload,
+        schedule_type, lookup_id, compose_app_name, _ = (
+            post_deploy._resolve_dokploy_schedule_runtime(
+                host=host,
+                token=token,
+                compose_id=target_definition.target_id,
+                compose_name=target_definition.target_name,
+                target_payload=payload,
+            )
         )
         schedule = api.find_matching_dokploy_schedule(
             host=host,
@@ -357,10 +384,50 @@ def observe_connection_isolation_operation(
                     )
                 )
                 return ConnectionIsolationObservation("present", evidence, passed=passed)
-        if not matching and provider_effect_phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT:
+        if (
+            not deployments
+            and provider_effect_phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT
+        ):
             return ConnectionIsolationObservation(
                 "present", {"connection_isolation_triggered": "false"}
             )
+        if (
+            not matching
+            and len(deployments) == 1
+            and schedule is not None
+            and schedule.get("enabled") is False
+            and provider_effect_phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
+            and api._deployment_status(deployments[0])
+            in (post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES)
+        ):
+            environment = api.parse_dokploy_env_text(str(payload.get("env") or ""))
+            policy = integration_readback_policy(
+                instance_name="testing",
+                policies=target_definition.policies,
+                workflow_mode="maintenance",
+            )
+            expected_script = isolation_script(
+                compose_app_name=compose_app_name,
+                database_name=environment.get("ODOO_DB_NAME", "").strip(),
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context=target_definition.context,
+                runtime_identity=environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
+                reviewed_resource_sha256=reviewed_resource_sha256,
+                operation_digest=expected,
+            )
+            if (
+                reviewed_plan_sha256
+                == connection_isolation_plan_sha256(target_definition, payload, environment, policy)
+                and schedule.get("script") == expected_script
+            ):
+                # A unique completed job on the exact dedicated reviewed script
+                # proves quiescence, but missing logs never prove repair success.
+                return ConnectionIsolationObservation(
+                    "present",
+                    {"connection_isolation_terminal_unverified": "true"},
+                )
     except (click.ClickException, KeyError, TypeError, ValueError):
         return unknown
     return unknown

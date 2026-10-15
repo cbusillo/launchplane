@@ -203,6 +203,7 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 ("usage", "in_use"),
                 ("data", "only_copy"),
                 ("production_resources", "shared"),
+                ("production_resources", "separation_ready"),
             ):
                 with self.subTest(field=field, value=value):
                     self.safety(**{field: value})

@@ -213,6 +213,8 @@ def observe_odoo_connection_isolation(
             target_definition=target,
             provider_operation_key=provider_operation_key,
             provider_effect_phase=provider_effect_phase,
+            reviewed_plan_sha256=request.reviewed_plan_sha256,
+            reviewed_resource_sha256=request.reviewed_resource_sha256,
         )
     except (FileNotFoundError, click.ClickException, ValueError):
         return ConnectionIsolationObservation("unknown", {})

@@ -10,11 +10,13 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
@@ -96,7 +98,7 @@ def main(argv):
             for row in rows:
                 if row["kind"] == kind and row["id"] in argv[3:]:
                     print(json.dumps(row))
-            return 0
+            return 42 if os.environ.get("FAKE_METADATA_READ_FAILURE") == "1" else 0
         if ".State.Status" in template:
             path = state_path(container_id)
             status = path.read_text().strip() if path.exists() else "running"
@@ -190,7 +192,7 @@ def main(argv):
         log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
-    if program[:2] == ["python3", "-c"]:
+    if program[:2] == ["python3", "-c"] or program[:3] == ["python3", "-I", "-c"]:
         log("exec qualify" + (" -i" if interactive else ""))
         return subprocess.run([sys.executable, *program[1:]],
                               stdin=None if interactive else subprocess.DEVNULL).returncode
@@ -532,6 +534,61 @@ def _render_post_deploy_script(
 
 @unittest.skipIf(BASH is None, "bash 4 or newer is required to run the rendered script")
 class DataWorkflowScriptExecutionTests(unittest.TestCase):
+    def test_running_isolation_excludes_restore_and_maintenance_until_remote_exit(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        prefix = dokploy_post_deploy.odoo_testing_schedule_lock_script("example-testing-app")
+        prefix = prefix.replace("/var/lock/launchplane-odoo-", f"{self.root}/launchplane-odoo-")
+        ready = self.root / "lock-held"
+        holder = subprocess.Popen(
+            [
+                self.bash,
+                "-c",
+                prefix + f"\nprintf ready >{shlex.quote(str(ready))}\nread -r release\n",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=self.base_environment,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and holder.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            policy = integration_readback_policy(
+                instance_name="testing",
+                policies=_policies(),
+                workflow_mode="maintenance",
+            )
+            scripts = (
+                isolation_script(
+                    compose_app_name="example-testing-app",
+                    database_name="example_testing",
+                    instance="testing",
+                    mode="apply",
+                    readback_spec=policy.encoded_spec(),
+                    context="example",
+                    runtime_identity=self.runtime_identity,
+                    reviewed_resource_sha256=self.resource_digest,
+                ),
+                _render_post_deploy_script(None),
+                _render_post_deploy_script(None, run_destructive_restore=True),
+            )
+            for script in scripts:
+                with self.subTest(script_kind=scripts.index(script)):
+                    run = self._run(script)
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertNotIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
+                    self.assertFalse(run.web_restarted)
+                    self.assertNotIn("exec workflow", run.docker_log)
+                    self.assertNotIn("exec readback", run.docker_log)
+        finally:
+            holder.communicate("release\n", timeout=5)
+        run = self._run(_render_post_deploy_script(None))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_apply_without_resource_review_never_dispatches_docker(self) -> None:
         from control_plane.dokploy.connection_isolation import isolation_script
 
@@ -579,6 +636,29 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertNotIn("stop web-id", run.docker_log)
         self.assertNotIn("exec readback", run.docker_log)
         self.assertFalse(run.web_restarted)
+
+    def test_failed_metadata_read_cannot_use_even_complete_looking_partial_output(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        policy = integration_readback_policy(
+            instance_name="testing", policies=_policies(), workflow_mode="maintenance"
+        )
+        run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+                reviewed_resource_sha256=self.resource_digest,
+            ),
+            FAKE_METADATA_READ_FAILURE="1",
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
+        self.assertFalse(run.readback_ran)
 
     def test_scoped_connection_repair_modes_and_failed_readback(self) -> None:
         from control_plane.dokploy.connection_isolation import isolation_script
@@ -666,6 +746,11 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         docker = bin_dir / "docker"
         docker.write_text(f"#!{sys.executable}\n{_FAKE_DOCKER}", encoding="utf-8")
         docker.chmod(0o755)
+        flock = bin_dir / "flock"
+        flock.write_text(
+            f"#!{sys.executable}\nimport fcntl, sys\ntry:\n    fcntl.flock(int(sys.argv[-1]), fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n    sys.exit(1)\n"
+        )
+        flock.chmod(0o755)
         modules = self.root / "modules"
         modules.mkdir()
         (modules / "psycopg2.py").write_text(_FAKE_PSYCOPG2, encoding="utf-8")
@@ -706,7 +791,11 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             (self.root / marker).unlink(missing_ok=True)
         (self.root / f"{WEB_CONTAINER_ID}.state").write_text(web_status)
         script_path = self.root / "script.sh"
-        script_path.write_text(script, encoding="utf-8")
+        # Each test's directory stands in for its own provider host filesystem.
+        script_path.write_text(
+            script.replace("/var/lock/launchplane-odoo-", f"{self.root}/launchplane-odoo-"),
+            encoding="utf-8",
+        )
         completed = subprocess.run(
             [self.bash, str(script_path)],
             capture_output=True,

@@ -7,6 +7,8 @@ from unittest.mock import Mock, patch
 from control_plane.dokploy import api, post_deploy
 from control_plane.dokploy.connection_isolation import (
     ConnectionIsolationObservation,
+    connection_isolation_plan_sha256,
+    isolation_script,
     observe_connection_isolation_operation,
 )
 from control_plane.dokploy.source import DokployTargetDefinition
@@ -54,7 +56,9 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
         )
 
     def observe(
-        self, phase: str = post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
+        self,
+        phase: str = post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER,
+        **review: str,
     ) -> ConnectionIsolationObservation:
         return observe_connection_isolation_operation(
             host="fixture",
@@ -62,6 +66,7 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
             target_definition=self.target,
             provider_operation_key=self.operation,
             provider_effect_phase=phase,
+            **review,
         )
 
     def test_exact_terminal_success_and_failure_can_be_adopted(self) -> None:
@@ -131,6 +136,69 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
         self.assertEqual(
             self.observe(post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT).outcome, "present"
         )
+
+    def test_upsert_with_unreadable_deployment_is_not_assumed_never_triggered(self) -> None:
+        self.logs.return_value = {}
+        self.assertEqual(
+            self.observe(post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT).outcome, "unknown"
+        )
+
+    def test_exact_terminal_script_can_settle_failure_when_logs_are_missing(self) -> None:
+        from tests.test_connection_isolation_qualification import resource_fixture
+        from control_plane.integration_readback import integration_readback_policy
+
+        _, identity = resource_fixture()
+        environment = {
+            "ODOO_DB_NAME": "example_testing",
+            "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": identity,
+        }
+        payload: api.JsonObject = {
+            "env": "\n".join(f"{key}={value}" for key, value in environment.items()),
+            "appName": "app",
+        }
+        self.fetch_dokploy_target_payload.return_value = payload
+        policy = integration_readback_policy(
+            instance_name="testing", policies=self.target.policies, workflow_mode="maintenance"
+        )
+        review = {
+            "reviewed_plan_sha256": connection_isolation_plan_sha256(
+                self.target, payload, environment, policy
+            ),
+            "reviewed_resource_sha256": "b" * 64,
+        }
+        script = isolation_script(
+            compose_app_name="app",
+            database_name="example_testing",
+            instance="testing",
+            mode="apply",
+            readback_spec=policy.encoded_spec(),
+            context="example",
+            runtime_identity=identity,
+            reviewed_resource_sha256=review["reviewed_resource_sha256"],
+            operation_digest=self.markers["connection_isolation_operation_sha256"],
+        )
+        self.find_matching_dokploy_schedule.return_value = {
+            "scheduleId": "schedule",
+            "script": script,
+            "enabled": False,
+        }
+        self.logs.return_value = {}
+        observed = self.observe(**review)
+        self.assertEqual(observed.outcome, "present")
+        self.assertFalse(observed.passed)
+        for change in ("script", "plan", "resource", "enabled"):
+            with self.subTest(change=change):
+                self.find_matching_dokploy_schedule.return_value = {
+                    "scheduleId": "schedule",
+                    "script": script + "\nexit 0" if change == "script" else script,
+                    "enabled": change == "enabled",
+                }
+                changed_review = {**review}
+                if change in {"plan", "resource"}:
+                    changed_review[
+                        f"reviewed_{'plan' if change == 'plan' else 'resource'}_sha256"
+                    ] = "c" * 64
+                self.assertEqual(self.observe(**changed_review).outcome, "unknown")
 
     def test_production_cannot_be_observed_by_this_adapter(self) -> None:
         self.target = DokployTargetDefinition(

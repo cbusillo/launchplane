@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import re
 import shlex
@@ -43,6 +44,18 @@ from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
 ODOO_POST_DEPLOY_SCHEDULE_UPSERT = "post_deploy_schedule_upsert"
+
+
+def odoo_testing_schedule_lock_script(compose_app_name: str) -> str:
+    """Hold the host execution lock through SQL, readback and web restart."""
+    digest = hashlib.sha256(compose_app_name.encode()).hexdigest()
+    return f"""exec 9>/var/lock/launchplane-odoo-{digest}.lock
+if ! flock -n 9; then
+    printf 'integration_readback_refused=testing_resources/workflow_active\\n' >&2
+    exit 1
+fi
+"""
+
 
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME = "platform-odoo-bootstrap"
@@ -2511,6 +2524,7 @@ def _build_dokploy_data_workflow_script(
     )
     return f"""#!/usr/bin/env bash
 set -euo pipefail
+{odoo_testing_schedule_lock_script(compose_app_name) if hold_web_until_integration_readback else ""}
 
 compose_project={quoted_compose_app_name}
 database_name={quoted_database_name}
