@@ -73,6 +73,8 @@ class OdooPostDeployRequest(BaseModel):
         if self.connection_isolation is not None:
             if runtime_key_safety_environment_class(self.instance) == "prod":
                 raise ValueError("Connection isolation refuses production.")
+            if self.instance != "testing":
+                raise ValueError("Connection isolation requires a testing lane.")
             if self.connection_isolation == "apply" and (
                 not self.reviewed_dry_run
                 or len(self.reviewed_plan_sha256) != 64
@@ -202,6 +204,7 @@ def execute_odoo_post_deploy(
     allow_historical_sender_contract: bool = False,
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
     fresh_restore_source_environment: dict[str, str] | None = None,
+    before_connection_isolation_mutation: Callable[[], None] | None = None,
 ) -> OdooPostDeployResult:
     if request.connection_isolation is not None:
         target = _resolve_compose_target_definition(
@@ -216,6 +219,7 @@ def execute_odoo_post_deploy(
                 target_definition=target,
                 mode=request.connection_isolation,
                 reviewed_plan_sha256=request.reviewed_plan_sha256,
+                before_mutation=before_connection_isolation_mutation,
             )
         except dokploy_post_deploy.OdooPostDeployReadbackFailure as error:
             return OdooPostDeployResult(

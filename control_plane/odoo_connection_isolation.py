@@ -11,6 +11,10 @@ import click
 OdooConnectionIsolationMode = Literal["dry-run", "apply", "readback"]
 
 
+class ConnectionIsolationOutcomeUnknown(RuntimeError):
+    """A provider effect started but its terminal outcome is unavailable."""
+
+
 class ConnectionIsolationPreconditionFailed(click.ClickException):
     def __init__(self, reason: Literal["plan_changed", "workflow_active"]) -> None:
         self.code = "connection_isolation_" + reason
