@@ -39,7 +39,7 @@ def operation_route(operation: str, method: str) -> str:
 
 
 def identifier(value: str) -> str:
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value):
+    if value in {".", ".."} or not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value):
         raise argparse.ArgumentTypeError("Use one plain context or instance identifier.")
     return value
 
@@ -73,9 +73,7 @@ def inspect_settings(
             len(record.keys) != len(set(record.keys))
             or set(record.values) | set(record.withheld_keys) != set(record.keys)
             or set(record.values) & set(record.withheld_keys)
-            or any(
-                re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,127}", key) is None for key in record.keys
-            )
+            or any(not key or key != key.strip() for key in record.keys)
         ):
             raise ValueError("Runtime inventory keys do not reconcile.")
         records.append(

@@ -124,9 +124,57 @@ class RetirementInventoryClientTests(unittest.TestCase):
         self.transport["request_launchplane"].assert_not_called()
 
     def test_invalid_identifiers_fail_before_url_formatting(self) -> None:
-        for value in ("../another", "example?apply=true", "example/testing"):
+        for value in (".", "..", "../another", "example?apply=true", "example/testing"):
             with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
                 CLIENT["identifier"](value)
+
+    def test_metadata_gate_runs_on_success_and_refuses_unsafe_metadata(self) -> None:
+        def public_identifier(value: str) -> str:
+            if "UNSAFE" in value:
+                raise ValueError("Unsafe identifier fixture")
+            return value
+
+        transport = {
+            **self.transport,
+            "resolve_settings": lambda args: self.settings,
+            "validate_service_url": lambda value: None,
+            "is_denied_key": lambda key: key in {"token", "values"},
+            "public_identifier": public_identifier,
+        }
+        with TemporaryDirectory() as directory:
+            helper = Path(directory) / "launchplane-write-action.py"
+            helper.write_text("")
+            for key, expected in (("odoo.db-filter", "ok"), ("UNSAFE", "unverified")):
+                response = self.runtime_response()
+                response["settings"][0].update(keys=[key], values={key: "PRIVATE"})
+                self.transport["request_launchplane_read"].return_value = response
+                output = io.StringIO()
+                with (
+                    patch(
+                        "sys.argv",
+                        [
+                            str(CLIENT_PATH),
+                            "--operator-helper",
+                            str(helper),
+                            "settings",
+                            "--context",
+                            "example",
+                            "--instance",
+                            "testing",
+                        ],
+                    ),
+                    patch.object(runpy, "run_path", return_value=transport),
+                    redirect_stdout(output),
+                ):
+                    code = CLIENT["main"]()
+                result = json.loads(output.getvalue())
+                self.assertEqual(result["status"], expected)
+                self.assertEqual(code == 0, expected == "ok")
+                self.assertNotIn("PRIVATE", output.getvalue())
+                if expected == "ok":
+                    self.assertIn(key, output.getvalue())
+                else:
+                    self.assertNotIn("UNSAFE", output.getvalue())
 
     def test_workflow_evidence_binds_policy_and_rejects_partial_or_changed_result(self) -> None:
         policy: dict[str, Any] = {
