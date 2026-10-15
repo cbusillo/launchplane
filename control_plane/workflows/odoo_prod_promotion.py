@@ -195,6 +195,9 @@ def execute_odoo_prod_promotion(
 
             try:
                 cutover_plan = decision_bound_cutover_plan(cutover_plan, release_decision)
+                # Preserve a completed/uncertain attempt's audit even when a
+                # newly unavailable host capability refuses the replay.
+                recovery = persisted_cutover(record_store, cutover_plan)
                 if cutover_provider is None and cutover_provider_factory is not None:
                     cutover_provider = cutover_provider_factory(cutover_plan)
                 if cutover_provider is None:
@@ -206,7 +209,6 @@ def execute_odoo_prod_promotion(
             from control_plane.odoo_cutover_plan import cutover_record_id
 
             promotion_record_id = "promotion-cutover-" + cutover_record_id(cutover_plan)
-        recovery = persisted_cutover(record_store, cutover_plan)
         infrastructure_backup = require_production_promotion_backup(
             record_store=record_store,
             product=product,

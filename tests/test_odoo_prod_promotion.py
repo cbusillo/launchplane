@@ -139,7 +139,11 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
             self.addCleanup(provider.engine.dispose)
             plan = provider.cutover
             store = _promotion_store()
-            for step in ("complete", "rolled_back"):
+            for step, bound_provider in (
+                (step, bound_provider)
+                for step in ("complete", "rolled_back")
+                for bound_provider in (None, provider)
+            ):
                 record = OdooCutoverRecord(
                     record_id="fixture-record",
                     plan=plan,
@@ -148,7 +152,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                     step=step,
                 )
                 with (
-                    self.subTest(step=step),
+                    self.subTest(step=step, provider_bound=bound_provider is not None),
                     patch(
                         "control_plane.workflows.odoo_prod_promotion.persisted_cutover",
                         return_value=record,
@@ -157,7 +161,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                         "control_plane.workflows.odoo_prod_promotion.require_production_promotion_backup",
                         side_effect=click.ClickException("fixture refused backup replay"),
                     ),
-                    self.assertRaisesRegex(click.ClickException, "refused backup replay"),
+                    self.assertRaises(click.ClickException),
                 ):
                     execute_odoo_prod_promotion(
                         control_plane_root=Path(directory),
@@ -171,6 +175,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                             backup_record_id=plan.release_id,
                         ),
                         cutover_plan=plan,
+                        cutover_provider=bound_provider,
                     )
                 store.write_promotion_record.assert_not_called()
 
