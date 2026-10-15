@@ -54,6 +54,19 @@ class OdooTestingResources(BaseModel):
         )
 
 
+class GenericWebTestingResources(OdooTestingResources):
+    """New empty storage only; no application or production settings are installed."""
+
+    resource_kind: Literal["generic-web"] = "generic-web"
+
+    @property
+    def volumes(self) -> dict[str, str]:
+        return {
+            "database": f"{self.namespace}-db",
+            "config": f"{self.namespace}-config",
+        }
+
+
 def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingResources) -> bool:
     return (
         evidence.get("testing_resources_ok") == "true"
@@ -112,6 +125,13 @@ def main():
         "ODOO_DB_VOLUME": namespace + "-db",
         "ODOO_LOG_VOLUME": namespace + "-logs",
     }
+    if spec.get("resource_kind") == "generic-web":
+        volumes = {
+            "database": namespace + "-db",
+            "config": namespace + "-config",
+        }
+    elif "resource_kind" in spec:
+        raise RuntimeError("Unsupported testing resource kind")
     if spec["volumes"] != volumes:
         raise RuntimeError("Invalid testing resource names")
     project = spec.get("compose_project", namespace)
