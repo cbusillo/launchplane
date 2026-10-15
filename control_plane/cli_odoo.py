@@ -7,10 +7,9 @@ from pathlib import Path
 from typing import Literal, cast, get_args
 
 import click
-
-from control_plane.odoo_secret_transport import plan_odoo_secret_transport
 from pydantic import ValidationError
 
+from control_plane.odoo_secret_transport import plan_odoo_secret_transport
 from control_plane.cli_shared import (
     DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
     direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,

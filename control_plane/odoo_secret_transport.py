@@ -68,8 +68,6 @@ def plan_odoo_secret_transport(
         )
         target = writes.get(desired_id) or binding_by_id.get(desired_id)
         if binding.binding_key == desired_key:
-            if binding.status != "configured":
-                raise ValueError("Odoo override secret binding is not configured.")
             desired_id = binding.binding_id
         else:
             replacement = binding.model_copy(
@@ -79,9 +77,20 @@ def plan_odoo_secret_transport(
                     "status": "configured",
                 }
             )
+            repaired_target = target
+            if target is not None:
+                # The former relabel helper omitted these fields. Restore only
+                # absent metadata; never replace a destination's differing policy.
+                repaired_target = target.model_copy(
+                    update={
+                        "declared_secret_class": target.declared_secret_class
+                        or binding.declared_secret_class,
+                        "sharing_reason": target.sharing_reason or binding.sharing_reason,
+                    }
+                )
             if (
-                target is not None
-                and target.model_copy(
+                repaired_target is not None
+                and repaired_target.model_copy(
                     update={"created_at": binding.created_at, "updated_at": binding.updated_at}
                 )
                 != replacement
@@ -93,6 +102,8 @@ def plan_odoo_secret_transport(
                 writes[desired_id] = replacement.model_copy(
                     update={"created_at": now, "updated_at": now}
                 )
+            elif repaired_target is not None and repaired_target != target:
+                writes[desired_id] = repaired_target.model_copy(update={"updated_at": now})
             sources[binding.binding_id] = binding
         changes.append(
             {
@@ -157,18 +168,32 @@ def plan_odoo_secret_transport(
             writes[binding.binding_id] = binding.model_copy(
                 update={"status": "disabled", "updated_at": now}
             )
-        if changed:
-            events.append(
-                SecretAuditEvent(
-                    event_id=f"{binding.secret_id}-relabelled-{uuid4().hex}",
-                    secret_id=binding.secret_id,
-                    event_type="relabelled",
-                    recorded_at=now,
-                    actor=source_label,
-                    detail="Odoo secret transport and override references migrated atomically.",
-                    metadata={"source": source_label, "old_binding_id": binding.binding_id},
-                )
+    for change in changes:
+        if change["old_binding_id"] == change["new_binding_id"]:
+            continue
+        binding = sources[change["old_binding_id"]]
+        events.append(
+            SecretAuditEvent(
+                event_id=f"{binding.secret_id}-relabelled-{uuid4().hex}",
+                secret_id=binding.secret_id,
+                event_type="relabelled",
+                recorded_at=now,
+                actor=source_label,
+                detail="Odoo secret transport and override references migrated atomically.",
+                metadata={
+                    "source": source_label,
+                    **{
+                        key: change[key]
+                        for key in (
+                            "old_binding_id",
+                            "old_binding_key",
+                            "new_binding_id",
+                            "new_binding_key",
+                        )
+                    },
+                },
             )
+        )
     secret_ids = {binding.secret_id for binding in sources.values()}
     return OdooSecretTransportPlan(
         record=updated,

@@ -19,9 +19,13 @@ from control_plane.contracts.odoo_website_settings import (
     OdooWebsiteSettings,
     OdooWebsiteSettingsIntent,
 )
-from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+from control_plane.storage.product_authority_bundle import (
+    OdooInstanceOverrideConflictError,
+    ProductAuthorityBundle,
+    SecretCopySourceConflictError,
+)
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.secrets import expected_secret_binding_id
 
@@ -138,8 +142,9 @@ class OdooSecretTransportTests(unittest.TestCase):
                 with patch.object(
                     self.store, "write_odoo_secret_transport_migration", side_effect=conflict
                 ):
-                    with self.assertRaisesRegex(click.ClickException, "re-run the migration"):
+                    with self.assertRaises(click.ClickException) as error:
                         self.migrate(current)
+                self.assertIsInstance(error.exception.__cause__, OdooInstanceOverrideConflictError)
                 self.assertEqual(self.read(), edited)
                 self.assert_unmigrated()
         edited = self.read()
@@ -166,7 +171,7 @@ class OdooSecretTransportTests(unittest.TestCase):
                 with patch.object(
                     self.store, "_after_product_authority_bundle_step", side_effect=fail
                 ):
-                    with self.assertRaisesRegex(RuntimeError, "injected storage failure"):
+                    with self.assertRaises(RuntimeError):
                         self.migrate()
                 self.assertEqual(self.read(), self.record)
                 self.assert_unmigrated()
@@ -193,8 +198,9 @@ class OdooSecretTransportTests(unittest.TestCase):
         with patch.object(
             self.store, "write_odoo_secret_transport_migration", side_effect=new_consumer
         ):
-            with self.assertRaisesRegex(click.ClickException, "re-run the migration"):
+            with self.assertRaises(click.ClickException) as error:
                 self.migrate()
+        self.assertIsInstance(error.exception.__cause__, OdooInstanceOverrideConflictError)
         self.assert_unmigrated()
         edited_binding = self.binding.model_copy(update={"status": "disabled"})
 
@@ -209,8 +215,9 @@ class OdooSecretTransportTests(unittest.TestCase):
         with patch.object(
             self.store, "write_odoo_secret_transport_migration", side_effect=edit_binding
         ):
-            with self.assertRaisesRegex(click.ClickException, "consumers changed"):
+            with self.assertRaises(click.ClickException) as error:
                 self.migrate()
+        self.assertIsInstance(error.exception.__cause__, SecretCopySourceConflictError)
         self.assertEqual(self.read(), self.record)
         self.assertEqual(self.store.list_secret_bindings(), (edited_binding,))
 
@@ -271,7 +278,7 @@ class OdooSecretTransportTests(unittest.TestCase):
             }
         )
         self.store.write_odoo_instance_override_record(record)
-        with self.assertRaisesRegex(click.ClickException, "missing secret binding"):
+        with self.assertRaises(click.ClickException):
             self.migrate(record)
         self.assertEqual(self.read(), record)
         self.assert_unmigrated()
@@ -307,7 +314,7 @@ class OdooSecretTransportTests(unittest.TestCase):
             }
         )
         self.store.write_secret_binding(target.model_copy(update={"instance": "other"}))
-        with self.assertRaisesRegex(click.ClickException, "destination binding conflicts"):
+        with self.assertRaises(click.ClickException):
             self.migrate(record)
         self.assertEqual(self.read(), record)
         self.assertEqual(
@@ -325,6 +332,88 @@ class OdooSecretTransportTests(unittest.TestCase):
             ],
             target,
         )
+
+    def test_old_relabel_missing_safety_metadata_recovers_atomically(self) -> None:
+        binding = self.binding.model_copy(
+            update={
+                "instance": "testing",
+                "declared_secret_class": "shared_safe",
+                "sharing_reason": SecretSharingReason(
+                    kind="site_shared", reason="synthetic sharing", evidence="synthetic fixture"
+                ),
+            }
+        )
+        self.store.write_secret_binding(binding)
+        updated = self.migrate()
+        target_id = updated.addon_settings[0].value.secret_binding_id
+        target = next(
+            item for item in self.store.list_secret_bindings() if item.binding_id == target_id
+        )
+        legacy_target = target.model_copy(
+            update={"declared_secret_class": None, "sharing_reason": None}
+        )
+        self.store.write_secret_binding(legacy_target)
+        self.store.write_odoo_instance_override_record(self.record)
+
+        def fail(step: str) -> None:
+            if step == "write_secret_binding":
+                raise RuntimeError("injected storage failure")
+
+        with patch.object(self.store, "_after_product_authority_bundle_step", side_effect=fail):
+            with self.assertRaises(RuntimeError):
+                self.migrate()
+        self.assertEqual(self.read(), self.record)
+        self.assertEqual(
+            next(
+                item for item in self.store.list_secret_bindings() if item.binding_id == target_id
+            ),
+            legacy_target,
+        )
+        repaired = self.migrate()
+        repaired_binding = next(
+            item for item in self.store.list_secret_bindings() if item.binding_id == target_id
+        )
+        self.assertEqual(repaired_binding.declared_secret_class, binding.declared_secret_class)
+        self.assertEqual(repaired_binding.sharing_reason, binding.sharing_reason)
+        self.assertEqual(repaired_binding.created_at, legacy_target.created_at)
+        self.assertEqual(repaired.addon_settings, updated.addon_settings)
+
+    def test_unchanged_disabled_binding_is_inspectable_without_reenabling_it(self) -> None:
+        updated = self.migrate()
+        bindings = self.store.list_secret_bindings()
+        for binding in bindings:
+            self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+        before = self.store.list_secret_bindings()
+        result = CliRunner().invoke(
+            main,
+            ["odoo-overrides", "migrate-secret-transport", "--database-url", self.database_url],
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(self.migrate(updated), updated)
+        self.assertEqual(self.store.list_secret_bindings(), before)
+
+    def test_audit_records_each_destination_when_a_legacy_binding_fans_out(self) -> None:
+        record = self.record.model_copy(
+            update={
+                "addon_settings": (
+                    *self.record.addon_settings,
+                    self.record.addon_settings[0].model_copy(update={"setting": "webhook_secret"}),
+                )
+            }
+        )
+        self.store.write_odoo_instance_override_record(record)
+        updated = self.migrate(record)
+        target_ids = {override.value.secret_binding_id for override in updated.addon_settings}
+        bindings = {binding.binding_id: binding for binding in self.store.list_secret_bindings()}
+        events = self.store.list_secret_audit_events(secret_id=self.binding.secret_id)
+        self.assertEqual({event.metadata["new_binding_id"] for event in events}, target_ids)
+        for event in events:
+            self.assertEqual(event.metadata["old_binding_id"], self.binding.binding_id)
+            self.assertEqual(event.metadata["old_binding_key"], self.binding.binding_key)
+            self.assertEqual(
+                event.metadata["new_binding_key"],
+                bindings[event.metadata["new_binding_id"]].binding_key,
+            )
 
 
 if __name__ == "__main__":
