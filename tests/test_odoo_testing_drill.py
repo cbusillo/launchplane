@@ -13,6 +13,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetStaffTestingHold,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.odoo_target_replacement_failures import TESTING_DRILL_DATABASE_KEY
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
@@ -901,12 +902,45 @@ class TestingDrillTests(TestingDrillScenario):
         require_drill_checkpoint(self.store, operation)
 
     def test_guarded_worker_preflight_failure_restores_the_untouched_lane(self) -> None:
+        from control_plane.contracts.deployment_record import (
+            DeploymentRecord,
+            ResolvedTargetEvidence,
+        )
+        from control_plane.testing_restore_prerequisite import incomplete_testing_restore
         from control_plane.workflows.odoo_stable_operation_worker import (
             _execute_target_replacement_with_checkpoint,
         )
 
         self.scheduler.run_once()
         operation = self.activate()
+        active = self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context)
+        assert active is not None
+
+        def refuse_before_effects(**_: object) -> None:
+            self.store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="unstarted-drill",
+                    context=self.context,
+                    instance="testing",
+                    source_git_ref=operation.request.source_git_ref,
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="compose", target_id=active.target_id, target_name="fixture"
+                    ),
+                    runtime_source={
+                        "data_source_mode": operation.request.data_source_mode,
+                        TESTING_DRILL_DATABASE_KEY: active.drill_database,
+                    },
+                    deploy=DeploymentEvidence(
+                        status="pending",
+                        deploy_mode="recreate-in-place",
+                        started_at=operation.started_at,
+                        target_name="fixture",
+                        target_type="compose",
+                    ),
+                )
+            )
+            raise ValueError("fixture preflight")
+
         with (
             patch(
                 "control_plane.workflows.odoo_stable_operation_worker.DurableOperationAuthorizationGuard"
@@ -919,7 +953,7 @@ class TestingDrillTests(TestingDrillScenario):
             ),
             patch(
                 "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
-                side_effect=ValueError("fixture preflight"),
+                side_effect=refuse_before_effects,
             ),
         ):
             self.assertTrue(
@@ -942,6 +976,31 @@ class TestingDrillTests(TestingDrillScenario):
                 scope="instance", context_name=self.context, instance_name="testing"
             ),
             (self.runtime,),
+        )
+        self.assertIsNone(
+            incomplete_testing_restore(
+                self.store, context=self.context, instance="testing", generation=self.gen
+            )
+        )
+        for selected in (
+            None,
+            active,
+            active.model_copy(update={"completed_at": self.gen.completed_at}),
+        ):
+            with self.subTest(selected=selected):
+                self.assertIsNotNone(
+                    incomplete_testing_restore(
+                        self.store, context=self.context, instance="testing", generation=selected
+                    )
+                )
+        pending = self.store.read_deployment_record("unstarted-drill")
+        self.store.write_deployment_record(
+            pending.model_copy(update={"runtime_source": {"data_source_mode": "upstream_restore"}})
+        )
+        self.assertIsNotNone(
+            incomplete_testing_restore(
+                self.store, context=self.context, instance="testing", generation=self.gen
+            )
         )
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "fail")

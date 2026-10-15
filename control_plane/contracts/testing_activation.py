@@ -19,6 +19,14 @@ class TestingActivationRefusalCode(StrEnum):
     RECEIPT_UNAVAILABLE = "testing_activation_receipt_unavailable"
     RECIPIENT_UNQUALIFIED = "testing_activation_recipient_unqualified"
     CARRIED_KEYS_UNVERIFIED = "testing_activation_carried_keys_unverified"
+    RECIPIENT_IDENTITY_UNVERIFIED = "testing_activation_recipient_identity_unverified"
+    RECIPIENT_OPTIONS_UNVERIFIED = "testing_activation_recipient_options_unverified"
+    RECIPIENT_SOURCE_UNVERIFIED = "testing_activation_recipient_source_unverified"
+    RECIPIENT_SOURCE_UNMATERIALIZED = "testing_activation_recipient_source_unmaterialized"
+    RECIPIENT_ENVIRONMENT_UNVERIFIED = "testing_activation_recipient_environment_unverified"
+    RECIPIENT_LABELS_UNVERIFIED = "testing_activation_recipient_labels_unverified"
+    RECIPIENT_RENDER_UNVERIFIED = "testing_activation_recipient_render_unverified"
+    RECIPIENT_RENDER_CHANGED = "testing_activation_recipient_render_changed"
 
 
 class TestingActivationRefusal(ValueError):

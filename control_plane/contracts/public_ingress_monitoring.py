@@ -79,6 +79,7 @@ PublicIngressTargetKind = Literal[
     "tls_domain",
 ]
 PublicIngressFailureCode = Literal[
+    "production_delivery_failed",
     "connection_timeout",
     "deploy_fence_held",
     "dns_failure",
@@ -1142,7 +1143,7 @@ def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngres
         "monitoring_intent_changed",
     }:
         return "configuration"
-    if code in {"deploy_fence_held", "provider_check_unavailable"}:
+    if code in {"deploy_fence_held", "provider_check_unavailable", "production_delivery_failed"}:
         return "provider"
     return "unknown"
 
@@ -1150,7 +1151,7 @@ def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngres
 def public_ingress_incident_severity(
     code: PublicIngressFailureCode,
 ) -> PublicIngressIncidentSeverity:
-    if code in {"deploy_fence_held", "tls_expiring"}:
+    if code in {"deploy_fence_held", "tls_expiring", "production_delivery_failed"}:
         return "warning"
     return "critical"
 

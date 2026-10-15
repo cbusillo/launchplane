@@ -200,6 +200,7 @@ class ActivationTests(unittest.TestCase):
                 {"domainId": "retained-origin", "host": retained_origin}
             ]
         self.writes: list[tuple[str, Any]] = []
+        self.materialized: dict[str, str] = {}
         self.projects: list[dict[str, Any]] = []
         self.inspections: list[bool] = []
         self.enterContext(
@@ -386,12 +387,12 @@ class ActivationTests(unittest.TestCase):
         self.inspections.append(any(path == "/api/compose.update" for path, _ in self.writes))
 
     def converted(self, **kwargs: Any) -> str:
-        payload = self.payloads[kwargs["compose_id"]]
-        from control_plane.dokploy.api import parse_dokploy_env_text
-
-        return json.dumps(
-            interpolate(json.loads(payload["composeFile"]), parse_dokploy_env_text(payload["env"]))
-        )
+        source = self.materialized.get(kwargs["compose_id"])
+        if source is None:
+            return "null\n"
+        document = json.loads(source)
+        document.setdefault("networks", {})["dokploy-network"] = {"external": True}
+        return json.dumps(document)
 
     def provider(self, **kwargs: Any) -> Any:
         path, body = kwargs["path"], kwargs.get("payload")
@@ -429,6 +430,9 @@ class ActivationTests(unittest.TestCase):
         if path == "/api/compose.update":
             self.payloads[body["composeId"]].update(body)
             return {}
+        if path == "/api/compose.fetchSourceType":
+            self.materialized[body["composeId"]] = self.payloads[body["composeId"]]["composeFile"]
+            return "raw"
         self.fail(f"Unexpected provider effect: {path}")
 
     def run_activation(self, key: str = "activate") -> Any:
@@ -831,6 +835,181 @@ class ActivationTests(unittest.TestCase):
             self.preparation.original, self.store.list_held_provider_target_reservations()
         )
 
+    def check_lost_materialization(self, *, persisted: bool, rejected: bool = False) -> None:
+        original = self.provider
+        attempts: list[str] = []
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        old_payloads = deepcopy(self.payloads)
+
+        def lost(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.fetchSourceType":
+                record = self.adapter.current()
+                self.assertFalse(record.published)
+                attempts.append(kwargs["payload"]["composeId"])
+                if len(attempts) == 1:
+                    if persisted:
+                        original(**kwargs)
+                    if rejected:
+                        import click
+
+                        raise click.ClickException("Provider rejected the source-fetch request")
+                    raise OSError("Uncertain raw-source fetch reply")
+            return original(**kwargs)
+
+        with patch("control_plane.testing_activation.api.dokploy_request", side_effect=lost):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+            record = self.adapter.current()
+            self.assertEqual(attempts, [record.target_id])
+            writes = deepcopy(self.writes)
+            self.assertEqual(self.run_activation("different-key").response_status_code, 409)
+            self.assertEqual(attempts, [record.target_id])
+            self.assertEqual(self.run_activation().response_status_code, 202)
+            self.assertEqual(attempts, [record.target_id] * (1 if persisted else 2))
+            if persisted:
+                self.assertEqual(self.writes, writes)
+        self.assertTrue(self.adapter.current().published)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            production,
+        )
+        for target_id, payload in old_payloads.items():
+            self.assertEqual(self.payloads[target_id], payload)
+        self.assertIn(
+            self.preparation.original, self.store.list_held_provider_target_reservations()
+        )
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+
+    def test_lost_materialization_reply_adopts_actual_render_without_redispatch(self) -> None:
+        self.check_lost_materialization(persisted=True)
+
+    def test_absent_materialization_can_resume_only_the_original_owned_unused_source(self) -> None:
+        self.check_lost_materialization(persisted=False)
+
+    def test_definite_source_fetch_rejection_can_resume_the_original_key(self) -> None:
+        self.check_lost_materialization(persisted=False, rejected=True)
+
+    def test_crash_after_materialization_phase_save_can_resume_before_any_fetch(self) -> None:
+        original = self.store.write_testing_activation
+
+        def crash(**kwargs: Any) -> Any:
+            result = original(**kwargs)
+            if any(path == "/api/compose.update" for path, _ in self.writes):
+                raise OSError("Process interrupted after persisted phase, before fetch")
+            return result
+
+        with patch.object(self.store, "write_testing_activation", side_effect=crash):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertEqual(self.materialized, {})
+        self.assertFalse(any(path == "/api/compose.fetchSourceType" for path, _ in self.writes))
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            [
+                body["composeId"]
+                for path, body in self.writes
+                if path == "/api/compose.fetchSourceType"
+            ],
+            [self.adapter.current().target_id],
+        )
+
+    def test_refused_pre_fetch_checkpoint_can_resume_without_false_dispatch(self) -> None:
+        original = self.store.checkpoint_mutation_provider_effect
+
+        def refused(**kwargs: Any) -> Any:
+            if any(path == "/api/compose.update" for path, _ in self.writes):
+                raise OSError("Checkpoint refused before first source fetch")
+            return original(**kwargs)
+
+        with patch.object(self.store, "checkpoint_mutation_provider_effect", side_effect=refused):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertEqual(self.materialized, {})
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            [
+                body["composeId"]
+                for path, body in self.writes
+                if path == "/api/compose.fetchSourceType"
+            ],
+            [self.adapter.current().target_id],
+        )
+
+    def check_recipient_drift_refuses_materialization(
+        self,
+        *,
+        dispatched: bool,
+    ) -> None:
+        original = self.provider
+
+        def lost_update(**kwargs: Any) -> Any:
+            if dispatched and kwargs["path"] == "/api/compose.fetchSourceType":
+                raise OSError("Uncertain source fetch without a visible file")
+            value = original(**kwargs)
+            if not dispatched and kwargs["path"] == "/api/compose.update":
+                raise OSError("Legacy interruption after provider configuration")
+            return value
+
+        with patch("control_plane.testing_activation.api.dokploy_request", side_effect=lost_update):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        record = self.adapter.current()
+        payload = deepcopy(self.payloads[record.target_id])
+        writes = deepcopy(self.writes)
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        for drift in (
+            {"appName": "production-recipient"},
+            {"serverId": "foreign-server"},
+            {"environmentId": "foreign-environment"},
+            {"deployments": [{"status": "running"}]},
+            {"domains": [{"host": "production.example.invalid"}]},
+            {"sourceType": "github"},
+            {"autoDeploy": True},
+            {"env": payload["env"] + "\nPRODUCTION_PASSWORD=private-fixture"},
+        ):
+            with self.subTest(drift=next(iter(drift))):
+                self.payloads[record.target_id] = {**deepcopy(payload), **drift}
+                self.assertEqual(self.run_activation().response_status_code, 409)
+                self.assertEqual(self.writes, writes)
+                self.assertEqual(self.materialized, {})
+                self.assertFalse(self.adapter.current().published)
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="prod"
+                    ),
+                    production,
+                )
+                self.preparation.assert_retained()
+        self.payloads[record.target_id] = payload
+        unsafe = json.loads(payload["composeFile"])
+        unsafe["volumes"]["database"]["name"] = "production-db"
+        self.materialized[record.target_id] = json.dumps(unsafe)
+        self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertEqual(self.writes, writes)
+        self.assertFalse(self.adapter.current().published)
+        self.preparation.assert_retained()
+        self.materialized.clear()
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            [
+                body["composeId"]
+                for path, body in self.writes
+                if path == "/api/compose.fetchSourceType"
+            ],
+            [record.target_id],
+        )
+        self.assertEqual(sum(path == "/api/compose.update" for path, _ in self.writes), 1)
+
+    def test_configured_recipient_drift_refuses_materialization_and_preserves_production(
+        self,
+    ) -> None:
+        self.check_recipient_drift_refuses_materialization(dispatched=False)
+
+    def test_uncertain_materialization_drift_refuses_re_fetch_and_preserves_production(
+        self,
+    ) -> None:
+        self.check_recipient_drift_refuses_materialization(dispatched=True)
+
     def test_unsafe_or_production_equal_carried_key_refuses_without_provider_writes(self) -> None:
         from control_plane.contracts.secret_record import SecretBinding, SecretRecord
         from control_plane.contracts.runtime_key_safety_policy import (
@@ -1155,8 +1334,9 @@ class ActivationTests(unittest.TestCase):
             )
 
         for instance in ("prod", "preview-1"):
-            response = asyncio.run(post({**draft, "instance": instance}))
-            self.assertIn(response.status_code, (400, 422), response.text)
+            for mode in ("dry-run", "readback"):
+                response = asyncio.run(post({**draft, "instance": instance, "mode": mode}))
+                self.assertIn(response.status_code, (400, 422), response.text)
         self.assertEqual(self.writes, [])
         planned = asyncio.run(post(draft))
         self.assertEqual(planned.status_code, 202, planned.text)
@@ -1182,6 +1362,287 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(repeated.status_code, 202, repeated.text)
         readback = asyncio.run(post({**draft, "mode": "readback"}))
         self.assertEqual(readback.status_code, 409, readback.text)
+
+    def test_missing_source_readback_after_unknown_materialization_has_no_effects(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        original = self.provider
+        private = "private-source-fetch-sentinel"
+
+        def unknown(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.fetchSourceType":
+                raise OSError(private)
+            return original(**kwargs)
+
+        with patch("control_plane.testing_activation.api.dokploy_request", side_effect=unknown):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        record = self.adapter.current()
+        writes, inspections = deepcopy(self.writes), list(self.inspections)
+        fences = self.store.list_held_provider_target_reservations()
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        response = asyncio.run(
+            request(
+                app,
+                "POST",
+                ROUTE.format(product=self.product),
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload=self.request.model_copy(
+                    update={"mode": "readback", "reviewed_plan_sha256": ""}
+                ).model_dump(mode="json"),
+            )
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            TestingActivationRefusalCode.RECIPIENT_SOURCE_UNMATERIALIZED.value,
+        )
+        self.assertNotIn(private, response.text)
+        self.assertEqual(self.adapter.current(), record)
+        self.assertEqual(self.writes, writes)
+        self.assertEqual(self.inspections, inspections)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            production,
+        )
+        self.preparation.assert_retained()
+
+    def test_unpublished_readback_diagnoses_qualification_without_effects_or_publication(
+        self,
+    ) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        private = "private-provider-diagnostic-sentinel"
+        with patch.object(
+            TestingActivationAdapter, "verify_provider", side_effect=ValueError(private)
+        ):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertEqual(record.phase, "configure_new_recipient")
+        payload = deepcopy(self.payloads[record.target_id])
+        self.materialized[record.target_id] = payload["composeFile"]
+        converted = json.loads(self.converted(compose_id=record.target_id))
+        unsafe_network = deepcopy(converted)
+        unsafe_network["networks"] = {"default": {"external": True}}
+        changed_command = deepcopy(converted)
+        changed_command["services"]["web"]["command"] = private
+        routed = deepcopy(converted)
+        routed["services"]["web"]["labels"] = {"traefik.enable": "true"}
+        malformed_mounts = deepcopy(converted)
+        malformed_mounts["services"]["web"]["volumes"] = 5
+        malformed_environment = deepcopy(converted)
+        malformed_environment["services"]["web"]["environment"] = [1]
+        joined_network = deepcopy(converted)
+        joined_network["services"]["web"]["networks"] = ["dokploy-network"]
+        interpolated_network = deepcopy(converted)
+        interpolated_network["services"]["web"]["networks"] = [
+            "${ROUTING_NETWORK:-dokploy-network}"
+        ]
+        aliased_network = deepcopy(converted)
+        aliased_network["networks"]["default"] = {"name": "dokploy-network"}
+        changed_network = deepcopy(converted)
+        changed_network["networks"]["dokploy-network"]["name"] = "foreign-network"
+        foreign_network = deepcopy(converted)
+        foreign_network["networks"]["foreign-network"] = {"external": True}
+        code = TestingActivationRefusalCode
+        cases: tuple[tuple[dict[str, Any], Any, TestingActivationRefusalCode], ...] = (
+            ({"appName": private}, None, code.RECIPIENT_IDENTITY_UNVERIFIED),
+            ({"autoDeploy": True}, None, code.RECIPIENT_OPTIONS_UNVERIFIED),
+            ({"composeFile": private}, None, code.RECIPIENT_SOURCE_UNVERIFIED),
+            (
+                {"env": payload["env"] + "\nUNMANAGED=" + private},
+                None,
+                code.RECIPIENT_ENVIRONMENT_UNVERIFIED,
+            ),
+            ({}, routed, code.RECIPIENT_LABELS_UNVERIFIED),
+            ({}, unsafe_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, joined_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, interpolated_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, aliased_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, changed_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, foreign_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, "null", code.RECIPIENT_SOURCE_UNMATERIALIZED),
+            ({}, "services: [" + private, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, {"services": {"web": private}}, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, malformed_mounts, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, malformed_environment, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, changed_command, code.RECIPIENT_RENDER_CHANGED),
+            ({}, ValueError(private), code.DEPENDENCY_UNVERIFIED),
+            ({}, None, code.RECIPIENT_UNQUALIFIED),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        draft = self.request.model_copy(
+            update={"mode": "readback", "reviewed_plan_sha256": ""}
+        ).model_dump(mode="json")
+        writes, inspections = deepcopy(self.writes), list(self.inspections)
+        fences = self.store.list_held_provider_target_reservations()
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        reservation = self.store.read_idempotency_record(
+            scope=self.scope,
+            route_path=ROUTE.format(product=self.product),
+            idempotency_key="activate",
+        )
+        for updates, render, expected_code in cases:
+            with self.subTest(category=expected_code):
+                self.payloads[record.target_id] = {**deepcopy(payload), **updates}
+                provider_render = (
+                    patch(
+                        "control_plane.testing_activation.compose.fetch_dokploy_converted_compose_file",
+                        side_effect=render,
+                    )
+                    if isinstance(render, Exception)
+                    else patch(
+                        "control_plane.testing_activation.compose.fetch_dokploy_converted_compose_file",
+                        return_value=(
+                            render
+                            if isinstance(render, str)
+                            else json.dumps(render if render is not None else converted)
+                        ),
+                    )
+                )
+                with provider_render:
+                    response = asyncio.run(
+                        request(
+                            app,
+                            "POST",
+                            ROUTE.format(product=self.product),
+                            headers={"Authorization": "Bearer local-operator-token"},
+                            payload=draft,
+                        )
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], expected_code.value)
+                self.assertNotIn(private, response.text)
+                self.assertEqual(self.adapter.current(), record)
+                self.assertEqual(self.writes, writes)
+                self.assertEqual(self.inspections, inspections)
+                self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
+                self.assertEqual(
+                    self.store.read_idempotency_record(
+                        scope=self.scope,
+                        route_path=ROUTE.format(product=self.product),
+                        idempotency_key="activate",
+                    ),
+                    reservation,
+                )
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ),
+                    self.preparation.retained,
+                )
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="prod"
+                    ),
+                    production,
+                )
+        self.payloads[record.target_id] = payload
+
+        # Ownership/request checks and the recorded phase bound diagnosis before
+        # any provider fetch, even when a recipient id is already recorded.
+        denied: tuple[tuple[dict[str, Any], dict[str, Any], TestingActivationRefusalCode], ...] = (
+            ({}, {"reason": private}, code.QUALIFICATION_UNVERIFIED),
+            ({"phase": "recipient_ready"}, {}, code.RECIPIENT_UNQUALIFIED),
+        )
+        for updates, request_changes, expected_code in denied:
+            with self.subTest(record_changes=updates, request_changes=request_changes):
+                retained = record.model_copy(update=updates)
+                self.store.write_testing_activation(
+                    expected=record.model_dump(mode="json"),
+                    replacement=retained.model_dump(mode="json"),
+                )
+                with patch(
+                    "control_plane.testing_activation.api.fetch_dokploy_target_payload",
+                    side_effect=AssertionError(
+                        "Unqualified diagnosis must not fetch a provider target"
+                    ),
+                ):
+                    response = asyncio.run(
+                        request(
+                            app,
+                            "POST",
+                            ROUTE.format(product=self.product),
+                            headers={"Authorization": "Bearer local-operator-token"},
+                            payload={**draft, **request_changes},
+                        )
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], expected_code.value)
+                self.assertNotIn(private, response.text)
+                self.assertEqual(
+                    activation_record(self.store, self.product, self.context), retained
+                )
+                self.assertEqual(self.writes, writes)
+                self.assertEqual(self.inspections, inspections)
+                self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
+                self.store.write_testing_activation(
+                    expected=retained.model_dump(mode="json"),
+                    replacement=record.model_dump(mode="json"),
+                )
+
+        for identity_changes in (
+            {"local_operator_subject": private},
+            {"local_operator_token_label": private},
+        ):
+            with self.subTest(identity_changes=identity_changes):
+                foreign_app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(),
+                    bearer_identity_config=_local_operator_bearer_config(
+                        token_label="local-owner-write"
+                    ).model_copy(update=identity_changes),
+                    record_store_factory=lambda: self.store,
+                    control_plane_root_path=self.root,
+                )
+                with patch(
+                    "control_plane.testing_activation.api.fetch_dokploy_target_payload",
+                    side_effect=AssertionError("Foreign custody must refuse before provider reads"),
+                ):
+                    response = asyncio.run(
+                        request(
+                            foreign_app,
+                            "POST",
+                            ROUTE.format(product=self.product),
+                            headers={"Authorization": "Bearer local-operator-token"},
+                            payload=draft,
+                        )
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], code.QUALIFICATION_UNVERIFIED.value
+                )
+                self.assertNotIn(private, response.text)
+                self.assertEqual(activation_record(self.store, self.product, self.context), record)
+                self.assertEqual(self.writes, writes)
+                self.assertEqual(self.inspections, inspections)
+                self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
 
     def test_route_reports_real_carried_key_refusal_before_provider_effects(self) -> None:
         import asyncio

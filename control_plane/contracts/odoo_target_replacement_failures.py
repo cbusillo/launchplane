@@ -17,6 +17,8 @@ DEPLOY_BLOCKED_PREFIX = "deploy_blocked."
 # Any other failure inside the deploy step, after the checks passed.
 DEPLOY_FAILED_CODE = "deploy_failed"
 _DEPLOY_FAILED_DESCRIPTION = "The deploy step failed."
+TESTING_RESTORE_REQUIRED_CODE = "testing_restore_required"
+TESTING_DRILL_DATABASE_KEY = "testing_drill_database"
 
 DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
     "backup_restore_proof_required": "The exact backup and restore proof is missing, invalid or changed.",
@@ -66,6 +68,9 @@ DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
     "override_secret_keys_missing": (
         "The lane's setting overrides need secrets that the deploy does not carry."
     ),
+    "fresh_testing_intent_invalid": (
+        "The fresh testing restore intent must use exact modules and keep live connections disabled."
+    ),
 }
 
 # LiveTargetRuntimeError codes, mapped onto the checks above.
@@ -99,6 +104,8 @@ def deploy_failure_description(code: str) -> str:
     """The fixed description of ``code``, or "" when Launchplane does not describe it here."""
     if code == DEPLOY_FAILED_CODE:
         return _DEPLOY_FAILED_DESCRIPTION
+    if code == TESTING_RESTORE_REQUIRED_CODE:
+        return "Testing needs a completed governed restore before ordinary maintenance."
     if not code.startswith(DEPLOY_BLOCKED_PREFIX):
         return ""
     return DEPLOY_BLOCKED_DESCRIPTIONS.get(code.removeprefix(DEPLOY_BLOCKED_PREFIX), "")
@@ -106,3 +113,12 @@ def deploy_failure_description(code: str) -> str:
 
 class OdooProviderEffectUncertainError(RuntimeError):
     """A release provider write may still be running; retain its lane for reconciliation."""
+
+
+class OdooFreshTestingIntentRefusedError(OdooProviderSafetyRefusedError):
+    """A predictable fresh-copy refusal, with no override values in its public detail."""
+
+    code = deploy_blocked_code("fresh_testing_intent_invalid")
+
+    def __init__(self) -> None:
+        super().__init__(deploy_failure_description(self.code))

@@ -93,12 +93,20 @@ def register_testing_activation_routes(
 
                 def readback() -> dict[str, object]:
                     record = adapter.current()
+                    adapter.require_unchanged(record)
                     if not record.published:
+                        # Diagnose the caller's persisted configuration without
+                        # recovering placement, inspecting host resources or
+                        # publishing/adopting an interrupted operation.
+                        if (
+                            record.phase in {"configure_new_recipient", "materialize_new_recipient"}
+                            and record.target_id
+                        ):
+                            adapter.verify_provider(record)
                         raise TestingActivationRefusal(
                             "Activation has no qualified published recipient.",
                             code=TestingActivationRefusalCode.RECIPIENT_UNQUALIFIED,
                         )
-                    adapter.require_unchanged(record)
                     adapter.verify_provider(record)
                     return adapter.result(record)
 

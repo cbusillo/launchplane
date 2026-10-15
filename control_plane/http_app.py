@@ -1,3 +1,7 @@
+from control_plane.dokploy_target_comparison import (
+    DokployTargetComparisonEvidenceUnavailableError,
+    require_provider_target_expectation,
+)
 from control_plane import odoo_website_settings as control_plane_odoo_website_settings
 from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
@@ -87,9 +91,6 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
     require_empty_testing_target_creation,
-)
-from control_plane.workflows.dokploy_target_adoption import (
-    DokployTargetComparisonEvidenceUnavailableError,
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_public_hosts
@@ -4478,7 +4479,38 @@ def create_launchplane_fastapi_app(
     ) -> Response:
         clear_authz_evaluation()
         try:
-            response = cast(Response, await call_next(request))
+            try:
+                response = cast(Response, await call_next(request))
+            except Exception:
+                scope = getattr(request.state, "production_delivery_scope", None)
+                if scope is None or scope[2] != "prod":
+                    raise
+                trace_id = next_trace_id()
+                logging.exception("Production delivery crashed; trace_id=%s", trace_id)
+                from control_plane.production_delivery_monitor import (
+                    record_rejected_production_request,
+                )
+
+                try:
+                    await record_rejected_production_request(
+                        request,
+                        get_record_store(),
+                        reason="delivery_failed",
+                        trace_id=trace_id,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Could not persist production delivery crash; trace_id=%s", trace_id
+                    )
+                return JSONResponse(
+                    status_code=500,
+                    content=LaunchplaneErrorResponse(
+                        trace_id=trace_id,
+                        error=LaunchplaneErrorDetail(
+                            code="delivery_failed", message="Production delivery failed."
+                        ),
+                    ).model_dump(mode="json"),
+                )
             if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
                 request.url.path in _AUTHZ_NO_STORE_ROUTES
                 or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
@@ -10008,6 +10040,21 @@ def create_launchplane_fastapi_app(
             )
         cancelled_at = utc_now_timestamp()
         if operation.status == "reconciliation_required":
+            if read_method_name == "read_odoo_stable_target_replacement_operation_record":
+                from control_plane.testing_replacement_recovery import service_testing_operation
+
+                if service_testing_operation(operation):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="service_testing_recovery_required",
+                        message=(
+                            "Held service-owned testing replacements require worker recovery with "
+                            "execution exclusion and original-effect proof, or a verified isolated "
+                            "replacement generation. Read the operation's recovery classification; "
+                            "a caller attestation cannot release this fence."
+                        ),
+                    )
             reconciliation_attestation = cancellation_request.reconciliation_attestation
             if reconciliation_attestation is None:
                 raise _launchplane_http_error(
@@ -10563,6 +10610,14 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+        request.state.production_delivery_scope = (
+            apply_request.product,
+            lane.context,
+            lane.instance,
+        )
+        request.state.production_delivery_candidate = (
+            apply_request.replacement.artifact_id or apply_request.replacement.source_git_ref
+        )
         normalized_idempotency_key = idempotency_key.strip()
         if not normalized_idempotency_key:
             raise _launchplane_http_error(
@@ -10894,6 +10949,13 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+        request.state.production_delivery_scope = (
+            authorization_product,
+            promotion_request.promotion.context,
+            promotion_request.promotion.to_instance,
+        )
+        request.state.production_delivery_candidate = promotion_request.promotion.artifact_id
+
         (
             normalized_idempotency_key,
             payload_fingerprint,
@@ -11180,6 +11242,13 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
+
+        request.state.production_delivery_scope = (
+            authorization_product,
+            run_request.run.context,
+            run_request.run.to_instance,
+        )
+        request.state.production_delivery_candidate = run_request.run.expected_artifact_id
 
         (
             normalized_idempotency_key,
@@ -25594,11 +25663,33 @@ def create_launchplane_fastapi_app(
                         context_name=setup_request.context,
                         instance_name=setup_request.instance,
                     )
-                    authorized = (
-                        authorized
-                        and tracked_provider.to_deployed_target_reference()
-                        == setup_request.expected_current_provider_target
-                    )
+                    if setup_request.operation == "repair-domain-authority" and authorized:
+                        try:
+                            require_provider_target_expectation(
+                                current=tracked_provider,
+                                expected=setup_request.expected_current_provider_target,
+                                fingerprint=setup_request.expected_current_provider_target_fingerprint,
+                                target=database_store.read_dokploy_target_record(
+                                    context_name=setup_request.context,
+                                    instance_name=setup_request.instance,
+                                ),
+                                target_id=tracked_id,
+                            )
+                        except DokployTargetComparisonEvidenceUnavailableError as error:
+                            raise _launchplane_http_error(
+                                status_code=400,
+                                trace_id=trace_id,
+                                code="dokploy_target_comparison_evidence_unavailable",
+                                message=str(error),
+                            ) from error
+                        except ValueError:
+                            authorized = False
+                    else:
+                        authorized = (
+                            authorized
+                            and tracked_provider.to_deployed_target_reference()
+                            == setup_request.expected_current_provider_target
+                        )
                 except FileNotFoundError:
                     authorized = False
         if not authorized:
@@ -29538,6 +29629,14 @@ def create_launchplane_fastapi_app(
             records=records if isinstance(records, dict) else None,
             authz=authz if isinstance(authz, dict) else None,
         )
+        from control_plane.production_delivery_monitor import record_rejected_production_request
+
+        try:
+            await record_rejected_production_request(
+                request, get_record_store(), reason=code, trace_id=trace_id
+            )
+        except Exception:
+            logging.exception("Could not persist production delivery alert; trace_id=%s", trace_id)
         response = JSONResponse(
             status_code=http_error.status_code,
             content=payload.model_dump(mode="json", exclude_none=True),

@@ -57,11 +57,29 @@ ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES: frozenset[
 # Env-key names, never values: safe to copy onto product-readable records. The same
 # rule as a deployment record's failure keys, so the two never disagree.
 ERROR_DETAIL_KEYS_MAX = ENV_KEY_NAMES_MAX
+TESTING_EXECUTION_FAILURE_KEY = "execution_failure_json"
 
 
 def safe_error_detail_keys(keys: Iterable[object]) -> tuple[str, ...]:
     """The env-key names among ``keys``, sorted and unique, capped; anything else dropped."""
     return env_key_names(keys)
+
+
+class OdooTargetReplacementExecutionFailure(BaseModel):
+    """Execution evidence survives a separate provider-recovery disposition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error_code: str = ""
+    error_message: str = ""
+    error_detail_keys: tuple[str, ...] = ()
+    deployment_record_id: str = ""
+    result: OdooStableTargetReplacementApplyResult | None = None
+
+    @model_validator(mode="after")
+    def _validate_detail_keys(self) -> "OdooTargetReplacementExecutionFailure":
+        self.error_detail_keys = safe_error_detail_keys(self.error_detail_keys)
+        return self
 
 
 class OdooStableTargetReplacementOperationRecord(BaseModel):
@@ -103,6 +121,19 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     disposable_supersession: DisposableTestingSupersession | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @property
+    def execution_failure(self) -> OdooTargetReplacementExecutionFailure | None:
+        # Existing journal storage is intentionally extensible. Older service
+        # images can still read this row after an emergency rollback.
+        encoded = (
+            self.recovery_journal.inspection.get(TESTING_EXECUTION_FAILURE_KEY)
+            if self.recovery_journal
+            else None
+        )
+        return (
+            OdooTargetReplacementExecutionFailure.model_validate_json(encoded) if encoded else None
+        )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OdooStableTargetReplacementOperationRecord":

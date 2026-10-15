@@ -87,13 +87,29 @@ reservation. The webhook request never waits on a deploy.
     upstream response text and API paths. Missing evidence
     leaves the lane unchanged with a recorded reason.
   - If testing already runs the desired artifact, stop.
+  - Odoo existing-data reconciliation waits with `testing_restore_required` if
+    this target's latest attempted restore lacks completion proof. A later failed
+    maintenance deploy or a newer artifact cannot repair that missing data.
+    Complete a governed target replacement with `data_source_mode=upstream_restore`,
+    or prepare an isolated fresh testing generation through the supported bootstrap
+    path. These remain separate operations with their normal safety checks; the
+    automatic deploy does not create an empty database or replay the failed restore.
+    Drill records name their selected database. When a no-effect drill restores
+    the prior completed generation on the same target, its unused candidate
+    database does not hold maintenance of the restored selection. Untagged
+    historical restore records still require completion proof.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
     the artifact id, so a crashed or repeated reconcile can't queue it twice.
   - An active attempt (including one awaiting provider reconciliation) is
     reported, never bypassed. When the last attempt ended (failed, cancelled,
     or passed but rolled back) and testing still differs, the next attempt's
-    key names the attempt before it. After three failed attempts of one
+    key names the attempt before it. A testing replacement retains its original
+    execution failure and deployment record separately from a provider-recovery
+    disposition. Recovery cancellation after observed provider quiescence does not
+    replace that failure with a generic cancellation reason. Structured operation
+    reads identify Launchplane's recovery cancellation without exposing caller or
+    provider free text. After three failed attempts of one
     artifact the reconcile fails until a newer build.
   - That operation already runs Odoo post-deploy, so there is no separate
     post-deploy step.
@@ -715,9 +731,31 @@ qualification before broad activation; this source proof does not establish them
 
 Launchplane's existing stable-operation worker inspects stranded replacements
 from its own event reconciler. Recovery applies only to testing,
-`recreate-in-place`, existing-data attempts with the service reconcile grant.
+`recreate-in-place`, existing-data or upstream-restore attempts with the service
+reconcile grant.
 Production, Client releases and caller-started operations keep their existing
 recovery rules.
+Those other manual cancellation routes trust the authorized caller's external
+provider attestation; timestamp validation alone is not service-owned inspection
+or proof that an external executor has stopped.
+
+Manual cancellation of a held service-owned testing replacement returns
+`409 service_testing_recovery_required`. A caller's timestamped provider
+attestation cannot substitute for the worker's execution exclusion and
+original-effect proof. Storage also refuses cancellation of these held records
+without the expected original record used by service recovery. Pending
+operations remain cancellable before execution, and terminal cancellations
+remain idempotent.
+
+To continue, read the operation GET's recovery classification. The existing
+stable-operation worker performs recovery when it can gather fresh proof under
+the execution lock; no manual safe-release assertion is needed. When original
+proof is missing, use the supported [isolated testing-generation
+replacement](disposable-lanes.md#fresh-odoo-testing-replacement-resources) with its
+captured old-target custody and current isolation evidence. This records
+supersession rather than asserting that old effects were safe. Until either
+path's prerequisites are met, the old operation remains fenced. These paths do
+not require a new cancellation grant or an alternate workflow identity.
 
 The worker holds an operation execution lock through provider effects and local
 publication. Each provider mutation first records a value-free dispatch intent
