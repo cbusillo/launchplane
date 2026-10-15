@@ -25,7 +25,9 @@ from control_plane.odoo_product_driver_http import (
 )
 from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
+    OdooPostDeployResult,
     execute_odoo_post_deploy,
+    observe_odoo_connection_isolation,
 )
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
@@ -49,7 +51,8 @@ class ConnectionIsolationApplyAdapter:
     instance: str
     trace_id: str
     reviewed_plan_sha256: str
-    execute: Callable[[Callable[[], None]], tuple[dict[str, object], dict[str, object]]]
+    execute: Callable[[Callable[[str], None], str], tuple[dict[str, object], dict[str, object]]]
+    observation: Callable[[str, str], ProviderObservation]
 
     def target_key(self) -> str:
         return f"odoo-connection-isolation:{self.product}:{self.context}:{self.instance}"
@@ -60,9 +63,9 @@ class ConnectionIsolationApplyAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        # A passing DB read cannot prove the previous web/schedule outcome.
-        # Retain the original fence; an uncertain repair is never blindly retried.
-        return ProviderObservation(outcome="unknown")
+        if reconciliation_key != self.reviewed_plan_sha256:
+            return ProviderObservation(outcome="unknown")
+        return self.observation(provider_operation_key, provider_effect_phase)
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -70,15 +73,15 @@ class ConnectionIsolationApplyAdapter:
         effect_started = False
         checkpoint_entered = False
 
-        def before_mutation() -> None:
+        def before_mutation(phase: str = "connection-isolation") -> None:
             nonlocal effect_started, checkpoint_entered
             checkpoint_entered = True
             lease.assert_current()
-            lease.checkpoint_effect("connection-isolation")
+            lease.checkpoint_effect(phase)
             effect_started = True
 
         try:
-            records, result = self.execute(before_mutation)
+            records, result = self.execute(before_mutation, provider_operation_key)
         except Exception as error:
             if not checkpoint_entered:
                 raise ProviderMutationRejectedError(error) from error
@@ -235,7 +238,8 @@ def execute_odoo_post_deploy_result(
     control_plane_root: Path,
     record_store: object,
     request: OdooPostDeployEnvelope,
-    before_connection_isolation_mutation: Callable[[], None] | None = None,
+    before_connection_isolation_mutation: Callable[[str], None] | None = None,
+    connection_isolation_operation_key: str = "",
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_odoo_post_deploy(
         control_plane_root=control_plane_root,
@@ -244,6 +248,8 @@ def execute_odoo_post_deploy_result(
         # This command reapplies settings; it never selects a forward artifact.
         allow_historical_sender_contract=True,
         before_connection_isolation_mutation=before_connection_isolation_mutation,
+        connection_isolation_operation_key=connection_isolation_operation_key,
+        connection_isolation_product=request.product,
     )
     records: dict[str, object] = {
         "transition": (
@@ -251,6 +257,45 @@ def execute_odoo_post_deploy_result(
         )
     }
     return records, cast(dict[str, object], driver_result.model_dump(mode="json"))
+
+
+def observe_odoo_connection_isolation_result(
+    *,
+    control_plane_root: Path,
+    request: OdooPostDeployEnvelope,
+    provider_operation_key: str,
+    provider_effect_phase: str,
+    trace_id: str,
+) -> ProviderObservation:
+    observed = observe_odoo_connection_isolation(
+        control_plane_root=control_plane_root,
+        request=request.post_deploy,
+        provider_operation_key=provider_operation_key,
+        provider_effect_phase=provider_effect_phase,
+    )
+    if observed.outcome != "present":
+        return ProviderObservation(outcome="unknown")
+    result = OdooPostDeployResult(
+        context=request.post_deploy.context,
+        instance=request.post_deploy.instance,
+        phase=request.post_deploy.phase,
+        post_deploy_status="pass" if observed.passed else "fail",
+        override_evidence=observed.evidence,
+        error_message=""
+        if observed.passed
+        else "The original repair did not pass; review a fresh dry-run before a new repair.",
+    )
+    return ProviderObservation(
+        outcome="present",
+        response_status_code=202,
+        response_payload=provider_operation_response_payload(
+            trace_id=trace_id,
+            records={
+                "transition": f"odoo-post-deploy:{result.context}:{result.instance}:{result.phase}"
+            },
+            result=result.model_dump(mode="json"),
+        ),
+    )
 
 
 def write_odoo_config_parameter_override_result(

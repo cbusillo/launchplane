@@ -26,7 +26,11 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
-from control_plane.dokploy.connection_isolation import run_connection_isolation
+from control_plane.dokploy.connection_isolation import (
+    ConnectionIsolationObservation,
+    observe_connection_isolation_operation,
+    run_connection_isolation,
+)
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
@@ -59,6 +63,7 @@ class OdooPostDeployRequest(BaseModel):
     connection_isolation: OdooConnectionIsolationMode | None = None
     reviewed_dry_run: bool = False
     reviewed_plan_sha256: str = ""
+    reviewed_resource_sha256: str = ""
     reason: str = Field(default="", max_length=500)
 
     @model_validator(mode="after")
@@ -77,6 +82,7 @@ class OdooPostDeployRequest(BaseModel):
             if self.connection_isolation == "apply" and (
                 not self.reviewed_dry_run
                 or len(self.reviewed_plan_sha256) != 64
+                or len(self.reviewed_resource_sha256) != 64
                 or not self.reason.strip()
             ):
                 raise ValueError("Connection isolation apply requires a reviewed dry-run.")
@@ -189,6 +195,29 @@ def _resolve_compose_target_definition(
     return target_definition
 
 
+def observe_odoo_connection_isolation(
+    *,
+    control_plane_root: Path,
+    request: OdooPostDeployRequest,
+    provider_operation_key: str,
+    provider_effect_phase: str,
+) -> ConnectionIsolationObservation:
+    try:
+        target = _resolve_compose_target_definition(
+            control_plane_root=control_plane_root, request=request
+        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        return observe_connection_isolation_operation(
+            host=host,
+            token=token,
+            target_definition=target,
+            provider_operation_key=provider_operation_key,
+            provider_effect_phase=provider_effect_phase,
+        )
+    except (FileNotFoundError, click.ClickException, ValueError):
+        return ConnectionIsolationObservation("unknown", {})
+
+
 def execute_odoo_post_deploy(
     *,
     control_plane_root: Path,
@@ -201,7 +230,9 @@ def execute_odoo_post_deploy(
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
-    before_connection_isolation_mutation: Callable[[], None] | None = None,
+    before_connection_isolation_mutation: Callable[[str], None] | None = None,
+    connection_isolation_operation_key: str = "",
+    connection_isolation_product: str = "",
 ) -> OdooPostDeployResult:
     if request.connection_isolation is not None:
         target = _resolve_compose_target_definition(
@@ -217,6 +248,9 @@ def execute_odoo_post_deploy(
                 mode=request.connection_isolation,
                 reviewed_plan_sha256=request.reviewed_plan_sha256,
                 before_mutation=before_connection_isolation_mutation,
+                reviewed_resource_sha256=request.reviewed_resource_sha256,
+                provider_operation_key=connection_isolation_operation_key,
+                expected_product=connection_isolation_product,
             )
         except dokploy_post_deploy.OdooPostDeployReadbackFailure as error:
             return OdooPostDeployResult(

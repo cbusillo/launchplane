@@ -57842,6 +57842,11 @@
                         "title": "Reviewed Plan Sha256",
                         "type": "string"
                       },
+                      "reviewed_resource_sha256": {
+                        "default": "",
+                        "title": "Reviewed Resource Sha256",
+                        "type": "string"
+                      },
                       "schema_version": {
                         "default": 1,
                         "minimum": 1,

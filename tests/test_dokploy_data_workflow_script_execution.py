@@ -18,7 +18,8 @@ import textwrap
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
+from tests.test_connection_isolation_qualification import inventory_rows, resource_fixture
 from unittest.mock import patch
 
 from control_plane import dokploy as control_plane_dokploy
@@ -43,6 +44,7 @@ WEB_CONTAINER_ID = "web-id"
 PRODUCTION_VALUE = "production-secret-value"
 
 _FAKE_DOCKER = """\
+import json
 import os
 import subprocess
 import sys
@@ -68,9 +70,31 @@ def main(argv):
             prefix = "label=com.docker.compose.service="
             if argument.startswith(prefix):
                 print(argument[len(prefix):] + "-id")
+                return 0
+        print("web-id\\ndatabase-id\\nscript-runner-id")
+        return 0
+    if command in ("volume", "network"):
+        if argv[1] == "ls":
+            print("db\\nfilestore" if command == "volume" else "private-network")
+        elif argv[1] == "inspect":
+            rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
+            for row in rows:
+                if row["kind"] == command:
+                    print(json.dumps(row))
         return 0
     if command == "inspect":
         template, container_id = argv[2], argv[3]
+        if '"kind":' in template:
+            kind = "environment" if '"kind":"environment"' in template else "container"
+            rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
+            if os.environ.get("FAKE_RESOURCE_CHANGED") == "1":
+                for row in rows:
+                    if row["kind"] == "container" and row["id"] == "database-id":
+                        row["ports"] = {"5432/tcp": [{"HostPort": "5432"}]}
+            for row in rows:
+                if row["kind"] == kind and row["id"] in argv[3:]:
+                    print(json.dumps(row))
+            return 0
         if ".State.Status" in template:
             path = state_path(container_id)
             status = path.read_text().strip() if path.exists() else "running"
@@ -164,9 +188,14 @@ def main(argv):
         log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
+    if program[:2] == ["python3", "-c"]:
+        log("exec qualify" + (" -i" if interactive else ""))
+        return subprocess.run([sys.executable, *program[1:]],
+                              stdin=None if interactive else subprocess.DEVNULL).returncode
     if program[:2] == ["python3", "-"]:
         log("exec readback" + (" -i" if interactive else ""))
         environment = dict(os.environ)
+        environment.update(exec_environment)
         environment["PYTHONPATH"] = str(state_dir / "modules")
         # Docker attaches the caller's stdin only with -i.
         stdin = None if interactive else subprocess.DEVNULL
@@ -501,6 +530,44 @@ def _render_post_deploy_script(
 
 @unittest.skipIf(BASH is None, "bash 4 or newer is required to run the rendered script")
 class DataWorkflowScriptExecutionTests(unittest.TestCase):
+    def test_resource_drift_refuses_before_web_stop_or_sql(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        snapshot, _ = resource_fixture()
+        namespace: dict[str, Any] = {}
+        from control_plane.connection_isolation_qualification import RESOURCE_QUALIFICATION_LIBRARY
+
+        exec(RESOURCE_QUALIFICATION_LIBRARY, namespace)
+        digest, _ = namespace["qualify_resources"](
+            snapshot,
+            "example-testing-app",
+            "example_testing",
+            "example",
+            self.runtime_identity,
+        )
+        policy = integration_readback_policy(
+            instance_name="testing",
+            policies=_policies(allowed=("shopify",)),
+            workflow_mode="maintenance",
+        )
+        run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+                reviewed_resource_sha256=digest,
+            ),
+            FAKE_RESOURCE_CHANGED="1",
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn("stop web-id", run.docker_log)
+        self.assertNotIn("exec readback", run.docker_log)
+        self.assertFalse(run.web_restarted)
+
     def test_scoped_connection_repair_modes_and_failed_readback(self) -> None:
         from control_plane.dokploy.connection_isolation import isolation_script
 
@@ -518,6 +585,8 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                         instance="testing",
                         mode=mode,
                         readback_spec=policy.encoded_spec(),
+                        context="example",
+                        runtime_identity=self.runtime_identity,
                     ),
                     FAKE_ODOO_DB=_fake_database({"shopify.api_token": "test-token"}),
                 )
@@ -531,6 +600,8 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 instance="testing",
                 mode="apply",
                 readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
             ),
             FAKE_ODOO_DB=_fake_database({"printnode.api_key": PRODUCTION_VALUE}),
         )
@@ -545,6 +616,8 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 instance="testing",
                 mode="dry-run",
                 readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
             ),
             FAKE_ODOO_DB=_fake_database({"printnode.api_key": PRODUCTION_VALUE}),
         )
@@ -558,6 +631,8 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 instance="testing",
                 mode="readback",
                 readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
             ),
             FAKE_ODOO_DB=_fake_database(
                 {"sms.endpoint": "enabled-test", "printnode.api_key": PRODUCTION_VALUE}
@@ -582,7 +657,12 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         (modules / "psycopg2.py").write_text(_FAKE_PSYCOPG2, encoding="utf-8")
         assert BASH is not None
         self.bash = BASH
+        resource_snapshot, self.runtime_identity = resource_fixture()
+        resource_rows = inventory_rows(resource_snapshot)
         self.base_environment = {
+            "FAKE_RESOURCE_ROWS": json.dumps(
+                [json.loads(line) for line in resource_rows.splitlines()]
+            ),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "FAKE_DOCKER_STATE": str(self.root),
             "FAKE_ODOO_DB": _fake_database(),

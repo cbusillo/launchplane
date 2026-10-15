@@ -42,6 +42,7 @@ from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
+ODOO_POST_DEPLOY_SCHEDULE_UPSERT = "post_deploy_schedule_upsert"
 
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME = "platform-odoo-bootstrap"
@@ -140,6 +141,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "odoo_restore_failure_logged",
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
+        "connection_isolation_resources_ok",
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
@@ -305,6 +307,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
+        return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
     if key == "website_bootstrap_company_email_skip_reason":
         return value == ODOO_COMPANY_EMAIL_SKIP_REASON
     if key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS:
@@ -409,7 +413,7 @@ def run_manual_data_schedule(
     before_provider_mutation: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
     if before_provider_mutation is not None:
-        before_provider_mutation("post_deploy_schedule_upsert")
+        before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
     schedule = api.upsert_dokploy_schedule(
         host=host,
         token=token,

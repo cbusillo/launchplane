@@ -337,6 +337,7 @@ class ConnectionIsolationTests(unittest.TestCase):
                     connection_isolation="apply",
                     reviewed_dry_run=True,
                     reviewed_plan_sha256="a" * 64,
+                    reviewed_resource_sha256="b" * 64,
                     reason="Repair testing-copy connections",
                 ),
             )

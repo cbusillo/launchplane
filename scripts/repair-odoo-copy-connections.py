@@ -25,6 +25,7 @@ def main() -> int:
     parser.add_argument("--idempotency-key", default="")
     args = parser.parse_args()
     reviewed_digest = ""
+    reviewed_resource_digest = ""
     if args.mode == "dry-run" and (not args.evidence_file or args.evidence_file.exists()):
         parser.error("Dry-run requires a new private --evidence-file.")
     if args.mode == "apply":
@@ -37,6 +38,7 @@ def main() -> int:
             }:
                 parser.error("The receipt is not this lane's dry-run evidence.")
             reviewed_digest = reviewed["evidence"]["connection_isolation_plan_sha256"]
+            reviewed_resource_digest = reviewed["evidence"]["connection_isolation_resource_sha256"]
         except (ValueError, KeyError, TypeError, OSError):
             parser.error("Invalid dry-run evidence file.")
     payload = OdooPostDeployEnvelope(
@@ -47,6 +49,7 @@ def main() -> int:
             connection_isolation=args.mode,
             reviewed_dry_run=args.reviewed_dry_run,
             reviewed_plan_sha256=reviewed_digest,
+            reviewed_resource_sha256=reviewed_resource_digest,
             reason=args.reason,
         ),
     )
@@ -78,6 +81,8 @@ def main() -> int:
             in {
                 "connection_isolation_ok",
                 "connection_isolation_plan_sha256",
+                "connection_isolation_resource_sha256",
+                "connection_isolation_resources_ok",
                 "integration_readback_ok",
                 "integration_readback_refused",
                 "integration_readback_allowed",

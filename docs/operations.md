@@ -2824,18 +2824,22 @@ manual provider schedule and hold the lane during the observation. A scoped
 post-deploy callers retain observation access.
 Every isolation mode accepts only the exact `testing` lane. Apply is a separate
 `odoo_connection_isolation.apply` effect. The Director agent can use it without
-a DB grant only when current,
-binding-matched disposable-lane evidence proves unused, reproducible data and
-production isolation. Missing, expired or unknown evidence, staff holds, target
-aliases, protected usage and only-copy data refuse with
-`disposable_lane_safety_unknown`. The current conservative collector cannot prove
-all these facts; an observation must not manufacture them. Source delivery alone
-therefore does not promise an eligible apply on an existing lane.
+a DB grant after operation-specific qualification. This fixed SQL preserves
+application records; it does not require declaring an existing copy disposable,
+unused or reproducible. Staff holds, target aliases, recorded protected usage,
+only-copy data and shared production resources still refuse with
+`disposable_lane_safety_unknown`, including expired protective observations.
+Before SQL, the service checks the actual testing web/database/runner identity,
+their private project network, the database endpoint and local writable volumes.
+Published database ports, foreign network members, overlapping foreign writable
+mounts, unsupported storage and unverified metadata refuse. The script pins SQL
+to the verified database address for that execution. It neither inspects other
+containers' environment nor executes their code.
 General maintenance retains `odoo_post_deploy.execute`; observing a copy gives
 no maintenance, production, grant or credential authority.
 
 Every isolation mode rejects production before provider access and reserves
-the lane against concurrent release work. Apply rechecks disposable safety
+the lane against concurrent release work. Apply rechecks recorded protections
 inside the reservation and immediately before dispatching the provider repair.
 It operates on the current tracked target and database. No SQL,
 credentials, carrier requests, notification probes, staff-account changes,
@@ -2855,15 +2859,21 @@ The service uses its existing disabled manual data-workflow schedule to
 return boolean verdicts and setting names only. Review that receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding
-again before any effect. Its durable provider reservation retains uncertain
+before dispatch and the receipt's `connection_isolation_resource_sha256` against
+actual Docker resources before stopping web or executing SQL.
+Its durable provider reservation retains uncertain
 outcomes under the original key and fences a new apply key as well. Retain the
 evidence and original idempotency key if the response is uncertain; do not submit
 a new repair. Independent observations never replay or store keyed apply results.
-Connection-isolation recovery of an uncertain provider operation is not yet a
-supported service capability. Its reservation remains fenced; a readback alone
-cannot prove the original web/schedule outcome or clear it. Actual repair
-qualification must include a supported recovery procedure before enabling apply.
-Do not release the reservation through direct database edits.
+To reconcile, repeat exactly the original apply request with its original
+receipt and key. This reads schedule history for the original operation marker;
+it does not dispatch the repair again. A unique terminal matching job settles
+success only with qualified resources, isolation and complete integration
+readback. A terminal failed job settles failure, allowing a newly reviewed
+dry-run and new key. A reservation checkpointed only at disabled schedule upsert
+can settle as not triggered. Missing, queued, active, ambiguous or unverified
+trigger evidence keeps the fence. An independent readback cannot clear it.
+Do not release reservations through direct database edits.
 
 Dry-run includes the complete integration readback, including settings outside
 this repair's carrier/SMS/IAP scope. Review those findings before apply. A failed
