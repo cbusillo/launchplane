@@ -297,3 +297,7 @@ claim from the replacement lane itself. Preparation refuses unresolved pending
 route effects so their provider identities cannot be detached from their target.
 The reviewed plan authorizes this exact empty allocation; recovery re-derives
 current separation evidence and never starts an application under that receipt.
+After target adoption, an older image may read the unchanged custody identity but
+cannot enforce the new hostname reservations. Keep the qualifying service image
+or forward-fix with compatible readers; retaining additive tables through schema
+rollback does not make old code a supported continuation.
