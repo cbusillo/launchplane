@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from collections.abc import Callable, Iterable
 from typing import Protocol, cast
@@ -671,6 +672,7 @@ def apply_live_target_runtime_environment(
     deploy_timeout_seconds: int | None,
     deploy_trigger: DokployDeployTrigger,
     before_provider_mutation: Callable[[], None] | None = None,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     allow_owned_preview: bool = False,
 ) -> dict[str, object]:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
@@ -829,16 +831,17 @@ def apply_live_target_runtime_environment(
                 desired_env_map=desired_env_map,
                 retired_keys=retired_keys,
             )
-            if before_provider_mutation is not None:
-                before_provider_mutation()
-            dokploy_api.update_dokploy_target_env(
-                host=host,
-                token=token,
-                target_type=target_definition.target_type,
-                target_id=target_definition.target_id,
-                target_payload=refreshed_payload,
-                env_text=dokploy_api.serialize_dokploy_env_text(updated_env_map),
-            )
+            with provider_mutation_guard() if provider_mutation_guard else nullcontext():
+                if before_provider_mutation is not None:
+                    before_provider_mutation()
+                dokploy_api.update_dokploy_target_env(
+                    host=host,
+                    token=token,
+                    target_type=target_definition.target_type,
+                    target_id=target_definition.target_id,
+                    target_payload=refreshed_payload,
+                    env_text=dokploy_api.serialize_dokploy_env_text(updated_env_map),
+                )
             persisted_payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,
                 token=token,

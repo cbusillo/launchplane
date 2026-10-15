@@ -2,6 +2,7 @@
 
 import argparse
 import http.client
+import io
 import json
 import os
 from pathlib import Path
@@ -125,7 +126,15 @@ def main() -> int:
         )
         return 0
     except urllib.error.HTTPError as error:
-        if submitted and error.code >= 500:
+        raw_error = error.read()
+        try:
+            code = json.loads(raw_error).get("error", {}).get("code", "")
+        except (ValueError, AttributeError):
+            code = ""
+        error = urllib.error.HTTPError(
+            error.url, error.code, error.reason, error.headers, io.BytesIO(raw_error)
+        )
+        if submitted and (error.code >= 500 or code == "mutation_reconciliation_required"):
             print(json.dumps({"status": "outcome_unknown", "retain_original_key": True}))
         else:
             transport["emit_http_error_payload"](

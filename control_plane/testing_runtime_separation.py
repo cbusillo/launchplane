@@ -1,6 +1,7 @@
 """Stage testing configuration without changing running resources or claiming disposability."""
 
-from contextlib import nullcontext
+from collections.abc import Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import cast
 
@@ -126,8 +127,58 @@ class TestingRuntimeSeparation:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        # A lost provider write cannot be proved absent. Never redispatch it.
-        return ProviderObservation(outcome="unknown")
+        if reconciliation_key != self.reconciliation_key():
+            return ProviderObservation(outcome="unknown")
+        try:
+            current, key = separation_binding(self.store, self.request, self.actor)
+            if (current, key) != (self.binding, self.key):
+                return ProviderObservation(outcome="unknown")
+            result = runtime.apply_live_target_runtime_environment(
+                control_plane_root=self.root,
+                database_url=self.store.database_url,
+                product_name=self.request.product,
+                context_name=self.request.context,
+                instance_name="testing",
+                apply_changes=False,
+                deploy=False,
+                no_cache=False,
+                deploy_timeout_seconds=None,
+                deploy_trigger=runtime.trigger_and_wait_for_dokploy_target_deploy,
+            )
+            delta = result.get("runtime_environment")
+            if not isinstance(delta, dict) or delta.get("changed_keys") != []:
+                return ProviderObservation(outcome="unknown")
+            if separation_binding(self.store, self.request, self.actor) != (self.binding, self.key):
+                return ProviderObservation(outcome="unknown")
+            result["mode"] = "apply"
+            result["apply"] = {
+                "applied": True,
+                "env_updated": True,
+                "verification": {"status": "pass"},
+                "recovered_by_readback": True,
+            }
+            return ProviderObservation(
+                outcome="present",
+                response_status_code=202,
+                response_payload=provider_operation_response_payload(
+                    trace_id=self.trace_id, records={}, result=result
+                ),
+            )
+        except Exception:
+            # A mismatch or unavailable read never proves an absent effect or permits retry.
+            return ProviderObservation(outcome="unknown")
+
+    @contextmanager
+    def mutation_guard(self) -> Iterator[None]:
+        # Only the bounded env write holds authority exclusion. Discovery and
+        # persistence reads do not stall unrelated authority writers.
+        guard = (
+            self.store.serialize_disposable_testing_resources()
+            if self.store.database_dialect_name == "postgresql"
+            else nullcontext()
+        )
+        with guard:
+            yield
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -142,37 +193,29 @@ class TestingRuntimeSeparation:
             lease.checkpoint_effect("testing_environment_staging")
             effect_started = True
 
-        # PostgreSQL excludes authority insert/update races, including a new hold
-        # or target alias, through the one env-only provider write and readback.
-        # SQLite is a deterministic rehearsal and publishes no safety facts.
-        guard = (
-            self.store.serialize_disposable_testing_resources()
-            if self.store.database_dialect_name == "postgresql"
-            else nullcontext()
-        )
         try:
-            with guard:
-                current, key = separation_binding(self.store, self.request, self.actor)
-                if (current, key) != (self.binding, self.key):
-                    raise ValueError("Separation inputs changed; review a fresh plan.")
-                runtime.evaluate_runtime_key_safety_for_live_target_sync(
-                    record_store=self.store,
-                    context_name=self.request.context,
-                    instance_name=self.request.instance,
-                )
-                result = runtime.apply_live_target_runtime_environment(
-                    control_plane_root=self.root,
-                    database_url=self.store.database_url,
-                    product_name=self.request.product,
-                    context_name=self.request.context,
-                    instance_name="testing",
-                    apply_changes=True,
-                    deploy=False,
-                    no_cache=False,
-                    deploy_timeout_seconds=None,
-                    deploy_trigger=runtime.trigger_and_wait_for_dokploy_target_deploy,
-                    before_provider_mutation=checkpoint,
-                )
+            current, key = separation_binding(self.store, self.request, self.actor)
+            if (current, key) != (self.binding, self.key):
+                raise ValueError("Separation inputs changed; review a fresh plan.")
+            runtime.evaluate_runtime_key_safety_for_live_target_sync(
+                record_store=self.store,
+                context_name=self.request.context,
+                instance_name=self.request.instance,
+            )
+            result = runtime.apply_live_target_runtime_environment(
+                control_plane_root=self.root,
+                database_url=self.store.database_url,
+                product_name=self.request.product,
+                context_name=self.request.context,
+                instance_name="testing",
+                apply_changes=True,
+                deploy=False,
+                no_cache=False,
+                deploy_timeout_seconds=None,
+                deploy_trigger=runtime.trigger_and_wait_for_dokploy_target_deploy,
+                before_provider_mutation=checkpoint,
+                provider_mutation_guard=self.mutation_guard,
+            )
         except Exception as error:
             if not effect_started:
                 raise ProviderMutationRejectedError(error) from error

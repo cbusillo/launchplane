@@ -20714,7 +20714,8 @@ def create_launchplane_fastapi_app(
             route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
             idempotency_key=idempotency_key,
             trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
+            check_replay=bool(idempotency_key.strip())
+            and not live_target_runtime_request.separation_only,
         )
         if replay_response is not None:
             return replay_response
@@ -20760,13 +20761,30 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 trace_id=trace_id,
             )
+            if normalized_idempotency_key:
+                prior = separation_store.read_idempotency_record(
+                    scope=idempotency_scope(identity),
+                    route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                )
+                if prior is not None and prior.state not in {"running", "reconcile_required"}:
+                    completed_replay = replay_stored_apply_idempotency(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+                        idempotency_key=normalized_idempotency_key,
+                        request_fingerprint_value=payload_fingerprint,
+                        trace_id=trace_id,
+                    )
+                    if completed_replay is not None:
+                        return completed_replay
             try:
                 binding, target_key = separation_binding(
                     separation_store,
                     live_target_runtime_request,
                     launchplane_identity_actor(identity),
                 )
-            except (ValueError, FileNotFoundError) as error:
+            except (ValueError, FileNotFoundError, click.ClickException, SQLAlchemyError) as error:
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
@@ -20810,6 +20828,9 @@ def create_launchplane_fastapi_app(
                     )
                 except (
                     ValueError,
+                    FileNotFoundError,
+                    click.ClickException,
+                    SQLAlchemyError,
                     control_plane_live_target_runtime.LiveTargetRuntimeError,
                 ) as error:
                     raise _launchplane_http_error(

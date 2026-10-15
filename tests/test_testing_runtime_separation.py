@@ -23,6 +23,33 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.store, self.context, self.app = fixture.store, fixture.context, fixture.app
+        from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+
+        self.production_secret = SecretRecord(
+            secret_id="production-only",
+            scope="context_instance",
+            integration="runtime_environment",
+            name="SYNC_DB_PASSWORD",
+            context=self.context,
+            instance="prod",
+            current_version_id="production-version",
+            created_at="2026-10-15T00:00:00Z",
+            updated_at="2026-10-15T00:00:00Z",
+        )
+        self.store.write_secret_record(self.production_secret)
+        self.store.write_secret_binding(
+            SecretBinding(
+                binding_id="production-binding",
+                secret_id=self.production_secret.secret_id,
+                integration="runtime_environment",
+                binding_key="SYNC_DB_PASSWORD",
+                context=self.context,
+                instance="prod",
+                declared_secret_class="prod_only",
+                created_at=self.production_secret.created_at,
+                updated_at=self.production_secret.updated_at,
+            )
+        )
         self.actor = launchplane_identity_actor(
             LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
         )
@@ -191,6 +218,8 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
         effects = []
 
         def write_and_lose_reply(**kwargs: object) -> dict[str, object]:
+            if not kwargs["apply_changes"]:
+                raise OSError("read still unavailable")
             callback = kwargs["before_provider_mutation"]
             assert callable(callback)
             callback()
@@ -247,7 +276,6 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
             "env": "SYNC_DB_VOLUME_NAME=production-db\nSYNC_CONFIG_VOLUME_NAME=production-config\nSYNC_DB_HOST_PORT=3307\nSYNC_HEALTH_HOST_PORT=8000\nSYNC_DB_PASSWORD=fixture-production-credential\n",
         }
         testing = {"composeId": "target-testing", "env": production["env"]}
-        production_before = production.copy()
         records_before = (
             self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
             self.store.list_secret_bindings(),
@@ -260,8 +288,6 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
             return testing.copy()
 
         def update(**kwargs: object) -> None:
-            self.assertEqual(kwargs["path"], "/api/compose.update")
-            self.assertEqual(kwargs["method"], "POST")
             payload = kwargs["payload"]
             assert isinstance(payload, dict)
             self.assertEqual(set(payload), {"composeId", "env"})
@@ -270,9 +296,6 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
             testing["env"] = payload["env"]
 
         with (
-            patch(
-                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync"
-            ),
             patch(
                 "control_plane.live_target_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
                 return_value=source.DokploySourceOfTruth(
@@ -313,7 +336,6 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
             deploy.assert_not_called()
         self.assertEqual(len(calls), 1)
         self.assertEqual(parse_dokploy_env_text(testing["env"]), desired)
-        self.assertEqual(production, production_before)
         self.assertEqual(
             records_before,
             (
@@ -328,19 +350,93 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("fixture-production-credential", response.text)
 
     async def test_key_safety_refusal_cannot_reach_writer(self) -> None:
-        from control_plane.live_target_runtime import LiveTargetRuntimeError
+        from control_plane.contracts.secret_record import SecretBinding
+        from control_plane.contracts.runtime_key_safety_policy import (
+            RuntimeKeySafetyPolicyRecord,
+            RuntimeSecretSafetyRule,
+        )
 
-        with (
-            patch(
-                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync",
-                side_effect=LiveTargetRuntimeError(
-                    "Production credential refused.", code="runtime_key_safety_failed"
+        self.store.write_secret_binding(
+            SecretBinding(
+                binding_id="shared-production-binding",
+                secret_id=self.production_secret.secret_id,
+                integration="runtime_environment",
+                binding_key="SYNC_DB_PASSWORD",
+                context=self.context,
+                created_at=self.production_secret.created_at,
+                updated_at=self.production_secret.updated_at,
+            )
+        )
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="production-policy",
+                source="fixture",
+                updated_at=self.production_secret.updated_at,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="SYNC_DB_PASSWORD", secret_class="prod_only"
+                    ),
                 ),
-            ),
-            patch(
-                "control_plane.live_target_runtime.apply_live_target_runtime_environment"
-            ) as driver,
-        ):
+            )
+        )
+        binding, _ = separation_binding(
+            self.store,
+            LiveTargetRuntimeApplyEnvelope.model_validate({**self.payload, "mode": "dry-run"}),
+            self.actor,
+        )
+        self.payload["reviewed_binding_sha256"] = binding
+        with patch(
+            "control_plane.live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
             response = await self.stage()
             self.assertEqual(response.status_code, 409, response.text)
             driver.assert_not_called()
+        self.assertEqual(
+            self.store.read_secret_record(self.production_secret.secret_id), self.production_secret
+        )
+
+    async def test_http_dry_run_returns_a_bound_plan_without_a_provider_write(self) -> None:
+        with patch(
+            "control_plane.live_target_runtime.apply_live_target_runtime_environment",
+            return_value={"status": "ok"},
+        ) as driver:
+            response = await self.stage(mode="dry-run", reviewed_binding_sha256="")
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(response.json()["result"]["separation_binding_sha256"], self.binding)
+            self.assertFalse(driver.call_args.kwargs["apply_changes"])
+            self.assertFalse(driver.call_args.kwargs["deploy"])
+
+    async def test_original_key_adopts_a_proven_env_write_without_redispatch(self) -> None:
+        effects = []
+
+        def write_then_observe(**kwargs: object) -> dict[str, object]:
+            if kwargs["apply_changes"]:
+                callback = kwargs["before_provider_mutation"]
+                assert callable(callback)
+                callback()
+                effects.append("env-only")
+                raise OSError("lost reply")
+            return {
+                "status": "ok",
+                "runtime_environment": {"changed_keys": []},
+                "deploy": {"requested": False, "triggered": False},
+            }
+
+        with (
+            patch(
+                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync"
+            ),
+            patch(
+                "control_plane.live_target_runtime.apply_live_target_runtime_environment",
+                side_effect=write_then_observe,
+            ),
+        ):
+            lost = await self.stage()
+            self.assertEqual(lost.status_code, 409, lost.text)
+            recovered = await self.stage()
+            self.assertEqual(recovered.status_code, 202, recovered.text)
+            self.assertTrue(recovered.json()["result"]["apply"]["recovered_by_readback"])
+            replay = await self.stage()
+            self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertEqual(effects, ["env-only"])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())

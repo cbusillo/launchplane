@@ -212,6 +212,15 @@ def _desired_hold(
     actor: str,
 ) -> DokployTargetStaffTestingHold | None:
     if not request.hold:
+        if (
+            existing is not None
+            and existing.purpose == "isolation_staging"
+            and request.purpose != "isolation_staging"
+        ):
+            raise TestingHoldRefusal(
+                "protected_hold",
+                "Lifting a staging interlock requires its explicit purpose and never requests deployment.",
+            )
         return None
     candidate = DokployTargetStaffTestingHold(
         reason=request.reason,
@@ -377,6 +386,7 @@ def apply_testing_hold_plan(
     reconcile_requested = False
     if (
         stored_hold is None
+        and request.purpose != "isolation_staging"
         and read_back_matches
         and isinstance(record_store, ProductReconcileRequester)
     ):

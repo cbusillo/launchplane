@@ -82,11 +82,15 @@ does not relabel or lift RepairShopr's retained D6 interlock.
 
 The dry run returns a binding of ownership, target, configuration, secret
 metadata and key-safety policy; apply requires that binding and the original
-idempotency key. PostgreSQL excludes authority insert/update races through the
-env-only write/readback. The adapter shares the generic-web deployment fence:
+idempotency key. PostgreSQL excludes authority insert/update races during the
+bounded env-only write. Discovery and persistence reads run outside that lock. The adapter shares the generic-web deployment fence:
 an unknown historical deploy blocks it, and an uncertain staging write keeps
-its own durable fence. It never supersedes, clears or retries an unknown effect.
-Completed same-key responses remain replayable. SQLite tests are rehearsals,
+its own durable fence. Original-key retry performs read-only reconciliation:
+it adopts the write only when the unchanged reviewed inputs and actual provider
+environment agree. A mismatch, stale configuration or unavailable read keeps
+the fence; no absence or safe-to-retry claim is made. It never supersedes an
+older deploy or redispatches an unknown effect. Completed same-key responses
+remain replayable. SQLite tests are rehearsals,
 not proof of PostgreSQL exclusion.
 
 Use `scripts/stage-testing-separation.py` with the installed authenticated
@@ -108,7 +112,12 @@ original request, key and evidence after an uncertain response. The env
 persistence readback does not establish that new volumes exist or testing is
 healthy. Do not roll testing back to shared-production settings. Retain the
 staging hold and old containers until the separately authorized recovery/deploy
-gates are met. No production rollback or volume deletion is part of this procedure.
+gates are met. An authorized admin lifting a staging interlock uses the existing
+reviewed testing-hold API with `hold=false` and `purpose=isolation_staging`.
+That lift, including a repeated/no-op lift, requests no reconciliation or deploy;
+ordinary staff holds retain their existing reconcile-on-lift behavior. A lift
+without the staging purpose refuses while that interlock is present. No
+production rollback or volume deletion is part of this procedure.
 
 The added hold purpose is read-compatible with existing records in this image.
 Older images cannot read purpose-tagged holds; after using one, retain this
