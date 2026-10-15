@@ -2832,11 +2832,24 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
         self.assertEqual(reservation.provider_effect_phase, "domain_delete")
         self.assertEqual(self.store.list_preview_records()[0].state, "active")
 
-        # Completion is still adopted after the automatic mutation budget is spent.
+        # A missing compose with domains still present cannot complete cleanup.
         self.request("preview", 5)
         with patch(
             "control_plane.dokploy.api.fetch_dokploy_target_payload",
             side_effect=click.ClickException("Dokploy request failed (404): missing compose"),
+        ):
+            unproven = self.run_once()
+        self.assertEqual(unproven.last_plan["preview_operation_status"], "reconcile_required")
+        self.assertEqual(self.store.list_preview_records()[0].state, "active")
+
+        # Independently verified completion is adopted after the mutation budget is spent.
+        self.request("preview", 5)
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                side_effect=click.ClickException("Dokploy request failed (404): missing compose"),
+            ),
+            patch("control_plane.dokploy.api.dokploy_request", return_value=[]),
         ):
             completed = self.run_once()
         self.assertEqual(completed.last_plan["preview_operation_status"], "adopted")
