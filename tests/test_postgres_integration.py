@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -4670,9 +4671,251 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 release.set()
                 event.remove(store._engine, "after_cursor_execute", pause_writer)
-            self.assertEqual(result.status, "changed")
+            self.assertEqual(result.status, "history_conflict")
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(store.read_deployment_record(history.record_id), history)
+
+    def test_never_live_history_contention_retries_through_public_writers(self) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.preview_record import PreviewRecord
+        from control_plane.contracts.promotion_record import (
+            ArtifactIdentityReference,
+            DeploymentEvidence,
+            PromotionRecord,
+        )
+        from control_plane.http_app import (
+            _PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+            create_launchplane_fastapi_app,
+            idempotency_scope,
+        )
+        from control_plane.service_auth import configured_local_operator_identity
+        from control_plane.storage.postgres import (
+            LaunchplaneDeploymentRow,
+            LaunchplanePromotionRow,
+            LaunchplanePreviewRow,
+            LaunchplaneProductProfileRow,
+            NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS,
+        )
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        for kind in (
+            "production",
+            "testing",
+            "promotion",
+            "preview",
+            "rolled_back",
+            "profile_write",
+            "profile_recovery",
+        ):
+            with self.subTest(writer=kind), _head_postgres_database() as url:
+                store = PostgresRecordStore(database_url=url)
+                self.addCleanup(store.close)
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_preview_profile_payload()
+                )
+                store.write_product_profile_record(profile)
+                config = _local_operator_bearer_config()
+                store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id="classification-fixture-policy",
+                        source="test",
+                        updated_at=profile.updated_at,
+                        policy=LaunchplaneAuthzPolicy(),
+                    )
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(),
+                    bearer_identity_config=config,
+                    record_store_factory=lambda: store,
+                )
+                identity = configured_local_operator_identity(config)
+                assert identity is not None
+                route = f"/v1/product-profiles/{profile.product}/production-use"
+                headers = {"Authorization": "Bearer local-operator-token"}
+                payload: dict[str, Any] = {
+                    "production_use": "prelaunch",
+                    "reason": "Reviewed never-live fact.",
+                }
+                dry = asyncio.run(request(app, "POST", route, headers=headers, payload=payload))
+                self.assertEqual(dry.status_code, 202, dry.text)
+                payload.update(
+                    mode="apply", reviewed_plan_sha256=dry.json()["result"]["plan_sha256"]
+                )
+                key = "retry-classification"
+                headers["Idempotency-Key"] = key
+
+                def classify() -> Any:
+                    return asyncio.run(
+                        request(app, "POST", route, headers=headers, payload=payload)
+                    )
+
+                deploy = DeploymentEvidence(
+                    status="pass",
+                    deploy_mode="compose",
+                    target_name="fixture",
+                    target_type="compose",
+                )
+                write: Callable[[], None]
+                if kind == "profile_write":
+                    changed_profile = profile.model_copy(update={"display_name": "Changed"})
+                    write = partial(store.write_product_profile_record, changed_profile)
+                    table = LaunchplaneProductProfileRow.__tablename__
+                elif kind == "profile_recovery":
+                    reservation = store.reserve_mutation(
+                        scope="fixture-recovery",
+                        route_path="/fixture-recovery",
+                        idempotency_key="fixture-recovery",
+                        request_fingerprint="fixture",
+                        lease_owner="fixture",
+                        reconciliation_key="fixture",
+                    ).record
+                    assert reservation is not None
+                    held = store.mark_mutation_reconcile_required(
+                        reservation=reservation,
+                        reconciliation_key="fixture",
+                    ).record
+                    assert held is not None
+
+                    def write() -> None:
+                        adopted = store.adopt_reconciled_mutation(
+                            reservation=held,
+                            response_status_code=202,
+                            response_trace_id="fixture-adoption",
+                            response_payload={},
+                            expected_binding_evidence=(profile,),
+                        )
+                        self.assertEqual(adopted.status, "adopted")
+
+                    table = LaunchplaneProductProfileRow.__tablename__
+                elif kind == "promotion":
+                    promotion = PromotionRecord(
+                        record_id="held-promotion",
+                        context=profile.lanes[0].context,
+                        from_instance="testing",
+                        to_instance="prod",
+                        artifact_identity=ArtifactIdentityReference(artifact_id="fixture-artifact"),
+                        deploy=deploy,
+                    )
+                    write = partial(store.write_promotion_record, promotion)
+                    table = LaunchplanePromotionRow.__tablename__
+                elif kind == "preview":
+                    preview = PreviewRecord(
+                        preview_id="held-preview",
+                        context=profile.preview.context,
+                        anchor_repo=profile.repository.partition("/")[2],
+                        anchor_pr_number=42,
+                        anchor_pr_url=f"https://github.com/{profile.repository}/pull/42",
+                        preview_label="fixture",
+                        canonical_url="https://preview.example.test",
+                        state="active",
+                        created_at=profile.updated_at,
+                        updated_at=profile.updated_at,
+                        eligible_at=profile.updated_at,
+                    )
+                    write = partial(store.write_preview_record, preview)
+                    table = LaunchplanePreviewRow.__tablename__
+                else:
+                    deployment = DeploymentRecord(
+                        record_id="held-deployment",
+                        context=profile.lanes[0].context,
+                        instance="testing" if kind == "testing" else "prod",
+                        source_git_ref="fixture",
+                        deploy=deploy,
+                    )
+                    write = partial(store.write_deployment_record, deployment)
+                    table = LaunchplaneDeploymentRow.__tablename__
+                written, release = threading.Event(), threading.Event()
+
+                def pause_writer(
+                    _connection: Any,
+                    _cursor: Any,
+                    _sql: Any,
+                    _params: Any,
+                    context: Any,
+                    _many: Any,
+                ) -> None:
+                    statement = context.compiled.statement if context.compiled is not None else None
+                    holds_profile = (
+                        kind == "profile_recovery"
+                        and statement is not None
+                        and statement.is_select
+                        and statement._for_update_arg is not None
+                        and any(
+                            source.compare(LaunchplaneProductProfileRow.__table__)
+                            for source in statement.get_final_froms()
+                        )
+                    )
+                    holds_write = (
+                        (context.isinsert or context.isupdate)
+                        and statement is not None
+                        and statement.table.name == table
+                    )
+                    if holds_profile or holds_write:
+                        written.set()
+                        if not release.wait(6 * NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS):
+                            raise AssertionError("History writer was not resumed")
+                        if kind == "rolled_back":
+                            raise RuntimeError("Roll back the fixture writer")
+
+                event.listen(store._engine, "after_cursor_execute", pause_writer)
+                try:
+                    with ThreadPoolExecutor(max_workers=2) as workers:
+                        writer = workers.submit(write)
+                        try:
+                            self.assertTrue(written.wait(5))
+                            busy = workers.submit(classify).result(
+                                timeout=3 * NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS
+                            )
+                            self.assertEqual(busy.status_code, 409, busy.text)
+                            self.assertEqual(
+                                busy.json()["error"]["code"], "production_history_busy"
+                            )
+                            self.assertEqual(
+                                store.read_product_profile_record(profile.product), profile
+                            )
+                            self.assertIsNone(
+                                store.read_idempotency_record(
+                                    scope=idempotency_scope(identity),
+                                    route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+                                    idempotency_key=key,
+                                )
+                            )
+                        finally:
+                            release.set()
+                        if kind == "rolled_back":
+                            with self.assertRaisesRegex(RuntimeError, "fixture writer"):
+                                writer.result(timeout=5)
+                        else:
+                            writer.result(timeout=5)
+                finally:
+                    release.set()
+                    event.remove(store._engine, "after_cursor_execute", pause_writer)
+                retry = classify()
+                if kind == "profile_write":
+                    self.assertEqual(retry.status_code, 409, retry.text)
+                    self.assertEqual(retry.json()["error"]["code"], "stale")
+                    self.assertEqual(
+                        store.read_product_profile_record(profile.product), changed_profile
+                    )
+                elif kind in {"production", "promotion"}:
+                    self.assertEqual(retry.status_code, 403, retry.text)
+                    self.assertEqual(store.read_product_profile_record(profile.product), profile)
+                else:
+                    self.assertEqual(retry.status_code, 202, retry.text)
+                    current = store.read_product_profile_record(profile.product)
+                    self.assertEqual(current.production_use, "prelaunch")
+                    self.assertFalse(current.prelaunch_bootstrap_authorized)
+                    self.assertEqual(current.release_on_acceptance, profile.release_on_acceptance)
+                    replay = classify()
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertEqual(replay.json()["result"], retry.json()["result"])
+                    payload["reason"] = "Different request"
+                    conflict = classify()
+                    self.assertEqual(conflict.status_code, 409, conflict.text)
+                    self.assertEqual(conflict.json()["error"]["code"], "idempotency_key_reused")
 
     def test_expired_event_hold_blocks_only_while_its_execution_owner_is_present(self) -> None:
         from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
@@ -10083,6 +10326,9 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
 
     def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
         self.scenario("normal")
+
+    def test_native_capture_keeps_original_generation_source_and_immutable_receipt(self) -> None:
+        self.native_capture_custody()
 
     def test_credential_comparison_failure_precedes_source_or_writes(self) -> None:
         self.credential_comparison_failure()

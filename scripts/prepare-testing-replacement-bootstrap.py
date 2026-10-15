@@ -14,6 +14,7 @@ from control_plane.testing_replacement_bootstrap import (
     ROUTE,
     TestingReplacementBootstrapPlan,
     TestingReplacementBootstrapRequest,
+    bootstrap_wire_payload,
 )
 
 
@@ -25,6 +26,7 @@ def main() -> int:
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--domain-host", required=True)
     parser.add_argument("--certificate-type", choices=("none", "letsencrypt"), default="none")
+    parser.add_argument("--source-mode", choices=("ssh", "container-export"), default="ssh")
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--idempotency-key", default="")
@@ -58,13 +60,14 @@ def main() -> int:
         reason=args.reason,
         domain_host=args.domain_host,
         certificate_type=args.certificate_type,
+        source_mode=args.source_mode,
     )
-    review_request = {"product": args.product, **draft.model_dump(mode="json")}
+    review_request = {"product": args.product, **bootstrap_wire_payload(draft)}
     submitted = False
     accepted = False
     trace = ""
     try:
-        body = draft.model_dump(mode="json")
+        body = bootstrap_wire_payload(draft)
         if args.mode == "apply":
             assert evidence_path is not None
             saved = json.loads(evidence_path.read_text())

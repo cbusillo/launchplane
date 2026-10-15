@@ -23,6 +23,7 @@ dependencies = [
     "tinycss2>=1.5.1",
     "playwright>=1.63.0",
     "pymysql>=1.2.3",
+    "websockets>=17.1",
 ]
 
 [project.optional-dependencies]

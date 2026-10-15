@@ -37,6 +37,10 @@ configuration. Existing testing credentials must be lane scoped and classified
 for testing. Shared keys require recorded read-only-source evidence. Opaque
 comparison against the product's production provider environment prevents
 testing credentials with production values. Values never enter client output.
+Key safety evaluates every secret actually delivered by the site resolver;
+unrelated global/platform bindings excluded by that resolver stay excluded.
+A real carried-key policy refusal returns the structured
+`testing_activation_carried_keys_unverified` category and keeps all holds.
 
 The fixed host inspector requalifies the original allocation's empty local
 backing directories, labels and all existing container mounts, including stopped

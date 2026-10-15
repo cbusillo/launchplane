@@ -267,7 +267,7 @@ class ActivationTests(unittest.TestCase):
 
     def seed_runtime_fixture(self) -> None:
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-        from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+        from control_plane.contracts.secret_record import SecretRecord, SecretBinding, SecretVersion
         from control_plane.contracts.runtime_key_safety_policy import (
             RuntimeKeySafetyPolicyRecord,
             RuntimeSecretSafetyRule,
@@ -312,6 +312,45 @@ class ActivationTests(unittest.TestCase):
                 declared_secret_class="testing",
                 created_at=stamp,
                 updated_at=stamp,
+            )
+        )
+        self.store.write_secret_version(
+            SecretVersion(
+                version_id="testing-version",
+                secret_id="testing-password",
+                created_at=stamp,
+                ciphertext="testing-ciphertext",
+            )
+        )
+        # Site delivery excludes global/platform secrets. Legacy all-bindings
+        # safety must not accidentally pull them back into this app's plan.
+        self.store.write_secret_record(
+            SecretRecord(
+                secret_id="global-platform-password",
+                scope="global",
+                integration="runtime_environment",
+                name="GLOBAL_PLATFORM_PASSWORD",
+                current_version_id="global-platform-version",
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+        self.store.write_secret_binding(
+            SecretBinding(
+                binding_id="global-platform-password",
+                secret_id="global-platform-password",
+                integration="runtime_environment",
+                binding_key="GLOBAL_PLATFORM_PASSWORD",
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+        self.store.write_secret_version(
+            SecretVersion(
+                version_id="global-platform-version",
+                secret_id="global-platform-password",
+                created_at=stamp,
+                ciphertext="global-platform-ciphertext",
             )
         )
         self.store.write_runtime_key_safety_policy_record(
@@ -689,8 +728,12 @@ class ActivationTests(unittest.TestCase):
                 side_effect=resolve_activation_runtime,
             ),
             patch(
-                "control_plane.runtime_environments.control_plane_secrets.resolve_site_secret_values",
-                return_value={"DB_PASSWORD": "safe-test-password"},
+                "control_plane.secrets._decrypt_secret_value",
+                side_effect=lambda ciphertext, key_id: (
+                    "safe-test-password"
+                    if ciphertext == "testing-ciphertext"
+                    else self.fail("Activation must never decrypt unrelated global credentials")
+                ),
             ),
         ):
             self.assertEqual(self.run_activation().response_status_code, 202)
@@ -1139,6 +1182,70 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(repeated.status_code, 202, repeated.text)
         readback = asyncio.run(post({**draft, "mode": "readback"}))
         self.assertEqual(readback.status_code, 409, readback.text)
+
+    def test_route_reports_real_carried_key_refusal_before_provider_effects(self) -> None:
+        import asyncio
+        from control_plane.testing_activation import preparation_resources
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        policy = self.store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]
+        self.store.write_runtime_key_safety_policy_record(
+            policy.model_copy(
+                update={
+                    "rules": (
+                        RuntimeSecretSafetyRule(
+                            binding_key="DB_PASSWORD", secret_class="prod_only"
+                        ),
+                    )
+                }
+            )
+        )
+        resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        with (
+            patch.object(
+                TestingActivationAdapter,
+                "current",
+                side_effect=lambda: resolve_activation_runtime(
+                    self.store, self.root, self.planned_record, resources
+                ),
+            ),
+            patch("control_plane.secrets._decrypt_secret_value", return_value="safe-test-password"),
+        ):
+            response = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    ROUTE.format(product=self.product),
+                    headers={"Authorization": "Bearer local-operator-token"},
+                    payload=self.request.model_copy(
+                        update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+                    ).model_dump(mode="json"),
+                )
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            TestingActivationRefusalCode.CARRIED_KEYS_UNVERIFIED.value,
+        )
+        self.assertEqual(self.writes, [])
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            self.preparation.retained,
+        )
 
     def test_route_names_fixed_refusals_without_exposing_untrusted_error_values(self) -> None:
         import asyncio
