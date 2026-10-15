@@ -459,13 +459,24 @@ re-evaluate recovered dependencies.
 Odoo destroy observation treats a missing provider lookup as inconclusive until
 two complete, bounded compose inventories agree that neither the original ID
 nor a replacement with its name exists, and the exact compose's domain list is
-empty. Conflicting, malformed, duplicate or changing inventory and remaining
-domains retain an unknown outcome. This observation never dispatches a provider
+empty (or its parent is reported deleted). The deleted-parent case still
+requires both inventories and inspection of every remaining compose's domains.
+Conflicting, malformed, duplicate or changing inventory and remaining
+domains (including the preview host attached to another compose) retain an unknown
+outcome. This observation never dispatches a provider
 write. It still requires the reservation's retained original issued intent;
 legacy holds without it remain fenced and cannot be reconstructed from a new
 plan, current preview history or a missing tracked target. Executor exclusion,
 expired grace and original data-schedule quiescence remain separate recovery
 requirements.
+
+Held-reservation classification distinguishes the original plan's
+`pull_request_number` from `target_pull_request_number`, attributed only by an
+exact recorded reconciliation-key and provider-key match against the current
+profile's naming policy. The latter stops fresh planning for that target when
+the original intent is unavailable; unrelated previews remain independent. It
+does not recover the original action or plan, permit provider observation, or
+settle the reservation. Original availability flags remain false.
 If a later browser or product-specific smoke workflow needs to publish common
 preview evidence, it should call
 `cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@<launchplane-sha>`

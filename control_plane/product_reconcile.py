@@ -39,7 +39,6 @@ from urllib.parse import quote, urlencode
 from uuid import uuid4
 
 import click
-from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
@@ -1438,7 +1437,10 @@ def reconcile_preview_target(
     unresolved = [
         entry
         for entry in recovery
-        if entry.get("pull_request_number") == pull_request_number
+        if (
+            entry.get("pull_request_number") == pull_request_number
+            or entry.get("target_pull_request_number") == pull_request_number
+        )
         and entry.get("settlement") not in {"adopted", "completed", "replayed"}
     ]
     if (
@@ -1876,20 +1878,17 @@ def _run_preview_operation(
         return ReconcileOutcome(plan)
 
     try:
-        recovery_plan = (
-            cast(PostgresRecordStore, record_store)
-            .read_original_mutation_intent(reservation)
-            .get("issued_plan")
-            if reservation is not None
-            else None
-        )
-        if unknown_destroy and isinstance(recovery_plan, dict):
+        if unknown_destroy and reservation is not None:
+            from control_plane.preview_reservation_recovery import original_preview_intent
+
             try:
-                stored_plan = OdooPreviewApplyInputsResult.model_validate(recovery_plan)
+                stored_plan = original_preview_intent(
+                    reservation, profile=profile, store=record_store
+                ).issued_plan
                 # Observe the original target before new discovery: destroy may already
                 # have removed its domain, making fresh planning impossible.
                 observed = run_issued_plan(stored_plan, allow_mutation=False)
-            except (ValidationError, OdooPreviewPlanProvenanceError):
+            except ValueError:
                 # Retained intent must not prevent a supported profile/model repair.
                 # Fresh planning still owns mutation authority and the runner's fence.
                 pass

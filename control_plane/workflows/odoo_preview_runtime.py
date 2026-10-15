@@ -1424,14 +1424,35 @@ def _destroyed_preview_absence_verified(
         for _, identifier, name in inventory
     ):
         return False
-    domains = dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/domain.byComposeId",
-        query={"composeId": plan.compose_ref},
-    )
+    try:
+        domains = dokploy_api.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/domain.byComposeId",
+            query={"composeId": plan.compose_ref},
+        )
+    except dokploy_api.DokployRequestFailed as error:
+        if error.status_code != 404:
+            raise
+        # Some provider versions require the parent compose to exist for this
+        # read. Absence still requires both inventories and every live domain.
+        domains = []
     if not isinstance(domains, list) or domains:
         return False
+    for _, identifier, _ in inventory:
+        candidate_domains = dokploy_api.dokploy_request(
+            host=host, token=token, path="/api/domain.byComposeId", query={"composeId": identifier}
+        )
+        if not isinstance(candidate_domains, list):
+            return False
+        for domain in candidate_domains:
+            if not isinstance(domain, dict):
+                return False
+            domain_host = domain.get("host")
+            if not isinstance(domain_host, str) or not domain_host.strip():
+                return False
+            if domain_host.strip().lower() == plan.domain_host.lower():
+                return False
     return _complete_preview_compose_inventory(host=host, token=token) == inventory
 
 
