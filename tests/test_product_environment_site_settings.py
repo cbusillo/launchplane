@@ -5,9 +5,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from control_plane import product_config_service
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
@@ -220,6 +222,61 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
         self.assertEqual(self.store.list_secret_records(), ())
 
+    async def test_director_live_provider_adoption_plan_is_read_only_and_redacted(self) -> None:
+        profile = _profile(production_use="live")
+        self.store.write_product_profile_record(profile)
+        provider = LaneProviderEnv(
+            env={"SITE_MODE": "private-provider-value", "SERVICE_PASSWORD": "private-password"},
+            template_defaults={},
+        )
+        for instance in ("testing", "prod"):
+            with (
+                self.subTest(instance=instance),
+                patch.object(
+                    product_config_service, "read_lane_provider_env", return_value=provider
+                ) as read_provider,
+                patch.object(
+                    self.store,
+                    "write_product_authority_bundle",
+                    wraps=self.store.write_product_authority_bundle,
+                ) as write_bundle,
+            ):
+                payload: dict[str, object] = {
+                    "product": "example-site",
+                    "context": "example-site",
+                    "instance": instance,
+                    "reason": "Inspect provider-only keys without adopting their values.",
+                    "schema_version": 2,
+                    "runtime_env": {"adopt_provider_keys": ["SITE_MODE", "SERVICE_PASSWORD"]},
+                }
+                review = await _post_product_config_apply(
+                    self.app, {**payload, "mode": "dry-run"}, authorization=_TOKEN
+                )
+                self.assertEqual(review.status_code, 202, review.text)
+                self.assertEqual(read_provider.call_args.kwargs["instance_name"], instance)
+                self.assertEqual(
+                    review.json()["result"]["provider_key_adoption"],
+                    [
+                        {"key": "SERVICE_PASSWORD", "disposition": "refused_credential"},
+                        {"key": "SITE_MODE", "disposition": "adopted"},
+                    ],
+                )
+                self.assertNotIn("private-provider-value", review.text)
+                self.assertNotIn("private-password", review.text)
+                applied = await _post_product_config_apply(
+                    self.app,
+                    {**payload, "mode": "apply"},
+                    authorization=_TOKEN,
+                    idempotency_key=f"live-adoption-plan-cannot-apply-{instance}",
+                )
+                self.assertEqual(applied.status_code, 403, applied.text)
+                self.assertEqual(applied.json()["error"]["code"], "live_product_requires_operator")
+                read_provider.assert_called_once()
+                write_bundle.assert_not_called()
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+        self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
+        self.assertEqual(self.store.list_secret_records(), ())
+
     async def test_director_live_setting_plan_does_not_authorize_apply(self) -> None:
         profile = _profile(production_use="live")
         self.store.write_product_profile_record(profile)
@@ -244,6 +301,33 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                 )
                 self.assertEqual(applied.status_code, 403, applied.text)
                 self.assertEqual(applied.json()["error"]["code"], "live_product_requires_operator")
+                if instance:
+                    form_payload = {
+                        "reason": "Inspect the same setting through the environment form.",
+                        "runtime_settings": {"SITE_MODE": "public"},
+                    }
+                    review = await _post_product_environment_config_apply(
+                        self.app,
+                        {**form_payload, "mode": "dry-run"},
+                        environment=instance,
+                        authorization=_TOKEN,
+                    )
+                    self.assertEqual(review.status_code, 202, review.text)
+                    applied = await _post_product_environment_config_apply(
+                        self.app,
+                        {
+                            **form_payload,
+                            "mode": "apply",
+                            "confirmation": f"APPLY example-site/{instance}",
+                        },
+                        environment=instance,
+                        authorization=_TOKEN,
+                        idempotency_key=f"live-form-plan-cannot-apply-{instance}",
+                    )
+                    self.assertEqual(applied.status_code, 403, applied.text)
+                    self.assertEqual(
+                        applied.json()["error"]["code"], "live_product_requires_operator"
+                    )
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
         self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
         self.assertEqual(self.store.list_secret_records(), ())

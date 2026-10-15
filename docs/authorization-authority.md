@@ -123,6 +123,9 @@ scope. The plan saves only review evidence. Applying undeclared settings still
 requires admin authority and returns `live_product_requires_operator` for the
 `local_operator` credential, even after a successful matching plan. Scoped agents
 retain their existing grants and Live-product guard.
+An instance-scoped provider-key adoption dry run can read that lane's provider
+environment inside the service, including production. It returns key dispositions
+without values, preserves credential refusals, and records no adopted settings.
 
 For scoped agents, product reads authorize the returned product. Profile and product overview lists filter role access
 per returned product; contextual secret and runtime-setting collections omit
