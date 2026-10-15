@@ -55,7 +55,8 @@ Product Ops is the default surface. Delivery Governance may reuse the same
 session, theme, and API transport, but it must not become a general issue
 tracker, planning system, work graph, engineering queue, or replacement forge.
 
-When an authenticated background GET returns `401 authentication_required`,
+When an authenticated GET returns `401 authentication_required`, including
+background refresh and the session check before a mutation,
 the browser immediately replaces the operational view with **Your session
 expired** and **Sign in with GitHub**. The sign-in link preserves the current
 UI path and query. The shell and cached operational evidence are removed;

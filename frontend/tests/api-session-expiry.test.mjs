@@ -17,7 +17,7 @@ test("only an active authentication-required GET ends the browser session", asyn
     for (const [status, code, expected] of [
       [403, "authorization_denied", 0],
       [503, "read_unavailable", 0],
-      [401, "different_credential_required", 0],
+      [401, "reauthentication_required", 0],
       [401, "authentication_required", 1],
     ]) {
       globalThis.fetch = async () => failure(status, code);
@@ -43,7 +43,7 @@ test("only an active authentication-required GET ends the browser session", asyn
   assert.equal(notifications, 1);
 });
 
-test("a rejected mutation is not retried or broadcast as a background expiry", async () => {
+test("a dispatched mutation rejection is not retried or broadcast as a GET expiry", async () => {
   let notifications = 0;
   const methods = [];
   const unsubscribe = subscribeToSessionExpiry(() => { notifications++; });
@@ -55,8 +55,25 @@ test("a rejected mutation is not retried or broadcast as a background expiry", a
   };
   try {
     await assert.rejects(logout(), LaunchplaneApiError);
-    assert.deepEqual(methods, ["GET", "POST"]);
+    assert.equal(methods.filter(method => method === "POST").length, 1);
     assert.equal(notifications, 0);
+  } finally {
+    unsubscribe();
+  }
+});
+
+test("expiry in the CSRF session read shows sign-in without dispatching the mutation", async () => {
+  let notifications = 0;
+  let posts = 0;
+  const unsubscribe = subscribeToSessionExpiry(() => { notifications++; });
+  globalThis.fetch = async (_path, options) => {
+    if (options.method === "POST") posts++;
+    return failure(401, "authentication_required");
+  };
+  try {
+    await assert.rejects(logout(), LaunchplaneApiError);
+    assert.equal(notifications, 1);
+    assert.equal(posts, 0);
   } finally {
     unsubscribe();
   }
