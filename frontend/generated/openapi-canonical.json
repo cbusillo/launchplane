@@ -32413,6 +32413,7 @@
           },
           "failure_code": {
             "enum": [
+              "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
               "dns_failure",
@@ -32592,6 +32593,7 @@
             "anyOf": [
               {
                 "enum": [
+                  "production_delivery_failed",
                   "connection_timeout",
                   "deploy_fence_held",
                   "dns_failure",
@@ -32839,6 +32841,7 @@
           },
           "failure_code": {
             "enum": [
+              "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
               "dns_failure",
