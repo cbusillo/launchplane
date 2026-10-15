@@ -3321,28 +3321,34 @@ def public_ingress_managed_secret_resolver(
     record_store: control_plane_secrets.SecretReadStore,
 ) -> Callable[[str, PublicIngressIncidentRecord], str]:
     def resolve(secret_id: str, incident: PublicIngressIncidentRecord) -> str:
-        normalized_secret_id = secret_id.strip()
-        if not normalized_secret_id:
-            return ""
-        try:
-            record = record_store.read_secret_record(normalized_secret_id)
-        except Exception:  # noqa: BLE001 - delivery records capture missing secrets per destination.
-            return ""
+        return managed_notification_secret_value(
+            record_store, secret_id, incident.context, incident.instance
+        )
+
+    return resolve
+
+
+def managed_notification_secret_value(
+    record_store: control_plane_secrets.SecretReadStore,
+    secret_id: str,
+    context: str,
+    instance: str,
+) -> str:
+    """Existing alert destinations resolve only managed secrets applicable to their lane."""
+    if not secret_id.strip():
+        return ""
+    try:
+        record = record_store.read_secret_record(secret_id.strip())
         if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
             return ""
         if not control_plane_secrets._scope_matches_record(
-            record,
-            context_name=incident.context,
-            instance_name=incident.instance,
+            record, context_name=context, instance_name=instance
         ):
             return ""
-        try:
-            version = record_store.read_secret_version(record.current_version_id)
-            return control_plane_secrets._decrypt_secret_value(version.ciphertext, version.key_id)
-        except Exception:  # noqa: BLE001 - delivery records capture unreadable secrets per destination.
-            return ""
-
-    return resolve
+        version = record_store.read_secret_version(record.current_version_id)
+        return control_plane_secrets._decrypt_secret_value(version.ciphertext, version.key_id)
+    except Exception:  # noqa: BLE001 - delivery records capture unavailable secrets.
+        return ""
 
 
 def public_ingress_notification_drivers(

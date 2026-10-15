@@ -20,6 +20,7 @@ from control_plane.contracts.deployment_record import (
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.lane_service_restart import LaneServiceRestartRecovery
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillEvidence
 from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionOperationRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
@@ -517,6 +518,11 @@ class ProductEnvironmentDetail(BaseModel):
     warnings: tuple[str, ...] = ()
     trust_state: FreshnessStatus
     provenance: DataProvenance
+    testing_rebuild_drill: OdooTestingDrillEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProductRuntimeConfigStatusItem(BaseModel):
@@ -739,6 +745,8 @@ def build_product_environment_detail(
         )
         if warning
     )
+    from control_plane.odoo_testing_drill import testing_drill_evidence
+
     return ProductEnvironmentDetail(
         product=profile.product,
         display_name=profile.display_name,
@@ -746,6 +754,9 @@ def build_product_environment_detail(
         driver_id=profile.driver_id,
         base_driver_id=descriptor.base_driver_id if descriptor is not None else "",
         environment=lane.instance,
+        testing_rebuild_drill=testing_drill_evidence(
+            record_store, profile.product, lane.context, lane.instance
+        ),
         context=lane.context,
         base_url=lane.base_url,
         health_url=lane.health_url,

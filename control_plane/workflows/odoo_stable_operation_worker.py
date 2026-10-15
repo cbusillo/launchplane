@@ -16,6 +16,7 @@ from typing import Any, Callable, Protocol, cast
 
 from pydantic import BaseModel
 from control_plane.lane_movement import LaneMovementRefused
+from control_plane.odoo_testing_drill import DrillSkipped
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -2201,6 +2202,9 @@ def _execute_target_replacement_with_checkpoint(
     )
 
     def checkpoint_provider_effect(phase: str) -> None:
+        from control_plane.odoo_testing_drill import require_drill_checkpoint
+
+        require_drill_checkpoint(record_store, operation)
         if execution_checkpoint is not None:
             execution_checkpoint(phase)
         elif phase in {
@@ -2215,6 +2219,8 @@ def _execute_target_replacement_with_checkpoint(
         authorization_guard.authorize_execution()
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
             raise _StaffTestingHoldError
+        if isinstance(record_store, PostgresRecordStore):
+            record_store.activate_odoo_testing_drill(operation, time.time())
         require_unchanged_production_artifact(
             record_store=record_store,
             product=operation.product,
@@ -2235,11 +2241,11 @@ def _execute_target_replacement_with_checkpoint(
         )
         if authorization_guard.denial_error is not None:
             raise authorization_guard.denial_error
-    except _StaffTestingHoldError:
+    except (_StaffTestingHoldError, DrillSkipped) as error:
         logging.info(
-            "Odoo stable target replacement operation %s was cancelled: its testing lane is "
-            "held for staff testing.",
+            "Odoo stable target replacement operation %s was cancelled by lane protection: %s",
             operation.operation_id,
+            str(error) if isinstance(error, DrillSkipped) else "staff_testing_hold",
         )
         finished_at = _utc_now_timestamp()
         terminal_operation = operation.model_copy(
@@ -2249,7 +2255,9 @@ def _execute_target_replacement_with_checkpoint(
                 "updated_at": finished_at,
                 "finished_at": finished_at,
                 "lease_owner": lease_owner,
-                "cancellation": staff_testing_hold_cancellation(finished_at),
+                "cancellation": staff_testing_hold_cancellation(finished_at).model_copy(
+                    update={"reason": str(error)} if isinstance(error, DrillSkipped) else {}
+                ),
             }
         )
     except DurableOperationAuthorizationDeniedError as error:
@@ -2328,6 +2336,10 @@ def _execute_target_replacement_with_checkpoint(
                     "error_message": "Testing provider effects require proved-safe reconciliation before retry.",
                 }
             )
+    if execution_checkpoint is not None and isinstance(record_store, PostgresRecordStore):
+        return record_store.complete_odoo_stable_target_replacement_operation_record(
+            record=terminal_operation, lease_owner=lease_owner, restore_unstarted_drill=True
+        )
     return record_store.complete_odoo_stable_target_replacement_operation_record(
         record=terminal_operation,
         lease_owner=lease_owner,

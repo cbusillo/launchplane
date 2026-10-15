@@ -1991,6 +1991,16 @@ export type OdooSlotReadiness = {
     slot_id: string;
 };
 
+export type OdooTestingDrillEvidence = {
+    alert_delivered: boolean;
+    deployment_record_id: string;
+    observed_at: string;
+    operation_id: string;
+    status: 'queued' | 'pass' | 'fail' | 'skipped';
+    step: string;
+    trace: string;
+};
+
 export type OdooWebsiteBootstrapPayload = {
     canonical_url: string;
     company_email: string;
@@ -3004,6 +3014,7 @@ export type ProductEnvironmentDetail = {
     runtime_settings: Array<ProductRuntimeSettingSummary>;
     schema_version: number;
     target: ProductTargetSummary;
+    testing_rebuild_drill?: OdooTestingDrillEvidence | null;
     topology: ProductEnvironmentTopology;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
     warnings: Array<string>;
@@ -3335,6 +3346,7 @@ export type ProductLaneProfile = {
     odoo_data_policy: ProductOdooLaneDataPolicy;
     odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy;
     odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy;
+    odoo_testing_drill_enabled?: boolean;
 };
 
 export type ProductManagedSecretConfigStatusItem = {

@@ -40,7 +40,7 @@ def _render_odoo_web_traefik_labels(
         raise click.ClickException("Odoo Traefik label rendering requires a positive port.")
     lines: list[str] = [
         "    networks:",
-        "      - testing-data" if isolated_testing else "      - default",
+        "      - default",
         "      - dokploy-network",
         "    labels:",
         '      - "traefik.enable=true"',
@@ -155,9 +155,11 @@ def render_odoo_raw_compose_file(
         if mount_workflow_ssh
         else ""
     )
-    web_networks = "    networks: [testing-data]" if isolated_testing and not domain_hosts else ""
-    private_network = "    networks: [testing-data]" if isolated_testing else ""
-    testing_networks = "  testing-data:\n    internal: true\n" if isolated_testing else ""
+    # Dokploy adds `default` to domain-enabled services. Make that very network
+    # private for testing, so provider conversion cannot add an outbound bridge.
+    web_networks = "    networks: [default]" if isolated_testing and not domain_hosts else ""
+    private_network = "    networks: [default]" if isolated_testing else ""
+    testing_networks = "  default:\n    internal: true\n" if isolated_testing else ""
     web_extra_hosts = (
         ""
         if isolated_testing
