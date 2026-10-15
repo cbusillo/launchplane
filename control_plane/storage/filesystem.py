@@ -5350,10 +5350,17 @@ class FilesystemRecordStore:
                 "odoo_stable_target_replacement_operations",
                 record.operation_id,
             )
+            from control_plane.testing_replacement_recovery import service_testing_operation
+
+            if (
+                current_record.status == "reconciliation_required"
+                and service_testing_operation(current_record)
+                and expected_record is None
+            ):
+                return False
             if expected_record is not None:
                 from control_plane.testing_replacement_recovery import (
                     recovery_binding_fingerprint,
-                    service_testing_operation,
                 )
 
                 route = _context_instance_record_id(current_record.context, current_record.instance)
