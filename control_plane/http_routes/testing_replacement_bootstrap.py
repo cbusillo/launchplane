@@ -25,6 +25,7 @@ from control_plane.testing_replacement_bootstrap import (
     TestingReplacementBootstrapRequest,
     TestingBootstrapPrerequisiteError,
     bootstrap_plan,
+    bootstrap_wire_payload,
 )
 
 
@@ -83,7 +84,7 @@ def register_testing_replacement_bootstrap_routes(
                     route_path=ROUTE.format(product=product),
                     idempotency_key=idempotency_key.strip(),
                     request_fingerprint=request_fingerprint(
-                        {"product": product, **body.model_dump(mode="json")}
+                        {"product": product, **bootstrap_wire_payload(body)}
                     ),
                     trace_id=trace,
                     adapter=adapter,

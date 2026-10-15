@@ -14,6 +14,9 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import click
+import hashlib
+import uuid
+from urllib.request import HTTPRedirectHandler, build_opener
 
 from control_plane import runtime_platform_credentials
 
@@ -1879,6 +1882,105 @@ def dokploy_request(
         query=query,
         timeout_seconds=timeout_seconds,
     )
+
+
+def upload_native_testing_chunk(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    container_id: str,
+    filename: str,
+    content: bytes,
+) -> None:
+    """Upload a bounded chunk; only metadata enters the provider-effect journal.
+
+    Provider success is provisional. The caller must inspect the actual receiver
+    bytes, because the provider's final temporary-file cleanup can mask cp errors.
+    """
+    from control_plane.dokploy.native_copy_stream import (
+        NativeSourceAuthorizationDenied,
+        NativeSourceUnavailable,
+    )
+
+    if (
+        not re.fullmatch(r"[a-f0-9]{64}", container_id)
+        or not re.fullmatch(r"[a-zA-Z0-9_-]+", server_id)
+        or server_id == "local"
+        or not re.fullmatch(r"lp-native-[a-f0-9]{32}-(database|filestore)-[0-9]+", filename)
+        or not 0 < len(content) <= 65536
+    ):
+        raise ValueError("Native testing upload requires a bounded qualified receiver.")
+    path = "/api/docker.uploadFileToContainer"
+    metadata: JsonObject = {
+        "serverId": server_id,
+        "containerId": container_id,
+        "filename": filename,
+        "destinationPath": "/tmp",
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+    class NoRedirect(HTTPRedirectHandler):
+        def redirect_request(
+            self, req: Request, fp: object, code: int, msg: str, headers: object, newurl: str
+        ) -> None:
+            return None
+
+    def send() -> JsonValue:
+        boundary = "lp-private-" + uuid.uuid4().hex
+        parts: list[bytes] = []
+        for key, value in (
+            ("serverId", server_id),
+            ("containerId", container_id),
+            ("destinationPath", "/tmp"),
+        ):
+            parts.append(
+                (
+                    f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'
+                ).encode()
+            )
+        parts.append(
+            (
+                f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'
+            ).encode()
+            + content
+            + b"\r\n"
+        )
+        parts.append((f"--{boundary}--\r\n").encode())
+        request = Request(
+            host.rstrip("/") + path,
+            data=b"".join(parts),
+            method="POST",
+            headers={
+                "x-api-key": token,
+                "Content-Type": "multipart/form-data; boundary=" + boundary,
+            },
+        )
+        try:
+            with build_opener(NoRedirect()).open(request, timeout=60) as response:
+                if response.status != 200:
+                    raise NativeSourceUnavailable("The native testing upload did not pass.")
+                # Never copy provider response bodies to an error/journal: this
+                # endpoint may echo the encoded private artifact in a command.
+                response.read(4096)
+        except HTTPError as error:
+            status = error.code
+            error.close()
+            if status in {401, 403}:
+                raise NativeSourceAuthorizationDenied(
+                    "The provider refused the testing upload."
+                ) from None
+            raise NativeSourceUnavailable("The native testing upload did not pass.") from None
+        except (OSError, URLError, TimeoutError):
+            raise NativeSourceUnavailable("The native testing upload is unverified.") from None
+        return {"uploaded": True}
+
+    observer = _mutation_observer.get()
+    if observer is None:
+        send()
+    else:
+        observer(host, path, metadata, send)
 
 
 def _dokploy_request(

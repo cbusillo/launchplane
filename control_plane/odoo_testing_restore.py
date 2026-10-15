@@ -2,7 +2,7 @@
 
 import base64
 import json
-from typing import Literal, TypeVar
+from typing import Literal, TypeVar, TypedDict
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -11,7 +11,7 @@ from control_plane.contracts.product_profile_record import (
     product_config_requirement_applies_to_lane,
 )
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.contracts.odoo_stable_target_replacement import (
@@ -42,6 +42,14 @@ class FreshOdooTestingGeneration(BaseModel):
     prepared_at: str
     completed_at: str = ""
     reconcile_requested_at: str = ""
+    source_mode: Literal["ssh", "container-export"] = "ssh"
+    source_binding_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
+
+    @model_validator(mode="after")
+    def _validate_source(self) -> "FreshOdooTestingGeneration":
+        if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
+            raise ValueError("A native source needs its exact binding; SSH generations carry none.")
+        return self
 
 
 def fresh_testing_mode_refusal(
@@ -168,6 +176,23 @@ try:
     else:
         raise RuntimeError("Unknown fresh testing restore phase")
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
+    if os.environ.get("LAUNCHPLANE_NATIVE_COPY") == "true":
+        import hashlib
+        import re
+        root = Path('/volumes/data/filestore') / runner.local.db_name
+        with runner.local.db_conn.cursor() as cursor:
+            cursor.execute("SELECT store_fname, checksum, file_size FROM ir_attachment WHERE store_fname IS NOT NULL")
+            while rows := cursor.fetchmany(100):
+                for name, checksum, size in rows:
+                    if not re.fullmatch(r'[a-f0-9]{2}/[a-f0-9]{40}', name):
+                        raise RuntimeError('Restored attachment has an unsafe path')
+                    path = root / name
+                    if path.is_symlink() or path.resolve() != path.absolute() or not path.is_file():
+                        raise RuntimeError('Restored attachment is missing')
+                    with path.open('rb') as handle:
+                        digest = hashlib.file_digest(handle, 'sha1').hexdigest()
+                    if digest != name.split('/')[1] or (checksum and digest != checksum) or (size is not None and path.stat().st_size != size):
+                        raise RuntimeError('Restored attachment failed integrity readback')
     modules = [name.strip() for name in (os.environ.get("ODOO_UPDATE_MODULES") or "").split(",") if name.strip()]
     if not modules or "AUTO" in modules:
         raise RuntimeError("Fresh copy needs exact declared module intent")
@@ -200,9 +225,17 @@ def encoded_testing_copy_runner() -> str:
 def generation_binding(generation: FreshOdooTestingGeneration) -> str:
     from control_plane.contracts.canonical_json import canonical_json_sha256
 
-    return canonical_json_sha256(
-        generation.model_dump(mode="json", exclude={"completed_at", "reconcile_requested_at"})
-    )
+    return canonical_json_sha256(generation_identity_payload(generation))
+
+
+def generation_identity_payload(generation: FreshOdooTestingGeneration) -> dict[str, object]:
+    payload = generation.model_dump(mode="json", exclude={"completed_at", "reconcile_requested_at"})
+    if generation.source_mode == "ssh":
+        payload.pop("source_mode")
+        payload.pop("source_binding_sha256")
+    elif not generation.source_binding_sha256:
+        raise ValueError("Native testing copy lacks its reviewed production source binding.")
+    return payload
 
 
 def encoded_restore_source(environment: dict[str, str]) -> str:
@@ -250,6 +283,20 @@ def validate_fresh_testing_intent(
             raise ValueError("Fresh testing cannot enable a managed integration.")
 
 
+class FreshRestoreScriptArguments(TypedDict):
+    generation: FreshOdooTestingGeneration
+    compose_project: str
+    image_reference: str
+    database_name: str
+    source_environment: dict[str, str]
+    readback_spec: str
+    readback_program: str
+    workflow_environment: dict[str, str]
+    runtime_environment: dict[str, str]
+    clear_stale_lock: bool
+    data_workflow_lock_path: str
+
+
 def build_fresh_testing_restore_script(
     *,
     generation: FreshOdooTestingGeneration,
@@ -263,7 +310,47 @@ def build_fresh_testing_restore_script(
     runtime_environment: dict[str, str],
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
+    native_capture: dict[str, object] | None = None,
 ) -> str:
+    spec = fresh_testing_restore_spec(
+        generation=generation,
+        compose_project=compose_project,
+        image_reference=image_reference,
+        database_name=database_name,
+        source_environment=source_environment,
+        readback_spec=readback_spec,
+        readback_program=readback_program,
+        workflow_environment=workflow_environment,
+        runtime_environment=runtime_environment,
+        clear_stale_lock=clear_stale_lock,
+        data_workflow_lock_path=data_workflow_lock_path,
+        native_capture=native_capture,
+    )
+    encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
+    return (
+        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
+        + encoded
+        + " <<'LP_FRESH_COPY'\n"
+        + FRESH_TESTING_RESTORE_HOST_PROGRAM
+        + "\nLP_FRESH_COPY\n"
+    )
+
+
+def fresh_testing_restore_spec(
+    *,
+    generation: FreshOdooTestingGeneration,
+    compose_project: str,
+    image_reference: str,
+    database_name: str,
+    source_environment: dict[str, str],
+    readback_spec: str,
+    readback_program: str,
+    workflow_environment: dict[str, str],
+    runtime_environment: dict[str, str],
+    clear_stale_lock: bool,
+    data_workflow_lock_path: str,
+    native_capture: dict[str, object] | None = None,
+) -> dict[str, object]:
     from control_plane.dokploy.compose import (
         ODOO_DATABASE_DATA_DIRECTORY,
         ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
@@ -291,7 +378,10 @@ def build_fresh_testing_restore_script(
         "compose_project": compose_project,
         "image_reference": image_reference,
         "database_name": database_name,
-        "source": json.loads(base64.b64decode(encoded_restore_source(source_environment))),
+        "source": json.loads(base64.b64decode(encoded_restore_source(source_environment)))
+        if generation.source_mode == "ssh"
+        else {},
+        "native_capture": native_capture,
         "readback_spec": readback_spec,
         "readback_program": readback_program,
         # This witnesses the completed source capture, not a particular future
@@ -299,19 +389,13 @@ def build_fresh_testing_restore_script(
         # and module/readback proof before the payload-bound web gate opens.
         "copy_binding_sha256": generation_binding(generation),
         "runner": TESTING_COPY_RUNNER,
+        "native_files_program": NATIVE_TESTING_FILES_PROGRAM,
         "website_settings_program": WEBSITE_SETTINGS_PROGRAM,
         "workflow_environment": workflow_environment,
         "ssh_key_path": source_environment.get("DATA_WORKFLOW_SSH_KEY", ""),
         "ssh_directory": source_environment.get("DATA_WORKFLOW_SSH_DIR", ""),
     }
-    encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
-    return (
-        "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
-        + encoded
-        + " <<'LP_FRESH_COPY'\n"
-        + FRESH_TESTING_RESTORE_HOST_PROGRAM
-        + "\nLP_FRESH_COPY\n"
-    )
+    return spec
 
 
 FRESH_TESTING_STALE_LOCK_PROGRAM = r"""import os,sys
@@ -349,6 +433,109 @@ if path.exists():
 """
 
 
+NATIVE_TESTING_FILES_PROGRAM = r"""
+import base64,hashlib,json,os,re,sys,tarfile
+from pathlib import Path,PurePosixPath
+spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
+capture=spec['capture']
+identity=capture['capture_id']
+if not re.fullmatch(r'[a-f0-9]{32}',identity):
+    raise RuntimeError('Invalid capture identity')
+mode=spec['mode']
+chunk_size=65536
+def path_for(part,index):
+    return Path('/tmp')/('lp-native-'+identity+'-'+part+'-'+str(index))
+def chunks(part):
+    record=capture[part]
+    if not 0 < record['size'] <= 128*1024*1024 or not re.fullmatch(r'[a-f0-9]{64}',record['sha256']):
+        raise RuntimeError('Invalid artifact receipt')
+    return range((record['size']+chunk_size-1)//chunk_size)
+observed=[]
+for part in ('database','filestore'):
+    for index in chunks(part):
+        path=path_for(part,index)
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError('Unexpected artifact staging path')
+        if mode=='inspect':
+            if path.exists():
+                with path.open('rb') as handle:
+                    digest=hashlib.file_digest(handle,'sha256').hexdigest()
+                observed.append({'part':part,'index':index,'size':path.stat().st_size,'sha256':digest})
+        elif mode=='cleanup':
+            path.unlink(missing_ok=True)
+if mode=='inspect':
+    print(json.dumps(observed));sys.exit(0)
+if mode=='cleanup':
+    sys.exit(0)
+if mode!='prepare':
+    raise RuntimeError('Unsupported artifact operation')
+artifacts={}
+try:
+    for part in ('database','filestore'):
+        destination=Path('/tmp')/('lp-native-'+identity+'-'+part+'.artifact')
+        if destination.exists() or destination.is_symlink():
+            raise RuntimeError('Unclaimed assembled artifact exists')
+        artifacts[part]=destination
+        digest=hashlib.sha256();size=0
+        with destination.open('xb') as output:
+            for index in chunks(part):
+                path=path_for(part,index)
+                if path.is_symlink():
+                    raise RuntimeError('Artifact staging changed')
+                with path.open('rb') as handle:
+                    data=handle.read(chunk_size+1)
+                expected=min(chunk_size,capture[part]['size']-index*chunk_size)
+                if len(data)!=expected:
+                    raise RuntimeError('Artifact staging is incomplete')
+                output.write(data);digest.update(data);size+=len(data)
+        if size!=capture[part]['size'] or digest.hexdigest()!=capture[part]['sha256']:
+            raise RuntimeError('Artifact integrity readback failed')
+    database=spec['database_name']
+    if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}',database):
+        raise RuntimeError('Invalid testing database')
+    root=Path('/volumes/data/filestore')/database
+    if root.resolve()!=root.absolute():
+        raise RuntimeError('Unsafe testing filestore')
+    root.mkdir(parents=True,exist_ok=True)
+    total=0
+    with tarfile.open(artifacts['filestore'],'r:gz') as archive:
+        for member in archive:
+            relative=PurePosixPath(member.name)
+            if relative.is_absolute() or '..' in relative.parts or member.issym() or member.islnk() or not (member.isdir() or member.isfile()):
+                raise RuntimeError('Unsafe source archive entry')
+            name=str(relative)
+            if member.isdir() or name.startswith('checklist/'):
+                continue
+            if not re.fullmatch(r'[a-f0-9]{2}/[a-f0-9]{40}',name):
+                raise RuntimeError('Unsupported source attachment path')
+            total+=member.size
+            if total>512*1024*1024:
+                raise RuntimeError('Expanded source exceeds its bound')
+            path=root/name
+            if path.resolve()!=path.absolute() or path.is_symlink():
+                raise RuntimeError('Unsafe attachment destination')
+            path.parent.mkdir(exist_ok=True)
+            with archive.extractfile(member) as handle:
+                data=handle.read(member.size+1)
+            if len(data)!=member.size or hashlib.sha1(data).hexdigest()!=relative.name:
+                raise RuntimeError('Source attachment content differs from its name')
+            if path.exists():
+                if not path.is_file() or path.read_bytes()!=data:
+                    raise RuntimeError('An existing testing attachment differs')
+            else:
+                with path.open('xb') as handle:
+                    handle.write(data)
+    destination=Path(spec['dump_path'])
+    if destination.parent!=Path('/tmp') or not re.fullmatch(r'lp-testing-[a-f0-9]{32}-[a-f0-9]{32}-database.dump',destination.name):
+        raise RuntimeError('Unsafe testing dump destination')
+    os.link(artifacts['database'],destination)
+    os.chmod(destination,0o644)
+finally:
+    for path in artifacts.values():
+        path.unlink(missing_ok=True)
+"""
+
+
 FRESH_TESTING_RESTORE_HOST_PROGRAM = r"""
 import base64
 import hashlib
@@ -369,6 +556,8 @@ def command(arguments, *, stdin=None, stdout=None):
     result = subprocess.run(arguments, input=stdin, stdout=stdout or subprocess.PIPE,
         stderr=subprocess.PIPE, check=False)
     if result.returncode:
+        if any(word in result.stderr.lower() for word in (b'permission denied',b'password authentication failed',b'unauthorized')):
+            raise PermissionError('The testing runtime refused this identity')
         raise RuntimeError("Fresh testing copy command did not pass")
     return result.stdout or b""
 
@@ -482,6 +671,25 @@ def restore_main():
                 raise RuntimeError("Testing storage has a bind consumer")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
+    if spec.get('inspection_only'):
+        # Read-only qualification uses this exact same container/storage/network
+        # guard as execution. It cannot stop a container, alter a gate or restore.
+        docker("exec",runner,"python3","-c","import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,name,None)) for name in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
+        present=docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres','_',database,stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
+        if present not in {'0','1'}:
+            raise RuntimeError('Ambiguous testing database')
+        if present=='1':
+            marker=docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',database,stdin=b"SELECT value FROM ir_config_parameter WHERE key='launchplane.testing_copy.restore_complete';\n").decode().strip()
+            if marker!=spec['copy_binding_sha256']:
+                raise RuntimeError('Existing testing database lacks its generation witness')
+        prefix=sys.argv[2]
+        capture=spec.get('native_capture')
+        if capture is not None and present=='0':
+            files=json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
+            for item in files:
+                print(prefix+json.dumps({'type':'chunk',**item}),flush=True)
+        print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1'}),flush=True)
+        return
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
     docker("exec", "-i", runner, "python3", "-", spec["data_workflow_lock_path"],
@@ -497,7 +705,12 @@ def restore_main():
     staging = None
     try:
         dump_path = "/tmp/" + namespace + "-" + uuid.uuid4().hex + "-database.dump"
-        if not resume:
+        if not resume and gen.get('source_mode','ssh')=='container-export':
+            capture=spec.get('native_capture')
+            if capture is None or capture['generation_binding_sha256']!=spec['copy_binding_sha256'] or capture['source_binding_sha256']!=gen['source_binding_sha256']:
+                raise RuntimeError('Native copy lacks its original capture receipt')
+            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'prepare','database_name':database,'dump_path':dump_path}).encode()).decode(),stdin=spec['native_files_program'].encode())
+        elif not resume:
             source = spec["source"]
             for key in ("ODOO_UPSTREAM_HOST", "ODOO_UPSTREAM_USER", "ODOO_UPSTREAM_DB_USER", "ODOO_UPSTREAM_DB_NAME"):
                 if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", source[key]):
@@ -544,7 +757,7 @@ def restore_main():
         if not resume:
             docker("exec", "-u", "root", runner, "chown", uid + ":" + gid, dump_path)
         workflow = spec["workflow_environment"]
-        environment = {**{key: value for key, value in workflow.items() if not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))}, "ODOO_FILESTORE_PATH": "/volumes/data/filestore", "ODOO_FILESTORE_OWNER": uid + ":" + gid, "ENV_OVERRIDE_DISABLE_CRON": "true", "ODOO_RESTORE_KEPT_INTEGRATIONS": ""}
+        environment = {**{key: value for key, value in workflow.items() if not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))}, "ODOO_FILESTORE_PATH": "/volumes/data/filestore", "ODOO_FILESTORE_OWNER": uid + ":" + gid, "ENV_OVERRIDE_DISABLE_CRON": "true", "ODOO_RESTORE_KEPT_INTEGRATIONS": "", "LAUNCHPLANE_NATIVE_COPY":str(gen.get('source_mode')=='container-export').lower()}
         arguments = ["exec", "-i"]
         for key, value in environment.items():
             if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
@@ -569,6 +782,8 @@ def restore_main():
         docker("exec", runner, "python3", "-c",
             "import hashlib,os;from pathlib import Path;Path(" + repr(marker) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
         docker("exec", "-u", "root", runner, "rm", "-f", dump_path)
+        if spec.get('native_capture') is not None:
+            docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         docker("start", web)
         for marker in ("testing_copy_pre_registry_sanitized", "testing_copy_sanitized", "integration_readback_ok", "odoo_module_update_image_match", "odoo_restore_completed"):
             print(marker + "=true")
@@ -585,6 +800,9 @@ def main():
     namespace = spec["generation"]["namespace"]
     if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
         raise RuntimeError("Invalid testing host lock identity")
+    if spec.get('inspection_only'):
+        restore_main()
+        return
     path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
     descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
@@ -596,7 +814,17 @@ def main():
 
 try:
     main()
+except PermissionError:
+    if len(sys.argv)>2:
+        print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
+        sys.exit(1)
+    print('odoo_restore_completed=false')
+    print('testing_copy_sanitized=false')
+    sys.exit(1)
 except Exception:
+    if len(sys.argv)>2:
+        print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
+        sys.exit(1)
     print("odoo_restore_completed=false")
     print("testing_copy_sanitized=false")
     # Failed copies and their stopped web remain for exact-generation recovery.
@@ -850,6 +1078,19 @@ def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGe
     from control_plane.contracts.canonical_json import canonical_json_sha256
 
     profile = getattr(store, "read_product_profile_record")(generation.product)
+    if generation.source_mode == "container-export":
+        from control_plane.odoo_testing_native_source import native_testing_source_authority
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        if (
+            native_testing_source_authority(
+                cast(PostgresRecordStore, store),
+                profile=profile,
+                testing_context=generation.context,
+            ).binding_sha256
+            != generation.source_binding_sha256
+        ):
+            raise ValueError("The reviewed native source authority changed.")
     production = [lane for lane in profile.lanes if lane.instance == "prod"]
     if len(production) != 1:
         raise ValueError("Fresh testing source authority is unavailable.")
@@ -887,9 +1128,7 @@ def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGe
     return canonical_json_sha256(
         {
             "profile": profile.model_dump(mode="json"),
-            "generation": generation.model_dump(
-                mode="json", exclude={"completed_at", "reconcile_requested_at"}
-            ),
+            "generation": generation_identity_payload(generation),
             "target": getattr(store, "read_dokploy_target_record")(
                 context_name=generation.context, instance_name="testing"
             ).model_dump(mode="json"),

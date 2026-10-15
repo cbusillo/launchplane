@@ -6,7 +6,8 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
+from control_plane.storage.postgres import PostgresRecordStore
 
 import click
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +17,10 @@ from control_plane.odoo_testing_restore import (
     read_current_testing_generation,
     fresh_testing_authority_sha256,
     fresh_testing_mode_refusal,
+)
+from control_plane.odoo_testing_native_source import (
+    native_testing_source_authority,
+    resolve_native_testing_source,
 )
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
@@ -1442,6 +1447,22 @@ def build_odoo_stable_target_replacement_plan(
                 "Fresh testing requires its recorded upstream restore policy.",
             )
         destructive_backup_required = False
+        if generation is not None and generation.source_mode == "container-export":
+            try:
+                if (
+                    native_testing_source_authority(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        testing_context=lane.context,
+                    ).binding_sha256
+                    != generation.source_binding_sha256
+                ):
+                    raise ValueError("The reviewed native source changed.")
+            except (ValueError, FileNotFoundError):
+                block(
+                    "fresh_testing_authority_unverified",
+                    "The reviewed native source authority is unverified.",
+                )
     if destructive_backup_required:
         try:
             odoo_backup_paths_from_runtime(
@@ -1594,7 +1615,9 @@ def build_odoo_stable_target_replacement_plan(
                 domain_hosts=current_target.domain_hosts,
                 runtime_port=profile.runtime_port,
             )
-            if request.data_source_mode == "upstream_restore":
+            if request.data_source_mode == "upstream_restore" and not (
+                generation is not None and generation.source_mode == "container-export"
+            ):
                 for code, message, keys in _upstream_restore_blockers(
                     current_env=live_runtime_values,
                     resolved_runtime_values=recorded_runtime_values,
@@ -2087,7 +2110,24 @@ def execute_odoo_stable_target_replacement_apply(
         runtime_source["runtime_override_payload_rendered"] = "false"
 
     production_write_started = False
+    native_source = None
     try:
+        if (
+            generation is not None
+            and generation.source_mode == "container-export"
+            and not generation.completed_at
+        ):
+            # Source inspection/probe happens outside DB authority locks and before
+            # the first testing provider write. It never exports or changes source.
+            native_source = resolve_native_testing_source(
+                cast(PostgresRecordStore, record_store),
+                root=control_plane_root,
+                profile=profile,
+                testing_context=plan.context,
+                probe=True,
+            )
+            if native_source.binding_sha256 != generation.source_binding_sha256:
+                raise ValueError("The reviewed native copy source changed.")
         with _failure_stage(deploy_blocked_code("provider_target_unreadable")):
             host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
             target_payload = dokploy_api.fetch_dokploy_target_payload(
@@ -2257,7 +2297,9 @@ def execute_odoo_stable_target_replacement_apply(
                 + ", ".join(missing_compose_keys),
                 tuple(missing_compose_keys),
             )
-        if request.data_source_mode == "upstream_restore":
+        if request.data_source_mode == "upstream_restore" and not (
+            generation is not None and generation.source_mode == "container-export"
+        ):
             configuration_blockers = _upstream_restore_blockers(
                 current_env=current_env_map,
                 resolved_runtime_values=runtime_environment_values,
@@ -2730,6 +2772,7 @@ def execute_odoo_stable_target_replacement_apply(
                 and not generation.completed_at
                 else None,
                 fresh_restore_source_environment=fresh_restore_source_environment,
+                fresh_native_source=native_source,
             )
     except OdooProviderEffectUncertainError:
         runtime_source["provider_outcome"] = "uncertain"

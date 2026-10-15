@@ -520,6 +520,68 @@ receipt proves route/metadata/supersession/queue preparation; `runtime_verified`
 remains false. Actual reconciliation, health, runtime identity and incident
 readback must separately prove the restored lane is green.
 
+For a containerized production source without host SSH restore coordinates, add
+`--source-mode container-export` to the same client's dry-run/apply/readback
+request. The service derives its single same-product production source from
+managed records and binds the reviewed database, filestore and source record
+versions to the new generation. Existing SSH requests, review files, request
+fingerprints and generation identities retain their previous meaning. Source
+mode is explicit; a failed SSH restore never selects another transport.
+
+Container export uses the provider's existing registered remote server terminal
+and identity. It refuses the provider's local key-generating terminal. Fixed
+commands read `pg_dump` output inside the recorded database container and stream
+the recorded web container's filestore; they create no production dump/archive,
+schedule, attachment pin, password or other persistent source file. A read-only
+probe and source identity checks precede the first testing provider write.
+An authorization refusal stops under the same identity. No new access grant or
+source credential is delivered to the testing containers.
+
+Before capture or upload, an inspection-only execution of the same restore
+guard qualifies the actual testing artifact, containers, private data network,
+volume backing identities and every backing consumer. The service retains raw
+source bytes only in its private `LAUNCHPLANE_STATE_DIR/private-testing-source/`
+cache, with directories and files readable only by the service user. Each artifact is bounded to 128 MiB;
+expanded attachments are bounded to 512 MiB. An immutable PostgreSQL receipt
+binds the generation, source observation, byte lengths and SHA256 digests before
+delivery. This cache uses the documented shared service state volume and is not
+a public asset store or runtime-configuration authority.
+
+Delivery uses at most 64 KiB per provider upload into the qualified runner's
+writable temporary layer, with metadata-only effect journaling. Provider upload
+success is provisional: actual receiver sizes and hashes must agree before the
+restore schedule runs. Retry retains the original receipt and bytes, skips
+already matching chunks and refuses a different existing chunk. An existing
+database must hold the exact generation's committed copy witness; that resume
+does not recapture or require the raw cache. A receipt whose raw files are
+missing without that database witness is held for recovery, never silently
+replaced with a newer production snapshot.
+
+The receiver verifies whole artifacts and rejects archive traversal, symlinks,
+hardlinks and special files. Only content-addressed Odoo attachment files enter
+the testing filestore. The custom database dump goes through the existing
+SQL-only credential and connection sanitization boundary before a registry
+process runs; every stored attachment reference must match the local bytes.
+Module, integration and website readback still precede the web gate. Successful
+readback removes raw receiver chunks and private cached bytes, retaining the
+immutable DB receipt. Failed attempts retain original chunks/cache and keep the
+generation for supported same-key recovery. Never delete retained old storage
+or fabricate a completion witness as cleanup.
+
+For updates, run the schema migration and deploy this image to the API and Odoo
+worker with their existing shared state volume before selecting container export.
+Verify their running revision and the bootstrap dry-run. After a completed copy,
+ordinary deployments use existing data; another production refresh needs a
+separately qualified generation. On a failed or interrupted copy, preserve the
+original request/key, generation, immutable capture receipt and private cache;
+repeat supported observation/recovery rather than changing source mode or
+credentials. Images predating container export cannot interpret these generation
+records: retain this image or a compatible successor and forward-fix instead of
+rolling records back or deleting evidence. Unreferenced pre-receipt cache
+directories may be removed only after the owning executor is stopped and their
+absence from retained capture receipts is verified; published failed captures
+remain recovery evidence.
+
 The service compares the existing local testing passwords with the supported
 production source's managed versions internally, without returning or retaining
 plaintext or password hashes. Missing versions or overlap refuse preparation;

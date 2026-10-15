@@ -63,6 +63,7 @@ from control_plane.testing_replacement_resources import (
     run_resource_schedule,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.odoo_testing_native_source import native_testing_source_authority
 
 ROUTE = TESTING_REPLACEMENT_BOOTSTRAP_ROUTE
 
@@ -125,15 +126,28 @@ def _bootstrap_prerequisite(code: BootstrapPrerequisiteCode) -> Iterator[None]:
         raise TestingBootstrapPrerequisiteError(code) from None
 
 
+def bootstrap_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
+    payload = request.model_dump(mode="json")
+    if payload.get("source_mode") == "ssh":
+        payload.pop("source_mode")
+    return payload
+
+
+def bootstrap_request_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
+    payload = bootstrap_wire_payload(request)
+    payload.pop("mode")
+    payload.pop("reviewed_plan_sha256")
+    return payload
+
+
 def bootstrap_request_sha256(request: TestingReplacementResourcesRequest) -> str:
-    return canonical_json_sha256(
-        request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"})
-    )
+    return canonical_json_sha256(bootstrap_request_payload(request))
 
 
 class TestingReplacementBootstrapRequest(TestingReplacementResourcesRequest):
     domain_host: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
     certificate_type: Literal["none", "letsencrypt"] = "none"
+    source_mode: Literal["ssh", "container-export"] = "ssh"
 
 
 class TestingReplacementBootstrapPlan(BaseModel):
@@ -144,6 +158,8 @@ class TestingReplacementBootstrapPlan(BaseModel):
     operation_id: str
     domain_host: str
     source_instance: Literal["prod"] = "prod"
+    source_mode: Literal["ssh", "container-export"] = "ssh"
+    source_binding_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     resources_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     omitted_runtime_keys: tuple[str, ...] = ()
@@ -259,17 +275,26 @@ def bootstrap_plan(
             ):
                 source_values.update({key: str(value) for key, value in runtime_record.env.items()})
     source_values.update({key: str(value) for key, value in target.env.items()})
+    source_binding = ""
     with _bootstrap_prerequisite(BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED):
-        encoded_restore_source(source_values)
+        if request.source_mode == "container-export":
+            source_binding = native_testing_source_authority(
+                store, profile=profile, testing_context=request.context
+            ).binding_sha256
+        else:
+            encoded_restore_source(source_values)
+    if generation is not None and source_binding != generation.source_binding_sha256:
+        raise ValueError("The reviewed production source authority changed.")
     digest = canonical_json_sha256(
         {
-            "request": request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),
+            "request": bootstrap_request_payload(request),
             "profile": profile.model_dump(mode="json"),
             "allocation": allocation.model_dump(mode="json"),
             "configuration": [
                 item.model_dump(mode="json")
                 for item in disposable_lane_configuration(store, request.context, "testing")
             ],
+            **({"native_source_binding_sha256": source_binding} if source_binding else {}),
         }
     )
     return TestingReplacementBootstrapPlan(
@@ -277,6 +302,8 @@ def bootstrap_plan(
         context=request.context,
         operation_id=operation.operation_id,
         domain_host=request.domain_host,
+        source_mode=request.source_mode,
+        source_binding_sha256=source_binding,
         plan_sha256=generation.bootstrap_plan_sha256 if generation is not None else digest,
         resources_binding_sha256=resources.binding_sha256,
         omitted_runtime_keys=tuple(sorted(omitted)),
@@ -402,6 +429,8 @@ class TestingReplacementBootstrapAdapter:
             context=self.request.context,
             operation_id=generation.operation_id,
             domain_host=generation.domain_host,
+            source_mode=generation.source_mode,
+            source_binding_sha256=generation.source_binding_sha256,
             plan_sha256=generation.bootstrap_plan_sha256,
             resources_binding_sha256=generation.resources_binding_sha256,
             omitted_runtime_keys=bootstrap_plan(
@@ -488,6 +517,8 @@ class TestingReplacementBootstrapAdapter:
                 bootstrap_plan_sha256=plan.plan_sha256,
                 request_sha256=bootstrap_request_sha256(self.request),
                 certificate_type=self.request.certificate_type,
+                source_mode=plan.source_mode,
+                source_binding_sha256=plan.source_binding_sha256,
                 omitted_runtime_keys=plan.omitted_runtime_keys,
                 prepared_at=utc_now_timestamp(),
             )

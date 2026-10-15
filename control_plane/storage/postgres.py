@@ -139,6 +139,7 @@ from control_plane.contracts.disposable_lane import (
     DisposableTestingResourcePreparation,
 )
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+from control_plane.contracts.odoo_testing_source import NativeTestingCopyCapture
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
@@ -3725,6 +3726,12 @@ class LaunchplaneFreshOdooTestingGenerationRow(Base):
     __tablename__ = "launchplane_fresh_odoo_testing_generations"
     product: Mapped[str] = mapped_column(String, primary_key=True)
     context: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneNativeTestingCopyCaptureRow(Base):
+    __tablename__ = "launchplane_native_testing_copy_captures"
+    generation_binding_sha256: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -10410,6 +10417,47 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
             return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
+
+    def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneNativeTestingCopyCaptureRow, binding)
+            return NativeTestingCopyCapture.model_validate(row.payload) if row else None
+
+    def write_native_testing_copy_capture(self, record: NativeTestingCopyCapture) -> None:
+        from control_plane.odoo_testing_restore import generation_binding
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            generation_row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (record.product, record.context),
+                with_for_update=True,
+            )
+            if generation_row is None:
+                raise ValueError("Native capture requires its recorded generation.")
+            generation = FreshOdooTestingGeneration.model_validate(generation_row.payload)
+            if (
+                generation.source_mode != "container-export"
+                or generation.completed_at
+                or generation_binding(generation) != record.generation_binding_sha256
+                or generation.source_binding_sha256 != record.source_binding_sha256
+            ):
+                raise ValueError("Native capture differs from the active generation.")
+            row = session.get(
+                LaunchplaneNativeTestingCopyCaptureRow, record.generation_binding_sha256
+            )
+            if row is not None:
+                if NativeTestingCopyCapture.model_validate(row.payload) != record:
+                    raise ValueError("Native capture receipts are immutable; do not recapture.")
+                return
+            session.add(
+                LaunchplaneNativeTestingCopyCaptureRow(
+                    generation_binding_sha256=record.generation_binding_sha256,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
 
     def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:
         with self._session_factory() as session:

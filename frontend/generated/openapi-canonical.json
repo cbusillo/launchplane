@@ -47236,6 +47236,15 @@
             "pattern": "^(?:[a-f0-9]{64})?$",
             "title": "Reviewed Plan Sha256",
             "type": "string"
+          },
+          "source_mode": {
+            "default": "ssh",
+            "enum": [
+              "ssh",
+              "container-export"
+            ],
+            "title": "Source Mode",
+            "type": "string"
           }
         },
         "required": [

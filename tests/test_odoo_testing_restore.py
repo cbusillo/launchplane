@@ -296,7 +296,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         output = io.StringIO()
         status = 0
         with (
-            patch.object(sys, "argv", ["copy", encoded]),
+            patch.object(
+                sys,
+                "argv",
+                ["copy", encoded] + (["fixture:"] if self.spec.get("inspection_only") else []),
+            ),
             patch("subprocess.run", side_effect=self.command),
             patch("tempfile.gettempdir", return_value=str(self.root)),
             redirect_stdout(output),
@@ -365,6 +369,67 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         status, _output = self.run_program()
         self.assertNotEqual(status, 0)
         self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
+
+    def test_native_receiver_inspection_uses_isolation_guard_without_effects(self) -> None:
+        self.spec["inspection_only"] = True
+        self.spec["generation"]["source_mode"] = "container-export"
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertEqual(len(frames), 1)
+        self.assertFalse(frames[0]["resume"])
+        self.assertEqual(frames[0]["runner"], self.containers["script-runner"]["Id"])
+        self.assertFalse(
+            any(
+                call[0] in {"ssh", "rsync"}
+                or call[:2] in (["docker", "stop"], ["docker", "start"], ["docker", "cp"])
+                or "rm" in call
+                for call in self.calls
+            )
+        )
+
+    def test_native_receiver_refuses_shared_storage_before_inspection_success(self) -> None:
+        self.spec["inspection_only"] = True
+        self.containers["other"] = {
+            "Id": "other",
+            "Config": {},
+            "Mounts": [{"Name": self.gen.namespace + "-data"}],
+        }
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertNotIn('"type": "complete"', output)
+
+    def test_native_receiver_refuses_existing_database_without_generation_witness(self) -> None:
+        self.spec["inspection_only"] = True
+        self.existing_database = True
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_native_restore_consumes_receipt_and_never_selects_ssh_fallback(self) -> None:
+        self.spec["generation"].update(
+            source_mode="container-export", source_binding_sha256="f" * 64
+        )
+        self.spec["source"] = {}
+        self.spec["native_capture"] = {
+            "capture_id": "a" * 32,
+            "generation_binding_sha256": self.spec["copy_binding_sha256"],
+            "source_binding_sha256": "f" * 64,
+        }
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
+        self.assertIn(["docker", "start", "web"], self.calls)
+        self.calls.clear()
+        self.spec["native_capture"] = None
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_website_exclusion_is_required_before_web_start(self) -> None:
         status, output = self.run_program()

@@ -34,6 +34,7 @@ from control_plane.dokploy.connection_isolation import (
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+from control_plane.contracts.odoo_testing_source import NativeOdooTestingSource
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
@@ -250,6 +251,7 @@ def execute_odoo_post_deploy(
     connection_isolation_product: str = "",
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
     fresh_restore_source_environment: dict[str, str] | None = None,
+    fresh_native_source: NativeOdooTestingSource | None = None,
     artifact_id: str = "",
     release_website_settings: OdooWebsiteSettingsIntent | None = None,
     release_operation: bool = False,
@@ -461,6 +463,40 @@ def execute_odoo_post_deploy(
 
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        native_preparer = None
+        native_capture = None
+        if (
+            fresh_testing_generation is not None
+            and fresh_testing_generation.source_mode == "container-export"
+        ):
+            from control_plane.odoo_testing_native_source import prepare_native_testing_delivery
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            if fresh_native_source is None:
+                raise ValueError("Native testing copy has no verified source descriptor.")
+            generation_for_capture = fresh_testing_generation
+            descriptor_for_capture = fresh_native_source
+
+            def native_preparer(spec: dict[str, object], server_id: str) -> dict[str, object]:
+                nonlocal native_capture
+                try:
+                    native_capture = prepare_native_testing_delivery(
+                        cast(PostgresRecordStore, record_store),
+                        root=control_plane_root,
+                        generation=generation_for_capture,
+                        descriptor=descriptor_for_capture,
+                        host=host,
+                        token=token,
+                        server_id=server_id,
+                        spec=spec,
+                        before_mutation=before_provider_effect,
+                    )
+                except ValueError:
+                    raise click.ClickException(
+                        "Native testing copy integrity or recovery is unverified; retain the original generation and capture receipt."
+                    ) from None
+                return native_capture.model_dump(mode="json")
+
         post_deploy_readback_markers = (
             dokploy_post_deploy.run_compose_post_deploy_update(
                 host=host,
@@ -476,6 +512,7 @@ def execute_odoo_post_deploy(
                 allow_historical_sender_contract=allow_historical_sender_contract,
                 fresh_testing_generation=fresh_testing_generation,
                 fresh_restore_source_environment=fresh_restore_source_environment,
+                prepare_native_source=native_preparer,
             )
             or {}
         )
@@ -500,6 +537,12 @@ def execute_odoo_post_deploy(
                 post_deploy_readback_markers,
                 allow_historical_contract=allow_historical_sender_contract,
             )
+        if native_capture is not None:
+            from control_plane.odoo_testing_native_source import (
+                remove_completed_native_capture_cache,
+            )
+
+            remove_completed_native_capture_cache(native_capture)
     except (click.ClickException, OSError) as error:
         determinate_failure = isinstance(
             error,
