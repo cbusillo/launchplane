@@ -340,6 +340,28 @@ def observe_tracked_dokploy_application(
     )
 
 
+def require_unmounted_retirement_application(*, control_plane_root: Path, target_id: str) -> None:
+    """Bound agent deletion to applications with no attached persistent storage.
+
+    Stopping this exact service does not reconfigure another service's database,
+    ports or credentials. Mount deletion can destroy shared or needed data, so
+    an absent/incomplete mount inspection cannot qualify this bounded path.
+    """
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    try:
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="application", target_id=target_id
+        )
+    except dokploy_api.DokployRequestFailed as error:
+        if error.status_code == 404:
+            return
+        raise
+    if _application_id(payload) != target_id or payload.get("mounts") != []:
+        raise ProductRetirementBlockedError(
+            "Agent retirement requires an exact application with a complete empty mount inventory."
+        )
+
+
 def build_provider_observation(
     *,
     target_id: str,

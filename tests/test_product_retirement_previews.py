@@ -99,18 +99,20 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                     eligible_at=self.profile.updated_at,
                 )
             )
-        self.apps = {
+        self.apps: dict[str, dict[str, Any]] = {
             "testing-app": {
                 "applicationId": "testing-app",
                 "name": "example-site-testing",
                 "appName": "example-site-testing-abc",
                 "applicationStatus": "idle",
+                "mounts": [],
             },
             "preview-6": {
                 "applicationId": "preview-6",
                 "name": "example-site-pr-6",
                 "appName": "example-site-pr-6-abc",
                 "applicationStatus": "idle",
+                "mounts": [],
             },
         }
         self.sessions = HumanSessionManager(
@@ -455,7 +457,6 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_director_retires_never_live_product_with_previews_without_grants(self) -> None:
         self.use_director_identity()
-        self.record_retirement_safety()
         payload = await self.director_plan()
         response = await request(
             self.app,
@@ -521,7 +522,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(applied.status_code, 202, applied.text)
         self.assertEqual(set(self.deleted), {"testing-app", "preview-6"})
 
-    async def test_bounded_observer_supports_an_absent_preview_without_assuming_safety(
+    async def test_unknown_observations_do_not_override_prelaunch_retirement(
         self,
     ) -> None:
         self.use_director_identity()
@@ -561,13 +562,12 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
             headers=self.director_headers,
             payload=payload,
         )
-        self.assertEqual(applied.status_code, 409, applied.text)
-        self.assertFalse(self.deleted)
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(set(self.deleted), {"testing-app", "preview-6"})
 
-    async def test_director_retirement_refuses_missing_usage_or_only_copy_evidence(self) -> None:
+    async def test_director_retirement_refuses_recorded_exceptions(self) -> None:
         self.use_director_identity()
         for changes in (
-            {},
             {"usage": "in_use"},
             {"data": "only_copy"},
             {"production_resources": "shared"},
@@ -589,11 +589,131 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
                 # Use a fresh inert plan key for the next observation.
                 self.director_headers["Idempotency-Key"] += "-next"
 
-    async def test_safety_expiry_before_testing_delete_retains_a_visible_fence_and_receipt(
+    async def test_mounted_application_is_never_deleted(self) -> None:
+        self.use_director_identity()
+        payload = await self.director_plan()
+        # Even a positive synthetic observation cannot bypass actual storage.
+        self.record_retirement_safety()
+        self.apps["preview-6"]["mounts"] = [{"volumeName": "production-data"}]
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+        self.assertIn("testing-app", self.apps)
+        self.assertIn("preview-6", self.apps)
+
+    async def test_missing_mount_inventory_cannot_qualify_deletion(self) -> None:
+        self.use_director_identity()
+        payload = await self.director_plan()
+        self.apps["preview-6"].pop("mounts")
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+
+    async def test_staff_testing_hold_blocks_retirement_without_observations(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+
+        self.use_director_identity()
+        payload = await self.director_plan()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.profile.lanes[0].context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "policies": target.policies.model_copy(
+                        update={
+                            "staff_testing_hold": DokployTargetStaffTestingHold(
+                                reason="Staff are using it"
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+
+    async def test_unknown_production_use_does_not_become_never_live(self) -> None:
+        self.use_director_identity()
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"production_use": "unknown"})
+        )
+        payload = await self.director_plan()
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+
+    async def test_cross_lane_secret_consumer_prevents_retirement(self) -> None:
+        from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+
+        self.use_director_identity()
+        context = self.profile.lanes[0].context
+        secret = SecretRecord(
+            secret_id="fixture-shared-secret",
+            scope="context_instance",
+            integration="runtime_environment",
+            name="API_TOKEN",
+            context=context,
+            instance="testing",
+            current_version_id="fixture-version",
+            created_at=self.profile.updated_at,
+            updated_at=self.profile.updated_at,
+        )
+        self.store.write_secret_record(secret)
+        binding = SecretBinding(
+            binding_id="fixture-production-binding",
+            secret_id=secret.secret_id,
+            integration=secret.integration,
+            binding_key=secret.name,
+            context="another-product",
+            instance="prod",
+            created_at=secret.created_at,
+            updated_at=secret.updated_at,
+        )
+        self.store.write_secret_binding(binding)
+        payload = await self.director_plan()
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+        self.assertEqual(self.store.read_secret_record(secret.secret_id), secret)
+        self.assertIn(binding, self.store.list_secret_bindings())
+
+    async def test_usage_hold_before_testing_delete_retains_a_visible_fence_and_receipt(
         self,
     ) -> None:
         from control_plane.disposable_lanes import require_disposable_lane
-        from datetime import datetime, timedelta, timezone
+        from tests.support.disposable_lanes import record_safety
 
         self.use_director_identity()
         self.payload["include_previews"] = False
@@ -620,14 +740,20 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         payload = await self.director_plan()
         calls = 0
 
-        def expire(*args: Any, **kwargs: Any) -> str:
+        def hold(*args: Any, **kwargs: Any) -> str:
             nonlocal calls
             calls += 1
             if calls > 1:
-                kwargs["now"] = datetime.now(timezone.utc) + timedelta(minutes=20)
+                record_safety(
+                    self.store,
+                    self.profile.product,
+                    self.profile.lanes[0].context,
+                    "testing",
+                    usage="in_use",
+                )
             return require_disposable_lane(*args, **kwargs)
 
-        with patch("control_plane.http_app.require_disposable_lane", side_effect=expire):
+        with patch("control_plane.http_app.require_disposable_lane", side_effect=hold):
             response = await request(
                 self.app,
                 "POST",
@@ -949,6 +1075,7 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
             "appName": "renamed-abc",
             "dockerImage": self.profile.image.repository + ":fixture",
             "applicationStatus": "idle",
+            "mounts": [],
         }
         response = await request(
             self.app, "POST", "/v1/product-retirement", headers=self.headers, payload=self.payload
