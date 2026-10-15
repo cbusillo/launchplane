@@ -2,6 +2,8 @@
 
 import base64
 import json
+from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from typing import Literal, TypeVar, TypedDict
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
@@ -47,6 +49,9 @@ class FreshOdooTestingGeneration(BaseModel):
     reconcile_requested_at: str = ""
     source_mode: Literal["ssh", "container-export"] = "ssh"
     source_binding_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
+    drill_storage_budget: OdooTestingDrillStorageBudget | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     drill_database: str = Field(
         default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
     )
@@ -654,15 +659,36 @@ def one_inspection(identifier):
     return values[0]
 
 
-def discard_previous_drill(gen, database_container, runner, database):
+def discard_previous_drill(gen, database_container, runner, database, receipt_root=None):
+    from datetime import datetime, timezone
+    def current():
+        if 'disposal_expires_at' in gen and datetime.now(timezone.utc).timestamp() >= gen['disposal_expires_at']:
+            raise RuntimeError('Disposal qualification expired')
+    current()
     previous = gen.get('discard_drill_database', '')
     witness = gen.get('discard_copy_binding', '')
     if not previous:
         if witness:
             raise RuntimeError('Unbound drill disposal witness')
         return
-    if not re.fullmatch(r'lp_drill_[a-f0-9]{32}', previous) or previous == database or not re.fullmatch(r'[a-f0-9]{64}', witness):
+    protected = {database, gen.get('drill_database'), gen.get('retained_drill_database')}
+    if not re.fullmatch(r'lp_drill_[a-f0-9]{32}', previous) or previous in protected or not re.fullmatch(r'[a-f0-9]{64}', witness):
         raise RuntimeError('Invalid prior drill database')
+    # A persistent write-ahead witness is required before DROP. It survives a
+    # successful drop followed by failed filestore removal or lost transport.
+    if receipt_root is None:
+        volume = json.loads(docker('volume','inspect',gen['namespace']+'-db'))[0]
+        receipt_root = Path(volume['Mountpoint']) / '.launchplane-drill-disposal'
+    root = Path(receipt_root)
+    if root.resolve() != root.absolute() or root.is_symlink():
+        raise RuntimeError('Unsafe disposal receipt path')
+    root.mkdir(mode=0o700, exist_ok=True)
+    receipt = root / (previous + '.json')
+    expected = {'database':previous,'witness':witness}
+    if receipt.is_symlink():
+        raise RuntimeError('Unsafe disposal receipt')
+    if receipt.exists() and json.loads(receipt.read_text()) != expected:
+        raise RuntimeError('Disposal receipt identity changed')
     present = docker('exec','-i',database_container,'sh','-c',
         'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
         '_', previous, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
@@ -674,12 +700,30 @@ def discard_previous_drill(gen, database_container, runner, database):
             '_', previous, stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
         if observed != witness:
             raise RuntimeError('Prior database lacks its committed drill witness')
-        # No FORCE: an unexpected user/connection retains this old copy.
+        if not receipt.exists():
+            descriptor = os.open(receipt, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
+            with os.fdopen(descriptor,'w') as handle:
+                json.dump(expected,handle,sort_keys=True);handle.flush();os.fsync(handle.fileno())
+            descriptor = os.open(root, os.O_RDONLY|os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        # No FORCE or connection termination. Unexpected connections retain it.
+        current()
         docker('exec','-i',database_container,'sh','-c',
             'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
             '_', previous, stdin=b'DROP DATABASE :"database_name";\n')
+    elif not receipt.exists():
+        absent = docker('exec',runner,'python3','-c',
+            "from pathlib import Path;import sys;p=Path('/volumes/data/filestore')/sys.argv[1];assert p.resolve()==p.absolute() and not p.is_symlink();print('absent' if not p.exists() else 'present')",previous).decode().strip()
+        if absent == 'absent':
+            return
+        raise RuntimeError('Absent database lacks a committed disposal receipt')
+    current()
     docker('exec',runner,'python3','-c',
         "from pathlib import Path;import re,shutil,sys;name=sys.argv[1];assert re.fullmatch(r'lp_drill_[a-f0-9]{32}',name);p=Path('/volumes/data/filestore')/name;assert p.resolve()==p.absolute() and not p.is_symlink();shutil.rmtree(p) if p.exists() else None", previous)
+    # Keep the receipt even on success: original-key readback remains possible.
 
 
 def restore_main():
@@ -694,8 +738,8 @@ def restore_main():
         raise RuntimeError("Testing compose identity changed")
     if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}", database):
         raise RuntimeError("Testing database identity is invalid")
-    modules = [name.strip() for name in str(spec["workflow_environment"].get("ODOO_UPDATE_MODULES", "")).split(",") if name.strip()]
-    if not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules):
+    modules = [name.strip() for name in str(spec.get("workflow_environment", {}).get("ODOO_UPDATE_MODULES", "")).split(",") if name.strip()]
+    if not spec.get('storage_maintenance') and (not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules)):
         raise RuntimeError("Testing restore has no exact declared module update intent")
     volumes = {namespace + "-data", namespace + "-db", namespace + "-logs"}
     containers = {}
@@ -729,7 +773,7 @@ def restore_main():
             environment = dict(item.split("=", 1) for item in configuration.get("Env", []) if "=" in item)
             if environment.get("PLATFORM_INSTANCE") != "testing" or environment.get("ODOO_DB_HOST") != "database" or environment.get("ODOO_DB_NAME") != database:
                 raise RuntimeError("Testing database endpoint is not local")
-            if environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "") != spec["expected_overrides_payload"]:
+            if not spec.get('storage_maintenance') and environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "") != spec["expected_overrides_payload"]:
                 raise RuntimeError("Testing settings changed after execution preflight")
             if environment.get("ODOO_MAX_CRON_THREADS") != "0":
                 raise RuntimeError("Fresh testing must have no cron workers")
@@ -780,6 +824,9 @@ def restore_main():
                 raise RuntimeError("Testing storage has a bind consumer")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
+    if spec.get('storage_maintenance'):
+        storage_maintenance(spec, containers)
+        return
     if spec.get('inspection_only'):
         # Read-only qualification uses this exact same container/storage/network
         # guard as execution. It cannot stop a container, alter a gate or restore.
@@ -801,6 +848,8 @@ def restore_main():
             artifacts=files['artifacts']
         print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1','artifacts':artifacts}),flush=True)
         return
+    if gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget']):
+        raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
     docker("exec", "-i", runner, "python3", "-", spec["data_workflow_lock_path"],
@@ -896,12 +945,8 @@ def restore_main():
         if spec.get('native_capture') is not None:
             docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         docker("start", web)
-        try:
-            discard_previous_drill(gen, containers['database'][0], runner, database)
-        except Exception:
-            # Cleanup cannot take a sanitized new lane offline. Keep exact
-            # custody in the slot receipt; never expose provider error values.
-            print("testing_drill_disposal_deferred=true", flush=True)
+        # Disposal is reconciled by the service against fresh use/custody facts,
+        # independently of the new copy's health and its long-running admission.
         for marker in ("testing_copy_pre_registry_sanitized", "testing_copy_sanitized", "integration_readback_ok", "odoo_module_update_image_match", "odoo_restore_completed"):
             print(marker + "=true")
     finally:
@@ -929,11 +974,13 @@ def main():
         os.close(descriptor)
 
 
+__LP_STORAGE_MAINTENANCE_LIBRARY__
+
 try:
     main()
 except PermissionError:
     if len(sys.argv)>2:
-        print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
+        print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
         sys.exit(1)
     print('odoo_restore_completed=false')
     print('testing_copy_sanitized=false')
@@ -951,6 +998,11 @@ except Exception:
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
     "__LP_COPY_WITNESS__", TESTING_COPY_COMPLETION_PARAMETER
+)
+
+
+FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
+    "__LP_STORAGE_MAINTENANCE_LIBRARY__", STORAGE_MAINTENANCE_LIBRARY
 )
 
 

@@ -2220,6 +2220,9 @@ def _execute_target_replacement_with_checkpoint(
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
             raise _StaffTestingHoldError
         if isinstance(record_store, PostgresRecordStore):
+            from control_plane.odoo_testing_storage import prepare_drill_storage
+
+            prepare_drill_storage(record_store, operation, control_plane_root_path)
             record_store.activate_odoo_testing_drill(operation, time.time())
         require_unchanged_production_artifact(
             record_store=record_store,

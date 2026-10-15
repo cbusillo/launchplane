@@ -7,6 +7,7 @@ from typing import Literal, get_args
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
@@ -298,6 +299,11 @@ class ProductLaneProfile(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    odoo_testing_drill_storage: OdooTestingDrillStorageBudget | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     instance: str
     context: str
@@ -326,7 +332,9 @@ class ProductLaneProfile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductLaneProfile":
-        if self.odoo_testing_drill_enabled and self.instance != "testing":
+        if (
+            self.odoo_testing_drill_enabled or self.odoo_testing_drill_storage
+        ) and self.instance != "testing":
             raise ValueError("Odoo testing drills require the testing instance.")
         if not self.instance.strip():
             raise ValueError("product lane profile requires instance")

@@ -23273,6 +23273,12 @@
             "title": "Deployment Record Id",
             "type": "string"
           },
+          "disposal_pending": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Disposal Pending",
+            "type": "integer"
+          },
           "observed_at": {
             "title": "Observed At",
             "type": "string"
@@ -23297,6 +23303,17 @@
             "title": "Step",
             "type": "string"
           },
+          "storage_status": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "pass",
+              "insufficient",
+              "unconfigured"
+            ],
+            "title": "Storage Status",
+            "type": "string"
+          },
           "trace": {
             "default": "",
             "title": "Trace",
@@ -23308,6 +23325,40 @@
           "observed_at"
         ],
         "title": "OdooTestingDrillEvidence",
+        "type": "object"
+      },
+      "OdooTestingDrillStorageBudget": {
+        "additionalProperties": false,
+        "description": "Admin-supplied working headroom, never an inferred source-size guarantee.",
+        "properties": {
+          "database_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Database Bytes",
+            "type": "integer"
+          },
+          "filestore_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Filestore Bytes",
+            "type": "integer"
+          },
+          "reserve_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Reserve Bytes",
+            "type": "integer"
+          },
+          "staging_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Staging Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "database_bytes",
+          "filestore_bytes",
+          "staging_bytes",
+          "reserve_bytes"
+        ],
+        "title": "OdooTestingDrillStorageBudget",
         "type": "object"
       },
       "OdooTestingRouteBindingRefreshEnvelope": {
@@ -33205,6 +33256,17 @@
             "default": false,
             "title": "Odoo Testing Drill Enabled",
             "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
+          "odoo_testing_drill_storage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooTestingDrillStorageBudget"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "x-launchplane-optional-response": true
           }
         },

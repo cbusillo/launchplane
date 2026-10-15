@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import secrets
+import time
 from threading import local
 from typing import (
     TYPE_CHECKING,
@@ -10668,6 +10669,186 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(LaunchplaneIdempotencyRow.created_at.asc(),),
         )
 
+    def list_odoo_testing_disposal_receipts(
+        self, product: str, context: str
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE, lane_key
+
+        payload = LaunchplaneIdempotencyRow.payload["response_payload"]
+        return self._list_models(
+            model_type=LaunchplaneIdempotencyRecord,
+            orm_model=LaunchplaneIdempotencyRow,
+            filters=(
+                LaunchplaneIdempotencyRow.scope == DRILL_SCOPE,
+                LaunchplaneIdempotencyRow.route_path == DRILL_ROUTE,
+                LaunchplaneIdempotencyRow.idempotency_key.like(lane_key(product, context) + ":%"),
+                payload["planned_generation"]["discard_drill_database"].as_string() != "",
+                payload["status"].as_string() == "pass",
+                or_(
+                    payload["disposal_status"].as_string().is_(None),
+                    payload["disposal_status"].as_string() != "disposed",
+                ),
+            ),
+            order_by=(LaunchplaneIdempotencyRow.created_at.asc(),),
+        )
+
+    def reconcile_odoo_testing_storage(
+        self,
+        operation: OdooStableTargetReplacementOperationRecord,
+        binding: str,
+        intent: dict[str, Any],
+        perform: Callable[[float], dict[str, object]],
+        *,
+        now: float,
+    ) -> dict[str, object]:
+        """Serialize cleanup with lane admission and every authority writer.
+
+        The dispatch intent has already committed. Failure preserves that exact
+        identity for host-lock/witness reconciliation; no receipt is erased.
+        """
+        from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE, DrillPrerequisite
+        from control_plane.odoo_testing_restore import (
+            fresh_testing_authority_sha256,
+            read_current_testing_generation,
+        )
+        from control_plane.odoo_testing_storage import capacity_admission_binding, storage_key
+        from control_plane.disposable_lanes import DisposableLaneStore, require_disposable_lane
+
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=operation.product, context=operation.context, instance="testing"
+            )
+            self._lock_product_authority_bundle_write(session)
+            outer = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                current = read_current_testing_generation(
+                    self, product=operation.product, context=operation.context, instance="testing"
+                )
+                if (
+                    current is None
+                    or not current.completed_at
+                    or fresh_testing_authority_sha256(self, current) != binding
+                ):
+                    raise DrillPrerequisite("testing_storage_authority_changed")
+                require_disposable_lane(
+                    cast(DisposableLaneStore, self),
+                    product=operation.product,
+                    context=operation.context,
+                    instance="testing",
+                    now=datetime.fromtimestamp(now, timezone.utc),
+                )
+                worker = session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow, operation.operation_id
+                )
+                if (
+                    worker is None
+                    or worker.status != "running"
+                    or worker.attempt != operation.attempt
+                    or worker.lease_owner != operation.lease_owner
+                    or parse_launchplane_mutation_timestamp(
+                        worker.lease_expires_at, field_name="lease_expires_at"
+                    ).timestamp()
+                    <= now
+                ):
+                    raise DrillPrerequisite("drill_worker_lease_changed")
+                rows = []
+                for key, copy in zip(intent["receipts"], intent["copies"], strict=True):
+                    row = session.scalar(
+                        self._idempotency_statement(
+                            scope=DRILL_SCOPE,
+                            route_path=DRILL_ROUTE,
+                            idempotency_key=key,
+                            for_update=True,
+                        )
+                    )
+                    if row is None:
+                        raise DrillPrerequisite("testing_disposal_receipt_missing")
+                    record = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                    planned = FreshOdooTestingGeneration.model_validate(
+                        record.response_payload["planned_generation"]
+                    )
+                    if (
+                        {
+                            "discard_drill_database": planned.discard_drill_database,
+                            "discard_copy_binding": planned.discard_copy_binding,
+                        }
+                        != copy
+                        or planned.discard_drill_database
+                        in {current.drill_database, current.retained_drill_database}
+                        or (planned.namespace, planned.target_id, planned.resources_binding_sha256)
+                        != (current.namespace, current.target_id, current.resources_binding_sha256)
+                    ):
+                        raise DrillPrerequisite("testing_disposal_identity_changed")
+                    rows.append((row, record))
+                safety = self.read_disposable_lane_safety(
+                    operation.product, operation.context, "testing"
+                )
+                assert safety is not None
+                pending_count = len(
+                    self.list_odoo_testing_disposal_receipts(operation.product, operation.context)
+                )
+                result = perform(safety.expires_at.timestamp())
+                results = result.get("disposals")
+                if (
+                    not isinstance(result.get("capacity"), bool)
+                    or not isinstance(results, list)
+                    or len(results) != len(rows)
+                    or any(value not in {"disposed", "deferred"} for value in results)
+                ):
+                    raise DrillPrerequisite("testing_storage_readback_unavailable")
+                for (row, record), status in zip(rows, results, strict=True):
+                    record.response_payload["disposal_status"] = status
+                    if (
+                        status == "disposed"
+                        and record.response_payload.get("failure_step")
+                        == "testing_disposal_deferred"
+                    ):
+                        record.response_payload["alert_superseded_by"] = operation.idempotency_key
+                    self._sync_idempotency_row(row, record)
+                receipt_row = session.scalar(
+                    self._idempotency_statement(
+                        scope=DRILL_SCOPE,
+                        route_path=DRILL_ROUTE,
+                        idempotency_key=operation.idempotency_key,
+                        for_update=True,
+                    )
+                )
+                if receipt_row is None:
+                    raise DrillPrerequisite("drill_receipt_missing")
+                receipt = LaunchplaneIdempotencyRecord.model_validate(receipt_row.payload)
+                remaining = pending_count - sum(status == "disposed" for status in results)
+                receipt.response_payload.update(
+                    storage_status="pass" if result["capacity"] else "insufficient",
+                    storage_admission=capacity_admission_binding(current, operation)
+                    if result["capacity"] and remaining == 0
+                    else "",
+                    storage_authority=binding,
+                    disposal_pending=remaining,
+                )
+                if "deferred" in results:
+                    receipt.response_payload.update(
+                        failure_step="testing_disposal_deferred",
+                        failure_trace=operation.operation_id,
+                        alert_delivered=False,
+                        next_alert_at=0,
+                        delivered_destinations=[],
+                    )
+                self._sync_idempotency_row(receipt_row, receipt)
+                evidence = dict(intent)
+                evidence.update(phase="complete", capacity=result["capacity"], disposals=results)
+                from control_plane.odoo_testing_drill import drill_receipt
+
+                session.merge(
+                    self._idempotency_row(
+                        drill_receipt(storage_key(operation.operation_id), time.time(), evidence)
+                    )
+                )
+                session.commit()
+                return result
+            finally:
+                self._disposable_authority_context.session = outer
+
     def update_odoo_testing_drill_receipt(
         self, key: str, now: float, payload: dict[str, Any]
     ) -> None:
@@ -10686,6 +10867,9 @@ class PostgresRecordStore(HumanSessionStore):
             "delivered_destinations",
             "next_alert_at",
             "alert_superseded_by",
+            "storage_status",
+            "disposal_pending",
+            "disposal_status",
         }
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -10923,6 +11107,15 @@ class PostgresRecordStore(HumanSessionStore):
                 return
             if current.model_dump(mode="json") != receipt.response_payload["previous_generation"]:
                 raise DrillPrerequisite("drill_generation_changed")
+            from control_plane.odoo_testing_storage import capacity_admission_binding
+            from control_plane.odoo_testing_restore import fresh_testing_authority_sha256
+
+            if receipt.response_payload.get("storage_admission") != capacity_admission_binding(
+                current, operation
+            ) or receipt.response_payload.get(
+                "storage_authority"
+            ) != fresh_testing_authority_sha256(self, current):
+                raise DrillPrerequisite("testing_storage_capacity_unverified")
             session.get(
                 LaunchplaneDisposableLaneSafetyRow,
                 (operation.product, operation.context, "testing"),

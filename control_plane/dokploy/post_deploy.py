@@ -195,6 +195,8 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "testing_copy_runtime_isolated",
         "testing_copy_pre_registry_sanitized",
         "testing_copy_sanitized",
+        "testing_drill_disposal_deferred",
+        "testing_drill_disposal_completed",
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(

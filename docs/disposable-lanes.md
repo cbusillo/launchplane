@@ -821,22 +821,53 @@ A drill can stop the testing web service, replace its disposable contents, load
 the production source with the existing bounded read-only export, and consume
 testing storage. It never changes production data, ports, storage, routes,
 credentials or permissions. Its copy has live keys and outbound connections
-removed before the first registry process. After the new copy passes sanitization,
-module and integration readback, the restore guard may dispose of the older
-service-created drill database and its filestore. The immediate completed
-predecessor is retained through final web/health checks, including when those
-checks fail. Only the copy two generations behind can be disposed of, and it must carry
-its exact committed copy witness; DROP uses no FORCE, so an unexpected connection
-refuses disposal. The new copy is distinct and the initial bootstrap database
-is retained. Successful cleanup bounds steady-state drill storage to the initial copy, current
-copy, immediate predecessor and in-progress copy. Cleanup runs after the sanitized
-new web process starts; a cleanup refusal preserves that working copy, emits
-`testing_drill_disposal_deferred=true` in the operation logs, and retains the old
-copy under the slot receipt's custody. Deferred cleanup and failed partial
-captures/copies require explicit disposition and can accumulate; admission does
-not establish available filesystem capacity. Durable deferred-disposal telemetry,
-capacity admission and bounded cleanup reconciliation are tracked in
-[#3729](https://github.com/cbusillo/launchplane/issues/3729).
+removed before the first registry process. The immediate completed predecessor,
+initial bootstrap database and current selection are retained. Disposal runs
+before a later drill selects its new database, independently of that new copy's
+health. Up to four outstanding slot receipts are reconciled per worker pass,
+oldest first, against fresh authoritative unused/reproducible/isolated facts,
+no hold, unchanged resource allocation and actual container/backing-consumer
+inspection. The same host lock excludes restore and cleanup processes. A copy
+must have its exact committed database witness; DROP uses neither FORCE nor
+connection termination. A connected database or failed filestore removal stays
+deferred. No receipt or failed raw-copy evidence is erased.
+An outstanding or refused disposal prevents the next capture from starting;
+the last healthy copy keeps serving. Later scheduled attempts reconcile the
+same original identities instead of adding another copy to a growing backlog.
+
+Before DROP, the host fsyncs a write-ahead receipt on the qualified database
+volume, binding the original database and witness. If DROP succeeds but filestore
+removal or transport fails, the original-key retry reacquires the host lock and
+uses that receipt. An absent database with a remaining filestore and no receipt
+is refused; absence of both needs no deletion. Foreign witnesses, symlinks and
+current/immediate-predecessor identities are refused. Historical slot receipts
+remain queryable after cleanup. Legacy `testing_drill_disposal_deferred` log
+markers are consumed into service evidence, but new copies no longer perform
+inline best-effort deletion after web startup.
+
+Each testing lane's `odoo_testing_drill_storage` record supplies positive integer
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`. Set these
+working-headroom requirements through the existing authenticated product-profile
+write path, preserving the rest of the current profile. There are no invented
+real sizes, default budgets, new grants or assumed observation lifetimes.
+Unconfigured requirements refuse a drill before database selection. Choose the
+requirements from qualified source size and restore/staging overhead; they are
+an explicit capacity requirement, **not a quota or a claim about future source
+growth**. A budget is not established by a healthy deployment or yesterday's
+free-space observation.
+
+On every new worker attempt, the shared resource guard reads current filesystem
+capacity, using non-root available bytes and the actual backing device. Demands
+for DB, filestore and capture staging on the same filesystem are summed before
+adding its reserve. Native staging requires a known runner writable-layer
+backing; unsupported storage layouts stay unverified. Cleanup can reclaim old
+copies even when that pass then refuses capacity. Capacity evidence is bound to
+the exact generation, authority and worker attempt before activation, and the
+host repeats the free-space check before touching the web gate or capturing.
+Insufficient or unavailable capacity alerts through the existing Discord policy
+and preserves the selected generation and its usable predecessor. This is a
+current admission check, not a filesystem reservation: unrelated writers or a
+source larger than the recorded working requirements can still consume space.
 A failed copy never deletes its predecessor. Final web and health verification
 still gates a passing operation and generation completion.
 

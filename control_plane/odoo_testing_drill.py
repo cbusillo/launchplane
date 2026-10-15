@@ -224,6 +224,7 @@ def prepare_drill(
             "reconcile_requested_at": prepared_at or timestamp(now),
             "request_sha256": canonical_json_sha256([key, database]),
             "source_binding_sha256": source_binding,
+            "drill_storage_budget": lane.odoo_testing_drill_storage,
         }
     )
     runtime = runtime.model_copy(
@@ -490,6 +491,22 @@ class OdooTestingDrillScheduler:
                         delivered_destinations=[],
                         next_alert_at=0,
                     )
+            if operation.result is not None:
+                evidence = operation.result.post_deploy_override_evidence
+                if evidence.get("post_deploy_readback_testing_drill_disposal_deferred") == "true":
+                    payload.update(disposal_status="deferred", disposal_pending=1)
+                    if payload.get("failure_step") != "testing_disposal_deferred":
+                        payload.update(
+                            failure_step="testing_disposal_deferred",
+                            failure_trace=payload["trace"],
+                            alert_delivered=False,
+                            delivered_destinations=[],
+                            next_alert_at=0,
+                        )
+                elif (
+                    evidence.get("post_deploy_readback_testing_drill_disposal_completed") == "true"
+                ):
+                    payload["disposal_status"] = "disposed"
             if payload != receipt.response_payload:
                 payload["observed_at"] = timestamp(now)
                 self.store.update_odoo_testing_drill_receipt(receipt.idempotency_key, now, payload)
@@ -557,7 +574,7 @@ class OdooTestingDrillScheduler:
                     sender,
                     {
                         "allowed_mentions": {"parse": []},
-                        "content": f"Odoo testing rebuild failed: {safe(product)} / testing. Step: {safe(payload.get('failure_step', payload.get('step')))}. Trace: {safe(payload.get('failure_trace', payload.get('trace')))}. Inspect the retained drill operation; no automatic recapture.",
+                        "content": f"Odoo testing {'storage cleanup deferred' if payload.get('failure_step') == 'testing_disposal_deferred' else 'rebuild failed'}: {safe(product)} / testing. Step: {safe(payload.get('failure_step', payload.get('step')))}. Trace: {safe(payload.get('failure_trace', payload.get('trace')))}. Inspect the retained drill operation; no automatic recapture.",
                     },
                 )
                 delivered_destinations.append(destination_key)
@@ -584,12 +601,14 @@ def testing_drill_evidence(
     )
     if receipt is None:
         return None
+    payload = dict(receipt.response_payload)
+    payload["disposal_pending"] = len(store.list_odoo_testing_disposal_receipts(product, context))
     return OdooTestingDrillEvidence.model_validate(
         {
             "observed_at": receipt.response_payload.get("observed_at", receipt.recorded_at),
             **{
                 key: value
-                for key, value in receipt.response_payload.items()
+                for key, value in payload.items()
                 if key in OdooTestingDrillEvidence.model_fields and key != "observed_at"
             },
         }

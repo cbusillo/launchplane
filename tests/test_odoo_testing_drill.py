@@ -44,6 +44,8 @@ from control_plane.odoo_testing_drill import (
 )
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import generation_binding
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.odoo_testing_storage import prepare_drill_storage
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplaneDisposableReplacementPreparationRow,
@@ -79,6 +81,12 @@ class TestingDrillScenario(unittest.TestCase):
                                 upstream_source=f"{self.profile.product}:{production.context}:prod",
                             ),
                             "odoo_testing_drill_enabled": True,
+                            "odoo_testing_drill_storage": OdooTestingDrillStorageBudget(
+                                database_bytes=100,
+                                filestore_bytes=100,
+                                staging_bytes=100,
+                                reserve_bytes=100,
+                            ),
                         }
                     )
                     if lane.instance == "testing"
@@ -222,6 +230,15 @@ class TestingDrillScenario(unittest.TestCase):
         self.enterContext(
             patch("control_plane.odoo_testing_restore.require_distinct_testing_credentials")
         )
+        self.storage_executor = self.enterContext(
+            patch(
+                "control_plane.odoo_testing_storage.execute_maintenance",
+                side_effect=lambda root, target, spec: {
+                    "capacity": True,
+                    "disposals": ["disposed"] * len(spec["storage_maintenance"]["copies"]),
+                },
+            )
+        )
 
     def evidence(self) -> Any:
         return testing_drill_evidence(self.store, self.profile.product, self.context, "testing")
@@ -276,6 +293,7 @@ class TestingDrillScenario(unittest.TestCase):
                 lease_expires_at=datetime.fromtimestamp(self.now + 300, timezone.utc).isoformat(),
             )
         assert operation is not None
+        prepare_drill_storage(self.store, operation, Path("."), now=self.now)
         self.store.activate_odoo_testing_drill(operation, self.now)
         return operation
 
