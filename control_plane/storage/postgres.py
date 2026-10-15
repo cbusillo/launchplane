@@ -19971,7 +19971,11 @@ class PostgresRecordStore(HumanSessionStore):
             effect = session.scalar(
                 select(LaunchplaneOrdinaryAgentEffectRow.effect_id)
                 .where(
-                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
+                    func.lower(
+                        LaunchplaneOrdinaryAgentEffectRow.payload["target"][
+                            "repository"
+                        ].as_string()
+                    )
                     == normalized_repository,
                     LaunchplaneOrdinaryAgentEffectRow.payload["target"]["base_branch"].as_string()
                     == normalized_base_branch,

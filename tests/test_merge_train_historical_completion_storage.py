@@ -30,6 +30,12 @@ from control_plane.storage.postgres import (
     LaunchplaneOrdinaryAgentEffectRow,
     PostgresRecordStore,
 )
+from tests.test_merge_train_historical_completion import (
+    _HistoricalCompletionFixture,
+    _ReadOnlyTransport,
+    _assess,
+    _provider_responses,
+)
 
 
 def _landing_plan(*, stale: bool = False) -> MergeTrainBatchLandingPlan:
@@ -262,6 +268,124 @@ class HistoricalEffectRepositoryFenceTests(unittest.TestCase):
                     base_branch=base_branch,
                     state="reconciliation_required",
                     refused=False,
+                )
+
+
+class PortableHistoricalEffectPreflightTests(unittest.TestCase):
+    def database_url(self) -> str:
+        return "sqlite+pysqlite:///:memory:"
+
+    def assert_preflight(
+        self, *, repository: str, base_branch: str, state: str, excluded: bool
+    ) -> None:
+        store = PostgresRecordStore(database_url=self.database_url())
+        self.addCleanup(store.close)
+        store.ensure_schema()
+        with TemporaryDirectory() as directory:
+            fixture = _HistoricalCompletionFixture(Path(directory))
+            store.write_merge_train_policy_record(fixture.policy_record)
+            store.write_merge_train_batch_candidate_record(fixture.candidate_record)
+            store.write_merge_train_batch_landing_plan_record(fixture.landing_record)
+            store.write_merge_train_controller_state_record(fixture.controller)
+            target = OrdinaryAgentTarget(
+                repository_id=123, repository=repository, base_branch=base_branch
+            )
+            payload = {
+                "effect_id": "legacy-effect",
+                "lease_id": "legacy-lease",
+                "request_id": "legacy-request",
+                "scope_sha256": "d" * 64,
+                "binding_revision": 1,
+                "action_ordinal": 1,
+                "revision": 1,
+                "target": target.model_dump(mode="json"),
+                "state": state,
+                "command_sha256": "e" * 64,
+            }
+            original_bytes = canonical_json_bytes(payload)
+            original_digest = canonical_json_sha256(payload)
+            with store._session_factory() as session:
+                effect = LaunchplaneOrdinaryAgentEffectRow(
+                    effect_id="legacy-effect",
+                    lease_id="legacy-lease",
+                    request_id="legacy-request",
+                    scope_sha256="d" * 64,
+                    binding_revision=1,
+                    action_ordinal=1,
+                    semantic_key="merge-train",
+                    command_sha256="e" * 64,
+                    revision=1,
+                    payload=payload,
+                )
+                original_command_digest = effect.command_sha256
+                original_revision = effect.revision
+                session.add(effect)
+                session.commit()
+            transport = _ReadOnlyTransport(responses=_provider_responses())
+
+            result = _assess(fixture, store=store, transport=transport)
+
+            self.assertEqual(result.evidence_eligible, not excluded, result.model_dump_json())
+            if excluded:
+                self.assertEqual(result.status, "unsupported")
+                self.assertEqual(result.reason_code, "ordinary_target_unsupported")
+                self.assertEqual(transport.requests, [])
+            else:
+                self.assertTrue(transport.requests)
+            self.assertEqual(
+                store.list_merge_train_controller_state_records(), (fixture.controller,)
+            )
+            self.assertEqual(
+                store.list_merge_train_batch_landing_plan_records(), (fixture.landing_record,)
+            )
+            self.assertEqual(store.list_merge_admission_records(), ())
+            with store._session_factory() as session:
+                row = session.get(LaunchplaneOrdinaryAgentEffectRow, effect.effect_id)
+                assert row is not None
+                self.assertEqual(canonical_json_bytes(row.payload), original_bytes)
+                self.assertEqual(canonical_json_sha256(row.payload), original_digest)
+                self.assertEqual(row.command_sha256, original_command_digest)
+                self.assertEqual(row.revision, original_revision)
+
+    def test_preflight_excludes_unresolved_effect_for_equivalent_repository_case(self) -> None:
+        for repository in ("acme/widget", "ACME/WIDGET", "Acme/Widget"):
+            for state in (
+                "reserved",
+                "dispatching",
+                "waiting_provider",
+                "reconciliation_required",
+                "rebind_pending",
+            ):
+                with self.subTest(repository=repository, state=state):
+                    self.assert_preflight(
+                        repository=repository, base_branch="main", state=state, excluded=True
+                    )
+
+    def test_portable_preflight_preserves_terminal_history_and_target_isolation(self) -> None:
+        for state in (
+            "not_dispatched",
+            "completed",
+            "completed_observed",
+            "terminal_conflict",
+            "exhausted",
+            "retained_no_conditional_delete",
+        ):
+            with self.subTest(state=state):
+                self.assert_preflight(
+                    repository="Acme/Widget", base_branch="main", state=state, excluded=False
+                )
+        for repository, base_branch in (
+            ("other/widget", "main"),
+            ("acme/other", "main"),
+            ("Acme/Widget", "MAIN"),
+            ("Acme/Widget", "other-branch"),
+        ):
+            with self.subTest(repository=repository, base_branch=base_branch):
+                self.assert_preflight(
+                    repository=repository,
+                    base_branch=base_branch,
+                    state="reconciliation_required",
+                    excluded=False,
                 )
 
 

@@ -974,6 +974,13 @@ class RealPostgresHistoricalEffectRepositoryFenceTests(
         return self.enterContext(_head_postgres_database())
 
 
+class RealPostgresPortableHistoricalEffectPreflightTests(
+    historical_storage_tests.PortableHistoricalEffectPreflightTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
 class RealPostgresLegacyPreviewReconciliationTests(
     legacy_preview_tests.LegacyPreviewReconciliationTests
 ):
