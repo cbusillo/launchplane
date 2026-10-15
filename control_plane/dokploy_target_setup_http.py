@@ -408,6 +408,8 @@ def execute_dokploy_target_setup(
         return mutate_dokploy_payload_for_target_setup(host, token, path, payload)
 
     apply_changes = request.mode == "apply"
+    if set(request.domains).intersection(record_store.retained_disposable_hostnames()):
+        raise ValueError("A hostname remains reserved by retained testing custody.")
     if disposable_placement is not None and disposable_checkpoint is None:
         raise ValueError("Resuming fresh placement requires its service-owned checkpoint.")
     ensure_dokploy_target_setup_context_is_not_historical(

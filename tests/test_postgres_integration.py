@@ -30,6 +30,11 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.workflows.dokploy_target_adoption import (
+    PROJECT_CREATE_PATH,
+    ENVIRONMENT_CREATE_PATH,
+    COMPOSE_CREATE_PATH,
+)
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -48,6 +53,7 @@ from tests.test_odoo_addon_settings_override import _existing_record as _addon_o
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetRecordChanged,
+    DokployTargetIntegrationAllowance,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
@@ -10191,6 +10197,13 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     "require_test_gate": True,
                     "policies": retained_record.policies.model_copy(
                         update={
+                            "integration_allowances": (
+                                DokployTargetIntegrationAllowance(
+                                    integration="shopify",
+                                    kind="pre_live",
+                                    reason="retained lane evidence",
+                                ),
+                            ),
                             "shopify": retained_record.policies.shopify.model_copy(
                                 update={"protected_store_keys": ("protected-store",)}
                             ),
@@ -10230,7 +10243,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
 
             def projects(**kwargs: Any) -> Any:
                 project = next(
-                    (payload for path, payload in calls if path == "/api/project.create"), None
+                    (payload for path, payload in calls if path == PROJECT_CREATE_PATH), None
                 )
                 if project is None:
                     return ()
@@ -10253,9 +10266,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             def mutate(host: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
                 calls.append((path, payload))
                 identifiers = {
-                    "/api/project.create": "projectId",
-                    "/api/environment.create": "environmentId",
-                    "/api/compose.create": "composeId",
+                    PROJECT_CREATE_PATH: "projectId",
+                    ENVIRONMENT_CREATE_PATH: "environmentId",
+                    COMPOSE_CREATE_PATH: "composeId",
                 }
                 self.assertIn(path, identifiers)
                 return {identifiers[path]: "fresh-" + identifiers[path]}
@@ -10263,7 +10276,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             def fetch(host: str, token: str, target_type: str, target_id: str) -> dict[str, Any]:
                 self.assertEqual(target_type, "compose")
                 namespace = next(
-                    (payload["name"] for path, payload in calls if path == "/api/compose.create"),
+                    (payload["name"] for path, payload in calls if path == COMPOSE_CREATE_PATH),
                     "fixture-compose",
                 )
                 return {
@@ -10452,13 +10465,40 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 replacement_record = fixture.store.read_dokploy_target_record(
                     context_name=fixture.context, instance_name="testing"
                 )
-                self.assertEqual(replacement_record.policies, retained_record.policies)
+                self.assertEqual(
+                    replacement_record.policies.shopify, retained_record.policies.shopify
+                )
+                self.assertFalse(replacement_record.policies.integration_allowances)
                 self.assertEqual(
                     replacement_record.require_test_gate, retained_record.require_test_gate
                 )
                 self.assertFalse(replacement_record.domains)
                 self.assertFalse(replacement_record.public_hosts)
                 self.assertFalse(replacement_record.env)
+                self.assertTrue(
+                    set(retained_record.domains).issubset(
+                        fixture.store.retained_disposable_hostnames()
+                    )
+                )
+                with self.assertRaises(DokployTargetRecordChanged):
+                    fixture.store.write_dokploy_target_record(
+                        replacement_record.model_copy(update={"domains": retained_record.domains})
+                    )
+                production_record = fixture.store.read_dokploy_target_record(
+                    context_name=fixture.context, instance_name="prod"
+                )
+                with self.assertRaises(DokployTargetRecordChanged):
+                    fixture.store.write_dokploy_target_record(
+                        production_record.model_copy(
+                            update={"public_hosts": retained_record.public_hosts}
+                        )
+                    )
+                self.assertEqual(
+                    fixture.store.read_dokploy_target_record(
+                        context_name=fixture.context, instance_name="prod"
+                    ),
+                    production_record,
+                )
                 self.assertEqual(
                     fixture.store.read_dokploy_target_id_record(
                         context_name=fixture.context, instance_name="prod"

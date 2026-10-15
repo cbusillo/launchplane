@@ -289,3 +289,11 @@ pending effects and target settings remain recoverable there. Protection policie
 and the test gate carry onto the new target; old routes and writable settings do
 not. Current target overrides and secret bindings cannot replace qualified volume
 names when positive evidence is published.
+
+Only protection policies carry onto the fresh target. Integration allowances stay
+in the retained snapshot and are not granted to the new generation. Retained
+hostnames remain reserved across target and public-host writers, including a
+claim from the replacement lane itself. Preparation refuses unresolved pending
+route effects so their provider identities cannot be detached from their target.
+The reviewed plan authorizes this exact empty allocation; recovery re-derives
+current separation evidence and never starts an application under that receipt.
