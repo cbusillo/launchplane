@@ -1168,6 +1168,8 @@ def observe_odoo_preview_dokploy_apply(
                     outcome=("absent" if provider_effect_phase in retry_safe_phases else "unknown"),
                     retry_safe=provider_effect_phase in retry_safe_phases,
                 )
+            if not _destroyed_preview_absence_verified(host=host, token=token, plan=plan):
+                return OdooPreviewDokployObservation(outcome="unknown")
             return OdooPreviewDokployObservation(
                 outcome="present",
                 result=_apply_result(request=request, status="pass", compose_id=plan.compose_ref),
@@ -1349,10 +1351,27 @@ def _original_compose_id_from_complete_inventory(
 ) -> str:
     if not environment_id:
         raise click.ClickException("Original preview environment binding is unavailable.")
+    matches = [
+        identifier
+        for environment, identifier, name in _complete_preview_compose_inventory(
+            host=host, token=token
+        )
+        if environment == environment_id and name == compose_name
+    ]
+    if len(matches) > 1:
+        raise click.ClickException("Original preview compose binding is ambiguous.")
+    return matches[0] if matches else ""
+
+
+def _complete_preview_compose_inventory(
+    *, host: str, token: str
+) -> tuple[tuple[str, str, str], ...]:
     projects = dokploy_api.dokploy_request(host=host, token=token, path="/api/project.all")
-    if not isinstance(projects, list):
+    if not isinstance(projects, list) or len(projects) > 1000:
         raise click.ClickException("Original preview inventory is incomplete.")
-    matches: list[str] = []
+    entries: list[tuple[str, str, str]] = []
+    environments_seen: set[str] = set()
+    composes_seen: set[str] = set()
     for project in projects:
         if not isinstance(project, dict):
             raise click.ClickException("Original preview inventory is incomplete.")
@@ -1360,10 +1379,17 @@ def _original_compose_id_from_complete_inventory(
         if not isinstance(environments, list):
             raise click.ClickException("Original preview inventory is incomplete.")
         for environment in environments:
-            if not isinstance(environment, dict) or not environment.get("environmentId"):
+            if not isinstance(environment, dict):
                 raise click.ClickException("Original preview inventory is incomplete.")
-            if environment["environmentId"] != environment_id:
-                continue
+            environment_id = environment.get("environmentId")
+            if (
+                not isinstance(environment_id, str)
+                or not environment_id.strip()
+                or environment_id in environments_seen
+                or len(environments_seen) >= 10000
+            ):
+                raise click.ClickException("Original preview environment inventory is ambiguous.")
+            environments_seen.add(environment_id)
             collections = [
                 environment[key] for key in ("compose", "composes") if key in environment
             ]
@@ -1371,17 +1397,42 @@ def _original_compose_id_from_complete_inventory(
             if not isinstance(composes, list):
                 raise click.ClickException("Original preview compose inventory is incomplete.")
             for compose in composes:
+                if not isinstance(compose, dict):
+                    raise click.ClickException("Original preview compose inventory is incomplete.")
+                name, identifier = compose.get("name"), compose.get("composeId")
                 if (
-                    not isinstance(compose, dict)
-                    or not compose.get("name")
-                    or not compose.get("composeId")
+                    not isinstance(name, str)
+                    or not name.strip()
+                    or not isinstance(identifier, str)
+                    or not identifier.strip()
+                    or identifier in composes_seen
+                    or len(entries) >= 10000
                 ):
                     raise click.ClickException("Original preview compose inventory is incomplete.")
-                if compose["name"] == compose_name:
-                    matches.append(str(compose["composeId"]))
-    if len(matches) > 1:
-        raise click.ClickException("Original preview compose binding is ambiguous.")
-    return matches[0] if matches else ""
+                composes_seen.add(identifier)
+                entries.append((environment_id, identifier, name))
+    return tuple(sorted(entries))
+
+
+def _destroyed_preview_absence_verified(
+    *, host: str, token: str, plan: OdooPreviewDokployDryRunPlan
+) -> bool:
+    """A missing lookup is insufficient: require stable inventory and removed domains."""
+    inventory = _complete_preview_compose_inventory(host=host, token=token)
+    if any(
+        identifier == plan.compose_ref or name == plan.compose_name
+        for _, identifier, name in inventory
+    ):
+        return False
+    domains = dokploy_api.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.byComposeId",
+        query={"composeId": plan.compose_ref},
+    )
+    if not isinstance(domains, list) or domains:
+        return False
+    return _complete_preview_compose_inventory(host=host, token=token) == inventory
 
 
 def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tuple[str, ...]:

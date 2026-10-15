@@ -455,6 +455,17 @@ Uncertain operations reconcile against the originally issued plan instead of
 replanning into another effect. Blocked apply-inputs responses have no apply
 provenance and are not persisted as issued plans, so a later retry can
 re-evaluate recovered dependencies.
+
+Odoo destroy observation treats a missing provider lookup as inconclusive until
+two complete, bounded compose inventories agree that neither the original ID
+nor a replacement with its name exists, and the exact compose's domain list is
+empty. Conflicting, malformed, duplicate or changing inventory and remaining
+domains retain an unknown outcome. This observation never dispatches a provider
+write. It still requires the reservation's retained original issued intent;
+legacy holds without it remain fenced and cannot be reconstructed from a new
+plan, current preview history or a missing tracked target. Executor exclusion,
+expired grace and original data-schedule quiescence remain separate recovery
+requirements.
 If a later browser or product-specific smoke workflow needs to publish common
 preview evidence, it should call
 `cbusillo/launchplane/.github/workflows/reusable-generic-web-preview-verification.yml@<launchplane-sha>`
