@@ -32,8 +32,9 @@ uses the existing prelaunch classification and protected-use exceptions instead
 of requiring positive unused/reproducible/isolated observations. Its bounded
 agent executor checks exact applications with empty mount inventories and
 preserves production target and secret consumers. The positive-observation
-requirements below continue to govern runtime sync and rebuild, which can
-start or change a lane.
+requirements below continue to govern ordinary runtime sync and rebuild, which can
+start or change a lane. Configuration-only separation below does not need occupancy
+or custody qualification.
 
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
@@ -56,6 +57,89 @@ been verified independent, all existing execution is excluded, and nothing
 shared with production changes. It permits runtime sync with deployment
 disabled and the bounded empty replacement staging below. Starting a lane requires `isolated`; normal key-safety and sanitized
 restore checks remain in their existing drivers.
+
+## Staging generic-web testing separation
+
+`POST /v1/live-target-runtime/apply` supports `separation_only=true` for an
+active, uniquely owned generic-web testing compose target. This stages the
+lane's existing managed configuration, including its intended new volume names,
+ports and testing credentials, with deployment disabled. It does not need
+#3611's unused, reproducible or only-copy observations: no existing container,
+volume, port listener, database or credential record is changed. It neither
+copies production storage nor creates a physical-isolation attestation.
+Actual resource creation and a fresh deploy still need their own render,
+physical-isolation and recovery qualification before anything runs.
+
+The recipient must not alias any other lane's provider target. Runtime key
+safety still refuses unsafe carried credentials. Known person-use evidence,
+real staff holds, legacy unclassified holds and another caller's staging
+interlock refuse staging. A purpose-tagged `isolation_staging` hold belongs to
+the authenticated caller and continues to block every event-driven deployment.
+Staff and staging purposes cannot replace or lift one another. A staging hold
+also cannot change callers. Existing holds without a purpose keep their staff-protection semantics; an old reason
+string is never interpreted as permission. In particular, this source change
+does not relabel or lift RepairShopr's retained D6 interlock.
+
+The dry run returns a binding of ownership, target, configuration, secret
+metadata and key-safety policy; apply requires that binding and the original
+idempotency key. PostgreSQL excludes authority insert/update races during the
+bounded env-only write. Discovery and persistence reads run outside that lock.
+The adapter shares the generic-web deployment fence:
+an unknown historical deploy blocks it, and an uncertain staging write keeps
+its own durable fence. Original-key retry performs read-only reconciliation:
+it adopts the write only when the unchanged reviewed inputs and actual provider
+environment agree. A mismatch, stale configuration or unavailable read keeps
+the fence; no absence or safe-to-retry claim is made. It never supersedes an
+older deploy or redispatches an unknown effect. Completed same-key responses
+remain replayable. Changed inputs and persistent provider mismatch remain
+protected unknown outcomes; [#3664](https://github.com/cbusillo/launchplane/issues/3664)
+owns additional retained-evidence/replacement recovery. That follow-up is not
+permission to clear the fence. Original-key reconciliation still reports these
+cases as reconciliation-required rather than as a fresh-plan refusal.
+SQLite tests are rehearsals, not proof of PostgreSQL exclusion.
+
+Use `scripts/stage-testing-separation.py` with the installed authenticated
+transport. First review `hold-dry-run`, then use `hold-apply` with the same
+review safeguards below for a new staging interlock. Keep its evidence separate
+from the runtime plan:
+
+```bash
+uv run python scripts/stage-testing-separation.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <testing-context> --reason '<reason>' \
+  --evidence-file <new-private-review-file>
+```
+
+Review the runtime `dry-run` receipt and repeat with `apply --reviewed-dry-run`
+and a stable `--idempotency-key`. A refusal stays refused; the client never
+switches identity, uses a workflow or resets a fence. Staging apply never lifts
+a hold. Keep the
+original request, key and evidence after an uncertain response. The env
+persistence readback does not establish that new volumes exist or testing is
+healthy. Do not roll testing back to shared-production settings. Retain the
+staging hold and old containers until the separately authorized recovery/deploy
+gates are met. The same repo client supports `hold-read` without review-file
+arguments, and `lift-dry-run` followed by reviewed `lift-apply` using a separate
+private review file. Only an already authorized admin can apply that explicit
+staging lift; the Director agent's apply denial remains enforced. The client
+keeps the same configured identity and offers no fallback.
+That lift, including a repeated/no-op lift, requests no reconciliation or deploy;
+ordinary staff holds retain their existing reconcile-on-lift behavior. A lift
+without the staging purpose refuses while that interlock is present. No
+production rollback or volume deletion is part of this procedure.
+
+The maintained catalog hold commands do not yet accept staging purpose; their
+projection/option update is tracked in
+[codex-skills#1881](https://github.com/cbusillo/codex-skills/issues/1881).
+Use the repo client's tested read/plan/apply modes with the installed transport;
+do not substitute hand-built authenticated calls or advertise catalog support
+before that companion lands. Existing staff and legacy hold commands retain
+their original shape and behavior.
+
+The added hold purpose is read-compatible with existing records in this image.
+Older images cannot read purpose-tagged holds; after using one, retain this
+image or a compatible successor and forward-fix rather than editing the hold
+or deleting evidence to make an older reader accept it.
 
 ## Preparing a testing production-copy policy
 

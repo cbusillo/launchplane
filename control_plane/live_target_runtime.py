@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
 from collections.abc import Callable, Iterable
 from typing import Protocol, cast
@@ -61,6 +62,8 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
     context: str
     instance: str
     deploy: bool = False
+    separation_only: bool = False
+    reviewed_binding_sha256: str = ""
     no_cache: bool = False
     deploy_timeout_seconds: int | None = Field(default=None, gt=0)
 
@@ -83,10 +86,28 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
             raise ValueError("Live target runtime apply requires context.")
         if not self.instance:
             raise ValueError("Live target runtime apply requires instance.")
+        if self.separation_only and (
+            self.instance != "testing"
+            or self.deploy
+            or self.no_cache
+            or self.deploy_timeout_seconds is not None
+        ):
+            raise ValueError("Separation stages testing configuration with deployment disabled.")
         if self.mode == "dry-run" and (
             self.deploy or self.no_cache or self.deploy_timeout_seconds is not None
         ):
             raise ValueError("Deploy options require live target runtime mode 'apply'.")
+        if (
+            self.separation_only
+            and self.mode == "apply"
+            and (
+                len(self.reviewed_binding_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in self.reviewed_binding_sha256)
+            )
+        ):
+            raise ValueError("Separation apply requires the reviewed configuration binding.")
+        if not self.separation_only and self.reviewed_binding_sha256:
+            raise ValueError("A separation binding is only for separation staging.")
         return self
 
     @property
@@ -651,6 +672,7 @@ def apply_live_target_runtime_environment(
     deploy_timeout_seconds: int | None,
     deploy_trigger: DokployDeployTrigger,
     before_provider_mutation: Callable[[], None] | None = None,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
     allow_owned_preview: bool = False,
 ) -> dict[str, object]:
     source_of_truth = dokploy_source.read_control_plane_dokploy_source_of_truth(
@@ -809,16 +831,17 @@ def apply_live_target_runtime_environment(
                 desired_env_map=desired_env_map,
                 retired_keys=retired_keys,
             )
-            if before_provider_mutation is not None:
-                before_provider_mutation()
-            dokploy_api.update_dokploy_target_env(
-                host=host,
-                token=token,
-                target_type=target_definition.target_type,
-                target_id=target_definition.target_id,
-                target_payload=refreshed_payload,
-                env_text=dokploy_api.serialize_dokploy_env_text(updated_env_map),
-            )
+            with provider_mutation_guard() if provider_mutation_guard else nullcontext():
+                if before_provider_mutation is not None:
+                    before_provider_mutation()
+                dokploy_api.update_dokploy_target_env(
+                    host=host,
+                    token=token,
+                    target_type=target_definition.target_type,
+                    target_id=target_definition.target_id,
+                    target_payload=refreshed_payload,
+                    env_text=dokploy_api.serialize_dokploy_env_text(updated_env_map),
+                )
             persisted_payload = dokploy_api.fetch_dokploy_target_payload(
                 host=host,
                 token=token,
