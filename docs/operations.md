@@ -2,6 +2,11 @@
 title: Operations
 ---
 
+For a generic-web testing lane with a retained legacy hold and unknown deploy,
+use the [independent testing activation procedure](testing-activation.md) after
+storage preparation. It consumes the original allocation, preserves the old
+recipient/fence and supplies the supported hold/rebuild continuation.
+
 ## Merge Admission Recovery
 
 Treat a merge admission without a terminal outcome as effect-unknown. Do not
