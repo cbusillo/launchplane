@@ -23,6 +23,7 @@ from control_plane.testing_replacement_bootstrap import (
     ROUTE,
     TestingReplacementBootstrapAdapter,
     TestingReplacementBootstrapRequest,
+    TestingBootstrapPrerequisiteError,
     bootstrap_plan,
 )
 
@@ -86,6 +87,8 @@ def register_testing_replacement_bootstrap_routes(
                     in_progress_message="Fresh testing bootstrap is running under its original key.",
                     reconcile_message="Bootstrap has an unknown outcome; inspect the retained generation with its original key.",
                 )
+        except TestingBootstrapPrerequisiteError as error:
+            refuse(409, error.code, str(error))
         except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
             refuse(
                 409,

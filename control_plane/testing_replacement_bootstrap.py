@@ -2,11 +2,14 @@
 
 from dataclasses import dataclass
 from collections.abc import Callable
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
+import click
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -26,6 +29,8 @@ from control_plane.live_target_runtime import evaluate_runtime_key_safety_for_li
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
+    TestingCredentialsOverlap,
+    TestingCredentialVersionsMissing,
     generation_binding,
     encoded_restore_source,
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
@@ -56,6 +61,52 @@ from control_plane.testing_replacement_resources import (
 from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = TESTING_REPLACEMENT_BOOTSTRAP_ROUTE
+
+type BootstrapPrerequisiteCode = Literal[
+    "testing_credentials_unsafe",
+    "testing_credentials_unverified",
+    "testing_credential_versions_missing",
+    "testing_credentials_overlap",
+    "testing_restore_source_unconfigured",
+]
+
+_PREREQUISITE_MESSAGES: dict[BootstrapPrerequisiteCode, str] = {
+    "testing_credentials_unsafe": (
+        "Existing testing credentials need current lane-local non-production safety proof."
+    ),
+    "testing_credentials_unverified": (
+        "Existing testing and production managed versions could not prove credential separation."
+    ),
+    "testing_credential_versions_missing": (
+        "Credential comparison needs all existing local testing and production managed versions."
+    ),
+    "testing_credentials_overlap": (
+        "An existing local testing credential equals a production source credential."
+    ),
+    "testing_restore_source_unconfigured": (
+        "The supported production-copy source needs complete managed source configuration."
+    ),
+}
+
+
+class TestingBootstrapPrerequisiteError(ValueError):
+    """A fixed prerequisite classification, never a wrapped private exception."""
+
+    def __init__(self, code: BootstrapPrerequisiteCode) -> None:
+        self.code = code
+        super().__init__(_PREREQUISITE_MESSAGES[code])
+
+
+@contextmanager
+def _bootstrap_prerequisite(code: BootstrapPrerequisiteCode) -> Iterator[None]:
+    try:
+        yield
+    except TestingCredentialVersionsMissing:
+        raise TestingBootstrapPrerequisiteError("testing_credential_versions_missing") from None
+    except TestingCredentialsOverlap:
+        raise TestingBootstrapPrerequisiteError("testing_credentials_overlap") from None
+    except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
+        raise TestingBootstrapPrerequisiteError(code) from None
 
 
 def bootstrap_request_sha256(request: TestingReplacementResourcesRequest) -> str:
@@ -165,23 +216,25 @@ def bootstrap_plan(
             raise ValueError("Fresh testing credential delivery changed after review.")
         omitted = frozenset(generation.omitted_runtime_keys)
     bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
-    safety = evaluate_runtime_key_safety_for_live_target_sync(
-        record_store=store,
-        context_name=request.context,
-        instance_name="testing",
-        required_binding_keys=tuple(sorted(bindings)),
-    )
-    if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
-        raise ValueError("Testing credentials lack current non-production safety proof.")
-    for binding in bindings.values():
-        record = store.read_secret_record(binding.secret_id)
-        if (
-            record.scope != "context_instance"
-            or record.context != request.context
-            or record.instance != "testing"
-        ):
-            raise ValueError("Fresh testing cannot carry a shared or production credential.")
-    require_distinct_testing_credentials(store, profile, request.context)
+    with _bootstrap_prerequisite("testing_credentials_unsafe"):
+        safety = evaluate_runtime_key_safety_for_live_target_sync(
+            record_store=store,
+            context_name=request.context,
+            instance_name="testing",
+            required_binding_keys=tuple(sorted(bindings)),
+        )
+        if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
+            raise ValueError("Testing credentials lack current non-production safety proof.")
+        for binding in bindings.values():
+            record = store.read_secret_record(binding.secret_id)
+            if (
+                record.scope != "context_instance"
+                or record.context != request.context
+                or record.instance != "testing"
+            ):
+                raise ValueError("Fresh testing cannot carry a shared or production credential.")
+    with _bootstrap_prerequisite("testing_credentials_unverified"):
+        require_distinct_testing_credentials(store, profile, request.context)
     source_values: dict[str, str] = {}
     for scope in ("context", "instance"):
         for runtime_record in store.list_runtime_environment_records(context_name=request.context):
@@ -190,7 +243,8 @@ def bootstrap_plan(
             ):
                 source_values.update({key: str(value) for key, value in runtime_record.env.items()})
     source_values.update({key: str(value) for key, value in target.env.items()})
-    encoded_restore_source(source_values)
+    with _bootstrap_prerequisite("testing_restore_source_unconfigured"):
+        encoded_restore_source(source_values)
     digest = canonical_json_sha256(
         {
             "request": request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),

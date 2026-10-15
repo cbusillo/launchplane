@@ -11,6 +11,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import ProductOdooLaneDataPolicy
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.odoo_testing_resources import OdooTestingResources
+from control_plane.odoo_testing_restore import TestingCredentialsOverlap
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
@@ -19,6 +20,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.testing_replacement_bootstrap import (
     TestingReplacementBootstrapAdapter,
     TestingReplacementBootstrapRequest,
+    TestingBootstrapPrerequisiteError,
     bootstrap_plan,
 )
 from control_plane.testing_replacement_resources import (
@@ -299,6 +301,61 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
         self.assertEqual(self.store.read_product_reconcile_request(queued.target_key), queued)
 
 
+class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
+    def credential_comparison_failure(self) -> None:
+        self.patches()
+        with (
+            patch(
+                "control_plane.testing_replacement_bootstrap.require_distinct_testing_credentials",
+                side_effect=TestingCredentialsOverlap("private fixture credential"),
+            ),
+            patch("control_plane.testing_replacement_bootstrap.encoded_restore_source") as source,
+            self.assertRaises(TestingBootstrapPrerequisiteError) as caught,
+        ):
+            bootstrap_plan(self.store, self.profile.product, self.request)
+        self.assertEqual(
+            caught.exception.code,
+            TestingBootstrapPrerequisiteError("testing_credentials_overlap").code,
+        )
+        self.assertNotIn("private fixture credential", str(caught.exception))
+        source.assert_not_called()
+        self.assertIsNone(
+            self.store.read_fresh_odoo_testing_generation(
+                self.profile.product, self.fixture.context
+            )
+        )
+        self.assertEqual(self.routes, [])
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.fixture.context, instance_name="prod"
+            ),
+            self.production_before,
+        )
+
+    def missing_source_failure(self) -> None:
+        self.patches()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context=self.fixture.context,
+                env={"FIXTURE_SETTING": "present"},
+                updated_at=self.profile.updated_at,
+            )
+        )
+        with self.assertRaises(TestingBootstrapPrerequisiteError) as caught:
+            bootstrap_plan(self.store, self.profile.product, self.request)
+        self.assertEqual(
+            caught.exception.code,
+            TestingBootstrapPrerequisiteError("testing_restore_source_unconfigured").code,
+        )
+        self.assertIsNone(
+            self.store.read_fresh_odoo_testing_generation(
+                self.profile.product, self.fixture.context
+            )
+        )
+        self.assertEqual(self.routes, [])
+
+
 class FreshTestingBootstrapObservationTests(unittest.TestCase):
     def test_unknown_dispatched_route_is_never_blindly_repeated(self) -> None:
         store = Mock(spec=PostgresRecordStore)
@@ -387,3 +444,24 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
             result = await self.post()
         self.assertEqual(result.status_code, 409, result.text)
         self.assertNotIn("private-value", result.text)
+
+    async def test_classified_prerequisite_refusal_remains_inert_and_value_free(self) -> None:
+        prerequisite = TestingBootstrapPrerequisiteError("testing_credentials_unverified")
+        with (
+            patch(
+                "control_plane.http_routes.testing_replacement_bootstrap.bootstrap_plan",
+                side_effect=prerequisite,
+            ),
+            patch(
+                "control_plane.testing_replacement_bootstrap.source.read_dokploy_config"
+            ) as provider,
+        ):
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], prerequisite.code)
+        provider.assert_not_called()
+        self.assertIsNone(
+            self.fixture.store.read_fresh_odoo_testing_generation(
+                self.fixture.profile.product, self.fixture.context
+            )
+        )
