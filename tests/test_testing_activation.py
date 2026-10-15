@@ -1295,6 +1295,77 @@ class ActivationTests(unittest.TestCase):
 
 
 class ActivationPortProgramTests(unittest.TestCase):
+    def test_port_proof_survives_the_real_schedule_log_transport(self) -> None:
+        from pathlib import Path
+        from control_plane.odoo_testing_resources import GenericWebTestingResources
+        from control_plane.testing_activation import inspect_new_resources
+
+        resources = GenericWebTestingResources(
+            product="fixture-product",
+            context="fixture-context",
+            operation_id="fixture-operation",
+            target_id="fixture-target",
+            namespace="lp-testing-" + "a" * 32,
+        )
+        port = 19212
+        _, successful_output = self.run_program([port], [])
+        _, refused_output = self.run_program([port], [], occupied=True)
+        cases = (
+            ("available", successful_output, True),
+            ("occupied", refused_output, False),
+            ("missing", "", False),
+            ("malformed", successful_output.replace("=true", "=unproved"), False),
+        )
+        for name, port_output, accepted in cases:
+            with (
+                self.subTest(name=name),
+                patch(
+                    "control_plane.testing_activation.source.read_dokploy_config",
+                    return_value=("https://provider.example.invalid", "fixture-token"),
+                ),
+                patch(
+                    "control_plane.testing_activation.api.fetch_dokploy_target_payload",
+                    return_value={"composeId": resources.target_id},
+                ),
+                patch(
+                    "control_plane.testing_activation.post_deploy._resolve_dokploy_schedule_runtime",
+                    return_value=(
+                        "dokploy-server",
+                        "fixture-user",
+                        "fixture-app",
+                        "fixture-server",
+                    ),
+                ),
+                patch(
+                    "control_plane.dokploy.api.upsert_dokploy_schedule",
+                    return_value={"scheduleId": "fixture-schedule"},
+                ),
+                patch(
+                    "control_plane.dokploy.api.run_dokploy_schedule",
+                    return_value="deployment=fixture-deployment status=done",
+                ),
+                patch(
+                    "control_plane.dokploy.api.latest_deployment_for_schedule",
+                    return_value={
+                        "deploymentId": "fixture-deployment",
+                        "logs": [
+                            "testing_resources_ok=true",
+                            "testing_resources_binding_sha256=" + resources.binding_sha256,
+                            *port_output.splitlines(),
+                        ],
+                    },
+                ),
+                patch(
+                    "control_plane.dokploy.api.dokploy_request",
+                    side_effect=AssertionError("Unmodeled provider call"),
+                ),
+            ):
+                if accepted:
+                    inspect_new_resources(Path("."), resources, {port}, lambda _phase: None)
+                else:
+                    with self.assertRaises(TestingActivationRefusal):
+                        inspect_new_resources(Path("."), resources, {port}, lambda _phase: None)
+
     def run_program(
         self, ports: list[int], containers: list[dict[str, Any]], *, occupied: bool = False
     ) -> tuple[int, str]:
