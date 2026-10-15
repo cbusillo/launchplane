@@ -43,7 +43,7 @@ test("only an active authentication-required GET ends the browser session", asyn
   assert.equal(notifications, 1);
 });
 
-test("a dispatched mutation rejection is not retried or broadcast as a GET expiry", async () => {
+test("an already-ended logout response is not replayed or broadcast as a GET expiry", async () => {
   let notifications = 0;
   const methods = [];
   const unsubscribe = subscribeToSessionExpiry(() => { notifications++; });
@@ -54,7 +54,7 @@ test("a dispatched mutation rejection is not retried or broadcast as a GET expir
       : failure(401, "authentication_required");
   };
   try {
-    await assert.rejects(logout(), LaunchplaneApiError);
+    assert.equal((await logout()).status, "ok");
     assert.equal(methods.filter(method => method === "POST").length, 1);
     assert.equal(notifications, 0);
   } finally {
@@ -62,7 +62,7 @@ test("a dispatched mutation rejection is not retried or broadcast as a GET expir
   }
 });
 
-test("expiry in the CSRF session read shows sign-in without dispatching the mutation", async () => {
+test("an ended session in CSRF preflight completes sign-out without dispatching a mutation", async () => {
   let notifications = 0;
   let posts = 0;
   const unsubscribe = subscribeToSessionExpiry(() => { notifications++; });
@@ -71,7 +71,7 @@ test("expiry in the CSRF session read shows sign-in without dispatching the muta
     return failure(401, "authentication_required");
   };
   try {
-    await assert.rejects(logout(), LaunchplaneApiError);
+    assert.equal((await logout()).status, "ok");
     assert.equal(notifications, 1);
     assert.equal(posts, 0);
   } finally {
@@ -99,8 +99,8 @@ test("pending verification retries the read before one logout dispatch", async (
   assert.equal(methods.filter(method => method === "POST").length, 1);
 });
 
-test("pending verification is bounded and cancellation never dispatches a write", async () => {
-  globalThis.setTimeout = callback => { queueMicrotask(callback); return 0; };
+test("pending verification is bounded and cancellation never dispatches a write", { timeout: 5000 }, async () => {
+  globalThis.setTimeout = callback => originalSetTimeout(callback, 0);
   let posts = 0;
   globalThis.fetch = async (_path, options) => {
     if (options.method === "POST") posts++;
@@ -108,11 +108,26 @@ test("pending verification is bounded and cancellation never dispatches a write"
   };
   await assert.rejects(logout(), error => error instanceof LaunchplaneApiError && error.statusCode === 503);
   const controller = new AbortController();
+  let cancelledReads = 0;
   globalThis.fetch = async () => {
+    cancelledReads++;
     controller.abort();
     return failure(503, "identity_verification_pending");
   };
   await assert.rejects(readAuthSession(controller.signal));
+  assert.equal(cancelledReads, 1);
+  const waitingController = new AbortController();
+  cancelledReads = 0;
+  globalThis.fetch = async () => {
+    cancelledReads++;
+    return failure(503, "identity_verification_pending");
+  };
+  globalThis.setTimeout = callback => {
+    waitingController.abort();
+    return originalSetTimeout(callback, 0);
+  };
+  await assert.rejects(readAuthSession(waitingController.signal), error => error.name === "AbortError");
+  assert.equal(cancelledReads, 1);
   assert.equal(posts, 0);
 });
 

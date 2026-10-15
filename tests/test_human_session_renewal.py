@@ -399,7 +399,9 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
             patch.object(self.client, "_new_session", return_value=self.http),
             patch(
                 "control_plane.service_human_auth.monotonic",
-                side_effect=[0, 0, OAUTH_EXCHANGE_BUDGET_SECONDS + 1],
+                side_effect=lambda: (
+                    0 if not self.http.get.called else OAUTH_EXCHANGE_BUDGET_SECONDS + 1
+                ),
             ),
         ):
             with self.assertRaises(GitHubIdentityUnavailable):
@@ -501,6 +503,17 @@ class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(rejected.status_code, 403)
                 accepted = await client.post("/auth/logout", headers=headers)
+                raced_session = manager.issue(_identity(), GitHubOAuthCredential("another-access"))
+
+                def revoked_during_csrf(*args: object, **kwargs: object) -> None:
+                    manager.revoke(raced_session)
+
+                with patch.object(manager, "consume_csrf_token", side_effect=revoked_during_csrf):
+                    raced = await client.post(
+                        "/auth/logout", headers=_browser_mutation_headers(manager, raced_session)
+                    )
+                self.assertEqual(raced.status_code, 200)
+                self.assertIn("Max-Age=0", raced.headers["Set-Cookie"])
         self.assertEqual(accepted.status_code, 200)
         self.assertIn("Max-Age=0", accepted.headers["Set-Cookie"])
         self.assertIsNone(manager.read_cookie(manager.session_cookie_header(session)))

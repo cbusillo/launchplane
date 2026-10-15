@@ -271,8 +271,18 @@ export function readAuthSession(
   );
 }
 
-export function logout(): Promise<LogoutPayload> {
-  return requestJson<LogoutPayload>("/auth/logout", "POST");
+export async function logout(): Promise<LogoutPayload> {
+  try {
+    return await requestJson<LogoutPayload>("/auth/logout", "POST");
+  } catch (error) {
+    // An authentication-required preflight means the server session already
+    // ended. Complete local sign-out without sending or replaying a write.
+    if (error instanceof LaunchplaneApiError && error.statusCode === 401 &&
+        error.code === "authentication_required") {
+      return { status: "ok", trace_id: error.traceId };
+    }
+    throw error;
+  }
 }
 
 export function listProducts(

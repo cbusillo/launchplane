@@ -751,10 +751,13 @@ until verification finishes, so parallel reads do not falsely sign the browser o
 refresh/renewal is due. Failures log only the exception type, never its value; CSRF consumption preserves current credential
 and claims metadata, and renewal cannot recreate a logged-out session. Provider
 requests have bounded socket timeouts and stop dispatching further requests after
-a 30-second exchange budget; membership pagination fails closed at its bound. Read-only sensitive/preflight paths keep their nonrenewing behavior. Logout
+a 30-second exchange budget; membership pagination fails closed at its bound. Read-only sensitive/preflight paths keep their nonrenewing behavior. The logout POST
 validates the existing cookie and single-use CSRF token without renewing claims.
 The browser retries only pending-verification GETs for up to 40 one-second waits,
-including CSRF preflight; it never retries a dispatched mutation.
+including the ordinary CSRF preflight (which can itself revalidate GitHub); it
+never retries a dispatched mutation. An already-ended session counts as a
+successful browser sign-out, and concurrent revocation during CSRF consumption
+clears an ended cookie while a live session still requires valid CSRF proof.
 
 ### Browser Mutation Boundary
 

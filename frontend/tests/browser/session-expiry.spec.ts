@@ -153,7 +153,7 @@ test("pending identity verification recovers initial load without another sign-i
   await expect(page.locator(".session-card h1")).toBeVisible();
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
   await page.screenshot({ path: `../tmp/browser-smoke/session-renewal-pending-${testInfo.project.name}.png`, fullPage: true });
-  await page.clock.runFor(1100);
+  await page.clock.runFor(60_000);
   await expect(page.locator(".product-directory-row").first()).toBeVisible();
   await page.getByRole("button", { name: "Refresh current evidence" }).click();
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);

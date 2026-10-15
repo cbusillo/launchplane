@@ -4962,7 +4962,17 @@ def create_launchplane_fastapi_app(
         if human_session_manager is not None:
             session = human_session_manager.read_cookie_without_renewal(cookie, allow_owner=True)
             if session is not None:
-                consume_browser_mutation_request(request=request, session=session)
+                try:
+                    consume_browser_mutation_request(request=request, session=session)
+                except HTTPException:
+                    # A concurrent failed refresh may have revoked the row
+                    # while CSRF consumption waited. An ended session can be
+                    # cleared; a live session still requires valid CSRF proof.
+                    if (
+                        human_session_manager.read_cookie_without_renewal(cookie, allow_owner=True)
+                        is not None
+                    ):
+                        raise
             human_session_manager.delete_cookie_session(cookie)
             clear_cookie = human_session_manager.clear_cookie_header()
         else:
