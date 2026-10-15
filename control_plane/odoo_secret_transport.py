@@ -19,6 +19,7 @@ from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideWrite,
     ProductAuthorityBundle,
     SecretBindingSetExpectation,
+    odoo_instance_override_records_match,
 )
 
 
@@ -47,7 +48,7 @@ def plan_odoo_secret_transport(
     bindings: tuple[SecretBinding, ...],
     source_label: str,
 ) -> OdooSecretTransportPlan:
-    if record not in records:
+    if not any(odoo_instance_override_records_match(record, other) for other in records):
         raise OdooInstanceOverrideConflictError("Odoo overrides changed before planning.")
     now = utc_now_timestamp()
     binding_by_id = {binding.binding_id: binding for binding in bindings}

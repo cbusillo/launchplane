@@ -26,8 +26,10 @@ from control_plane.contracts.secret_record import (
     SecretVersion,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
+    OdooInstanceOverrideWrite,
     ProductAuthorityBundle,
     SecretCopySourceConflictError,
 )
@@ -185,6 +187,98 @@ class OdooSecretTransportTests(unittest.TestCase):
         self.assertEqual(updated.website_settings, self.record.website_settings)
         self.assertEqual(updated.last_apply, self.record.last_apply)
         self.assertNotEqual(updated.addon_settings, self.record.addon_settings)
+
+    def test_concurrent_boolean_edit_is_not_equal_to_zero_during_migration(self) -> None:
+        record = self.record.model_copy(
+            update={
+                "config_parameters": (
+                    OdooConfigParameterOverride(
+                        key="sample.enabled", value=OdooOverrideValue(source="literal", value=0)
+                    ),
+                )
+            }
+        )
+        self.store.write_odoo_instance_override_record(record)
+        edited = record.model_copy(
+            update={
+                "config_parameters": (
+                    OdooConfigParameterOverride(
+                        key=record.config_parameters[0].key,
+                        value=OdooOverrideValue(source="literal", value=False),
+                    ),
+                )
+            }
+        )
+        commit = self.store.write_odoo_secret_transport_migration
+
+        def conflict(
+            bundle: ProductAuthorityBundle,
+            *,
+            expected_records: tuple[OdooInstanceOverrideRecord, ...],
+        ) -> None:
+            self.store.write_odoo_instance_override_record(edited, expected_record=record)
+            commit(bundle, expected_records=expected_records)
+
+        with patch.object(
+            self.store, "write_odoo_secret_transport_migration", side_effect=conflict
+        ):
+            with self.assertRaises(click.ClickException):
+                self.migrate(record)
+        self.assertEqual(self.read().model_dump_json(), edited.model_dump_json())
+        self.assert_unmigrated()
+        with self.assertRaises(click.ClickException):
+            self.migrate(record)
+        updated = self.migrate(edited)
+        self.assertEqual(
+            updated.config_parameters[0].model_dump_json(),
+            edited.config_parameters[0].model_dump_json(),
+        )
+
+    def test_reviewed_store_writes_preserve_scalar_types_on_conflict(self) -> None:
+        record = self.record.model_copy(
+            update={
+                "config_parameters": (
+                    OdooConfigParameterOverride(
+                        key="sample.enabled", value=OdooOverrideValue(source="literal", value=0)
+                    ),
+                )
+            }
+        )
+        edited = record.model_copy(
+            update={
+                "config_parameters": (
+                    OdooConfigParameterOverride(
+                        key=record.config_parameters[0].key,
+                        value=OdooOverrideValue(source="literal", value=False),
+                    ),
+                )
+            }
+        )
+        filesystem = FilesystemRecordStore(Path(self.enterContext(TemporaryDirectory())))
+        stores: tuple[PostgresRecordStore | FilesystemRecordStore, ...] = (self.store, filesystem)
+        for store in stores:
+            store.write_odoo_instance_override_record(edited)
+            for bundled in (False, True):
+                with self.subTest(store=type(store).__name__, bundled=bundled):
+                    with self.assertRaises(OdooInstanceOverrideConflictError):
+                        if bundled:
+                            store.write_product_authority_bundle(
+                                ProductAuthorityBundle(
+                                    odoo_instance_override_writes=(
+                                        OdooInstanceOverrideWrite(
+                                            record=record, expected_record=record
+                                        ),
+                                    ),
+                                )
+                            )
+                        else:
+                            store.write_odoo_instance_override_record(
+                                record, expected_record=record
+                            )
+                    persisted = store.read_odoo_instance_override_record(
+                        context_name=edited.context, instance_name=edited.instance
+                    )
+                    self.assertEqual(persisted.model_dump_json(), edited.model_dump_json())
 
     def test_concurrent_new_consumer_or_binding_edit_refuses_without_disabling_reference(
         self,

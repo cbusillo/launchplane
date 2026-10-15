@@ -60,6 +60,7 @@ from sqlalchemy.engine import Engine, ExceptionContext, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
+from sqlalchemy.types import TypeDecorator
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -566,6 +567,7 @@ from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
+    odoo_instance_override_records_match,
 )
 from control_plane.storage.schema_invariants import (
     RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
@@ -600,6 +602,20 @@ class OrdinaryAgentDeliveryActivationConflictError(ValueError):
 ConnectionFactory = Callable[[], Any]
 PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
+
+
+class _OdooOverridePayloadJson(TypeDecorator[PayloadDict]):
+    """Do not suppress a boolean/number-only override update during ORM flush."""
+
+    impl = PayloadJsonType
+    cache_ok = True
+
+    def compare_values(self, x: Any, y: Any) -> bool:
+        if not isinstance(x, dict) or not isinstance(y, dict):
+            return x is y
+        return json.dumps(x, sort_keys=True) == json.dumps(y, sort_keys=True)
+
+
 OrdinaryAgentDeliveryActivationWriteStatus = Literal["written", "replayed"]
 
 
@@ -4313,7 +4329,7 @@ class LaunchplaneOdooInstanceOverrideRow(Base):
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(_OdooOverridePayloadJson(), nullable=False)
 
 
 class LaunchplaneEveryCodeWorkRequestRow(Base):
@@ -6574,10 +6590,9 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                     .with_for_update()
                 )
-                if (
-                    current is None
-                    or OdooInstanceOverrideRecord.model_validate(current.payload)
-                    != write.expected_record
+                if current is None or not odoo_instance_override_records_match(
+                    OdooInstanceOverrideRecord.model_validate(current.payload),
+                    write.expected_record,
                 ):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
                 self._merge_authority_row(
@@ -26713,7 +26728,7 @@ class PostgresRecordStore(HumanSessionStore):
                     if current is not None
                     else None
                 )
-                if current_record != expected_record:
+                if not odoo_instance_override_records_match(current_record, expected_record):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             require_bundle_context_owner(
                 ProductAuthorityBundle(
@@ -26747,7 +26762,12 @@ class PostgresRecordStore(HumanSessionStore):
             def route(record: OdooInstanceOverrideRecord) -> tuple[str, str]:
                 return record.context, record.instance
 
-            if sorted(current, key=route) != sorted(expected_records, key=route):
+            if len(current) != len(expected_records) or any(
+                not odoo_instance_override_records_match(actual, expected)
+                for actual, expected in zip(
+                    sorted(current, key=route), sorted(expected_records, key=route), strict=True
+                )
+            ):
                 raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
 
         self._write_product_authority_bundle(bundle, guard_provider=guard)
