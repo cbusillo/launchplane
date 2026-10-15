@@ -131,7 +131,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
         stub_verified_promotion_backup(self, "control_plane.workflows.odoo_prod_promotion")
 
     def test_refused_finished_cutover_replay_preserves_promotion_audit(self) -> None:
-        from control_plane.contracts.odoo_cutover import OdooCutoverRecord
+        from control_plane.contracts.odoo_cutover import CutoverStep, OdooCutoverRecord
         from tests.test_odoo_cutover import IsolatedCutoverProvider
 
         with TemporaryDirectory() as directory:
@@ -149,7 +149,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
                     plan=plan,
                     began_at=datetime.now(UTC),
                     updated_at=datetime.now(UTC),
-                    step=step,
+                    step=cast(CutoverStep, step),
                 )
                 with (
                     self.subTest(step=step, provider_bound=bound_provider is not None),
