@@ -64,6 +64,23 @@ def safe_error_detail_keys(keys: Iterable[object]) -> tuple[str, ...]:
     return env_key_names(keys)
 
 
+class OdooTargetReplacementExecutionFailure(BaseModel):
+    """Execution evidence survives a separate provider-recovery disposition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    error_code: str = ""
+    error_message: str = ""
+    error_detail_keys: tuple[str, ...] = ()
+    deployment_record_id: str = ""
+    result: OdooStableTargetReplacementApplyResult | None = None
+
+    @model_validator(mode="after")
+    def _validate_detail_keys(self) -> "OdooTargetReplacementExecutionFailure":
+        self.error_detail_keys = safe_error_detail_keys(self.error_detail_keys)
+        return self
+
+
 class OdooStableTargetReplacementOperationRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -89,6 +106,9 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     heartbeat_at: str = ""
     attempt: int = Field(default=0, ge=0)
     result: OdooStableTargetReplacementApplyResult | None = None
+    execution_failure: OdooTargetReplacementExecutionFailure | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     cancellation: DurableOperationCancellation | None = None
     error_code: str = ""
     error_message: str = ""

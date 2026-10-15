@@ -38,6 +38,11 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urlencode
 from uuid import uuid4
 
+from control_plane.testing_restore_prerequisite import (
+    TestingRestoreHistoryStore,
+    incomplete_testing_restore,
+)
+
 import click
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -567,6 +572,20 @@ def reconcile_testing_target(
     if generation is not None and not generation.reconcile_requested_at:
         plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
         return ReconcileOutcome(plan)
+    if generation is None or generation.completed_at:
+        incomplete_restore = incomplete_testing_restore(
+            cast(TestingRestoreHistoryStore, record_store),
+            context=lane.context,
+            instance=lane.instance,
+        )
+        if incomplete_restore is not None:
+            plan.update(
+                action="wait",
+                held=True,
+                reason="testing_restore_required",
+                failed_restore_deployment_record_id=incomplete_restore.record_id,
+            )
+            return ReconcileOutcome(plan)
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
         replacement=OdooStableTargetReplacementApplyRequest(
@@ -1158,6 +1177,7 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
         "The deploy passed, but recording its release tuple from the artifact manifest failed."
     ),
     "operation_cancelled": "The deploy was cancelled.",
+    "testing_restore_required": "Testing needs a completed governed restore before ordinary maintenance.",
     "operation_authorization_reconcile_refused": (
         "Launchplane's reconcile grant did not cover this deploy when it ran."
     ),
@@ -1237,7 +1257,8 @@ def _testing_failure_reason(
     validated env-key names, the result's step statuses and the worker attempt;
     never the error message.
     """
-    error_code = operation.error_code.strip()
+    failure = operation.execution_failure
+    error_code = (failure.error_code if failure is not None else operation.error_code).strip()
     if not _ERROR_CODE_PATTERN.match(error_code):
         error_code = _testing_failure_code(operation)
     if error_code.startswith("unexpected."):
@@ -1259,10 +1280,11 @@ def _testing_failure_reason(
             or TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
         )
     parts = [description]
-    if operation.error_detail_keys:
+    detail_keys = failure.error_detail_keys if failure is not None else operation.error_detail_keys
+    if detail_keys:
         # Env-key names the record validated, such as undeclared runtime keys.
-        parts.append(f"Keys: {', '.join(sorted(operation.error_detail_keys))}.")
-    result = operation.result
+        parts.append(f"Keys: {', '.join(sorted(detail_keys))}.")
+    result = failure.result if failure is not None else operation.result
     if result is not None:
         parts.append(
             f"Steps: deploy {result.deploy_status}, post-deploy {result.post_deploy_status}, "
@@ -1276,9 +1298,9 @@ def _testing_failure_reason(
 
 
 def _testing_failure_code(operation: OdooStableTargetReplacementOperationRecord) -> str:
-    if operation.status == "cancelled":
+    if operation.status == "cancelled" and operation.execution_failure is None:
         return "operation_cancelled"
-    result = operation.result
+    result = operation.execution_failure.result if operation.execution_failure else operation.result
     if result is None:
         return "operation_failed"
     steps = (

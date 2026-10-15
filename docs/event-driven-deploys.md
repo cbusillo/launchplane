@@ -87,13 +87,25 @@ reservation. The webhook request never waits on a deploy.
     upstream response text and API paths. Missing evidence
     leaves the lane unchanged with a recorded reason.
   - If testing already runs the desired artifact, stop.
+  - Odoo existing-data reconciliation waits with `testing_restore_required` if
+    this target's latest attempted restore lacks completion proof. A later failed
+    maintenance deploy or a newer artifact cannot repair that missing data.
+    Complete a governed target replacement with `data_source_mode=upstream_restore`,
+    or prepare an isolated fresh testing generation through the supported bootstrap
+    path. These remain separate operations with their normal safety checks; the
+    automatic deploy does not create an empty database or replay the failed restore.
   - Otherwise, `record_verified_build_artifact` and queue the stable target
     replacement for the testing lane. Its idempotency key is the lane plus
     the artifact id, so a crashed or repeated reconcile can't queue it twice.
   - An active attempt (including one awaiting provider reconciliation) is
     reported, never bypassed. When the last attempt ended (failed, cancelled,
     or passed but rolled back) and testing still differs, the next attempt's
-    key names the attempt before it. After three failed attempts of one
+    key names the attempt before it. A testing replacement retains its original
+    execution failure and deployment record separately from a provider-recovery
+    disposition. Recovery cancellation after observed provider quiescence does not
+    replace that failure with a generic cancellation reason. Structured operation
+    reads identify Launchplane's recovery cancellation without exposing caller or
+    provider free text. After three failed attempts of one
     artifact the reconcile fails until a newer build.
   - That operation already runs Odoo post-deploy, so there is no separate
     post-deploy step.

@@ -59,6 +59,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+    OdooTargetReplacementExecutionFailure,
     safe_error_detail_keys,
 )
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -98,6 +99,10 @@ from control_plane.launchplane_reconcile_authorization import (
 from control_plane.testing_lane_hold import (
     read_staff_testing_hold,
     staff_testing_hold_cancellation,
+)
+from control_plane.testing_restore_prerequisite import (
+    TestingRestoreHistoryStore,
+    incomplete_testing_restore,
 )
 from control_plane.workflows.odoo_stable_bootstrap import (
     OdooStableBootstrapStore,
@@ -2215,6 +2220,20 @@ def _execute_target_replacement_with_checkpoint(
         authorization_guard.authorize_execution()
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
             raise _StaffTestingHoldError
+        if (
+            service_testing_operation(operation)
+            and operation.request.data_source_mode == "existing"
+            and incomplete_testing_restore(
+                cast(TestingRestoreHistoryStore, record_store),
+                context=operation.context,
+                instance=operation.instance,
+            )
+            is not None
+        ):
+            raise OdooTargetReplacementStageError(
+                "testing_restore_required",
+                "Testing requires a completed governed restore before ordinary maintenance.",
+            )
         require_unchanged_production_artifact(
             record_store=record_store,
             product=operation.product,
@@ -2324,6 +2343,19 @@ def _execute_target_replacement_with_checkpoint(
                     "heartbeat_at": "",
                     "result": None,
                     "cancellation": None,
+                    "deployment_record_id": terminal_operation.deployment_record_id,
+                    "execution_failure": OdooTargetReplacementExecutionFailure(
+                        error_code=terminal_operation.error_code
+                        or (
+                            "driver_result_failed"
+                            if terminal_operation.result
+                            else "operation_failed"
+                        ),
+                        error_message=terminal_operation.error_message,
+                        error_detail_keys=terminal_operation.error_detail_keys,
+                        deployment_record_id=terminal_operation.deployment_record_id,
+                        result=terminal_operation.result,
+                    ),
                     "error_code": "operation_reconciliation_required",
                     "error_message": "Testing provider effects require proved-safe reconciliation before retry.",
                 }

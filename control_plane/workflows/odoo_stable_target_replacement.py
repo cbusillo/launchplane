@@ -2853,6 +2853,7 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_identity_injected=True,
             runtime_source=runtime_source,
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
+            error_code="post_deploy_failed",
         )
 
     if (

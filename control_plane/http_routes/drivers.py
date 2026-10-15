@@ -572,7 +572,11 @@ def register_operation_status_read_routes(
                     operation_id=operation.operation_id.strip()
                 ),
             )
-            result = operation_result_read_view(operation.result)
+            result = operation_result_read_view(
+                operation.execution_failure.result
+                if operation.execution_failure
+                else operation.result
+            )
         if operation.status == "reconciliation_required" and service_testing_operation(operation):
             # Both authorized views preserve the same fixed public observations.
             description = (

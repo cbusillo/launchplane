@@ -33,6 +33,8 @@ from control_plane.contracts.dokploy_target_record import (
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimePlan
@@ -801,6 +803,103 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
+    def test_failed_restore_holds_new_builds_until_this_target_has_restore_proof(self) -> None:
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="cm",
+                instance="testing",
+                target_id="testing-target",
+                updated_at="2026-09-29T12:00:00Z",
+            )
+        )
+        restore = DeploymentRecord(
+            record_id="failed-restore",
+            context="cm",
+            instance="testing",
+            source_git_ref=OLDER,
+            resolved_target=ResolvedTargetEvidence(
+                target_type="compose", target_id="testing-target", target_name="fixture"
+            ),
+            deploy=DeploymentEvidence(
+                deploy_mode="recreate-in-place",
+                status="fail",
+                target_name="fixture",
+                target_type="compose",
+                started_at="2026-09-29T11:00:00Z",
+                finished_at="2026-09-29T11:01:00Z",
+            ),
+            post_deploy_update=PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                evidence={
+                    "workflow_intent": "restore",
+                    "post_deploy_readback_odoo_restore_completed": "false",
+                },
+            ),
+        )
+        self.store.write_deployment_record(restore)
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        plan = self.reconcile()
+        self.assertEqual(plan["reason"], "testing_restore_required")
+        self.assertEqual(plan["failed_restore_deployment_record_id"], restore.record_id)
+        self.assertFalse(self.store.list_odoo_stable_target_replacement_operation_records())
+        # A later ordinary failure does not supersede the data prerequisite.
+        maintenance = restore.model_copy(
+            update={
+                "record_id": "failed-maintenance",
+                "deploy": restore.deploy.model_copy(
+                    update={
+                        "started_at": "2026-09-29T12:00:00Z",
+                        "finished_at": "2026-09-29T12:01:00Z",
+                    }
+                ),
+                "post_deploy_update": restore.post_deploy_update.model_copy(
+                    update={"evidence": {"workflow_intent": "deploy"}}
+                ),
+            }
+        )
+        self.store.write_deployment_record(maintenance)
+        self.github.add_run(21, DEPLOYABLE)
+        self.request()
+        self.assertEqual(self.reconcile()["reason"], "testing_restore_required")
+        from control_plane.testing_restore_prerequisite import incomplete_testing_restore
+
+        # A retained target's failure cannot fence an independent replacement target.
+        target = self.store.read_dokploy_target_id_record(
+            context_name="cm", instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            target.model_copy(update={"target_id": "independent-target"})
+        )
+        self.assertIsNone(incomplete_testing_restore(self.store, context="cm", instance="testing"))
+        self.store.write_dokploy_target_id_record(target)
+        # The supported governed restore provides completion proof; no hold is cleared by hand.
+        self.store.write_deployment_record(
+            restore.model_copy(
+                update={
+                    "record_id": "completed-restore",
+                    "deploy": restore.deploy.model_copy(
+                        update={
+                            "started_at": "2026-09-29T13:00:00Z",
+                            "finished_at": "2026-09-29T13:01:00Z",
+                        }
+                    ),
+                    "post_deploy_update": restore.post_deploy_update.model_copy(
+                        update={
+                            "status": "pass",
+                            "evidence": {
+                                "workflow_intent": "restore",
+                                "post_deploy_readback_odoo_restore_completed": "true",
+                            },
+                        }
+                    ),
+                }
+            )
+        )
+        self.request()
+        self.assertIn("queued_operation_id", self.reconcile())
+
     def test_unverified_fresh_generation_holds_without_queueing(self) -> None:
         for error in (ValueError, FileNotFoundError, click.ClickException):
             with self.subTest(error=error):
