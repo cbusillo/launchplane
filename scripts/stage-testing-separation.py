@@ -134,7 +134,10 @@ def main() -> int:
         error = urllib.error.HTTPError(
             error.url, error.code, error.reason, error.headers, io.BytesIO(raw_error)
         )
-        if submitted and (error.code >= 500 or code == "mutation_reconciliation_required"):
+        if submitted and (
+            error.code >= 500
+            or code in {"mutation_reconciliation_required", "mutation_in_progress"}
+        ):
             print(json.dumps({"status": "outcome_unknown", "retain_original_key": True}))
         else:
             transport["emit_http_error_payload"](

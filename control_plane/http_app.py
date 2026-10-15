@@ -20761,6 +20761,7 @@ def create_launchplane_fastapi_app(
                 record_store=record_store,
                 trace_id=trace_id,
             )
+            prior = None
             if normalized_idempotency_key:
                 prior = separation_store.read_idempotency_record(
                     scope=idempotency_scope(identity),
@@ -20778,19 +20779,37 @@ def create_launchplane_fastapi_app(
                     )
                     if completed_replay is not None:
                         return completed_replay
-            try:
-                binding, target_key = separation_binding(
-                    separation_store,
-                    live_target_runtime_request,
-                    launchplane_identity_actor(identity),
-                )
-            except (ValueError, FileNotFoundError, click.ClickException, SQLAlchemyError) as error:
-                raise _launchplane_http_error(
-                    status_code=409,
-                    trace_id=trace_id,
-                    code="testing_separation_refused",
-                    message="Testing separation requires an owned, unshared target and the caller's staging interlock.",
-                ) from error
+            if prior is not None and prior.state in {"running", "reconcile_required"}:
+                if prior.request_fingerprint != payload_fingerprint:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="idempotency_key_reused",
+                        message="This key belongs to a different staging request.",
+                    )
+                # Reconciliation is observation, not a fresh effect. Preserve
+                # truthful uncertainty even when the original inputs drifted.
+                binding = live_target_runtime_request.reviewed_binding_sha256
+                target_key = prior.provider_target_key
+            else:
+                try:
+                    binding, target_key = separation_binding(
+                        separation_store,
+                        live_target_runtime_request,
+                        launchplane_identity_actor(identity),
+                    )
+                except (
+                    ValueError,
+                    FileNotFoundError,
+                    click.ClickException,
+                    SQLAlchemyError,
+                ) as error:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="testing_separation_refused",
+                        message="Testing separation requires an owned, unshared target and the caller's staging interlock.",
+                    ) from error
             if live_target_runtime_request.apply_changes:
                 if not normalized_idempotency_key:
                     raise _launchplane_http_error(

@@ -494,7 +494,7 @@ export type DokployTargetShopifyPolicy = {
 };
 
 export type DokployTargetStaffTestingHold = {
-    purpose: 'staff_testing' | 'isolation_staging';
+    purpose?: 'staff_testing' | 'isolation_staging';
     reason: string;
     recorded_at: string;
     recorded_by: string;

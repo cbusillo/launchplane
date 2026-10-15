@@ -79,7 +79,9 @@ class DokployTargetStaffTestingHold(BaseModel):
 
     reason: str
     purpose: Literal["staff_testing", "isolation_staging"] = Field(
-        default="staff_testing", exclude_if=lambda purpose: purpose == "staff_testing"
+        default="staff_testing",
+        exclude_if=lambda purpose: purpose == "staff_testing",
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
     recorded_by: str = ""
     recorded_at: str = ""

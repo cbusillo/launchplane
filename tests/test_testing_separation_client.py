@@ -16,6 +16,9 @@ class TestingSeparationClientTests(unittest.TestCase):
     def test_reviewed_apply_reports_uncertain_409_and_never_retries(self) -> None:
         self._exercise_apply("mutation_reconciliation_required", unknown=True)
 
+    def test_in_progress_write_retains_the_original_key(self) -> None:
+        self._exercise_apply("mutation_in_progress", unknown=True)
+
     def test_pre_effect_conflict_stays_a_refusal(self) -> None:
         self._exercise_apply("testing_separation_stale", unknown=False)
 

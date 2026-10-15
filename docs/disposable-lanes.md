@@ -75,23 +75,28 @@ safety still refuses unsafe carried credentials. Known person-use evidence,
 real staff holds, legacy unclassified holds and another caller's staging
 interlock refuse staging. A purpose-tagged `isolation_staging` hold belongs to
 the authenticated caller and continues to block every event-driven deployment.
-Setting that purpose cannot replace an existing staff or foreign hold. Existing
-holds without a purpose keep their staff-protection semantics; an old reason
+Staff and staging purposes cannot replace or lift one another. A staging hold
+also cannot change callers. Existing holds without a purpose keep their staff-protection semantics; an old reason
 string is never interpreted as permission. In particular, this source change
 does not relabel or lift RepairShopr's retained D6 interlock.
 
 The dry run returns a binding of ownership, target, configuration, secret
 metadata and key-safety policy; apply requires that binding and the original
 idempotency key. PostgreSQL excludes authority insert/update races during the
-bounded env-only write. Discovery and persistence reads run outside that lock. The adapter shares the generic-web deployment fence:
+bounded env-only write. Discovery and persistence reads run outside that lock.
+The adapter shares the generic-web deployment fence:
 an unknown historical deploy blocks it, and an uncertain staging write keeps
 its own durable fence. Original-key retry performs read-only reconciliation:
 it adopts the write only when the unchanged reviewed inputs and actual provider
 environment agree. A mismatch, stale configuration or unavailable read keeps
 the fence; no absence or safe-to-retry claim is made. It never supersedes an
 older deploy or redispatches an unknown effect. Completed same-key responses
-remain replayable. SQLite tests are rehearsals,
-not proof of PostgreSQL exclusion.
+remain replayable. Changed inputs and persistent provider mismatch remain
+protected unknown outcomes; [#3664](https://github.com/cbusillo/launchplane/issues/3664)
+owns additional retained-evidence/replacement recovery. That follow-up is not
+permission to clear the fence. Original-key reconciliation still reports these
+cases as reconciliation-required rather than as a fresh-plan refusal.
+SQLite tests are rehearsals, not proof of PostgreSQL exclusion.
 
 Use `scripts/stage-testing-separation.py` with the installed authenticated
 transport. First review `hold-dry-run`, then use `hold-apply` with the same

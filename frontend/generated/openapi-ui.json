@@ -11368,7 +11368,8 @@
               "isolation_staging"
             ],
             "title": "Purpose",
-            "type": "string"
+            "type": "string",
+            "x-launchplane-optional-response": true
           },
           "reason": {
             "title": "Reason",
@@ -11386,7 +11387,6 @@
           }
         },
         "required": [
-          "purpose",
           "reason",
           "recorded_at",
           "recorded_by"

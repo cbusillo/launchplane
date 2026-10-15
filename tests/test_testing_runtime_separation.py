@@ -440,3 +440,72 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(replay.status_code, 202, replay.text)
         self.assertEqual(effects, ["env-only"])
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    async def test_uncertain_original_key_stays_reconciliation_required_after_input_drift(
+        self,
+    ) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        effects = []
+
+        def write_and_drift(**kwargs: object) -> dict[str, object]:
+            self.assertTrue(kwargs["apply_changes"])
+            callback = kwargs["before_provider_mutation"]
+            assert callable(callback)
+            callback()
+            effects.append("env-only")
+            self.store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context=self.context,
+                    instance="testing",
+                    env={"EXAMPLE_CONFIG": "new"},
+                    updated_at=self.production_secret.updated_at,
+                )
+            )
+            raise OSError("lost write reply")
+
+        with (
+            patch(
+                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync"
+            ),
+            patch(
+                "control_plane.live_target_runtime.apply_live_target_runtime_environment",
+                side_effect=write_and_drift,
+            ),
+        ):
+            for _ in range(2):
+                response = await self.stage()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    response.json()["error"]["code"], "mutation_reconciliation_required"
+                )
+        self.assertEqual(effects, ["env-only"])
+        self.assertEqual(len(self.store.list_held_provider_target_reservations()), 1)
+
+    async def test_last_key_safety_checkpoint_refuses_before_write(self) -> None:
+        from control_plane.live_target_runtime import LiveTargetRuntimeError
+
+        effects = []
+
+        def write(**kwargs: object) -> dict[str, object]:
+            callback = kwargs["before_provider_mutation"]
+            assert callable(callback)
+            callback()
+            effects.append("write")
+            return {}
+
+        with (
+            patch(
+                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync",
+                side_effect=[{}, LiveTargetRuntimeError("Credential became unsafe.")],
+            ),
+            patch(
+                "control_plane.live_target_runtime.apply_live_target_runtime_environment",
+                side_effect=write,
+            ),
+        ):
+            response = await self.stage()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(effects, [])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())

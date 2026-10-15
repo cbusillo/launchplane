@@ -190,6 +190,11 @@ class TestingRuntimeSeparation:
             current, key = separation_binding(self.store, self.request, self.actor)
             if (current, key) != (self.binding, self.key):
                 raise ValueError("Separation inputs changed; review a fresh plan.")
+            runtime.evaluate_runtime_key_safety_for_live_target_sync(
+                record_store=self.store,
+                context_name=self.request.context,
+                instance_name=self.request.instance,
+            )
             lease.checkpoint_effect("testing_environment_staging")
             effect_started = True
 

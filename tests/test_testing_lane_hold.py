@@ -661,3 +661,25 @@ class IsolationStagingHoldTests(unittest.TestCase):
         self.assertNotIn("purpose", hold.model_dump(mode="json"))
         legacy = DokployTargetStaffTestingHold.model_validate(hold.model_dump(mode="json"))
         self.assertEqual(legacy.purpose, "staff_testing")
+
+    def test_cross_purpose_updates_and_lifts_preserve_the_existing_hold(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            for existing_purpose, requested_purpose in (
+                ("staff_testing", "isolation_staging"),
+                ("isolation_staging", "staff_testing"),
+            ):
+                existing = DokployTargetStaffTestingHold.model_validate(
+                    {"reason": _HOLD_REASON, "purpose": existing_purpose, "recorded_by": "agent"}
+                )
+                _seed_target(store, hold=existing)
+                for holding in (False, True):
+                    draft = TestingHoldApplyRequest.model_validate(
+                        {**_payload(hold=holding), "purpose": requested_purpose}
+                    )
+                    with (
+                        self.subTest(existing_purpose=existing_purpose, holding=holding),
+                        self.assertRaises(TestingHoldRefusal),
+                    ):
+                        build_testing_hold_plan(record_store=store, request=draft, actor="agent")
+                    self.assertEqual(_read_hold(store), existing)

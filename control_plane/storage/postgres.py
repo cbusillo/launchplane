@@ -6199,6 +6199,7 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneSecretRow
                 | LaunchplaneSecretVersionRow
                 | LaunchplaneSecretBindingRow
+                | LaunchplaneRuntimeKeySafetyPolicyRow
                 | LaunchplaneDisposableLaneSafetyRow
                 | LaunchplaneDisposableReplacementPreparationRow
                 | LaunchplaneDisposableTestingResourceAllocationRow,
