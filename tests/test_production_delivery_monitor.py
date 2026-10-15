@@ -226,16 +226,30 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(detail().health_monitoring.open_incidents, ())
 
     def test_retired_lag_with_an_interrupted_send_preserves_unknown_outcome(self) -> None:
+        policy = self.store.list_public_ingress_notification_policy_records()[0]
+        self.store.write_public_ingress_notification_policy_record(
+            policy.model_copy(
+                update={
+                    "destinations": (
+                        PublicIngressNotificationDestination(
+                            destination_id="existing-github",
+                            kind="github_issue",
+                            github_repository="example/alerts",
+                        ),
+                    ),
+                }
+            )
+        )
         self.seed_legacy_lag()
         queued = self.store.list_outbox_delivery_records()[0].model_copy(
-            update={"provider_operation_key": "interrupted-send", "provider_id": "discord"}
+            update={"provider_operation_key": "interrupted-send", "provider_id": "github"}
         )
-        sender = Mock()
+        sender = Mock(return_value={})
         started = Mock()
         result = deliver_public_ingress_notification_outbox_delivery(
             record=queued,
             record_store=self.store,
-            drivers=PublicIngressNotificationDriverSet(discord_sender=sender),
+            drivers=PublicIngressNotificationDriverSet(github_client=sender),
             mark_provider_started=started,
         )
         self.assertEqual(result.state, "failed")
