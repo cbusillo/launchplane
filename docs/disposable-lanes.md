@@ -91,6 +91,71 @@ analytics and similar connections must be removed or neutralized and verified
 without exposing their values. A successful policy readback does not prove that
 work happened or permit apply while required physical isolation is unknown.
 
+## Fresh Odoo testing replacement resources
+
+`POST /v1/products/{product}/testing-replacement-resources` prepares a separate,
+empty Odoo testing target without requiring an assertion about unknown historical
+effects. Its input names the owned testing context, retained service operation,
+reason and mode. The service derives the placement from the retained testing
+target and allocates its own resource namespace. It accepts no production
+destination, existing volume, credential, domain or caller-selected placement.
+
+The dry run captures the retained target identity as inert preparation evidence
+and returns a review digest. Apply uses the existing durable provider-operation
+runner and the original idempotency key. Only new project, environment and empty
+raw-compose creation calls are permitted; the old target, operation, routes and
+storage are preserved. An interrupted create with no complete receipt stays
+unknown and is never blindly repeated.
+
+The preparation schedule creates three local volumes with no driver options,
+bound to the service allocation. Readback checks their labels, actual backing
+directories, distinct filesystem identities, emptiness and every existing
+container's mounts, including stopped containers and parent bind mounts. An
+existing foreign volume, nonempty directory, external backing option, active
+preparation or incomplete provider response refuses qualification. Nothing is
+deleted to recover. The new compose must remain raw, empty, unrouted and without
+deployment history. No application, host port or credential is installed.
+
+PostgreSQL excludes authority inserts, updates, aliases and evidence writers
+while the operation owns its executor and resource snapshot. Referenced secret
+metadata participates in that snapshot, including cross-context references.
+SQLite remains a rehearsal backend and cannot publish these enabling facts.
+After actual provider readback, only the testing instance's volume settings are
+changed; other configuration and production records remain unchanged.
+
+Use the bounded client with the installed authenticated transport:
+
+```bash
+uv run python scripts/prepare-testing-replacement-resources.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <testing-context> \
+  --operation-id <retained-operation> --reason '<reason>' \
+  --evidence-file <private-review-file>
+```
+
+Review the private receipt, then repeat with `apply`, `--reviewed-dry-run` and
+the original stable `--idempotency-key`. Use `readback` with the same product,
+context, operation and reason for a separate actual resource read. Readback
+requires the current testing volume authority to agree with the allocation;
+drift cannot refresh positive evidence. A complete allocation with a lost final
+HTTP receipt can be adopted only after another actual readback. Otherwise keep
+the original key and investigate the retained operation; do not create another
+target or delete partial resources.
+
+This producer establishes unused, empty replacement resources and
+`separation_ready`, not permission to start restored testing. It supplies no
+production-capable key and performs no production copy. The separate continuation
+must render without host SSH mounts or host ports, use the qualified volume
+authority, sanitize the copy before any Odoo registry or module code runs, and
+prove credentials and integrations safe before web starts. Supersession still
+requires `isolated`; this preparation alone cannot release it. The old hostname
+is not moved by preparation. Recovery retains partial new resources and their
+service namespace in an additive allocation table. The retained custody payload
+is unchanged; downgrade retains allocation metadata and re-upgrade adopts it.
+An older image cannot continue the new resource route. After activation, retain
+the qualifying image and forward-fix rather than erasing custody or restoring
+an old database to clear the fence.
+
 ## First service collector
 
 `collect` on the observation API resolves two existing service sources itself:

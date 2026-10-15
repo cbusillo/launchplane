@@ -10086,6 +10086,212 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_resource_guard_excludes_absent_configuration_alias_and_evidence_writers(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from tests.support.disposable_lanes import record_safety
+        from tests.support.profiles import _generic_site_profile_payload
+
+        for change in ("global-insert", "instance-insert", "new-alias", "evidence-refresh"):
+            with self.subTest(change=change), _head_postgres_database() as url:
+                first = PostgresRecordStore(database_url=url)
+                second = PostgresRecordStore(database_url=url)
+                self.addCleanup(first.close)
+                self.addCleanup(second.close)
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload()
+                )
+                first.write_product_profile_record(profile)
+                lane = next(item for item in profile.lanes if item.instance == "testing")
+                target = DokployTargetIdRecord(
+                    context=lane.context,
+                    instance="testing",
+                    target_id="fresh-compose",
+                    updated_at=profile.updated_at,
+                )
+                first.write_dokploy_target_id_record(target)
+                reached_lock = threading.Event()
+                original_lock = second._lock_product_authority_bundle_write
+
+                def signal_lock(session: Any) -> None:
+                    reached_lock.set()
+                    original_lock(session)
+
+                def competing_write() -> None:
+                    if change == "new-alias":
+                        second.write_dokploy_target_id_record(
+                            target.model_copy(
+                                update={"context": "another-lane", "instance": "prod"}
+                            )
+                        )
+                    elif change == "evidence-refresh":
+                        record_safety(second, profile.product, lane.context, "testing")
+                    else:
+                        second.write_runtime_environment_record(
+                            RuntimeEnvironmentRecord(
+                                scope="global" if change == "global-insert" else "instance",
+                                context="" if change == "global-insert" else lane.context,
+                                instance="" if change == "global-insert" else "testing",
+                                env={"EXAMPLE_RUNTIME_SETTING": "new"},
+                                updated_at=profile.updated_at,
+                            )
+                        )
+
+                with (
+                    patch.object(
+                        second, "_lock_product_authority_bundle_write", side_effect=signal_lock
+                    ),
+                    ThreadPoolExecutor(max_workers=1) as pool,
+                ):
+                    with first.serialize_disposable_testing_resources() as checkpoint:
+                        future = pool.submit(competing_write)
+                        self.assertTrue(reached_lock.wait(10))
+                        with self.assertRaises(TimeoutError):
+                            future.result(timeout=0.1)
+                        checkpoint()
+                        # Same-thread evidence writes can commit under the held
+                        # coordinator without deadlocking its separate connection.
+                        record_safety(first, profile.product, lane.context, "testing")
+                        checkpoint()
+                    future.result(timeout=10)
+
+    def test_fresh_resource_preparation_replay_and_readback_preserve_retained_operation(
+        self,
+    ) -> None:
+        from tests.test_testing_replacement_resources import TestingReplacementResourceHttpTests
+        from control_plane.odoo_testing_resources import OdooTestingResources
+
+        with _head_postgres_database() as url:
+            fixture = TestingReplacementResourceHttpTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            policy = LaunchplaneAuthzPolicy()
+            fixture.store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=1, policy_sha256=authz_policy_sha256(policy)
+                    ),
+                    revision=1,
+                    status="active",
+                    source="test:resource-preparation",
+                    updated_at=fixture.profile.updated_at,
+                    policy=policy,
+                )
+            )
+            calls: list[tuple[str, dict[str, Any]]] = []
+
+            def mutate(host: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+                calls.append((path, payload))
+                identifiers = {
+                    "/api/project.create": "projectId",
+                    "/api/environment.create": "environmentId",
+                    "/api/compose.create": "composeId",
+                }
+                self.assertIn(path, identifiers)
+                return {identifiers[path]: "fresh-" + identifiers[path]}
+
+            def fetch(host: str, token: str, target_type: str, target_id: str) -> dict[str, Any]:
+                self.assertEqual(target_type, "compose")
+                return {
+                    "composeId": target_id,
+                    "name": "fixture-compose",
+                    "appName": "fixture-compose",
+                    "serverId": "fixture-server",
+                    "sourceType": "raw",
+                    "env": "",
+                    "composeFile": "",
+                }
+
+            def schedule(**kwargs: Any) -> dict[str, str]:
+                resources = kwargs["resources"]
+                self.assertIsInstance(resources, OdooTestingResources)
+                self.assertNotEqual(resources.target_id, "compose-testing")
+                kwargs["checkpoint"]()
+                return {
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": resources.binding_sha256,
+                    "schedule_id": "resource-schedule",
+                }
+
+            async def scenario() -> None:
+                before_profile = fixture.store.read_product_profile_record(fixture.profile.product)
+                before_production = fixture.store.read_dokploy_target_id_record(
+                    context_name=fixture.context, instance_name="prod"
+                )
+                plan = await fixture.post()
+                self.assertEqual(plan.status_code, 202, plan.text)
+                body = {
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+                }
+                with (
+                    patch(
+                        "control_plane.testing_replacement_resources.source.read_dokploy_config",
+                        return_value=("provider.invalid", "fixture-token"),
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
+                        return_value=("provider.invalid", "fixture-token"),
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup",
+                        side_effect=mutate,
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                        side_effect=fetch,
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.fetch_dokploy_target_payload",
+                        side_effect=lambda **kw: fetch(
+                            kw["host"], kw["token"], kw["target_type"], kw["target_id"]
+                        ),
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.run_resource_schedule",
+                        side_effect=schedule,
+                    ),
+                ):
+                    applied = await fixture.post(**body)
+                    self.assertEqual(applied.status_code, 202, applied.text)
+                    count = len(calls)
+                    replay = await fixture.post(**body)
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertTrue(replay.json()["replayed"])
+                    self.assertEqual(len(calls), count)
+                    readback = await fixture.post(mode="readback")
+                    self.assertEqual(readback.status_code, 202, readback.text)
+                    self.assertEqual(
+                        readback.json()["result"]["resources_binding_sha256"],
+                        applied.json()["result"]["resources_binding_sha256"],
+                    )
+                self.assertEqual(
+                    fixture.store.read_product_profile_record(fixture.profile.product),
+                    before_profile,
+                )
+                self.assertEqual(
+                    fixture.store.read_dokploy_target_id_record(
+                        context_name=fixture.context, instance_name="prod"
+                    ),
+                    before_production,
+                )
+                self.assertEqual(
+                    fixture.store.read_odoo_stable_target_replacement_operation_record(
+                        fixture.operation.operation_id
+                    ),
+                    fixture.operation,
+                )
+                safety = fixture.store.read_disposable_lane_safety(
+                    fixture.profile.product, fixture.context, "testing"
+                )
+                assert safety is not None
+                self.assertEqual(safety.production_resources, "separation_ready")
+                self.assertFalse(
+                    fixture.store.supersede_disposable_testing_replacement(fixture.operation)
+                )
+
+            asyncio.run(scenario())
+
     def test_disposable_records_survive_schema_rollback_without_changing_legacy_payloads(
         self,
     ) -> None:
@@ -10096,9 +10302,10 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
         from control_plane.storage.postgres import (
             LaunchplaneProductProfileRow,
             LaunchplaneOdooStableTargetReplacementOperationRow,
+            LaunchplaneDisposableReplacementPreparationRow,
         )
         from control_plane.storage.migrations.versions import (
-            de647804f004_disposable_lane_records as migration,
+            ef758915f005_disposable_testing_resource_allocations as migration,
         )
 
         with _head_postgres_database() as url:
@@ -10132,6 +10339,25 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             record_safety(store, profile.product, lane.context, "testing")
             evidence = store.read_disposable_lane_safety(profile.product, lane.context, "testing")
             preparation = store.read_disposable_replacement_preparation(operation.operation_id)
+            allocation = store.read_disposable_resource_preparation(operation.operation_id)
+            assert preparation is not None and allocation is not None
+            store.compare_and_write_disposable_resource_preparation(
+                expected=allocation,
+                replacement=allocation.model_copy(
+                    update={
+                        "resource_namespace": "lp-testing-" + "a" * 32,
+                        "replacement_target_id": "new-fixture",
+                    }
+                ),
+            )
+            allocation = store.read_disposable_resource_preparation(operation.operation_id)
+            with store._session_factory() as session:
+                custody = session.get(
+                    LaunchplaneDisposableReplacementPreparationRow, operation.operation_id
+                )
+                assert custody is not None
+                # The older strict reader still sees exactly its original payload.
+                self.assertEqual(custody.payload, preparation.model_dump(mode="json"))
             with store._session_factory() as session:
                 profile_row = session.get(LaunchplaneProductProfileRow, profile.product)
                 operation_row = session.get(
@@ -10150,6 +10376,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 store.read_disposable_replacement_preparation(operation.operation_id), preparation
             )
+            self.assertEqual(
+                store.read_disposable_resource_preparation(operation.operation_id), allocation
+            )
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(
                 store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
@@ -10159,6 +10388,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             store.verify_schema()
             self.assertEqual(
                 store.read_disposable_replacement_preparation(operation.operation_id), preparation
+            )
+            self.assertEqual(
+                store.read_disposable_resource_preparation(operation.operation_id), allocation
             )
 
     def test_disposable_replacement_safety_and_exclusion_on_postgres(self) -> None:

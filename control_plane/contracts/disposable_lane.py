@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_DISPOSABLE_LANE_SAFETY_SECONDS = 900
 DISPOSABLE_LANE_OBSERVATION_ROUTE = "/v1/disposable-lanes/observations"
+TESTING_REPLACEMENT_RESOURCES_ROUTE = "/v1/products/{product}/testing-replacement-resources"
 
 
 class DisposableLaneSafety(BaseModel):
@@ -87,6 +88,14 @@ class DisposableTestingReplacementPreparation(BaseModel):
         if self.recorded_at.utcoffset() is None:
             raise ValueError("Replacement preparation requires a timezone-aware timestamp.")
         return self
+
+
+class DisposableTestingResourcePreparation(DisposableTestingReplacementPreparation):
+    """Joined view; allocation fields never enter the retained custody payload."""
+
+    resource_namespace: str = ""
+    replacement_target_id: str = ""
+    resources_binding_sha256: str = ""
 
 
 class DisposableTestingSupersession(BaseModel):
