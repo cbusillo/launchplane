@@ -1,4 +1,5 @@
 from collections.abc import Iterator, Sequence
+import asyncio
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from inspect import signature
@@ -80,6 +81,113 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 
 class TestingReplacementRecoveryTests(unittest.TestCase):
     database_url = ""
+
+    def test_manual_attestation_cannot_cancel_service_testing_with_unknown_or_active_effects(
+        self,
+    ) -> None:
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import (
+            _odoo_operation_status_identity,
+            _odoo_operation_status_policy,
+        )
+        from tests.support.auth import _StubVerifier
+        from tests.support.http import request
+
+        for journal_present in (False, True):
+            for store, root in self.stores():
+                with self.subTest(journal_present=journal_present, store=type(store).__name__):
+                    operation = self.running(store)
+                    execution = (
+                        guard_testing_replacement(store, operation, "worker", lambda _: None)
+                        if journal_present
+                        else store.testing_replacement_execution_lock(operation.operation_id)
+                    )
+                    with execution as check:
+                        self.assertIsNotNone(check)
+                        if journal_present:
+                            with patch.object(api, "_dokploy_request", return_value={}):
+                                api.dokploy_request(
+                                    host="https://provider.test",
+                                    token="fixture-token",
+                                    path="/api/compose.update",
+                                    method="POST",
+                                    payload={"composeId": "compose-123"},
+                                )
+                        fenced = self.fence(store)
+                        app = create_launchplane_fastapi_app(
+                            control_plane_root_path=root,
+                            verifier=_StubVerifier(_odoo_operation_status_identity()),
+                            authz_policy=_odoo_operation_status_policy(
+                                action="odoo_target_replacement_apply.execute",
+                                products=(fenced.product,),
+                                contexts=(fenced.context,),
+                                instances=(fenced.instance,),
+                                schema_version=2,
+                            ),
+                            record_store_factory=lambda: store,
+                        )
+                        response = asyncio.run(
+                            request(
+                                app,
+                                "POST",
+                                f"/v1/drivers/odoo/target-replacement/operations/{fenced.operation_id}/cancel",
+                                headers={"Authorization": "Bearer valid-token"},
+                                payload={
+                                    "reason": "An admin asserts the provider is idle.",
+                                    "reconciliation_attestation": {
+                                        "provider_inspected_at": fenced.updated_at,
+                                        "provider_state": "No work observed.",
+                                        "evidence_reference": "provider-read:manual",
+                                        "safe_to_release": True,
+                                    },
+                                },
+                            )
+                        )
+                        self.assertEqual(response.status_code, 409, response.text)
+                        self.assertEqual(
+                            store.read_odoo_stable_target_replacement_operation_record(
+                                fenced.operation_id
+                            ),
+                            fenced,
+                        )
+
+    def test_storage_cannot_release_service_testing_without_recovery_comparison(self) -> None:
+        from control_plane.contracts.durable_operation_authorization import (
+            DurableOperationCancellation,
+            DurableOperationReconciliationAttestation,
+        )
+
+        for store, _ in self.stores():
+            self.running(store)
+            fenced = self.fence(store)
+            assert fenced.authorization is not None
+            cancelled_at = stamp()
+            cancelled = fenced.model_copy(
+                update={
+                    "status": "cancelled",
+                    "phase": "cancelled",
+                    "updated_at": cancelled_at,
+                    "finished_at": cancelled_at,
+                    "cancellation": DurableOperationCancellation(
+                        reason="Manual assertion without original-effect proof.",
+                        cancelled_at=cancelled_at,
+                        caller=fenced.authorization.caller,
+                        reconciliation_attestation=DurableOperationReconciliationAttestation(
+                            provider_inspected_at=fenced.updated_at,
+                            provider_state="No work observed.",
+                            evidence_reference="provider-read:manual",
+                            safe_to_release=True,
+                        ),
+                    ),
+                }
+            )
+            self.assertFalse(
+                store.cancel_pending_odoo_stable_target_replacement_operation_record(cancelled)
+            )
+            self.assertEqual(
+                store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id),
+                fenced,
+            )
 
     def test_new_isolated_target_supersedes_a_journalless_testing_fence_without_past_effect_proof(
         self,

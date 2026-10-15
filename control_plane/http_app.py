@@ -10002,6 +10002,21 @@ def create_launchplane_fastapi_app(
             )
         cancelled_at = utc_now_timestamp()
         if operation.status == "reconciliation_required":
+            if read_method_name == "read_odoo_stable_target_replacement_operation_record":
+                from control_plane.testing_replacement_recovery import service_testing_operation
+
+                if service_testing_operation(operation):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="service_testing_recovery_required",
+                        message=(
+                            "Held service-owned testing replacements require worker recovery with "
+                            "execution exclusion and original-effect proof, or a verified isolated "
+                            "replacement generation. Read the operation's recovery classification; "
+                            "a caller attestation cannot release this fence."
+                        ),
+                    )
             reconciliation_attestation = cancellation_request.reconciliation_attestation
             if reconciliation_attestation is None:
                 raise _launchplane_http_error(

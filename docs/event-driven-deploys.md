@@ -719,6 +719,24 @@ from its own event reconciler. Recovery applies only to testing,
 Production, Client releases and caller-started operations keep their existing
 recovery rules.
 
+Manual cancellation of a held service-owned testing replacement returns
+`409 service_testing_recovery_required`. A caller's timestamped provider
+attestation cannot substitute for the worker's execution exclusion and
+original-effect proof. Storage also refuses cancellation of these held records
+without the expected original record used by service recovery. Pending
+operations remain cancellable before execution, and terminal cancellations
+remain idempotent.
+
+To continue, read the operation GET's recovery classification. The existing
+stable-operation worker performs recovery when it can gather fresh proof under
+the execution lock; no manual safe-release assertion is needed. When original
+proof is missing, use the supported [isolated testing-generation
+replacement](disposable-lanes.md#fresh-odoo-testing-replacement-resources) with its
+captured old-target custody and current isolation evidence. This records
+supersession rather than asserting that old effects were safe. Until either
+path's prerequisites are met, the old operation remains fenced. These paths do
+not require a new cancellation grant or an alternate workflow identity.
+
 The worker holds an operation execution lock through provider effects and local
 publication. Each provider mutation first records a value-free dispatch intent
 on the operation's `recovery_journal`; acknowledgement, target identity, schedule
