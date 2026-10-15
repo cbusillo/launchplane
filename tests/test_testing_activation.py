@@ -604,9 +604,14 @@ class ActivationTests(unittest.TestCase):
 
         public = ActivationTests()
         public.private_product = False
-        public.database_url = self.database_url
-        public.setUp()
+        if self.database_url:
+            from tests.test_postgres_integration import _head_postgres_database
+
+            database = _head_postgres_database()
+            public.database_url = database.__enter__()
+            self.addCleanup(database.__exit__, None, None, None)
         self.addCleanup(public.doCleanups)
+        public.setUp()
         payload = public.planned_record.model_dump(exclude={"configuration_version"})
         payload["configuration_sha256"] = configuration_digest(
             public.store, public.product, public.context, version=1
