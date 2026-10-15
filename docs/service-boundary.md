@@ -743,12 +743,12 @@ with a separate OAuth-custody purpose. Associated data binds ciphertext to the
 session ID and immutable GitHub ID. Tokens never enter cookies, browser session
 responses, logs or scrubbed record exports. Session-row locks serialize refresh
 and persistence across workers. Dashboard reads skip a busy refresh, using only
-already-current claims without extending their lifetime; stale claims refuse
-until verification finishes. Reads and cookie renewal avoid locking when no
+already-current claims without extending their lifetime; stale claims receive retryable `503 identity_verification_pending`
+until verification finishes, so parallel reads do not falsely sign the browser out. Reads and cookie renewal avoid locking when no
 refresh/renewal is due. Failures log only the exception type, never its value; CSRF consumption preserves current credential
 and claims metadata, and renewal cannot recreate a logged-out session. Provider
-requests have bounded timeouts and membership pagination fails closed at its
-bound. Read-only sensitive/preflight paths keep their nonrenewing behavior.
+requests have bounded socket timeouts and stop dispatching further requests after
+a 30-second exchange budget; membership pagination fails closed at its bound. Read-only sensitive/preflight paths keep their nonrenewing behavior.
 
 ### Browser Mutation Boundary
 

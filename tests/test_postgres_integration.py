@@ -4449,6 +4449,63 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             self.assertEqual(stored.csrf_generation, consumed.csrf_generation)
             self.assertIsNone(managers[0].consume_csrf_token(original, csrf))
 
+    def test_concurrent_stale_human_read_is_pending_then_uses_refreshed_claims(self) -> None:
+        from control_plane.service_human_auth import (
+            GitHubOAuthClient,
+            GitHubOAuthLogin,
+            HumanSessionManager,
+            HumanSessionUpdateBusy,
+            SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS,
+        )
+        from control_plane.service_human_credentials import GitHubOAuthCredential
+        from tests.test_service_human_auth import _config, _identity
+        from tests.test_human_session_renewal import _policy
+
+        with _head_postgres_database() as url:
+            stores = [PostgresRecordStore(database_url=url) for _ in range(2)]
+            for store in stores:
+                self.addCleanup(store.close)
+            now = datetime.now(timezone.utc)
+            managers = [
+                HumanSessionManager(config=_config(), session_store=store, now=lambda: now)
+                for store in stores
+            ]
+            original = managers[0].issue(_identity(), GitHubOAuthCredential("access"))
+            now += timedelta(seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS)
+            entered, release = threading.Event(), threading.Event()
+            provider = Mock(spec=GitHubOAuthClient)
+
+            def exchange(*args: object, **kwargs: object) -> GitHubOAuthLogin:
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("test provider wait")
+                return GitHubOAuthLogin(_identity(), GitHubOAuthCredential("rotated-access"))
+
+            provider.revalidate.side_effect = exchange
+            with ThreadPoolExecutor(max_workers=1) as workers:
+                first = workers.submit(
+                    managers[0].refresh_authorization_claims,
+                    original,
+                    client=provider,
+                    authz_policy=_policy(),
+                )
+                try:
+                    self.assertTrue(entered.wait(5))
+                    with self.assertRaises(HumanSessionUpdateBusy):
+                        managers[1].refresh_authorization_claims(
+                            original, client=provider, authz_policy=_policy()
+                        )
+                finally:
+                    release.set()
+                refreshed = first.result(timeout=5)
+            self.assertEqual(
+                managers[1].refresh_authorization_claims(
+                    original, client=provider, authz_policy=_policy()
+                ),
+                refreshed,
+            )
+            self.assertEqual(provider.revalidate.call_count, 1)
+
     def test_new_human_sign_in_purges_abandoned_expired_credentials(self) -> None:
         from control_plane.service_human_auth import HumanSessionManager
         from control_plane.service_human_credentials import GitHubOAuthCredential
@@ -4487,6 +4544,23 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             original = manager.issue(_identity(), GitHubOAuthCredential("original-access"))
             now += timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS)
             entered, release = threading.Event(), threading.Event()
+            from control_plane.storage.postgres import LaunchplaneHumanSessionRow
+
+            logout_started = threading.Event()
+
+            def observe_logout(
+                _conn: Any, _cursor: Any, _sql: Any, _params: Any, context: Any, _many: Any
+            ) -> None:
+                compiled = context.compiled
+                if (
+                    compiled is not None
+                    and compiled.statement.is_delete
+                    and compiled.statement.table.compare(LaunchplaneHumanSessionRow.__table__)
+                ):
+                    logout_started.set()
+
+            event.listen(other._engine, "before_cursor_execute", observe_logout)
+            self.addCleanup(event.remove, other._engine, "before_cursor_execute", observe_logout)
             provider = Mock(spec=GitHubOAuthClient)
 
             def exchange(*args: object, **kwargs: object) -> GitHubOAuthLogin:
@@ -4506,18 +4580,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                 try:
                     self.assertTrue(entered.wait(5))
                     logout = workers.submit(other.delete_session, original.session_id)
-                    deadline = time.monotonic() + 5
-                    waiting = 0
-                    while time.monotonic() < deadline:
-                        with store._engine.connect() as observer:
-                            waiting = observer.scalar(
-                                text(
-                                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
-                                )
-                            )
-                        if waiting:
-                            break
-                        time.sleep(0.01)
+                    self.assertTrue(logout_started.wait(5))
                 finally:
                     release.set()
                 refresh.result(timeout=5)

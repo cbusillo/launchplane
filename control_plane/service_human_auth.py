@@ -11,6 +11,7 @@ import os
 import logging
 import secrets
 from threading import RLock
+from time import monotonic
 import warnings
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import urlsplit
@@ -32,10 +33,15 @@ SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS = 24 * 60 * 60
 SESSION_CLAIMS_REFRESH_AFTER_SECONDS = SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS - 60 * 60
 OAUTH_REFRESH_MARGIN_SECONDS = 5 * 60
 OAUTH_REQUEST_TIMEOUT_SECONDS = 10
+OAUTH_EXCHANGE_BUDGET_SECONDS = 30
 OAUTH_STATE_TTL_SECONDS = 10 * 60
 BROWSER_CSRF_HEADER_NAME = "X-CSRF-Token"
 _BROWSER_CSRF_TOKEN_VERSION = "v1"
 _LOGGER = logging.getLogger(__name__)
+
+
+class GitHubIdentityUnavailable(RuntimeError):
+    """A transient provider failure, without provider response contents."""
 
 
 class HumanSessionUpdateBusy(RuntimeError):
@@ -361,6 +367,7 @@ class GitHubOAuthClient:
             scope=" ".join(self._config.scopes),
             redirect_uri=self._config.redirect_uri,
         )
+        deadline = monotonic() + OAUTH_EXCHANGE_BUDGET_SECONDS
         try:
             token = client.fetch_token(
                 GITHUB_TOKEN_URL,
@@ -370,7 +377,10 @@ class GitHubOAuthClient:
             )
             credential = GitHubOAuthCredential.from_token(token, now=_utc_now())
             identity = self._fetch_identity(
-                client, authz_policy=authz_policy, is_product_owner=is_product_owner
+                client,
+                authz_policy=authz_policy,
+                is_product_owner=is_product_owner,
+                deadline=deadline,
             )
             return GitHubOAuthLogin(identity, credential)
         finally:
@@ -385,6 +395,7 @@ class GitHubOAuthClient:
             scope=" ".join(self._config.scopes),
             redirect_uri=self._config.redirect_uri,
         )
+        deadline = monotonic() + OAUTH_EXCHANGE_BUDGET_SECONDS
         try:
             now = _utc_now()
             if credential.access_expires_at is not None and credential.access_expires_at <= (
@@ -406,22 +417,33 @@ class GitHubOAuthClient:
                 )
                 credential = GitHubOAuthCredential.from_token(token, now=now)
             client.token = {"access_token": credential.access_token, "token_type": "Bearer"}
-            identity = self._fetch_identity(client, authz_policy=authz_policy)
+            identity = self._fetch_identity(client, authz_policy=authz_policy, deadline=deadline)
             return GitHubOAuthLogin(identity, credential)
         finally:
             client.close()
 
     @staticmethod
-    def _get_payload(client: OAuth2SessionType, url: str) -> Any:
-        response = client.get(url, timeout=OAUTH_REQUEST_TIMEOUT_SECONDS, allow_redirects=False)
+    def _get_payload(client: OAuth2SessionType, url: str, *, deadline: float) -> Any:
+        remaining = deadline - monotonic()
+        if remaining <= 0:
+            raise GitHubIdentityUnavailable("GitHub verification budget exhausted.")
+        response = client.get(
+            url, timeout=min(OAUTH_REQUEST_TIMEOUT_SECONDS, remaining), allow_redirects=False
+        )
+        if response.status_code == 429 or response.status_code >= 500:
+            raise GitHubIdentityUnavailable("GitHub identity provider is unavailable.")
         if response.status_code != 200:
             raise PermissionError("GitHub identity could not be verified.")
         return response.json()
 
-    def _list_payload(self, client: OAuth2SessionType, url: str) -> list[dict[str, Any]]:
+    def _list_payload(
+        self, client: OAuth2SessionType, url: str, *, deadline: float
+    ) -> list[dict[str, Any]]:
         result: list[dict[str, Any]] = []
         for page in range(1, 101):
-            payload = self._get_payload(client, f"{url}?per_page=100&page={page}")
+            payload = self._get_payload(
+                client, f"{url}?per_page=100&page={page}", deadline=deadline
+            )
             if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
                 raise ValueError("GitHub membership response is invalid.")
             result.extend(payload)
@@ -435,13 +457,14 @@ class GitHubOAuthClient:
         *,
         authz_policy: LaunchplaneAuthzPolicy,
         is_product_owner: Callable[[int], bool] | None = None,
+        deadline: float,
     ) -> GitHubHumanIdentity:
-        user_payload = self._get_payload(client, GITHUB_USER_URL)
+        user_payload = self._get_payload(client, GITHUB_USER_URL, deadline=deadline)
         if not isinstance(user_payload, dict):
             raise ValueError("GitHub user response is invalid.")
-        org_payload = self._list_payload(client, GITHUB_ORGS_URL)
-        team_payload = self._list_payload(client, GITHUB_TEAMS_URL)
-        email_payload = self._list_payload(client, GITHUB_EMAILS_URL)
+        org_payload = self._list_payload(client, GITHUB_ORGS_URL, deadline=deadline)
+        team_payload = self._list_payload(client, GITHUB_TEAMS_URL, deadline=deadline)
+        email_payload = self._list_payload(client, GITHUB_EMAILS_URL, deadline=deadline)
         if any(
             not isinstance(org.get("login"), str) or not org["login"].strip() for org in org_payload
         ):
@@ -682,6 +705,8 @@ class HumanSessionManager:
         self._session_store.delete_session(session.session_id)
 
     def _refresh_due(self, session: LaunchplaneHumanSession, now: datetime) -> bool:
+        if not session.oauth_credential:
+            return False
         verified_at = session.claims_verified_at or session.created_at
         if now >= verified_at + timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS):
             return True
@@ -714,7 +739,10 @@ class HumanSessionManager:
             return session
         try:
             if not self._refresh_due(session, self._now()):
-                return self._fresh_session(session)
+                fresh = self._fresh_session(session)
+                if fresh is None:
+                    self.revoke(session)
+                return fresh
         except Exception:
             self.revoke(session)
             return None
@@ -765,9 +793,13 @@ class HumanSessionManager:
         except HumanSessionUpdateBusy:
             # An exchange is in progress, not failed. A follower may use only
             # already-current claims; it cannot renew them or wait on a DB lock.
-            return self._fresh_session(
-                self._session_store.read_session_without_cleanup(session.session_id)
-            )
+            current = self._session_store.read_session_without_cleanup(session.session_id)
+            if current is None or current.expires_at <= self._now():
+                return None
+            fresh = self._fresh_session(current)
+            if fresh is None:
+                raise HumanSessionUpdateBusy() from None
+            return fresh
 
     def renew_if_needed(self, session: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
         now = self._now()

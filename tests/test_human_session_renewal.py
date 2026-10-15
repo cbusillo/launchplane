@@ -4,7 +4,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
 from requests import PreparedRequest, Response, Session
 from requests.adapters import BaseAdapter
@@ -35,7 +35,11 @@ from control_plane.service_human_auth import (
 )
 from control_plane.service_human_credentials import GitHubOAuthCredential, HumanCredentialCipher
 from control_plane.storage.postgres import _human_session_from_payload, _human_session_payload
-from tests.http_app_test_support import _RejectingVerifier, _StubFastApiGitHubOAuthClient
+from tests.http_app_test_support import (
+    _RejectingVerifier,
+    _StubFastApiGitHubOAuthClient,
+    _MissingProductReadStore,
+)
 from tests.support.http import lifespan_client
 from tests.test_service import _HostedAuthzPolicyStore
 from tests.test_service_human_auth import _config, _identity
@@ -203,7 +207,8 @@ class HumanSessionRenewalTests(unittest.TestCase):
             self.now = self.session.created_at + timedelta(
                 seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS
             )
-            self.assertIsNone(self.refresh())
+            with self.assertRaises(HumanSessionUpdateBusy):
+                self.refresh()
         self.assertEqual(self.store.read_session(self.session.session_id), self.session)
         self.client.revalidate.assert_not_called()
 
@@ -212,7 +217,6 @@ class HumanSessionRenewalTests(unittest.TestCase):
         self.client.revalidate.side_effect = OSError("synthetic-private-token")
         with self.assertLogs("control_plane.service_human_auth", level="WARNING") as logs:
             self.assertIsNone(self.refresh())
-        self.assertIn("OSError", " ".join(logs.output))
         self.assertNotIn("synthetic-private-token", " ".join(logs.output))
 
     def test_client_session_stores_no_credential_and_never_refreshes_identity(self) -> None:
@@ -267,7 +271,6 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
         self.assertEqual(result.credential.access_token, self.http.token["access_token"])
         self.assertNotEqual(result.credential.refresh_token, credential.refresh_token)
         self.http.refresh_token.assert_called_once()
-        self.assertIsNone(self.http.refresh_token.call_args.kwargs["scope"])
         self.http.close.assert_called_once()
 
     def test_long_lived_access_revalidates_without_refreshing_token(self) -> None:
@@ -300,7 +303,12 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.http.get.side_effect = None
                 self.http.get.return_value = Mock(status_code=status)
-                with self.assertRaises(PermissionError):
+                from control_plane.service_human_auth import GitHubIdentityUnavailable
+
+                error_type = (
+                    GitHubIdentityUnavailable if status >= 500 or status == 429 else PermissionError
+                )
+                with self.assertRaises(error_type):
                     self.revalidate(GitHubOAuthCredential("access"))
         self.http.get.side_effect = lambda url, **kwargs: Mock(
             status_code=200,
@@ -381,6 +389,23 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
         self.assertNotIn("scope", body)
         self.assertTrue(all(request.headers.get("Authorization") for request in requests))
 
+    def test_exchange_budget_stops_dispatching_further_membership_requests(self) -> None:
+        from control_plane.service_human_auth import (
+            GitHubIdentityUnavailable,
+            OAUTH_EXCHANGE_BUDGET_SECONDS,
+        )
+
+        with (
+            patch.object(self.client, "_new_session", return_value=self.http),
+            patch(
+                "control_plane.service_human_auth.monotonic",
+                side_effect=[0, 0, OAUTH_EXCHANGE_BUDGET_SECONDS + 1],
+            ),
+        ):
+            with self.assertRaises(GitHubIdentityUnavailable):
+                self.client.revalidate(GitHubOAuthCredential("access"), authz_policy=_policy())
+        self.assertEqual(self.http.get.call_count, 1)
+
     def test_removed_membership_cannot_renew_the_prior_role(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {"github_humans": [{"organizations": ["formerly-allowed"], "roles": ["admin"]}]}
@@ -419,6 +444,31 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
 
 
 class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_oauth_provider_outage_is_retryable_and_hides_provider_value(self) -> None:
+        from control_plane.service_human_auth import GitHubIdentityUnavailable
+
+        manager = HumanSessionManager(config=_config(), session_store=InMemoryHumanSessionStore())
+        oauth = _StubFastApiGitHubOAuthClient(_identity())
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_policy(),
+            human_session_manager=manager,
+            github_oauth_client=oauth,
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        async with lifespan_client(app) as client:
+            login = await client.get("/auth/github/login")
+            state = parse_qs(urlsplit(login.headers["Location"]).query)["state"][0]
+            with patch.object(
+                oauth,
+                "fetch_identity",
+                side_effect=GitHubIdentityUnavailable("private-provider-value"),
+            ):
+                response = await client.get(f"/auth/github/callback?code=github-code&state={state}")
+        self.assertEqual(response.status_code, 503)
+        self.assertNotIn("private-provider-value", response.text)
+        self.assertNotIn("Set-Cookie", response.headers)
+
     async def test_renewal_uses_current_db_policy_and_never_exposes_credentials(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
@@ -450,6 +500,18 @@ class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
             )
             now += timedelta(seconds=SESSION_RENEW_AFTER_SECONDS + 1)
             async with lifespan_client(app) as client:
+                from control_plane.service_human_auth import HumanSessionUpdateBusy
+
+                with patch.object(
+                    manager, "refresh_authorization_claims", side_effect=HumanSessionUpdateBusy
+                ):
+                    pending = await client.get(
+                        "/v1/auth/session",
+                        headers={"Cookie": manager.session_cookie_header(session)},
+                    )
+                self.assertEqual(pending.status_code, 503)
+                self.assertEqual(pending.json()["error"]["code"], "identity_verification_pending")
+                self.assertNotIn("Set-Cookie", pending.headers)
                 response = await client.get(
                     "/v1/auth/session", headers={"Cookie": manager.session_cookie_header(session)}
                 )

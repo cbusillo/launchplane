@@ -838,6 +838,8 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import (
     GitHubOAuthLoginClient,
+    GitHubIdentityUnavailable,
+    HumanSessionUpdateBusy,
     BROWSER_CSRF_HEADER_NAME,
     HumanSessionManager,
     LaunchplaneHumanSession,
@@ -4627,11 +4629,20 @@ def create_launchplane_fastapi_app(
                 return None
             session = owner_checked
         elif enforce_human_policy_revalidation:
-            session = human_session_manager.refresh_authorization_claims(
-                session,
-                client=github_oauth_client,
-                authz_policy=resolved_authz_policy_runtime.policy,
-            )
+            try:
+                session = human_session_manager.refresh_authorization_claims(
+                    session,
+                    client=github_oauth_client,
+                    authz_policy=resolved_authz_policy_runtime.policy,
+                )
+            except HumanSessionUpdateBusy:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=next_trace_id(),
+                    code="identity_verification_pending",
+                    message="GitHub identity verification is in progress. Retry this read shortly.",
+                    headers={"Cache-Control": "no-store"},
+                ) from None
             if session is None:
                 return None
             if not human_session_manager.authorization_claims_are_current(session):
@@ -4880,9 +4891,24 @@ def create_launchplane_fastapi_app(
                     ),
                 ).model_dump(mode="json"),
             )
-        except Exception:
-            # OAuth errors may carry token responses. Emit only our trace.
-            _LOGGER.error("GitHub OAuth callback failed", extra={"trace_id": trace_id})
+        except (OSError, RequestException, GitHubIdentityUnavailable):
+            return JSONResponse(
+                status_code=503,
+                content=LaunchplaneErrorResponse(
+                    trace_id=trace_id,
+                    error=LaunchplaneErrorDetail(
+                        code="oauth_provider_unavailable",
+                        message="GitHub sign-in is temporarily unavailable.",
+                    ),
+                ).model_dump(mode="json"),
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as error:
+            # OAuth errors may carry token responses. Emit only trace and type.
+            _LOGGER.error(
+                "GitHub OAuth callback failed",
+                extra={"trace_id": trace_id, "failure_type": type(error).__name__},
+            )
             return reject_invalid_github_oauth_callback(
                 trace_id,
                 "GitHub OAuth callback could not be completed.",
