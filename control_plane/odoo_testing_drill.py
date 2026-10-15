@@ -69,6 +69,10 @@ class DrillSkipped(ValueError):
 class DrillPrerequisite(ValueError):
     """A fixed, value-free prerequisite code for the lane and its Discord alert."""
 
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(code)
+
 
 def timestamp(now: float) -> str:
     return datetime.fromtimestamp(now, timezone.utc).isoformat().replace("+00:00", "Z")

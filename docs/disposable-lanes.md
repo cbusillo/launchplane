@@ -845,7 +845,8 @@ do not erase generation history or restore an old DB snapshot to clear a failure
 Staff holds provide the supported per-lane maintenance pause. A held queued
 operation has not selected its new database. A refusal after selection but before
 any provider dispatch can restore the exact previous generation and runtime
-atomically with the terminal operation. This is limited to the continuously held
+atomically with the terminal operation or its no-effect source-read retry back
+to pending. This is limited to the continuously held
 worker recovery guard, the same live lease/attempt, empty dispatch history and
 unchanged selected settings; it never overwrites intervening settings. An
 abandoned attempt, dispatched effect or later hold/failure retains the exact

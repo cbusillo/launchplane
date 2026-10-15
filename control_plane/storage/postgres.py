@@ -11562,7 +11562,13 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             if (
                 restore_unstarted_drill
-                and record.status in {"fail", "cancelled"}
+                and (
+                    record.status in {"fail", "cancelled"}
+                    or (
+                        record.status == "pending"
+                        and record.error_code == "lane_movement.source_order_unavailable"
+                    )
+                )
                 and current_record.attempt == record.attempt
                 and (
                     current_record.recovery_journal is None
