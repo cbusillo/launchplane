@@ -280,6 +280,15 @@ uv run launchplane service audit-config-authority --control-plane-root .
 The initial audit is report-only. Use it to classify findings and understand the
 baseline before adding changed-file enforcement.
 
+Python permission declarations are schema, rather than runtime grants, when a
+single module-level `*_AUTHZ_ACTION` string binding contains a dotted action
+identifier and every local use passes it as `action=` to an
+`authorization_allows` check. The scanner derives this evidence from the scanned
+source snapshot. A name or string shape alone is insufficient: unused or rebound
+constants, wildcard selectors, and values also used in subjects or grant data
+remain unclassified. This conservative classification does not change service
+authorization or permit checked-in policy records.
+
 After the baseline is clean for a repo, enforce only the changed files in CI or
 review workflows:
 

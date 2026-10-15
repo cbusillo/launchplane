@@ -46,7 +46,9 @@ The fixed host inspector requalifies the original allocation's empty local
 backing directories, labels and all existing container mounts, including stopped
 containers. Every requested host port must be absent from every container's
 configured bindings and available to bind. Nothing inspects production data
-contents or mounts production storage. The new provider source and environment
+contents or mounts production storage. Host storage and port proofs must both
+survive the shared bounded schedule-log parser; absent, malformed or false proof
+keeps activation and hold lift refused. The new provider source and environment
 are read back, then its actual converted Compose is interpolated with those
 same managed values and checked against the reviewed source. It can use only
 the two qualified volumes, explicit independent ports and its private Compose

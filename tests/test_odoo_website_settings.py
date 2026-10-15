@@ -258,7 +258,7 @@ class WebsiteSettingsTests(unittest.TestCase):
             )
             self.assertFalse(changed.last_apply.website_settings_verified)
 
-    def test_two_slot_refuses_preparation_but_allows_withdrawal(self) -> None:
+    def test_two_slot_prepares_settings_without_activation_and_allows_withdrawal(self) -> None:
         from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
 
         cutover = OdooCutoverLane(
@@ -293,8 +293,9 @@ class WebsiteSettingsTests(unittest.TestCase):
                 }
             )
             store.write_product_profile_record(configured)
-            with self.assertRaises(ValueError):
-                plan_website_settings(store, request())
+            prepared = plan_website_settings(store, request())
+            self.assertFalse(prepared["applied"])
+            self.assertEqual(prepared["after"], intent().model_dump(mode="json"))
             self.assertFalse(
                 plan_website_settings(
                     store, request().model_copy(update={"website_settings": None})
