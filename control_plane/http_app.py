@@ -4472,7 +4472,37 @@ def create_launchplane_fastapi_app(
     ) -> Response:
         clear_authz_evaluation()
         try:
-            response = cast(Response, await call_next(request))
+            try:
+                response = cast(Response, await call_next(request))
+            except Exception:
+                if getattr(request.state, "production_delivery_scope", None) is None:
+                    raise
+                trace_id = next_trace_id()
+                logging.exception("Production delivery crashed; trace_id=%s", trace_id)
+                from control_plane.production_delivery_monitor import (
+                    record_rejected_production_request,
+                )
+
+                try:
+                    await record_rejected_production_request(
+                        request,
+                        get_record_store(),
+                        reason="delivery_failed",
+                        trace_id=trace_id,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Could not persist production delivery crash; trace_id=%s", trace_id
+                    )
+                return JSONResponse(
+                    status_code=500,
+                    content=LaunchplaneErrorResponse(
+                        trace_id=trace_id,
+                        error=LaunchplaneErrorDetail(
+                            code="delivery_failed", message="Production delivery failed."
+                        ),
+                    ).model_dump(mode="json"),
+                )
             if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
                 request.url.path in _AUTHZ_NO_STORE_ROUTES
                 or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
@@ -10557,6 +10587,14 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+        request.state.production_delivery_scope = (
+            apply_request.product,
+            lane.context,
+            lane.instance,
+        )
+        request.state.production_delivery_candidate = (
+            apply_request.replacement.artifact_id or apply_request.replacement.source_git_ref
+        )
         normalized_idempotency_key = idempotency_key.strip()
         if not normalized_idempotency_key:
             raise _launchplane_http_error(
@@ -10888,6 +10926,13 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+        request.state.production_delivery_scope = (
+            authorization_product,
+            promotion_request.promotion.context,
+            promotion_request.promotion.to_instance,
+        )
+        request.state.production_delivery_candidate = promotion_request.promotion.artifact_id
+
         (
             normalized_idempotency_key,
             payload_fingerprint,
@@ -11174,6 +11219,13 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
+
+        request.state.production_delivery_scope = (
+            authorization_product,
+            run_request.run.context,
+            run_request.run.to_instance,
+        )
+        request.state.production_delivery_candidate = run_request.run.expected_artifact_id
 
         (
             normalized_idempotency_key,

@@ -17,13 +17,18 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.outbox_worker import run_outbox_worker_once
+from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.production_delivery_monitor import (
     DELIVERY_LAG_CHECK,
     monitor_production_delivery_once,
     record_production_delivery_failure,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.public_ingress_monitor import PublicIngressNotificationDriverSet
+from control_plane.workflows.public_ingress_monitor import (
+    HttpObservation,
+    PublicIngressNotificationDriverSet,
+    run_public_ingress_monitor_once,
+)
 from tests.support.stores import _sqlite_database_url
 from tests.test_public_ingress_monitor import _profile
 
@@ -36,7 +41,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.store = PostgresRecordStore(database_url=_sqlite_database_url(self.root / "store.db"))
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
-        self.profile = _profile()
+        self.profile = _profile().model_copy(update={"production_use": "live"})
         self.lane = self.profile.lanes[0]
         self.store.write_product_profile_record(self.profile)
         self.now = datetime.now(timezone.utc)
@@ -116,6 +121,21 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.reject()
         self.reject()
         self.monitor()
+        run_public_ingress_monitor_once(
+            record_store=self.store,
+            checked_at=self.timestamp(),
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"status": "ok"},
+            ),
+            tls_get=lambda _domain, _timeout: PublicTlsProbeResult(
+                status="unsupported",
+                failure_code="tls_unsupported",
+                summary="TLS is outside this health fixture.",
+            ),
+        )
         incidents = self.store.list_public_ingress_incident_records(status="open")
         self.assertEqual(len(incidents), 1)
         self.assertIn("launchplane_req_failure", incidents[0].summary)
@@ -173,14 +193,20 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.deploy(self.head, failed=True)
         self.monitor()
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.assertIn("deployment_failed", incident.summary)
         self.assertIn("deploy-" + self.head, incident.summary)
 
     def test_lag_survives_restart_and_new_merges_without_resetting_deadline(self) -> None:
         self.monitor()
         self.now += timedelta(seconds=61)
         self.head = "c" * 40
-        self.monitor()
+        restarted = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(restarted.close)
+        monitor_production_delivery_once(
+            restarted,
+            observed_at=self.timestamp(),
+            transport_factory=self.factory,
+            max_age_seconds=60,
+        )
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
         self.assertEqual(incident.check_name, DELIVERY_LAG_CHECK)
         self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
@@ -222,7 +248,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         )
         self.assertEqual(self.store.list_public_ingress_incident_records(), ())
 
-    def test_scheduler_runs_delivery_without_health_checks_and_serializes_replicas(self) -> None:
+    def test_scheduler_deduplicates_completed_delivery_slots_without_health_checks(self) -> None:
         self.store.write_product_profile_record(
             self.profile.model_copy(
                 update={
@@ -248,3 +274,61 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertTrue(first.run_delivery_once())
         self.assertFalse(second.run_delivery_once())
         action.assert_called_once()
+        self.monitor()
+        self.now += timedelta(seconds=61)
+        self.monitor()
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+
+    def test_delayed_failure_ingestion_is_detected_after_a_later_scan(self) -> None:
+        failed_at = self.now
+        self.monitor()
+        self.now += timedelta(seconds=20)
+        self.monitor()
+        self.deploy(self.head, failed=True)
+        record = self.store.list_deployment_records()[0]
+        self.store.write_deployment_record(
+            record.model_copy(
+                update={
+                    "deploy": record.deploy.model_copy(
+                        update={"finished_at": failed_at.isoformat()},
+                    )
+                }
+            )
+        )
+        self.monitor()
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+
+    def test_matching_success_between_polls_resolves_even_with_newer_unrelated_release(
+        self,
+    ) -> None:
+        self.reject()
+        self.now += timedelta(seconds=10)
+        self.deploy(self.head)
+        self.now += timedelta(seconds=10)
+        self.deploy("c" * 40)
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+
+    def test_delivered_pending_source_resolves_lag_before_timing_newer_main(self) -> None:
+        pending = self.head
+        self.monitor()
+        self.now += timedelta(seconds=61)
+        self.head = "c" * 40
+        self.monitor()
+        self.now += timedelta(seconds=1)
+        self.deploy(pending)
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        self.now += timedelta(seconds=61)
+        self.monitor()
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+
+    def test_prelaunch_product_has_no_automatic_release_deadline(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"production_use": "prelaunch"})
+        )
+        self.monitor()
+        self.now += timedelta(hours=2)
+        self.monitor()
+        self.factory.assert_not_called()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())

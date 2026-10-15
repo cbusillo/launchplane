@@ -1105,6 +1105,9 @@ def _monitoring_reconciliation_observations(
                 status="open",
             )
             for incident in open_incidents:
+                # Delivery has its own recovery evidence; HTTP target retirement cannot resolve it.
+                if incident.check_name.startswith("production-delivery-"):
+                    continue
                 target_key = _incident_target_key(incident)
                 monitored = monitored_check_identity(incident.check_name)
                 if monitored is not None:

@@ -287,7 +287,11 @@ class HealthMonitorScheduler:
     def _run_delivery_monitor(self) -> None:
         from control_plane.production_delivery_monitor import monitor_production_delivery_once
 
-        monitor_production_delivery_once(self.store, observed_at=_timestamp(self.clock()))
+        monitor_production_delivery_once(
+            self.store,
+            observed_at=_timestamp(self.clock()),
+            should_stop=self._stop.is_set,
+        )
 
     def watch_once(self, instance: str = "prod") -> bool:
         now = self.clock()

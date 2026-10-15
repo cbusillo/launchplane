@@ -1908,7 +1908,7 @@ promotion and queued Odoo release failures once per minute, including products
 without HTTP health checks. As with other incidents, existing matching
 notification policies select the Discord destination; no credential or new
 destination is created by monitoring. Check-scoped HTTP-only policies do not
-match provider incidents. Confirm the product's existing owner policy covers
+match provider incidents. Confirm the product's existing Director notification policy covers
 provider incidents when qualifying notification delivery.
 
 The same monitor compares each active product's recorded default branch with

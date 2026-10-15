@@ -458,6 +458,38 @@ class GenericWebHttpTests(unittest.TestCase):
                     self.assertEqual(len(incidents), 1)
                     self.assertIn(payload["trace_id"], incidents[0].summary)
                     self.assertEqual(store.list_deployment_records(), ())
+                    with (
+                        patch(
+                            "control_plane.http_routes.generic_web.require_unchanged_production_artifact",
+                            side_effect=RuntimeError("unexpected driver crash"),
+                        ),
+                        self.assertLogs(level="ERROR"),
+                    ):
+                        crash_status, crash_payload = _invoke_app(
+                            app,
+                            method="POST",
+                            path="/v1/drivers/generic-web/deploy",
+                            payload={
+                                "product": "sellyouroutboard",
+                                "deploy": {
+                                    "product": "sellyouroutboard",
+                                    "instance": "prod",
+                                    "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:"
+                                    + "f" * 64,
+                                    "source_git_ref": "f" * 40,
+                                },
+                            },
+                            headers={"Idempotency-Key": "crashing-production-request"},
+                        )
+                    self.assertEqual(crash_status, 500)
+                    self.assertTrue(
+                        any(
+                            crash_payload["trace_id"] in incident.summary
+                            for incident in store.list_public_ingress_incident_records(
+                                status="open"
+                            )
+                        )
+                    )
                 else:
                     deploy.assert_called_once()
 
@@ -1814,6 +1846,7 @@ class GenericWebHttpTests(unittest.TestCase):
                     },
                     headers={"Idempotency-Key": "generic-web-prod-promotion-reviewed-only"},
                 )
+            self.delivery_incidents = store.list_public_ingress_incident_records()
 
         self.release_review_evaluations = review_mock.call_count if review_mock else 0
         return status_code, payload
@@ -1860,6 +1893,17 @@ class GenericWebHttpTests(unittest.TestCase):
         self.assertEqual(payload["error"]["message"], "Request could not be completed.")
         self.assertIn(payload["trace_id"], logs.output[0])
         self.assertIn("source inventory mismatch", logs.output[0])
+        self.assertEqual(self.delivery_incidents, ())
+
+    def test_unauthorized_production_request_cannot_create_delivery_incident(self) -> None:
+        with patch(
+            "control_plane.http_routes.generic_web.native_routes._native_driver_route_authorization_allows",
+            return_value=False,
+        ):
+            status, payload = self._invoke_live_promotion_without_intent_or_grant()
+        self.assertEqual(status, 403, payload)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(self.delivery_incidents, ())
 
     def test_generic_web_prod_promotion_live_needs_a_recorded_approval_not_an_exemption(
         self,

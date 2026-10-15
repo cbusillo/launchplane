@@ -17,7 +17,7 @@ from pathlib import Path as FilePath
 from typing import Annotated, Literal, NoReturn, cast
 
 import click
-from fastapi import Depends, Header, Path, Query
+from fastapi import Depends, Header, Path, Query, Request
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.durable_operation_authorization import (
@@ -342,6 +342,7 @@ def register_odoo_prod_release_operation_routes(
 
     def enqueue_promotion(
         request: OdooProdPromotionRunEnvelope,
+        http_request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_mutation_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
@@ -359,6 +360,8 @@ def register_odoo_prod_release_operation_routes(
             ).product
         except ValueError as error:
             bad_route(trace_id, error)
+        http_request.state.production_delivery_scope = (product, run.context, run.to_instance)
+        http_request.state.production_delivery_candidate = run.expected_artifact_id
         normalized_key = require_idempotency_key(idempotency_key, trace_id)
         require_wait(run.wait, trace_id)
         run_request = run.model_copy(update={"product": product})
@@ -429,6 +432,7 @@ def register_odoo_prod_release_operation_routes(
 
     def enqueue_rollback(
         request: OdooProdRollbackEnvelope,
+        http_request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_mutation_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key", max_length=256)] = "",
@@ -446,6 +450,11 @@ def register_odoo_prod_release_operation_routes(
             ).product
         except ValueError as error:
             bad_route(trace_id, error)
+        http_request.state.production_delivery_scope = (
+            product,
+            rollback.context,
+            rollback.instance,
+        )
         normalized_key = require_idempotency_key(idempotency_key, trace_id)
         require_wait(rollback.wait, trace_id)
         fingerprint = odoo_prod_rollback_request_fingerprint(product=product, request=rollback)

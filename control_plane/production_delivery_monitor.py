@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import hashlib
 import logging
 import re
 from urllib.parse import quote
 
 from starlette.requests import Request
+from starlette.concurrency import run_in_threadpool
 
 from control_plane.build_provenance import BuildProvenanceTransport
 from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -84,7 +86,7 @@ def _observe(
         ),
     )
     # On the service store, observation, incident and notification outbox commit together.
-    _store_monitor_observation(
+    result = _store_monitor_observation(
         record_store=store,
         record=observation,
         incident_eligible=True,
@@ -93,6 +95,8 @@ def _observe(
         notify=True,
         notification_drivers=None,
     )
+    if result.authority_changed:
+        raise RuntimeError("Production delivery alert authority changed during persistence")
 
 
 def record_production_delivery_failure(
@@ -140,49 +144,93 @@ async def record_rejected_production_request(
 ) -> None:
     """Use only typed delivery routes; never persist raw request or exception text."""
     path = request.url.path
-    if request.method != "POST" or reason == "authentication_required":
+    # This diagnostic scope is set only after the route's existing authorization check.
+    # It supplies no authorization and is never accepted from a request body/header.
+    authorized_scope = getattr(request.state, "production_delivery_scope", None)
+    if request.method != "POST" or authorized_scope is None:
         return
-    if not (
-        (
-            path.startswith("/v1/drivers/")
-            and path.rsplit("/", 1)[-1]
-            in {
-                "deploy",
-                "prod-promotion",
-                "prod-promotion-run",
-                "prod-promotion-inputs",
-                "target-replacement-apply",
-            }
-        )
-        or path in {"/v1/odoo-prod-promotions", "/v1/odoo-prod-rollbacks"}
-        or path.endswith("/environments/prod/promotion/workflow-dispatch")
-    ) or not isinstance(store, (PostgresRecordStore, FilesystemRecordStore)):
+    if not isinstance(store, (PostgresRecordStore, FilesystemRecordStore)):
         return
-    payload = await request.json()
+    try:
+        payload = await request.json()
+    except RuntimeError:
+        # A propagated driver crash is observed by outer middleware after body consumption.
+        payload = {"product": authorized_scope[0]}
     if not isinstance(payload, dict):
         return
     product = payload.get("product") or request.path_params.get("product")
     if not isinstance(product, str):
         return
-    profile = store.read_product_profile_record(product)
     details = next(
         (
             payload[key]
-            for key in ("deploy", "promotion", "inputs", "replacement")
+            for key in ("deploy", "promotion", "run", "replacement", "rollback", "workflow")
             if isinstance(payload.get(key), dict)
         ),
         payload,
     )
-    instance = (
-        details.get("instance") or details.get("to_instance") or ("prod" if "prod" in path else "")
-    )
-    lane = next((lane for lane in profile.lanes if lane.instance == instance == "prod"), None)
-    if lane is None:
+    if details.get("dry_run") is True:
         return
-    candidate = details.get("artifact_id") or details.get("source_git_ref") or "unspecified"
+    instance = details.get("instance") or details.get("to_instance") or authorized_scope[2]
+    if instance != "prod":
+        return
+    candidate = (
+        details.get("artifact_id")
+        or details.get("expected_artifact_id")
+        or details.get("source_git_ref")
+        or getattr(request.state, "production_delivery_candidate", "")
+        or ""
+    )
     if not isinstance(candidate, str):
         return
-    if path == "/v1/drivers/generic-web/deploy" and details.get("artifact_id"):
+    await run_in_threadpool(
+        _record_rejected_payload,
+        store,
+        product=product,
+        instance=instance,
+        candidate=candidate,
+        authorized_scope=authorized_scope,
+        path=path,
+        reason=reason,
+        trace_id=trace_id,
+        request_key=request.headers.get("Idempotency-Key", ""),
+    )
+
+
+def _record_rejected_payload(
+    store: Store,
+    *,
+    product: str,
+    instance: str,
+    candidate: str,
+    authorized_scope: tuple[str, str, str],
+    path: str,
+    reason: str,
+    trace_id: str,
+    request_key: str,
+) -> None:
+    profile = store.read_product_profile_record(product)
+    lane = next((lane for lane in profile.lanes if lane.instance == instance), None)
+    if lane is None or authorized_scope != (profile.product, lane.context, lane.instance):
+        return
+    if not candidate:
+        testing = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
+        if testing is not None:
+            try:
+                inventory = store.read_environment_inventory(
+                    context_name=testing.context, instance_name="testing"
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                if inventory.artifact_identity is not None:
+                    candidate = inventory.artifact_identity.artifact_id
+                elif inventory.runtime_identity is not None:
+                    candidate = inventory.runtime_identity.artifact_id
+        if not candidate:
+            # Unknown intent stays actionable; separate requests/reasons cannot swallow each other.
+            candidate = "request:" + _candidate_key(request_key or trace_id) + ":" + reason
+    if path == "/v1/drivers/generic-web/deploy":
         from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
 
         candidate = normalize_generic_web_artifact_id(profile=profile, artifact_id=candidate)
@@ -204,12 +252,15 @@ def monitor_production_delivery_once(
         [object, LaunchplaneProductProfileRecord], BuildProvenanceTransport
     ] = resolve_build_provenance_transport,
     max_age_seconds: int = PRODUCTION_DELIVERY_LAG_SECONDS,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> None:
     now = observed_at or utc_now_timestamp()
     for profile in store.list_product_profile_records():
         if not profile.is_active:
             continue
         for lane in profile.lanes:
+            if should_stop():
+                return
             if lane.instance != "prod":
                 continue
             try:
@@ -231,108 +282,12 @@ def _monitor_lane(
 ) -> None:
     deployments = store.list_deployment_records(context_name=lane.context, instance_name="prod")
     latest = deployments[0] if deployments else None
-    scan_key = "failures:" + profile.product
-    scan = store.read_idempotency_record(scope=_SCOPE, route_path=_ROUTE, idempotency_key=scan_key)
-    cutoff = scan.recorded_at if scan else ""
-    promotions = store.list_promotion_records(context_name=lane.context, to_instance_name="prod")
-    for records in (deployments, promotions):
-        for record in records if cutoff else records[:1]:
-            finished = record.deploy.finished_at or record.deploy.started_at
-            if cutoff and (not finished or _time(finished) <= _time(cutoff)):
-                continue
-            if record.failure is not None or any(
-                status == "fail"
-                for status in (
-                    record.deploy.status,
-                    record.post_deploy_update.status,
-                    record.destination_health.status,
-                )
-            ):
-                record_production_delivery_failure(
-                    store,
-                    profile,
-                    lane,
-                    candidate=record.artifact_identity.artifact_id
-                    if record.artifact_identity
-                    else record.source_git_ref
-                    if isinstance(record, DeploymentRecord)
-                    else record.record_id,
-                    reason=record.failure.code if record.failure else "deployment_failed",
-                    trace_id=record.record_id,
-                    observed_at=finished or now,
-                )
-    operations = (
-        store.list_odoo_prod_promotion_operation_records(
-            product=profile.product,
-            context_name=lane.context,
-            instance_name="prod",
-        )
-        if isinstance(store, PostgresRecordStore)
-        else ()
-    )
-    for operation in operations if cutoff else operations[:1]:
-        if operation.status in {"fail", "cancelled"} and (
-            not cutoff or _time(operation.updated_at) > _time(cutoff)
-        ):
-            record_production_delivery_failure(
-                store,
-                profile,
-                lane,
-                candidate=operation.result.artifact_id
-                if operation.result and operation.result.artifact_id
-                else operation.operation_id,
-                reason=operation.error_code or "promotion_failed",
-                trace_id=operation.runner_trace_id or operation.operation_id,
-                observed_at=operation.finished_at or operation.updated_at,
-            )
-    if isinstance(store, PostgresRecordStore):
-        from control_plane.client_release import read_client_release_step_views
-
-        for decision in store.list_release_review_decision_records(
-            product=profile.product, limit=1
-        ):
-            for step in read_client_release_step_views(
-                store=store, profile=profile, decision=decision
-            ):
-                failure = step.failure
-                if failure is None or (
-                    cutoff and failure.recorded_at and _time(failure.recorded_at) <= _time(cutoff)
-                ):
-                    continue
-                record_production_delivery_failure(
-                    store,
-                    profile,
-                    lane,
-                    candidate=decision.checklist.candidate.artifact_id,
-                    reason=failure.code,
-                    trace_id=failure.trace_id or failure.record_id,
-                    observed_at=failure.recorded_at or now,
-                )
-    _write_receipt(store, key=scan_key, now=now, payload={})
-    if latest is not None and deployment_record_passed(latest):
-        keys = {_candidate_key(latest.source_git_ref)}
-        if latest.artifact_identity is not None:
-            keys.add(_candidate_key(latest.artifact_identity.artifact_id))
-        for incident in store.list_public_ingress_incident_records(
-            product=profile.product,
-            context_name=lane.context,
-            instance_name="prod",
-            status="open",
-        ):
-            if (
-                incident.check_name in {DELIVERY_CHECK_PREFIX + key for key in keys}
-                and latest.deploy.finished_at
-                and _time(latest.deploy.finished_at) > _time(incident.opened_at)
-            ):
-                _observe(
-                    store,
-                    profile,
-                    lane,
-                    check_name=incident.check_name,
-                    failed=False,
-                    summary="The matching production delivery succeeded.",
-                    observed_at=now,
-                )
+    try:
+        _scan_failures(store, profile, lane, now, deployments)
+    except Exception:
+        _LOGGER.exception("Production delivery failure scan failed for %s", profile.product)
+    if profile.production_use != "live":
+        return
 
     transport = transport_factory(store, profile)
     repository_path = "/repos/" + quote(profile.repository, safe="/")
@@ -362,15 +317,38 @@ def _monitor_lane(
     )
     pending = str(receipt.response_payload.get("pending_commit", "")) if receipt else ""
     since = str(receipt.response_payload.get("pending_since", "")) if receipt else ""
+    reached_pending = bool(pending and pending == current)
     if pending and current and pending != current:
-        comparison = transport.get_json(
-            repository_path + f"/compare/{pending}...{quote(current, safe='')}"
-        )
-        if isinstance(comparison, dict) and comparison.get("status") in {"ahead", "identical"}:
-            pending, since = "", ""
-    if current == head:
+        try:
+            comparison = transport.get_json(
+                repository_path + f"/compare/{pending}...{quote(current, safe='')}"
+            )
+            reached_pending = isinstance(comparison, dict) and comparison.get("status") in {
+                "ahead",
+                "identical",
+            }
+        except Exception:
+            # Unknown comparison cannot resolve attention or stop the overdue check.
+            _LOGGER.warning("Production source comparison unavailable for %s", profile.product)
+    if reached_pending or current == head:
         pending, since = "", ""
-    elif not pending or pending == current:
+        if store.list_public_ingress_incident_records(
+            product=profile.product,
+            context_name=lane.context,
+            instance_name="prod",
+            check_name=DELIVERY_LAG_CHECK,
+            status="open",
+        ):
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=DELIVERY_LAG_CHECK,
+                failed=False,
+                summary="Production reached the source that triggered delivery attention.",
+                observed_at=now,
+            )
+    if current != head and not pending:
         pending, since = head, now
     _write_receipt(
         store,
@@ -405,11 +383,159 @@ def _monitor_lane(
         )
 
 
+def _scan_failures(
+    store: Store,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    now: str,
+    deployments: tuple[DeploymentRecord, ...],
+) -> None:
+    scan_key = "failures:" + profile.product
+    scan = store.read_idempotency_record(scope=_SCOPE, route_path=_ROUTE, idempotency_key=scan_key)
+    seen = dict(scan.response_payload.get("seen", {})) if scan else {}
+    # Evidence times are not ingestion watermarks: a runner can post a record late.
+    events: list[tuple[str, str, str, str, str, bool]] = []
+    promotions = store.list_promotion_records(context_name=lane.context, to_instance_name="prod")
+    histories: tuple[tuple[DeploymentRecord | PromotionRecord, ...], ...] = (
+        deployments,
+        promotions,
+    )
+    for records in histories:
+        for index, record in enumerate(records):
+            if record.failure is not None or any(
+                status == "fail"
+                for status in (
+                    record.deploy.status,
+                    record.post_deploy_update.status,
+                    record.destination_health.status,
+                )
+            ):
+                events.append(
+                    (
+                        record.record_id,
+                        record.artifact_identity.artifact_id
+                        if record.artifact_identity
+                        else record.source_git_ref
+                        if isinstance(record, DeploymentRecord)
+                        else record.record_id,
+                        record.failure.code if record.failure else "deployment_failed",
+                        record.record_id,
+                        record.deploy.finished_at or record.deploy.started_at,
+                        index == 0,
+                    )
+                )
+    if isinstance(store, PostgresRecordStore):
+        from control_plane.client_release import read_client_release_step_views
+
+        release_candidates: dict[str, str] = {}
+        for index, decision in enumerate(
+            store.list_release_review_decision_records(product=profile.product)
+        ):
+            try:
+                steps = read_client_release_step_views(
+                    store=store, profile=profile, decision=decision
+                )
+            except Exception:
+                _LOGGER.exception("Release delivery evidence unavailable for %s", profile.product)
+                continue
+            for step in steps:
+                release_candidates[step.operation_id] = decision.checklist.candidate.artifact_id
+                if step.failure is not None:
+                    failure = step.failure
+                    events.append(
+                        (
+                            step.operation_id,
+                            decision.checklist.candidate.artifact_id,
+                            failure.code,
+                            failure.trace_id or failure.record_id,
+                            failure.recorded_at,
+                            index == 0,
+                        )
+                    )
+        for index, operation in enumerate(
+            store.list_odoo_prod_promotion_operation_records(
+                product=profile.product,
+                context_name=lane.context,
+                instance_name="prod",
+            )
+        ):
+            if operation.operation_id in release_candidates:
+                continue
+            if operation.status in {"fail", "cancelled"}:
+                candidate = (
+                    release_candidates.get(operation.operation_id)
+                    or (operation.result.artifact_id if operation.result else "")
+                    or operation.request.expected_artifact_id
+                )
+                events.append(
+                    (
+                        operation.operation_id,
+                        candidate or "request:" + _candidate_key(operation.idempotency_key),
+                        operation.error_code or "promotion_failed",
+                        operation.runner_trace_id or operation.operation_id,
+                        operation.finished_at or operation.updated_at,
+                        index == 0,
+                    )
+                )
+    for record_id, candidate, reason, trace, finished, initial_eligible in events:
+        signature = _candidate_key(reason + ":" + finished)
+        if seen.get(record_id) == signature:
+            continue
+        if scan is not None or initial_eligible:
+            try:
+                record_production_delivery_failure(
+                    store,
+                    profile,
+                    lane,
+                    candidate=candidate,
+                    reason=reason,
+                    trace_id=trace,
+                    observed_at=finished or now,
+                )
+            except Exception:
+                _LOGGER.exception("Could not persist delivery failure for %s", profile.product)
+                continue
+        seen[record_id] = signature
+    _write_receipt(store, key=scan_key, now=now, payload={"seen": seen})
+    # The matching delivery may be followed by another release between two polls.
+    for incident in store.list_public_ingress_incident_records(
+        product=profile.product,
+        context_name=lane.context,
+        instance_name="prod",
+        status="open",
+    ):
+        if (
+            not incident.check_name.startswith(DELIVERY_CHECK_PREFIX)
+            or incident.check_name == DELIVERY_LAG_CHECK
+        ):
+            continue
+        for deployment in deployments:
+            if not deployment_record_passed(deployment) or not deployment.deploy.finished_at:
+                continue
+            keys = {_candidate_key(deployment.source_git_ref)}
+            if deployment.artifact_identity:
+                keys.add(_candidate_key(deployment.artifact_identity.artifact_id))
+            if incident.check_name in {DELIVERY_CHECK_PREFIX + key for key in keys} and _time(
+                deployment.deploy.finished_at
+            ) > _time(incident.opened_at):
+                _observe(
+                    store,
+                    profile,
+                    lane,
+                    check_name=incident.check_name,
+                    failed=False,
+                    summary="The matching production delivery succeeded.",
+                    observed_at=now,
+                )
+                break
+
+
 def _time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
-def _write_receipt(store: Store, *, key: str, now: str, payload: dict[str, str]) -> None:
+def _write_receipt(store: Store, *, key: str, now: str, payload: dict[str, object]) -> None:
     store.write_idempotency_record(
         LaunchplaneIdempotencyRecord(
             record_id="production-delivery-" + _candidate_key(key),
