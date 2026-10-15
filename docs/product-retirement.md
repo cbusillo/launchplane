@@ -113,7 +113,7 @@ rebuild retain their existing positive safety-evidence requirements.
 | Usage | Leave a lane someone is using alone. | A staff-testing hold or recorded `in_use` blocks; a complete occupancy inventory is not required by direction. Resolve uncertain real use with the person who knows before applying. |
 | Needed copy | Leave the only copy of something needed alone. | Recorded `only_copy` blocks. Reproducing every disposable output is not required; confirm unknown needed-copy facts with the person who knows. |
 | Production resources | Nothing shared with production changes. | Keep ownership and target-alias fences; refuse mounted applications or incomplete mount inspection, recorded sharing and scoped secrets consumed outside the lane. Full physical independence of databases, ports and credentials that deletion never changes is not an additional prerequisite. |
-| Production use | Whole-product agent retirement is for a product that never went live. | The existing authoritative `production_use=prelaunch` classification is required; `unknown` and `live` refuse. Never infer this from a name or missing production history. |
+| Production use | Whole-product agent retirement is for a product that never went live. | The authoritative `production_use=prelaunch` classification is required; `unknown` and `live` refuse. A bounded Director-agent attestation retains `production_use_authority=director_agent` and requires testing-only ownership at retirement. Never infer never-live status from a name or missing production history. |
 
 Protective observations remain holds even after their timestamps expire or their
 binding changes: age cannot make known users, needed data or sharing disappear.

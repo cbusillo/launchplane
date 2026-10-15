@@ -1001,6 +1001,7 @@ export type LaunchplaneProductProfileRecord = {
     preview: ProductPreviewProfile;
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
+    production_use_authority?: 'explicit' | 'director_agent';
     promotion_workflow: ProductPromotionWorkflowProfile;
     public_website?: 'required' | 'none';
     release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';
@@ -4974,6 +4975,7 @@ export type LaunchplaneProductProfileRecordWritable = {
     preview: ProductPreviewProfileWritable;
     product: string;
     production_use: 'unknown' | 'prelaunch' | 'live';
+    production_use_authority?: 'explicit' | 'director_agent';
     promotion_workflow: ProductPromotionWorkflowProfile;
     public_website?: 'required' | 'none';
     release_on_acceptance: 'held' | 'promote' | 'promote_with_rollback_drill' | 'director_standing';

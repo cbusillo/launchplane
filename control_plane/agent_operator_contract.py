@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
-from control_plane.contracts.disposable_lane import DISPOSABLE_LANE_OBSERVATION_ROUTE
+from control_plane.contracts.disposable_lane import (
+    DISPOSABLE_LANE_OBSERVATION_ROUTE,
+    TESTING_REPLACEMENT_RESOURCES_ROUTE,
+)
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 
 import hashlib
@@ -85,6 +88,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        TESTING_REPLACEMENT_RESOURCES_ROUTE,
+        "Prepare fresh empty Odoo testing resources while preserving the retained target, then qualify their actual backing storage; this never restores data or starts web.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
     OperationSpec(
         "POST",
         DISPOSABLE_LANE_OBSERVATION_ROUTE,
