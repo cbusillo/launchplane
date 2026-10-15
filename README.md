@@ -39,8 +39,8 @@ Replace `tests.test_module_name` with the module for the changed behavior.
 During the [Q326 trial](docs/style/testing.md#local-test-loop), routine changes
 use focused local tests plus lint, type checks, and IDE inspection; the full
 sharded suite is CI's required gate before a checked `gh-pr.py ready` handoff.
-The second command remains available locally for the trial's excluded change
-kinds and when the affected boundary or observed risk requires it.
+Run the second command locally for the trial's excluded change kinds and when
+the affected boundary or observed risk requires it.
 
 Implementation goes through a task branch and PR. Once required checks pass and
 review findings are accounted for, follow [AGENTS.md](AGENTS.md) to hand the PR
