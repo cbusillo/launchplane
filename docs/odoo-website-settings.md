@@ -35,6 +35,8 @@ and reads back native analytics/consent fields and
 the matching post-commit readback digest. The stopped-web maintenance driver
 also executes a generated copy of the committed devkit consumer through the
 runtime's native Odoo shell; rollback images need not contain the new consumer.
+The rendered legacy parameter carries the same indexing choice, so an older
+image's startup settings addon cannot re-enable the forward flag.
 A failed consumer, including the recovery path after a failed workflow, keeps
 web stopped. No new credential or provider interface is introduced.
 
@@ -49,7 +51,7 @@ The two-slot host provider currently has no website-settings maintenance receipt
 promotion with website snapshots refuses before provider effects. Preparation
 and release review remain supported, and existing products configured for the
 stable-target driver use the path above. Two-slot activation requires adding that
-provider capability; never change a live product's driver to bypass the refusal.
+provider capability ([#3620](https://github.com/cbusillo/launchplane/issues/3620)); never change a live product's driver to bypass the refusal.
 
 The devkit consumer runs on data workflows and every web startup, clearing
 every copied website's native GA key and disabling

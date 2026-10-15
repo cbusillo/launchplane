@@ -285,6 +285,24 @@ def render_post_deploy_payload(
             )
         )
     website_bootstrap = record.website_bootstrap if workflow_intent != "restore" else None
+    website_settings = (
+        record.website_settings.settings
+        if record.website_settings is not None and odoo_instance_is_production(record.instance)
+        else None
+    )
+    if website_settings is not None:
+        # The legacy settings addon runs on every startup, even on rollback images.
+        # Keep its parameter path in agreement with the typed native consumer.
+        indexing_parameter = "cm_website.public_indexing_enabled"
+        config_parameters = [item for item in config_parameters if item.key != indexing_parameter]
+        config_parameters.append(
+            OdooPostDeployConfigParameter(
+                key=indexing_parameter,
+                value=OdooPostDeployRenderedValue(
+                    source="literal", value="1" if website_settings.public_indexing_enabled else "0"
+                ),
+            )
+        )
     return OdooPostDeployPayload(
         schema_version=1,
         context=record.context,
@@ -293,11 +311,7 @@ def render_post_deploy_payload(
         config_parameters=tuple(config_parameters),
         addon_settings=tuple(addon_settings),
         website_bootstrap=website_bootstrap,
-        website_settings=(
-            record.website_settings.settings
-            if record.website_settings is not None and odoo_instance_is_production(record.instance)
-            else None
-        ),
+        website_settings=website_settings,
     )
 
 

@@ -129,6 +129,7 @@ class WebsiteSettingsTests(unittest.TestCase):
             changed = build_release_review(store=store, profile=profile(), read=github_read)
             self.assertFalse(changed.approved)
             self.assertNotEqual(changed.checklist_digest, accepted.checklist_digest)
+            assert changed.checklist is not None
             self.assertNotEqual(
                 changed.checklist.website_settings, accepted.checklist.website_settings
             )
@@ -216,6 +217,10 @@ class WebsiteSettingsTests(unittest.TestCase):
             self.assertEqual(captured[2]["website_settings"]["google_analytics_key"], "")
             self.assertFalse(captured[2]["website_settings"]["public_indexing_enabled"])
             self.assertIsNone(captured[2]["website_settings"]["cookies_bar"])
+            legacy_parameters = {
+                item["key"]: item["value"]["value"] for item in captured[2]["config_parameters"]
+            }
+            self.assertEqual(legacy_parameters["cm_website.public_indexing_enabled"], "0")
             self.assertIsNone(captured[2]["website_settings"]["block_third_party_domains"])
             for digest in ("", "f" * 64):
                 with (

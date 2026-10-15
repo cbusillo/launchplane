@@ -244,7 +244,11 @@ def execute_odoo_post_deploy(
     accepted_settings: OdooWebsiteSettingsIntent | None = None
     if rendering_record is not None:
         if control_plane_odoo_instance_overrides.odoo_instance_is_production(request.instance):
-            if not artifact_id:
+            if not artifact_id and (
+                rendering_record.website_settings is not None
+                or rendering_record.last_apply.website_settings is not None
+                or release_website_settings is not None
+            ):
                 release_reader = getattr(record_store, "read_release_tuple_record", None)
                 if not callable(release_reader):
                     raise click.ClickException(
