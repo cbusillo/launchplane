@@ -9,6 +9,7 @@ from control_plane import product_config_service
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.product_config_http import product_environment_config_confirmation
 from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
@@ -255,11 +256,11 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                 self.assertEqual(review.status_code, 202, review.text)
                 self.assertEqual(read_provider.call_args.kwargs["instance_name"], instance)
                 self.assertEqual(
-                    review.json()["result"]["provider_key_adoption"],
-                    [
-                        {"key": "SERVICE_PASSWORD", "disposition": "refused_credential"},
-                        {"key": "SITE_MODE", "disposition": "adopted"},
-                    ],
+                    {
+                        item["key"]: item["disposition"]
+                        for item in review.json()["result"]["provider_key_adoption"]
+                    },
+                    {"SERVICE_PASSWORD": "refused_credential", "SITE_MODE": "adopted"},
                 )
                 self.assertNotIn("private-provider-value", review.text)
                 self.assertNotIn("private-password", review.text)
@@ -318,7 +319,9 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                         {
                             **form_payload,
                             "mode": "apply",
-                            "confirmation": f"APPLY example-site/{instance}",
+                            "confirmation": product_environment_config_confirmation(
+                                product="example-site", environment=instance
+                            ),
                         },
                         environment=instance,
                         authorization=_TOKEN,
