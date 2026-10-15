@@ -15,6 +15,7 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.action_effects import AGENT_READ_ROLE_ACTION, ODOO_CONNECTION_ISOLATION_ACTIONS
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -301,7 +302,7 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
                         products=("example-odoo",),
                         contexts=("cm",),
                         instances=("testing",),
-                        actions=("odoo_connection_isolation.apply",),
+                        actions=(ODOO_CONNECTION_ISOLATION_ACTIONS["apply"],),
                     ),
                 ),
             )
@@ -314,3 +315,79 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
             response = await self.call("apply", key="granted-but-protected")
             self.assertEqual(response.status_code, 409, response.text)
             execute.assert_not_called()
+
+    async def test_scoped_read_role_does_not_acquire_provider_execution(self) -> None:
+        self.app = self.make_app(
+            policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-read",),
+                        products=("example-odoo",),
+                        contexts=("cm",),
+                        instances=("testing",),
+                        actions=(AGENT_READ_ROLE_ACTION,),
+                    ),
+                ),
+            )
+        )
+        with (
+            scoped_agent_transport(),
+            patch("control_plane.http_app.execute_odoo_post_deploy_result") as execute,
+        ):
+            for mode in ("dry-run", "readback"):
+                response = await self.call(mode)
+                self.assertEqual(response.status_code, 403, response.text)
+            execute.assert_not_called()
+
+    async def test_refused_before_effect_releases_reservation_for_valid_repair(self) -> None:
+        self.safety(usage="in_use")
+        refused = await self.call("apply", key="protected-repair")
+        self.assertEqual(refused.json()["error"]["code"], "disposable_lane_safety_unknown")
+        self.safety()
+
+        def valid(**kwargs: Any) -> Any:
+            kwargs["before_connection_isolation_mutation"]()
+            return {}, {"post_deploy_status": "pass"}
+
+        with patch("control_plane.http_app.execute_odoo_post_deploy_result", side_effect=valid):
+            response = await self.call("apply", key="valid-repair")
+        self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_lease_loss_before_dispatch_uses_runner_reconciliation(self) -> None:
+        from control_plane.provider_operations import _ProviderOperationLeaseLostError
+
+        self.safety()
+
+        def execute(**kwargs: Any) -> Any:
+            kwargs["before_connection_isolation_mutation"]()
+            self.fail("A lost lease must prevent dispatch")
+
+        with (
+            patch("control_plane.http_app.execute_odoo_post_deploy_result", side_effect=execute),
+            patch(
+                "control_plane.provider_operations._ReservationHeartbeat.assert_current",
+                side_effect=_ProviderOperationLeaseLostError(),
+            ),
+        ):
+            response = await self.call("apply", key="lease-lost")
+        self.assertEqual(response.status_code, 409, response.text)
+
+    async def test_post_effect_transport_errors_are_unverified_and_retained(self) -> None:
+        import click
+
+        self.safety()
+
+        def uncertain(**kwargs: Any) -> Any:
+            kwargs["before_connection_isolation_mutation"]()
+            raise click.ClickException("Provider acknowledgement missing")
+
+        with patch(
+            "control_plane.http_app.execute_odoo_post_deploy_result", side_effect=uncertain
+        ) as execute:
+            response = await self.call("apply", key="transport-error")
+            self.assertEqual(response.status_code, 503, response.text)
+            response = await self.call("apply", key="transport-error")
+            self.assertEqual(response.status_code, 409, response.text)
+            execute.assert_called_once()

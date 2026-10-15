@@ -34,6 +34,7 @@ from control_plane.provider_operations import (
     ProviderOperationLease,
     provider_operation_response_payload,
 )
+from control_plane.odoo_connection_isolation import ConnectionIsolationOutcomeUnknown
 
 
 ODOO_POST_DEPLOY_ROUTE = "/v1/drivers/odoo/post-deploy"
@@ -67,9 +68,11 @@ class ConnectionIsolationApplyAdapter:
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
         effect_started = False
+        checkpoint_entered = False
 
         def before_mutation() -> None:
-            nonlocal effect_started
+            nonlocal effect_started, checkpoint_entered
+            checkpoint_entered = True
             lease.assert_current()
             lease.checkpoint_effect("connection-isolation")
             effect_started = True
@@ -77,8 +80,12 @@ class ConnectionIsolationApplyAdapter:
         try:
             records, result = self.execute(before_mutation)
         except Exception as error:
-            if not effect_started:
+            if not checkpoint_entered:
                 raise ProviderMutationRejectedError(error) from error
+            if effect_started:
+                raise ConnectionIsolationOutcomeUnknown(
+                    "The isolation outcome is unverified."
+                ) from error
             raise
         return ProviderMutationOutcome(
             response_status_code=202,

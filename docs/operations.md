@@ -2817,8 +2817,11 @@ The existing `POST /v1/drivers/odoo/post-deploy` route accepts
 `post_deploy.connection_isolation` as `dry-run`, `apply`, or `readback`.
 Dry-run and readback use the separate instance-scoped
 `odoo_connection_isolation.plan` and `odoo_connection_isolation.read` actions.
-The authenticated Director agent inherits these inert observations without a
-post-deploy write grant. Existing post-deploy callers retain observation access.
+The authenticated Director agent inherits these SQL observations without a
+post-deploy write grant. They run a fixed read-only program through a disabled
+manual provider schedule and hold the lane during the observation. A scoped
+`agent.read` rule alone does not confer this provider-execution path. Existing
+post-deploy callers retain observation access.
 Every isolation mode accepts only the exact `testing` lane. Apply is a separate
 `odoo_connection_isolation.apply` effect. The Director agent can use it without
 a DB grant only when current,
@@ -2856,6 +2859,11 @@ again before any effect. Its durable provider reservation retains uncertain
 outcomes under the original key and fences a new apply key as well. Retain the
 evidence and original idempotency key if the response is uncertain; do not submit
 a new repair. Independent observations never replay or store keyed apply results.
+Connection-isolation recovery of an uncertain provider operation is not yet a
+supported service capability. Its reservation remains fenced; a readback alone
+cannot prove the original web/schedule outcome or clear it. Actual repair
+qualification must include a supported recovery procedure before enabling apply.
+Do not release the reservation through direct database edits.
 
 Dry-run includes the complete integration readback, including settings outside
 this repair's carrier/SMS/IAP scope. Review those findings before apply. A failed

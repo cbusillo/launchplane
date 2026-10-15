@@ -1,6 +1,9 @@
 from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
-from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
+from control_plane.odoo_connection_isolation import (
+    ConnectionIsolationOutcomeUnknown,
+    ConnectionIsolationPreconditionFailed,
+)
 from control_plane.action_effects import (
     ODOO_CONNECTION_ISOLATION_ACTIONS,
     AGENT_READ_ROLE_ACTION,
@@ -7318,6 +7321,7 @@ def create_launchplane_fastapi_app(
                 target=AuthorizationTarget(
                     scope="instance", instances=(post_deploy_request.post_deploy.instance,)
                 ),
+                inherit_agent_read_role=director_agent_identity(identity),
             )
             # Existing maintenance callers keep observation, never a new repair write.
             if not authorized and isolation_mode in {"dry-run", "readback"}:
@@ -7421,7 +7425,7 @@ def create_launchplane_fastapi_app(
                         execute=execute_isolation_apply,
                     ),
                     in_progress_message="This isolation repair is already running. Retain its original key.",
-                    reconcile_message="The original isolation repair needs reconciliation before another apply.",
+                    reconcile_message="The original isolation repair is fenced. Keep its key and read back independently. Supported recovery is pending launchplane#3632; do not retry under another key.",
                 )
             with synchronous_odoo_lane(
                 record_store=record_store,
@@ -7443,7 +7447,7 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=f"No Launchplane route for {_ODOO_POST_DEPLOY_ROUTE}.",
             ) from error
-        except DokployScheduleExecutionFailed as error:
+        except (DokployScheduleExecutionFailed, ConnectionIsolationOutcomeUnknown) as error:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,

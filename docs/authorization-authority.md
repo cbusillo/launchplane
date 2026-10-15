@@ -180,7 +180,8 @@ compose, leaving retained target/storage and historical effects untouched.
 
 The Odoo post-deploy endpoint classifies validated `connection_isolation`
 requests separately from general maintenance. Its instance-scoped plan and
-read actions inherit standing observation permission; isolation apply remains
+read actions inherit the Director's standing observation permission; a scoped
+`agent.read` rule alone does not execute its provider schedule. Isolation apply remains
 a write. Only the authenticated Director identity can use the source-owned
 testing repair without a policy grant, after fresh disposable-lane checks.
 Production, staff use, only-copy data, unknown safety and shared resources remain
