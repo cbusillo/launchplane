@@ -1922,8 +1922,11 @@ def _scan_source_text(
     parser = _parser_name(source_file.path)
     candidates: list[tuple[int, str, object]] = []
     coverage_gaps: list[CoverageGap] = []
+    python_allow_reasons: dict[str, object] = {}
     if parser == "python_ast":
-        parsed_candidates, parse_error = _python_candidates(text)
+        parsed_candidates, parse_error = _python_candidates(
+            text, allow_context=python_allow_reasons
+        )
         candidates.extend(parsed_candidates)
         if parse_error:
             coverage_gaps.append(
@@ -1963,6 +1966,7 @@ def _scan_source_text(
         path=source_file.relative_path,
         candidates=candidates,
     )
+    allow_context = {**allow_context, **python_allow_reasons}
     if repository_package:
         allow_context = {**allow_context, "repository_package": repository_package}
     if (
@@ -1991,11 +1995,15 @@ def _scan_source_text(
     return findings, coverage_gaps
 
 
-def _python_candidates(text: str) -> tuple[list[tuple[int, str, object]], str]:
+def _python_candidates(
+    text: str, *, allow_context: dict[str, object] | None = None
+) -> tuple[list[tuple[int, str, object]], str]:
     try:
         tree = ast.parse(text)
     except SyntaxError as error:
         return [], str(error)
+    if allow_context is not None:
+        allow_context["fixed_authorization_actions"] = _python_fixed_authorization_actions(tree)
     dataclass_fields = _python_dataclass_fields(tree)
     candidates: list[tuple[int, str, object]] = []
     for node in ast.walk(tree):
@@ -2029,6 +2037,53 @@ def _python_candidates(text: str) -> tuple[list[tuple[int, str, object]], str]:
         elif isinstance(node, ast.Call):
             candidates.extend(_python_call_candidates(node))
     return candidates, ""
+
+
+def _python_fixed_authorization_actions(tree: ast.Module) -> dict[tuple[int, str], str]:
+    """Recognize declarations consumed only as an authorization check's action.
+
+    Name or dotted-string shape alone cannot distinguish a permission from a
+    subject or grant. Require one module binding and exclusively action-keyword
+    uses in the same source snapshot; ambiguous or exported-only values stay
+    unclassified. This is classification evidence, not a grant or effect map.
+    """
+    action_uses = {
+        id(keyword.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and _call_name(node.func).rsplit(".", 1)[-1] == "authorization_allows"
+        for keyword in node.keywords
+        if keyword.arg == "action" and isinstance(keyword.value, ast.Name)
+    }
+    references: dict[str, list[ast.Name]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            references.setdefault(node.id, []).append(node)
+    actions: dict[tuple[int, str], str] = {}
+    for statement in tree.body:
+        value_node: ast.expr | None
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target, value_node = statement.targets[0], statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            target, value_node = statement.target, statement.value
+        else:
+            continue
+        if not isinstance(target, ast.Name) or not target.id.endswith("_AUTHZ_ACTION"):
+            continue
+        value = _literal_value(value_node) if value_node is not None else None
+        if not isinstance(value, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+", value
+        ):
+            continue
+        uses = references.get(target.id, [])
+        loads = [node for node in uses if isinstance(node.ctx, ast.Load)]
+        if (
+            loads
+            and all(id(node) in action_uses for node in loads)
+            and all(node is target or isinstance(node.ctx, ast.Load) for node in uses)
+        ):
+            actions[statement.lineno, target.id] = value
+    return actions
 
 
 def _python_dataclass_fields(tree: ast.Module) -> dict[str, tuple[str, ...]]:
@@ -2653,6 +2708,7 @@ def _build_finding(
         key=key,
         value=value,
         allow_context=allow_context,
+        line=line,
     )
     classification = "allowed" if allow_reason else "needs_classification"
     severity = "info" if allow_reason else _severity(rule_id=rule_id, key=key)
@@ -2864,6 +2920,7 @@ def _allow_reason(
     key: str,
     value: object,
     allow_context: Mapping[str, object] | None = None,
+    line: int = 0,
 ) -> str:
     allow_context = allow_context or {}
     normalized = path.replace("\\", "/")
@@ -2888,6 +2945,14 @@ def _allow_reason(
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized == ".github/github.json" and _is_launchplane_metadata_routing(key, value):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
+    fixed_actions = allow_context.get("fixed_authorization_actions")
+    if (
+        normalized.endswith(".py")
+        and isinstance(fixed_actions, dict)
+        and (line, key) in fixed_actions
+        and fixed_actions[line, key] == value
+    ):
+        return ALLOW_REASON_SCHEMA_ONLY
     if (
         normalized == "pyproject.toml"
         and re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key)
