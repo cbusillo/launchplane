@@ -532,7 +532,8 @@ queue has started deploying. Omitted delivery keys come from the generation's
 immutable receipt; readback is never permission to replay bootstrap.
 
 New fresh-generation recovery journals bind override intent independently of
-`last_apply`, `updated_at` and `source_label`. Publishing post-deploy success or
+apply status, time, detail, `updated_at` and `source_label`. Website-setting
+history that still affects rendering remains bound. Publishing post-deploy success or
 failure does not change that intent. During the initial copy, deployment and
 post-deploy render the same generation hostname without rewriting the stored
 override intent. Later ordinary deployments retain their canonical-record

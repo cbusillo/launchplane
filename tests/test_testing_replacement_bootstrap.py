@@ -328,6 +328,14 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
         from tests.test_testing_replacement_recovery import stamp
         from tests.test_product_reconcile import _inventory
         from control_plane.contracts.secret_record import SecretRecord, SecretVersion
+        from control_plane.contracts.odoo_website_settings import (
+            OdooWebsiteSettings,
+            OdooWebsiteSettingsIntent,
+        )
+        from control_plane.odoo_instance_overrides import (
+            render_post_deploy_payload,
+        )
+        from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
 
         self.patches()
         self.review()
@@ -344,6 +352,10 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
                 OdooConfigParameterOverride(
                     key="fixture.setting",
                     value=OdooOverrideValue(source="literal", value="initial"),
+                ),
+                OdooConfigParameterOverride(
+                    key=WEBSITE_INDEXING_PARAMETER,
+                    value=OdooOverrideValue(source="literal", value="0"),
                 ),
             ),
         )
@@ -478,6 +490,24 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
         )
         changed = baseline_override.model_copy(deep=True)
         changed.config_parameters[0].value.value = "changed-intent"
+        history_changed = baseline_override.model_copy(
+            update={
+                "last_apply": baseline_override.last_apply.model_copy(
+                    update={
+                        "website_settings": OdooWebsiteSettingsIntent(
+                            artifact_id="fixture-artifact",
+                            settings=OdooWebsiteSettings(
+                                website_id=1, public_origin="https://fixture.invalid"
+                            ),
+                        )
+                    }
+                )
+            }
+        )
+        self.assertNotEqual(
+            render_post_deploy_payload(baseline_override),
+            render_post_deploy_payload(history_changed),
+        )
         profile = self.store.read_product_profile_record(self.profile.product)
         runtime = self.store.list_runtime_environment_records(
             scope="context", context_name=override.context
@@ -487,6 +517,7 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
         )
         changes: tuple[tuple[Any, Any, Any], ...] = (
             (self.store.write_odoo_instance_override_record, changed, baseline_override),
+            (self.store.write_odoo_instance_override_record, history_changed, baseline_override),
             (
                 self.store.write_product_profile_record,
                 profile.model_copy(update={"display_name": "changed product"}),

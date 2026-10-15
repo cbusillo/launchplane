@@ -1207,9 +1207,13 @@ def fresh_testing_authority_sha256(
             # an absent preimage is never permission to rebind a held operation.
             "overrides": override.model_dump(
                 mode="json",
-                exclude=set()
+                exclude={}
                 if include_override_results
-                else {"last_apply", "updated_at", "source_label"},
+                else {
+                    "last_apply": {"attempted", "status", "applied_at", "detail"},
+                    "updated_at": True,
+                    "source_label": True,
+                },
             )
             if override is not None
             else None,
