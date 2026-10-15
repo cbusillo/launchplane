@@ -140,6 +140,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
         "testing_resources_ok",
+        "testing_resources_incomplete",
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(

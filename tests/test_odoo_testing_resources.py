@@ -66,11 +66,14 @@ class TestingResourceProgramTests(unittest.TestCase):
             self.fail(f"Unexpected Docker operation: {arguments}")
         return subprocess.CompletedProcess(command, 0, stdout=result, stderr="")
 
-    def run_program(self, mode: str = "prepare") -> tuple[int, dict[str, str]]:
+    def run_program(
+        self, mode: str = "prepare", *, project: str = ""
+    ) -> tuple[int, dict[str, str]]:
         spec = {
             **self.resources.model_dump(mode="json"),
             "volumes": self.resources.volumes,
             "mode": mode,
+            "compose_project": project or self.resources.namespace,
         }
         encoded = base64.b64encode(json.dumps(spec).encode()).decode()
         output = io.StringIO()
@@ -144,6 +147,33 @@ class TestingResourceProgramTests(unittest.TestCase):
         self.assertNotEqual(status, 0)
         self.assertFalse(resource_readback_passes(evidence, self.resources))
         self.assertFalse(self.volumes)
+
+    def test_actual_provider_project_container_blocks_even_without_volume_mounts(self) -> None:
+        self.prepare()
+        project = self.resources.namespace + "-abc123"
+        self.containers["new-project-container"] = {
+            "Config": {"Labels": {"com.docker.compose.project": project}},
+            "Mounts": [],
+        }
+        self.assertNotEqual(self.run_program("readback", project=project)[0], 0)
+
+    def test_partial_empty_preparation_can_be_classified_but_foreign_data_cannot(self) -> None:
+        self.prepare()
+        missing_name = next(iter(self.volumes))
+        del self.volumes[missing_name]
+        # Keep the fake backing directory so a later retry can recreate metadata.
+        (self.root / missing_name / "_data").rmdir()
+        (self.root / missing_name).rmdir()
+        status, evidence = self.run_program("readback")
+        self.assertNotEqual(status, 0)
+        self.assertEqual(evidence.get("testing_resources_incomplete"), "true")
+        remaining = next(iter(self.volumes.values()))
+        kept = Path(str(remaining["Mountpoint"])) / "needed-copy"
+        kept.write_text("keep me")
+        status, evidence = self.run_program("readback")
+        self.assertNotEqual(status, 0)
+        self.assertNotIn("testing_resources_incomplete", evidence)
+        self.assertEqual(kept.read_text(), "keep me")
 
 
 if __name__ == "__main__":

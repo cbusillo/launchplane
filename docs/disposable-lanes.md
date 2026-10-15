@@ -121,11 +121,15 @@ directories, distinct filesystem identities, emptiness and every existing
 container's mounts, including stopped containers and parent bind mounts. An
 existing foreign volume, nonempty directory, external backing option, active
 preparation or incomplete provider response refuses qualification. Nothing is
-deleted to recover. The new compose must remain raw, empty, unrouted and without
+deleted to recover. The new compose must remain empty, unconfigured, unrouted and without
 deployment history. No application, host port or credential is installed.
+Dokploy's unconfigured default source type is accepted, and its returned compose
+project name is used for actual container inspection.
 
 PostgreSQL excludes authority inserts, updates, aliases and evidence writers
-while the operation owns its executor and resource snapshot. Referenced secret
+while metadata is checked or published. Provider I/O holds no global authority
+lock; each effect and final publication rechecks the captured configuration.
+The retained executor stays excluded throughout. Referenced secret
 metadata participates in that snapshot, including cross-context references.
 SQLite remains a rehearsal backend and cannot publish these enabling facts.
 After actual provider readback, only the testing instance's volume settings are
@@ -146,9 +150,13 @@ the original stable `--idempotency-key`. Use `readback` with the same product,
 context, operation and reason for a separate actual resource read. Readback
 requires the current testing volume authority to agree with the allocation;
 drift cannot refresh positive evidence. A complete allocation with a lost final
-HTTP receipt can be adopted only after another actual readback. Otherwise keep
-the original key and investigate the retained operation; do not create another
-target or delete partial resources.
+HTTP receipt can be adopted only after another actual readback. Target adoption
+and its allocation identity commit together. If terminal readback proves only
+missing service-named volumes while all existing ones are empty, correctly
+labelled, independently backed and unused, original-key apply can resume storage
+preparation on that same target. It cannot create another target. Active remote
+jobs, foreign resources or uncertain creation stay unknown. Keep the original
+key and retained resources; never delete them to make recovery pass.
 
 This producer establishes unused, empty replacement resources and
 `separation_ready`, not permission to start restored testing. It supplies no

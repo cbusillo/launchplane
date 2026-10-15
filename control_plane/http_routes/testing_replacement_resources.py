@@ -4,6 +4,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated, NoReturn
 from uuid import uuid4
+import click
 
 from fastapi import Depends, Header, Path as PathParameter
 
@@ -95,7 +96,7 @@ def register_testing_replacement_resource_routes(
             adapter = TestingReplacementResourceAdapter(root, record_store, product, body, trace)
             try:
                 result = await run_in_worker_thread(adapter.readback)
-            except (ValueError, FileNotFoundError):
+            except (ValueError, FileNotFoundError, click.ClickException):
                 refuse(
                     409,
                     "testing_resources_unverified",

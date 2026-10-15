@@ -10157,6 +10157,18 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
     def test_fresh_resource_preparation_replay_and_readback_preserve_retained_operation(
         self,
     ) -> None:
+        self._fresh_resource_preparation_case("normal")
+
+    def test_lost_resource_receipt_adopts_actual_work_without_another_create(self) -> None:
+        self._fresh_resource_preparation_case("lost-receipt")
+
+    def test_partial_empty_resources_resume_only_on_the_recorded_target(self) -> None:
+        self._fresh_resource_preparation_case("partial")
+
+    def test_alias_insert_during_provider_io_refuses_positive_publication(self) -> None:
+        self._fresh_resource_preparation_case("alias")
+
+    def _fresh_resource_preparation_case(self, fault: str) -> None:
         from tests.test_testing_replacement_resources import TestingReplacementResourceHttpTests
         from control_plane.odoo_testing_resources import OdooTestingResources
 
@@ -10179,6 +10191,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 )
             )
             calls: list[tuple[str, dict[str, Any]]] = []
+            phases: list[str] = []
 
             def mutate(host: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
                 calls.append((path, payload))
@@ -10207,6 +10220,44 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 self.assertIsInstance(resources, OdooTestingResources)
                 self.assertNotEqual(resources.target_id, "compose-testing")
                 kwargs["checkpoint"]()
+                # Unrelated authority remains writable while the provider is
+                # doing I/O; final positive publication still serializes.
+                second = PostgresRecordStore(database_url=url)
+                pool = ThreadPoolExecutor(max_workers=1)
+                try:
+                    pool.submit(
+                        second.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="unrelated",
+                            env={"SETTING": "value"},
+                            updated_at=fixture.profile.updated_at,
+                        ),
+                    ).result(timeout=5)
+                finally:
+                    pool.shutdown(wait=False)
+                    second.close()
+                phases.append(kwargs["mode"])
+                if fault == "alias":
+                    fixture.store.write_dokploy_target_id_record(
+                        DokployTargetIdRecord(
+                            context="another-context",
+                            instance="prod",
+                            target_id=resources.target_id,
+                            updated_at=fixture.profile.updated_at,
+                        )
+                    )
+                    kwargs["checkpoint"]()
+                if fault != "normal" and phases == ["prepare"]:
+                    # Remote work completed (or is partially prepared) but the
+                    # request died before the allocation receipt publication.
+                    raise RuntimeError("fixture lost schedule reply")
+                if fault == "partial" and phases == ["prepare", "readback"]:
+                    from control_plane.testing_replacement_resources import (
+                        IncompleteTestingResources,
+                    )
+
+                    raise IncompleteTestingResources("fixture actual missing empty volumes")
                 return {
                     "testing_resources_ok": "true",
                     "testing_resources_binding_sha256": resources.binding_sha256,
@@ -10252,13 +10303,54 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                         side_effect=schedule,
                     ),
                 ):
+                    if fault == "alias":
+                        with self.assertRaises(ValueError):
+                            await fixture.post(**body)
+                        self.assertIsNone(
+                            fixture.store.read_disposable_lane_safety(
+                                fixture.profile.product, fixture.context, "testing"
+                            )
+                        )
+                        self.assertEqual(
+                            fixture.store.read_odoo_stable_target_replacement_operation_record(
+                                fixture.operation.operation_id
+                            ),
+                            fixture.operation,
+                        )
+                        return
+                    if fault != "normal":
+                        with self.assertRaises(RuntimeError):
+                            await fixture.post(**body)
+                        captured = fixture.store.read_disposable_resource_preparation(
+                            fixture.operation.operation_id
+                        )
+                        assert captured is not None
+                        self.assertEqual(
+                            captured.replacement_target_id,
+                            fixture.store.read_dokploy_target_id_record(
+                                context_name=fixture.context, instance_name="testing"
+                            ).target_id,
+                        )
+                        self.assertFalse(captured.resources_binding_sha256)
+                        count = len(calls)
                     applied = await fixture.post(**body)
                     self.assertEqual(applied.status_code, 202, applied.text)
+                    if fault != "normal":
+                        self.assertEqual(len(calls), count)
                     count = len(calls)
                     replay = await fixture.post(**body)
                     self.assertEqual(replay.status_code, 202, replay.text)
                     self.assertTrue(replay.json()["replayed"])
                     self.assertEqual(len(calls), count)
+                    import click
+
+                    with patch(
+                        "control_plane.testing_replacement_resources.run_resource_schedule",
+                        side_effect=click.ClickException("private-provider-error"),
+                    ):
+                        failed = await fixture.post(mode="readback")
+                        self.assertEqual(failed.status_code, 409, failed.text)
+                        self.assertNotIn("private-provider-error", failed.text)
                     readback = await fixture.post(mode="readback")
                     self.assertEqual(readback.status_code, 202, readback.text)
                     self.assertEqual(
