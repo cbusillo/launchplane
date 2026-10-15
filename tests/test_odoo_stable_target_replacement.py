@@ -92,6 +92,7 @@ from control_plane.contracts.odoo_target_replacement_failures import (
 )
 from control_plane.operation_status_read import safe_operation_error_code
 from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementPlan,
     DokployRequest,
     TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE,
     TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE,
@@ -3432,6 +3433,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
     def test_fresh_restore_preflights_forbidden_overrides_and_rechecks_plan_drift(self) -> None:
         from tests.test_odoo_testing_restore import generation
+        from control_plane.integration_readback import INTEGRATION_FAMILIES
 
         fresh = generation().model_copy(
             update={
@@ -3442,7 +3444,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             }
         )
         valid = _opw_website_override_record().model_copy(update={"instance": "testing"})
-        for key in ("shopify.api_token", "google_analytics.private_fixture", "shopify"):
+        integration_key = next(
+            key for family in INTEGRATION_FAMILIES for key in family.config_parameters
+        )
+        for key in (integration_key, "google_analytics.private_fixture", "shopify"):
             invalid = valid.model_copy(
                 update={
                     "config_parameters": (
@@ -3475,10 +3480,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             for drift in (False, True):
                 with self.subTest(key=key, drift=drift):
                     stores: list[_Store] = []
-                    plans: list[object] = []
+                    plans: list[OdooStableTargetReplacementPlan] = []
                     effects: list[str] = []
 
-                    def plan_then_change(**kwargs: object) -> object:
+                    def plan_then_change(**kwargs: object) -> OdooStableTargetReplacementPlan:
                         store = cast(_Store, kwargs["record_store"])
                         stores.append(store)
                         plan = build_odoo_stable_target_replacement_plan(**kwargs)  # type: ignore[arg-type]
@@ -3510,7 +3515,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                                 stores[0].deployment_records[-1].failure.code, result.error_code
                             )
                         else:
-                            with self.assertRaises(OdooTargetReplacementStageError) as caught:
+                            with self.assertRaises(OdooTargetReplacementStageError):
                                 self._apply_upstream_restore(
                                     override_record=invalid,
                                     post_deploy_results=(),
@@ -3518,10 +3523,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                                     fresh_generation=fresh,
                                     external_checkpoint=effects.append,
                                 )
-                            self.assertEqual(
-                                caught.exception.code,
-                                "plan_not_ready.compose_or_override_render_failed",
-                            )
+                            self.assertEqual(plans[0].plan_status, "blocked")
                         self.assertFalse(effects)
                         self.assertFalse(stores[0].last_provider_env)
                         self.assertFalse(stores[0].environment_inventories)
@@ -3537,9 +3539,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         from tests.test_odoo_testing_restore import generation
 
         stores: list[_Store] = []
+        effects: list[str] = []
 
         def change_override(store: _Store) -> None:
             stores.append(store)
+            effects.clear()
             assert store.odoo_instance_override_record is not None
             store.odoo_instance_override_record = store.odoo_instance_override_record.model_copy(
                 update={
@@ -3570,6 +3574,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     }
                 ),
                 mutate_before_restore=change_override,
+                external_checkpoint=effects.append,
                 real_post_deploy=True,
             )
         failure = stores[0].deployment_records[-1].failure
@@ -3578,6 +3583,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(_unexpected_error_code(caught.exception), failure.code)
         self.assertEqual(stores[0].deployment_records[-1].deploy.status, "fail")
         self.assertFalse(stores[0].environment_inventories)
+        self.assertFalse(effects)
         self.assertNotIn("private-override-value", str(stores[0].deployment_records))
 
     def test_real_restore_schedule_does_not_trigger_after_authorization_revocation(self) -> None:
