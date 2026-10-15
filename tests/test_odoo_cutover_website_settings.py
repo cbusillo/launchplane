@@ -23,7 +23,11 @@ from control_plane.dokploy.slot_maintenance import (
     payload_digest,
     run_planned_slot_maintenance,
 )
-from control_plane.dokploy.slot_website_settings import run_slot_website_settings
+from control_plane.dokploy.slot_website_settings import (
+    StartupSettingsReadback,
+    run_slot_website_settings,
+)
+from control_plane.dokploy.slot_writers import SlotWriterContainer
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
@@ -76,6 +80,55 @@ class WebsiteProvider(IsolatedCutoverProvider):
                 }
             )
         return receipt
+
+
+def startup_readback(plan: OdooCutoverPlan) -> StartupSettingsReadback:
+    assert plan.website_settings is not None
+    digest = plan.website_settings.settings.digest
+    return StartupSettingsReadback(
+        digest,
+        digest,
+        tuple(
+            SlotWriterContainer(writer, slot.slot_id, slot.slot_id + writer.writer_id, slot.image)
+            for slot in (plan.old, plan.new)
+            for writer in plan.writers
+        ),
+    )
+
+
+def startup_inspection(plan: OdooCutoverPlan, container: str) -> str:
+    from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
+
+    assert plan.website_settings is not None
+    settings = plan.website_settings.settings
+    target = next(item for item in startup_readback(plan).containers if item.container == container)
+    payload = {
+        "instance": "prod",
+        "website_settings": settings.model_dump(mode="json"),
+        "config_parameters": [
+            {
+                "key": WEBSITE_INDEXING_PARAMETER,
+                "value": {
+                    "source": "literal",
+                    "value": "1" if settings.public_indexing_enabled else "0",
+                },
+            }
+        ],
+    }
+    return json.dumps(
+        [
+            {
+                "Config": {
+                    "Image": target.image,
+                    "Env": [
+                        "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64="
+                        + base64.b64encode(json.dumps(payload).encode()).decode()
+                    ],
+                },
+                "State": {"Running": False, "Restarting": False},
+            }
+        ]
+    )
 
 
 class CutoverWebsiteTests(unittest.TestCase):
@@ -188,13 +241,15 @@ class CutoverWebsiteTests(unittest.TestCase):
         assert intent is not None
         calls: list[str] = []
 
-        def startup(*_args: Any) -> tuple[str, str]:
+        def startup(*_args: Any) -> StartupSettingsReadback:
             calls.append("startup")
-            return (intent.settings.digest, intent.settings.digest)
+            return startup_readback(plan)
 
         def execute(argv: tuple[str, ...], stdin: str | None) -> str:
             if argv[1] == "inspect":
-                return plan.new.image
+                return (
+                    plan.new.image if argv[-1] == "runner" else startup_inspection(plan, argv[-1])
+                )
             calls.append("native")
             assert stdin is not None
             raw = json.loads(stdin)
@@ -277,7 +332,9 @@ class CutoverWebsiteTests(unittest.TestCase):
                 intent,
                 runner_container="runner",
                 execute=execute,
-                configure_startup=lambda *_args: (intent.settings.digest, ""),
+                configure_startup=lambda *_args: StartupSettingsReadback(
+                    intent.settings.digest, "", ()
+                ),
             )
         self.assertNotIn("native", calls)
         calls.clear()
@@ -288,7 +345,7 @@ class CutoverWebsiteTests(unittest.TestCase):
                 intent,
                 runner_container="runner",
                 execute=execute,
-                configure_startup=lambda *_args: ("", ""),
+                configure_startup=lambda *_args: StartupSettingsReadback("", "", ()),
             )
         self.assertNotIn("native", calls)
         with self.assertRaises(ValueError):
@@ -314,7 +371,9 @@ class CutoverWebsiteTests(unittest.TestCase):
 
         def transport(argv: tuple[str, ...], stdin: str | None) -> str:
             if argv[1] == "inspect":
-                return plan.new.image
+                return (
+                    plan.new.image if argv[-1] == "runner" else startup_inspection(plan, argv[-1])
+                )
             if argv[-1].endswith("web-ready"):
                 stamp_writes.append(stdin)
                 return ""
@@ -324,15 +383,141 @@ class CutoverWebsiteTests(unittest.TestCase):
             return json.dumps({"settings_sha256": ""})
 
         assert plan.website_settings is not None
-        settings_digest = plan.website_settings.settings.digest
         with self.assertRaises(ValueError):
             run_planned_slot_maintenance(
                 plan,
                 runner_container="runner",
                 execute=transport,
-                configure_startup=lambda *_args: (settings_digest, settings_digest),
+                configure_startup=lambda *_args: startup_readback(plan),
             )
         self.assertFalse(stamp_writes)
+
+    def test_stale_effective_container_env_refuses_commit_even_when_durable_readback_matches(
+        self,
+    ) -> None:
+        from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
+
+        plan = self.provider.cutover
+        readback = startup_readback(plan)
+        assert plan.website_settings is not None
+        for target in readback.containers:
+            for defect in ("settings", "legacy_indexing", "running"):
+                with self.subTest(
+                    slot=target.slot_id, writer=target.writer.writer_id, defect=defect
+                ):
+                    native = MagicMock()
+
+                    def execute(argv: tuple[str, ...], stdin: str | None) -> str:
+                        if argv[-1] == "runner":
+                            return plan.new.image
+                        if argv[1] != "inspect":
+                            native(argv, stdin)
+                            return ""
+                        inspection = json.loads(startup_inspection(plan, argv[-1]))
+                        if argv[-1] == target.container:
+                            if defect == "running":
+                                inspection[0]["State"]["Running"] = True
+                            else:
+                                payload = json.loads(
+                                    base64.b64decode(
+                                        inspection[0]["Config"]["Env"][0].split("=", 1)[1]
+                                    )
+                                )
+                                if defect == "settings":
+                                    payload["website_settings"]["google_analytics_key"] = (
+                                        "G-PREVIOUS"
+                                    )
+                                else:
+                                    payload["config_parameters"] = [
+                                        {
+                                            "key": WEBSITE_INDEXING_PARAMETER,
+                                            "value": {"source": "literal", "value": "stale"},
+                                        }
+                                    ]
+                                inspection[0]["Config"]["Env"] = [
+                                    "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64="
+                                    + base64.b64encode(json.dumps(payload).encode()).decode()
+                                ]
+                        return json.dumps(inspection)
+
+                    with self.assertRaises(ValueError):
+                        run_slot_website_settings(
+                            plan,
+                            plan.new,
+                            plan.website_settings,
+                            runner_container="runner",
+                            execute=execute,
+                            configure_startup=lambda *_args: readback,
+                        )
+                    native.assert_not_called()
+
+    def test_preflight_refusal_does_not_persist_a_cutover_or_cross_provider_checkpoint(
+        self,
+    ) -> None:
+        from control_plane.workflows.odoo_prod_promotion import (
+            OdooProdPromotionRequest,
+            execute_odoo_prod_promotion,
+        )
+        from tests.test_release_review import seed, decision
+
+        plan = self.provider.cutover
+        seed(self.records)
+        approved = decision(self.records)
+        approved = approved.model_copy(
+            update={
+                "product": plan.new.binding.product_id,
+                "checklist": approved.checklist.model_copy(
+                    update={
+                        "candidate": approved.checklist.candidate.model_copy(
+                            update={"artifact_id": plan.candidate.artifact_id}
+                        ),
+                        "website_settings": plan.website_settings,
+                        "production_website_settings": plan.production_website_settings,
+                    }
+                ),
+            }
+        )
+        checkpoint = MagicMock()
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.require_release_approval",
+                return_value=approved,
+            ),
+            patch.object(
+                self.provider, "preflight", side_effect=ValueError("fixture capability unavailable")
+            ),
+        ):
+            result = execute_odoo_prod_promotion(
+                control_plane_root=Path(self.directory.name),
+                state_dir=Path(self.directory.name),
+                database_url="",
+                record_store=self.records,
+                request=OdooProdPromotionRequest(
+                    product=plan.new.binding.product_id,
+                    context=plan.new.runtime_identity.context,
+                    artifact_id=plan.candidate.artifact_id,
+                    backup_record_id="fixture-backup",
+                ),
+                cutover_plan=plan,
+                cutover_provider=self.provider,
+                provider_effect_checkpoint=checkpoint,
+            )
+        self.assertEqual(result.promotion_status, "fail")
+        self.assertFalse(
+            self.records.list_deployment_records(
+                context_name=plan.new.runtime_identity.context,
+                instance_name=plan.new.binding.environment_id,
+            )
+        )
+        checkpoint.assert_not_called()
+        self.assertFalse(self.provider.actions)
+        with patch.object(
+            self.provider, "preflight", side_effect=ValueError("fixture capability unavailable")
+        ):
+            with self.assertRaises(ValueError):
+                self.run_cutover()
+        with self.assertRaises(FileNotFoundError):
+            self.store.load(self.record_id)
 
     def test_deployment_bridge_updates_verified_baseline_without_replacing_prepared_intent(
         self,

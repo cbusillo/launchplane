@@ -165,15 +165,22 @@ records the verified applied baseline separately from pending preparation.
 The installed host adapter must bind `configure_startup` and the driver's
 `website_settings` capability. The former merges the selected snapshot and its legacy indexing parameter
 into both slots' durable managed startup payloads, preserves unrelated settings
-and secrets, and returns both digests only after readback. A retained container
-must not restore stale settings into the shared database on a later restart.
+and secrets, and returns `StartupSettingsReadback` only after readback. It must
+recreate every stopped writer container in both slots from those payloads and
+return the complete bound inventory. Restarting an existing container retains
+its creation-time environment and cannot satisfy this contract. Launchplane
+independently inspects that inventory's images, stopped state, effective typed
+payload and legacy indexing parameter before native commit or guard release.
 The driver also binds `website_settings_preflight` to verify both forward and
-rollback startup/native capabilities before any candidate preparation. It must keep the slot
+rollback startup/native capabilities before any cutover record, provider-effect
+checkpoint or candidate preparation. It must keep the slot
 fenced on failure. `run_slot_website_settings` checks the immutable runner image,
 merges the native execution payload without exporting secrets, and requires the
 consumer's post-commit digest. Missing capability refuses the release before
 candidate preparation; there is no in-place fallback. Source support does not
-configure those installed host capabilities or activate a lane.
+configure those installed host capabilities or activate a lane. A Client's
+hotfix rejection describes the rejected release's current production snapshot;
+switch-back uses the original cutover's retained snapshot instead.
 
 Typed-settings releases use prepared public serving and a measured writer pause
 even for compatible artifacts, so candidate settings never appear on the old

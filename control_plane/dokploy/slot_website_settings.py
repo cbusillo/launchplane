@@ -1,7 +1,12 @@
 """Apply decision-bound website settings in a credential-safe slot runner."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
+from dataclasses import dataclass
+import base64
 import json
+from typing import TYPE_CHECKING
 
 from control_plane._odoo_website_settings_program import (
     WEBSITE_INDEXING_PARAMETER,
@@ -14,10 +19,73 @@ from control_plane.contracts.odoo_cutover import (
 )
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 
-# The installed host adapter updates and reads back the slot's durable managed
-# startup payloads for BOTH slots, preserving unrelated settings/secrets. Fence
-# an already-running retained slot until this operation and native commit pass.
-StartupSettings = Callable[[OdooCutoverPlan, OdooSlot, OdooWebsiteSettingsIntent], tuple[str, str]]
+if TYPE_CHECKING:
+    from control_plane.dokploy.slot_writers import SlotWriterContainer
+
+
+@dataclass(frozen=True)
+class StartupSettingsReadback:
+    """Durable payload digests and the recreated, still-fenced writer inventory."""
+
+    selected_digest: str
+    retained_digest: str
+    containers: tuple[SlotWriterContainer, ...]
+
+
+# Update/read both durable payloads AND recreate their stopped consumers. A
+# docker restart preserves creation-time env and cannot satisfy this contract.
+StartupSettings = Callable[
+    [OdooCutoverPlan, OdooSlot, OdooWebsiteSettingsIntent], StartupSettingsReadback
+]
+
+
+def _verify_startup_containers(
+    plan: OdooCutoverPlan,
+    intent: OdooWebsiteSettingsIntent,
+    readback: StartupSettingsReadback,
+    execute: Callable[[tuple[str, ...], str | None], str],
+) -> None:
+    expected = {
+        (slot.slot_id, writer.writer_id) for slot in (plan.old, plan.new) for writer in plan.writers
+    }
+    targets = readback.containers
+    if (
+        {(item.slot_id, item.writer.writer_id) for item in targets} != expected
+        or len(targets) != len(expected)
+        or len({item.container for item in targets}) != len(targets)
+    ):
+        raise ValueError("startup readback requires every writer in both slots")
+    for target in targets:
+        slot = plan.old if target.slot_id == plan.old.slot_id else plan.new
+        observed = json.loads(execute(("docker", "inspect", target.container), None))
+        if (
+            target.writer not in plan.writers
+            or target.image != slot.image
+            or len(observed) != 1
+            or observed[0]["Config"]["Image"] != slot.image
+            or observed[0]["State"].get("Running")
+            or observed[0]["State"].get("Restarting")
+        ):
+            raise ValueError("startup container image/inventory differs or writers are unfenced")
+        environment = dict(item.split("=", 1) for item in observed[0]["Config"]["Env"])
+        payload = json.loads(base64.b64decode(environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"]))
+        indexing = [
+            item["value"]
+            for item in payload.get("config_parameters", [])
+            if item["key"] == WEBSITE_INDEXING_PARAMETER
+        ]
+        if (
+            payload.get("instance") != "prod"
+            or payload.get("website_settings") != intent.settings.model_dump(mode="json")
+            or indexing
+            != [
+                {
+                    "source": "literal",
+                    "value": "1" if intent.settings.public_indexing_enabled else "0",
+                }
+            ]
+        ):
+            raise ValueError("effective container startup settings differ from the snapshot")
 
 
 def run_slot_website_settings(
@@ -61,9 +129,11 @@ def run_slot_website_settings(
         "database": slot.binding.database,
         "database_uuid": slot.runtime_identity.database_uuid,
     }
-    startup_digest, retained_digest = configure_startup(plan, slot, intent)
+    readback = configure_startup(plan, slot, intent)
+    startup_digest, retained_digest = readback.selected_digest, readback.retained_digest
     if startup_digest != intent.settings.digest or retained_digest != intent.settings.digest:
         raise ValueError("durable startup website settings readback differs from the snapshot")
+    _verify_startup_containers(plan, intent, readback, execute)
     program = """
 import base64, json, os, subprocess, sys
 request=json.load(sys.stdin)

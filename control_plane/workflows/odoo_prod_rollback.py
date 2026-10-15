@@ -449,10 +449,18 @@ def execute_odoo_prod_rollback(
     try:
         if current_deployment is not None and current_deployment.odoo_cutover is not None:
             plan = current_deployment.odoo_cutover.plan
+            # A rejection is recorded while the hotfix is serving, so its
+            # production snapshot describes the rejected hotfix, not the
+            # retained release. Recovery uses the immutable cutover snapshot.
             if release_decision is not None and (
-                plan.website_settings != release_decision.checklist.website_settings
-                or plan.production_website_settings
-                != release_decision.checklist.production_website_settings
+                release_decision.product != product
+                or release_decision.checklist.candidate.artifact_id != plan.candidate.artifact_id
+                or release_decision.decision != "changes_requested"
+                and (
+                    plan.website_settings != release_decision.checklist.website_settings
+                    or plan.production_website_settings
+                    != release_decision.checklist.production_website_settings
+                )
             ):
                 raise click.ClickException(
                     "Rollback website snapshots differ from the release decision."

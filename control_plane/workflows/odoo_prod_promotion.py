@@ -204,13 +204,21 @@ def execute_odoo_prod_promotion(
                 raise click.ClickException(
                     "Two-slot website snapshots differ from the release decision."
                 )
-            cutover_plan = OdooCutoverPlan.model_validate(
-                {
-                    **cutover_plan.model_dump(),
-                    "website_settings": candidate_settings,
-                    "production_website_settings": production_settings,
-                }
-            )
+            try:
+                cutover_plan = OdooCutoverPlan.model_validate(
+                    {
+                        **cutover_plan.model_dump(),
+                        "website_settings": candidate_settings,
+                        "production_website_settings": production_settings,
+                    }
+                )
+                if cutover_provider is None and cutover_provider_factory is not None:
+                    cutover_provider = cutover_provider_factory(cutover_plan)
+                if cutover_provider is None:
+                    raise ValueError("Two-slot provider/runtime binding is unavailable.")
+                cutover_provider.preflight(cutover_plan)
+            except ValueError as error:
+                raise click.ClickException(str(error)) from error
         if cutover_plan is not None:
             from control_plane.odoo_cutover_plan import cutover_record_id
 
@@ -270,8 +278,6 @@ def execute_odoo_prod_promotion(
             replacement_result: OdooCutoverApplyResult | OdooStableTargetReplacementApplyResult
             if cutover_plan is not None:
                 plan = cutover_plan
-                if cutover_provider is None and cutover_provider_factory is not None:
-                    cutover_provider = cutover_provider_factory(plan)
                 if cutover_provider is None:
                     raise click.ClickException(
                         "Two-slot provider/runtime binding is unavailable; refusing in-place fallback."

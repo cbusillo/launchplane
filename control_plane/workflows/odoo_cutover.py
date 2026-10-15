@@ -32,6 +32,10 @@ class OdooCutoverStore(Protocol):
 
 
 class OdooCutoverProvider(PublicPauseProvider, Protocol):
+    def preflight(self, plan: OdooCutoverPlan) -> None:
+        """Read-only capability validation before persisting a new cutover."""
+        ...
+
     def exclusive(self, plan: OdooCutoverPlan) -> AbstractContextManager[None]: ...
     def current_route(self, plan: OdooCutoverPlan) -> OdooRouteObservation: ...
     def prepare_candidate(self, plan: OdooCutoverPlan) -> None:
@@ -151,6 +155,7 @@ def execute_odoo_cutover(
         try:
             record = store.load(record_id)
         except FileNotFoundError:
+            provider.preflight(plan)
             _require_route(provider.current_route(plan), plan, plan.old)
             record = OdooCutoverRecord(
                 record_id=record_id, plan=plan, began_at=clock(), updated_at=clock()

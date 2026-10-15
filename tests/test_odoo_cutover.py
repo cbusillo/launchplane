@@ -122,6 +122,9 @@ class IsolatedCutoverProvider(WebsiteFixture):
             ),
         )
 
+    def preflight(self, plan: OdooCutoverPlan) -> None:
+        pass
+
     def prepare_candidate(self, plan: OdooCutoverPlan) -> None:
         self.actions.append("prepare")
         if self.target != plan.old:
