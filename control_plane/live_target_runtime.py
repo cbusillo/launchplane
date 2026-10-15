@@ -61,6 +61,8 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
     context: str
     instance: str
     deploy: bool = False
+    separation_only: bool = False
+    reviewed_binding_sha256: str = ""
     no_cache: bool = False
     deploy_timeout_seconds: int | None = Field(default=None, gt=0)
 
@@ -83,10 +85,28 @@ class LiveTargetRuntimeApplyEnvelope(BaseModel):
             raise ValueError("Live target runtime apply requires context.")
         if not self.instance:
             raise ValueError("Live target runtime apply requires instance.")
+        if self.separation_only and (
+            self.instance != "testing"
+            or self.deploy
+            or self.no_cache
+            or self.deploy_timeout_seconds is not None
+        ):
+            raise ValueError("Separation stages testing configuration with deployment disabled.")
         if self.mode == "dry-run" and (
             self.deploy or self.no_cache or self.deploy_timeout_seconds is not None
         ):
             raise ValueError("Deploy options require live target runtime mode 'apply'.")
+        if (
+            self.separation_only
+            and self.mode == "apply"
+            and (
+                len(self.reviewed_binding_sha256) != 64
+                or any(c not in "0123456789abcdef" for c in self.reviewed_binding_sha256)
+            )
+        ):
+            raise ValueError("Separation apply requires the reviewed configuration binding.")
+        if not self.separation_only and self.reviewed_binding_sha256:
+            raise ValueError("A separation binding is only for separation staging.")
         return self
 
     @property

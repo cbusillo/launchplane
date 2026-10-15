@@ -590,3 +590,34 @@ class GenericWebTestingHoldRouteTests(TestingHoldRouteTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IsolationStagingHoldTests(unittest.TestCase):
+    def test_staging_interlock_keeps_dispatch_held_and_cannot_replace_staff_hold(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_target(store)
+            draft = TestingHoldApplyRequest.model_validate(
+                {**_payload(), "purpose": "isolation_staging"}
+            )
+            plan, _ = build_testing_hold_plan(record_store=store, request=draft, actor="agent")
+            applied = apply_testing_hold_plan(
+                record_store=store,
+                request=draft.model_copy(
+                    update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+                ),
+                actor="agent",
+            )
+            self.assertTrue(applied.read_back_matches)
+            self.assertFalse(applied.reconcile_requested)
+            hold = _read_hold(store)
+            assert hold is not None
+            self.assertEqual(hold.purpose, "isolation_staging")
+            _seed_target(
+                store, hold=DokployTargetStaffTestingHold(reason=_HOLD_REASON, recorded_by="agent")
+            )
+            with self.assertRaises(TestingHoldRefusal):
+                build_testing_hold_plan(record_store=store, request=draft, actor="agent")
+            hold = _read_hold(store)
+            assert hold is not None
+            self.assertEqual(hold.reason, _HOLD_REASON)

@@ -78,6 +78,7 @@ class DokployTargetStaffTestingHold(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     reason: str
+    purpose: Literal["staff_testing", "isolation_staging"] = "staff_testing"
     recorded_by: str = ""
     recorded_at: str = ""
 

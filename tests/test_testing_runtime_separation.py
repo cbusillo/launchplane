@@ -1,0 +1,346 @@
+"""Configuration staging protects production without asserting disposable lane facts."""
+
+import unittest
+from httpx2 import Response
+from unittest.mock import patch
+
+from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+from control_plane.http_app import launchplane_identity_actor
+from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
+from control_plane.service_auth import LocalOperatorIdentity
+from control_plane.testing_runtime_separation import separation_binding
+from tests import test_disposable_lane_authority as authority
+from tests.support.auth import scoped_agent_transport
+from tests.support.http import request
+
+
+class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
+    database_url: str | None = None
+
+    def setUp(self) -> None:
+        fixture = authority.DisposableRuntimeAuthorityTests()
+        fixture.database_url = self.database_url
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.store, self.context, self.app = fixture.store, fixture.context, fixture.app
+        self.actor = launchplane_identity_actor(
+            LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
+        )
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+            purpose="isolation_staging",
+            reason="Stage independent testing resources.",
+            recorded_by=self.actor,
+        )
+        self.store.write_dokploy_target_record(target)
+        self.payload = {
+            "product": "example-site",
+            "context": self.context,
+            "instance": "testing",
+            "mode": "apply",
+            "separation_only": True,
+        }
+        self.binding, self.key = separation_binding(
+            self.store,
+            LiveTargetRuntimeApplyEnvelope.model_validate({**self.payload, "mode": "dry-run"}),
+            self.actor,
+        )
+        self.payload["reviewed_binding_sha256"] = self.binding
+
+    async def stage(self, *, key: str = "separation", **changes: object) -> Response:
+        return await request(
+            self.app,
+            "POST",
+            "/v1/live-target-runtime/apply",
+            headers={"Authorization": "Bearer local-operator-token", "Idempotency-Key": key},
+            payload={**self.payload, **changes},
+        )
+
+    async def test_unknown_usage_custody_and_sharing_do_not_block_env_only_staging(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        for index, facts in enumerate(
+            (
+                None,
+                {"usage": "unknown", "data": "unknown", "production_resources": "shared"},
+                {"usage": "unknown", "data": "only_copy", "production_resources": "shared"},
+            )
+        ):
+            if facts is not None:
+                record_safety(self.store, "example-site", self.context, "testing", **facts)
+            with (
+                self.subTest(facts=facts),
+                patch(
+                    "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync"
+                ),
+                patch(
+                    "control_plane.live_target_runtime.apply_live_target_runtime_environment",
+                    return_value={"status": "ok"},
+                ) as driver,
+            ):
+                response = await self.stage(key=f"separation-{index}")
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertFalse(driver.call_args.kwargs["deploy"])
+                self.assertEqual(driver.call_args.kwargs["instance_name"], "testing")
+
+    async def test_staff_foreign_and_legacy_holds_refuse_before_any_driver_call(self) -> None:
+        for purpose, actor in (("staff_testing", self.actor), ("isolation_staging", "other-agent")):
+            target = self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            )
+            target.policies.staff_testing_hold = DokployTargetStaffTestingHold.model_validate(
+                {"purpose": purpose, "reason": "Do not interrupt.", "recorded_by": actor}
+            )
+            self.store.write_dokploy_target_record(target)
+            with (
+                self.subTest(purpose=purpose, actor=actor),
+                patch(
+                    "control_plane.live_target_runtime.apply_live_target_runtime_environment"
+                ) as driver,
+            ):
+                response = await self.stage()
+                self.assertEqual(response.status_code, 409, response.text)
+                driver.assert_not_called()
+
+    async def test_production_and_deploy_flags_cannot_enter_separation(self) -> None:
+        with patch(
+            "control_plane.live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            for changes in (
+                {"instance": "prod"},
+                {"deploy": True},
+                {"no_cache": True},
+                {"instance": "pr-1"},
+            ):
+                response = await self.stage(**changes)
+                self.assertEqual(response.status_code, 400, response.text)
+            with scoped_agent_transport():
+                response = await self.stage()
+            self.assertEqual(response.status_code, 403, response.text)
+            driver.assert_not_called()
+
+    async def test_unknown_deploy_fence_is_preserved_and_no_write_runs(self) -> None:
+        reserved = self.store.reserve_mutation(
+            scope="earlier",
+            route_path="/earlier-deploy",
+            idempotency_key="old-deploy",
+            request_fingerprint="a" * 64,
+            lease_owner="old-worker",
+            reconciliation_key="old-evidence",
+            provider_target_key=self.key,
+        )
+        assert reserved.record is not None
+        fenced = self.store.mark_mutation_reconcile_required(
+            reservation=reserved.record, reconciliation_key="old-evidence"
+        )
+        with patch(
+            "control_plane.live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            response = await self.stage()
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
+            driver.assert_not_called()
+        self.assertIn(fenced.record, self.store.list_held_provider_target_reservations())
+
+    async def test_new_production_alias_refuses_even_without_observations(self) -> None:
+        target = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            target.model_copy(update={"context": "other-product", "instance": "prod"})
+        )
+        with patch(
+            "control_plane.live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            response = await self.stage()
+            self.assertEqual(response.status_code, 409, response.text)
+            driver.assert_not_called()
+
+    async def test_late_hold_refuses_before_effect_and_releases_only_fresh_reservation(
+        self,
+    ) -> None:
+        def mutate_then_checkpoint(**kwargs: object) -> dict[str, object]:
+            target = self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            )
+            target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                reason="Staff testing now."
+            )
+            self.store.write_dokploy_target_record(target)
+            callback = kwargs["before_provider_mutation"]
+            assert callable(callback)
+            callback()
+            self.fail("No provider effect may follow a new staff hold.")
+
+        with (
+            patch(
+                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync"
+            ),
+            patch(
+                "control_plane.live_target_runtime.apply_live_target_runtime_environment",
+                side_effect=mutate_then_checkpoint,
+            ),
+        ):
+            response = await self.stage()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    async def test_timeout_after_write_keeps_unknown_fence_across_keys(self) -> None:
+        effects = []
+
+        def write_and_lose_reply(**kwargs: object) -> dict[str, object]:
+            callback = kwargs["before_provider_mutation"]
+            assert callable(callback)
+            callback()
+            effects.append("env-only")
+            raise OSError("lost reply")
+
+        with (
+            patch(
+                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync"
+            ),
+            patch(
+                "control_plane.live_target_runtime.apply_live_target_runtime_environment",
+                side_effect=write_and_lose_reply,
+            ),
+        ):
+            for key in ("separation", "separation", "another-key"):
+                response = await self.stage(key=key)
+                self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(effects, ["env-only"])
+        self.assertEqual(len(self.store.list_held_provider_target_reservations()), 1)
+
+    async def test_real_env_writer_stages_new_volume_and_port_settings_and_keeps_production(
+        self,
+    ) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from control_plane.dokploy import source
+        from control_plane.dokploy.api import parse_dokploy_env_text
+        from control_plane.runtime_environments import SiteRuntimeEnvironment
+
+        desired = {
+            "SYNC_DB_VOLUME_NAME": "new-testing-db",
+            "SYNC_CONFIG_VOLUME_NAME": "new-testing-config",
+            "SYNC_DB_HOST_PORT": "13307",
+            "SYNC_HEALTH_HOST_PORT": "18000",
+            "SYNC_DB_PASSWORD": "fixture-testing-credential",
+        }
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.context,
+                instance="testing",
+                env={k: v for k, v in desired.items() if k != "SYNC_DB_PASSWORD"},
+                updated_at="2026-10-15T00:00:00Z",
+            )
+        )
+        binding, _ = separation_binding(
+            self.store,
+            LiveTargetRuntimeApplyEnvelope.model_validate({**self.payload, "mode": "dry-run"}),
+            self.actor,
+        )
+        self.payload["reviewed_binding_sha256"] = binding
+        production = {
+            "composeId": "target-prod",
+            "env": "SYNC_DB_VOLUME_NAME=production-db\nSYNC_CONFIG_VOLUME_NAME=production-config\nSYNC_DB_HOST_PORT=3307\nSYNC_HEALTH_HOST_PORT=8000\nSYNC_DB_PASSWORD=fixture-production-credential\n",
+        }
+        testing = {"composeId": "target-testing", "env": production["env"]}
+        production_before = production.copy()
+        records_before = (
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            self.store.list_secret_bindings(),
+            self.store.list_secret_records(),
+        )
+        calls = []
+
+        def fetch(**kwargs: object) -> dict[str, str]:
+            self.assertEqual(kwargs["target_id"], "target-testing")
+            return testing.copy()
+
+        def update(**kwargs: object) -> None:
+            self.assertEqual(kwargs["path"], "/api/compose.update")
+            self.assertEqual(kwargs["method"], "POST")
+            payload = kwargs["payload"]
+            assert isinstance(payload, dict)
+            self.assertEqual(set(payload), {"composeId", "env"})
+            self.assertEqual(payload["composeId"], "target-testing")
+            calls.append(payload)
+            testing["env"] = payload["env"]
+
+        with (
+            patch(
+                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync"
+            ),
+            patch(
+                "control_plane.live_target_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                return_value=source.DokploySourceOfTruth(
+                    schema_version=1,
+                    targets=(
+                        source.DokployTargetDefinition(
+                            context=self.context, instance="testing", target_id="target-testing"
+                        ),
+                    ),
+                ),
+            ),
+            patch(
+                "control_plane.live_target_runtime.control_plane_runtime_environments.resolve_site_runtime_environment",
+                return_value=SiteRuntimeEnvironment(
+                    values=desired,
+                    secret_keys=frozenset({"SYNC_DB_PASSWORD"}),
+                    retired_keys=frozenset(),
+                    site_keys=frozenset(desired),
+                ),
+            ),
+            patch(
+                "control_plane.live_target_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture-token"),
+            ),
+            patch(
+                "control_plane.live_target_runtime.dokploy_api.fetch_dokploy_target_payload",
+                side_effect=fetch,
+            ),
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=update),
+            patch(
+                "control_plane.live_target_runtime.trigger_and_wait_for_dokploy_target_deploy"
+            ) as deploy,
+        ):
+            response = await self.stage()
+            self.assertEqual(response.status_code, 202, response.text)
+            replay = await self.stage()
+            self.assertEqual(replay.status_code, 202, replay.text)
+            deploy.assert_not_called()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(parse_dokploy_env_text(testing["env"]), desired)
+        self.assertEqual(production, production_before)
+        self.assertEqual(
+            records_before,
+            (
+                self.store.read_dokploy_target_record(
+                    context_name=self.context, instance_name="prod"
+                ),
+                self.store.list_secret_bindings(),
+                self.store.list_secret_records(),
+            ),
+        )
+        self.assertNotIn("fixture-testing-credential", response.text)
+        self.assertNotIn("fixture-production-credential", response.text)
+
+    async def test_key_safety_refusal_cannot_reach_writer(self) -> None:
+        from control_plane.live_target_runtime import LiveTargetRuntimeError
+
+        with (
+            patch(
+                "control_plane.live_target_runtime.evaluate_runtime_key_safety_for_live_target_sync",
+                side_effect=LiveTargetRuntimeError(
+                    "Production credential refused.", code="runtime_key_safety_failed"
+                ),
+            ),
+            patch(
+                "control_plane.live_target_runtime.apply_live_target_runtime_environment"
+            ) as driver,
+        ):
+            response = await self.stage()
+            self.assertEqual(response.status_code, 409, response.text)
+            driver.assert_not_called()

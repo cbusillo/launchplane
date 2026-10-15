@@ -11361,6 +11361,15 @@
         "additionalProperties": false,
         "description": "Site staff are testing on this lane: event-driven deploys wait until it is lifted.",
         "properties": {
+          "purpose": {
+            "default": "staff_testing",
+            "enum": [
+              "staff_testing",
+              "isolation_staging"
+            ],
+            "title": "Purpose",
+            "type": "string"
+          },
           "reason": {
             "title": "Reason",
             "type": "string"
@@ -11377,6 +11386,7 @@
           }
         },
         "required": [
+          "purpose",
           "reason",
           "recorded_at",
           "recorded_by"

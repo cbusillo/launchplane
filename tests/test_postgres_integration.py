@@ -17,6 +17,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_testing_runtime_separation as testing_separation
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -10832,3 +10833,24 @@ class RealPostgresPreviewReservationRecoveryTests(
 
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresTestingSeparationTests(testing_separation.TestingRuntimeSeparationTests):
+    def setUp(self) -> None:
+        database = _head_postgres_database()
+        self.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:separation",
+                updated_at="2026-10-15T00:00:00Z",
+                policy=policy,
+            )
+        )

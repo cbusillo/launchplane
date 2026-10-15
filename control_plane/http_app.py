@@ -20743,7 +20743,82 @@ def create_launchplane_fastapi_app(
                     for lane in profile.lanes
                 )
             )
-        if director_disposable_apply:
+        if live_target_runtime_request.separation_only:
+            from control_plane.testing_runtime_separation import (
+                TestingRuntimeSeparation,
+                separation_binding,
+            )
+
+            if not director_agent_identity(identity):
+                raise _launchplane_http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="Testing separation requires the authenticated Director agent.",
+                )
+            separation_store = require_live_target_runtime_database_store(
+                record_store=record_store,
+                trace_id=trace_id,
+            )
+            try:
+                binding, target_key = separation_binding(
+                    separation_store,
+                    live_target_runtime_request,
+                    launchplane_identity_actor(identity),
+                )
+            except (ValueError, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="testing_separation_refused",
+                    message="Testing separation requires an owned, unshared target and the caller's staging interlock.",
+                ) from error
+            if live_target_runtime_request.apply_changes:
+                if not normalized_idempotency_key:
+                    raise _launchplane_http_error(
+                        status_code=400,
+                        trace_id=trace_id,
+                        code="idempotency_key_required",
+                        message="Separation apply requires a stable Idempotency-Key.",
+                    )
+                if binding != live_target_runtime_request.reviewed_binding_sha256:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="testing_separation_stale",
+                        message="Separation configuration changed after review.",
+                    )
+                try:
+                    return await run_provider_mutation(
+                        record_store=record_store,
+                        identity=identity,
+                        route_path=_LIVE_TARGET_RUNTIME_APPLY_ROUTE,
+                        idempotency_key=normalized_idempotency_key,
+                        request_fingerprint=payload_fingerprint,
+                        trace_id=trace_id,
+                        adapter=TestingRuntimeSeparation(
+                            store=separation_store,
+                            root=resolved_control_plane_root,
+                            request=live_target_runtime_request,
+                            actor=launchplane_identity_actor(identity),
+                            binding=binding,
+                            target_key=target_key,
+                            trace_id=trace_id,
+                        ),
+                        in_progress_message="Testing separation is in progress.",
+                        reconcile_message="Separation outcome is unknown; retain the original key and fence.",
+                    )
+                except (
+                    ValueError,
+                    control_plane_live_target_runtime.LiveTargetRuntimeError,
+                ) as error:
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="testing_separation_refused",
+                        message="Testing separation inputs or key safety changed; review again.",
+                    ) from error
+        if director_disposable_apply and not live_target_runtime_request.separation_only:
             try:
                 disposable_runtime_binding = require_disposable_lane(
                     cast(DisposableLaneStore, record_store),
@@ -20815,6 +20890,8 @@ def create_launchplane_fastapi_app(
                 message=str(error),
             ) from error
         tracked_target = driver_result.get("tracked_target")
+        if live_target_runtime_request.separation_only:
+            driver_result["separation_binding_sha256"] = binding
         records: dict[str, str] = {}
         if isinstance(tracked_target, dict):
             records = {
