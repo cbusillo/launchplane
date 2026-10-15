@@ -23273,6 +23273,12 @@
             "title": "Deployment Record Id",
             "type": "string"
           },
+          "disposal_attention": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Disposal Attention",
+            "type": "integer"
+          },
           "disposal_pending": {
             "default": 0,
             "minimum": 0.0,

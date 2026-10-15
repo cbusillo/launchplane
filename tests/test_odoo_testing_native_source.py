@@ -89,6 +89,24 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_dispatch_guard_can_refuse_after_handshake_without_sending_the_program(self) -> None:
+        connection = Connection()
+
+        def refuse(dispatch: Any) -> None:
+            raise transport.NativeSourceAuthorizationDenied("fixture revoked authority")
+
+        with self.assertRaises(transport.NativeSourceAuthorizationDenied):
+            transport._read_program(
+                connection,
+                program="fixture program",
+                payload={},
+                timeout_seconds=5,
+                receive=lambda frame: None,
+                dispatch_guard=refuse,
+            )
+        self.assertTrue(connection.sent)
+        self.assertFalse(any(message.startswith("{") for message in connection.sent))
+
     def test_private_cache_requires_a_mount_outside_the_shared_backing(self) -> None:
         from control_plane.odoo_testing_native_source import require_private_copy_mount
 

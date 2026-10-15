@@ -831,15 +831,19 @@ inspection. The same host lock excludes restore and cleanup processes. A copy
 must have its exact committed database witness; DROP uses neither FORCE nor
 connection termination. A connected database or failed filestore removal stays
 deferred. No receipt or failed raw-copy evidence is erased.
-An outstanding or refused disposal prevents the next capture from starting;
+Copies from different resource generations, protected current/predecessor copies,
+and legacy absent databases with a remaining filestore but no host write-ahead
+receipt become retained attention. They are never deleted, remain queryable and
+alert through the existing policy, but do not permanently block the new lane.
+An outstanding retriable disposal prevents the next capture from starting;
 the last healthy copy keeps serving. Later scheduled attempts reconcile the
 same original identities instead of adding another copy to a growing backlog.
 
-Before DROP, the host fsyncs a write-ahead receipt on the qualified database
-volume, binding the original database and witness. If DROP succeeds but filestore
+Before DROP, the host fsyncs a write-ahead receipt on the qualified logs
+volume outside PGDATA, binding the original database and witness. If DROP succeeds but filestore
 removal or transport fails, the original-key retry reacquires the host lock and
 uses that receipt. An absent database with a remaining filestore and no receipt
-is refused; absence of both needs no deletion. Foreign witnesses, symlinks and
+is retained without deleting files; absence of both needs no deletion. Foreign witnesses, symlinks and
 current/immediate-predecessor identities are refused. Historical slot receipts
 remain queryable after cleanup. Legacy `testing_drill_disposal_deferred` log
 markers are consumed into service evidence, but new copies no longer perform
@@ -859,11 +863,18 @@ free-space observation.
 On every new worker attempt, the shared resource guard reads current filesystem
 capacity, using non-root available bytes and the actual backing device. Demands
 for DB, filestore and capture staging on the same filesystem are summed before
-adding its reserve. Native staging requires a known runner writable-layer
+adding its reserve. SSH capture accounts for both host staging and the runner's
+simultaneous dump copy. Native staging requires a known runner writable-layer
 backing; unsupported storage layouts stay unverified. Cleanup can reclaim old
 copies even when that pass then refuses capacity. Capacity evidence is bound to
 the exact generation, authority and worker attempt before activation, and the
 host repeats the free-space check before touching the web gate or capturing.
+A witnessed existing-copy resume does not demand another complete copy or staging
+allocation. Holds and the existing destructive authorization checkpoint are
+rechecked under the lane/authority locks immediately before sending the remote
+program. Locks are released for the remote wait, then results are recorded under
+locks; changed authority preserves completed cleanup evidence while refusing
+activation from that capacity snapshot.
 Insufficient or unavailable capacity alerts through the existing Discord policy
 and preserves the selected generation and its usable predecessor. This is a
 current admission check, not a filesystem reservation: unrelated writers or a
@@ -873,7 +884,8 @@ still gates a passing operation and generation completion.
 
 `GET /v1/products/{product}/environments/testing` includes value-free
 `testing_rebuild_drill` evidence: queued/pass/fail/skipped, observation time,
-operation/deployment IDs, failing step, trace and alert delivery status. A pass
+operation/deployment IDs, failing step, trace, alert delivery status, pending
+disposal count, retained-attention count and capacity status. A pass
 requires the worker's health result and this exact generation's committed copy
 completion. It does not replace monitor freshness or prove platform updates.
 Failures use the lane's existing enabled Discord notification destinations and
@@ -919,3 +931,8 @@ is not authorized. Private slot receipts retain prior generation identities;
 they are provenance, not a promise that a successfully superseded drill database
 still exists after bounded disposal. Remove failed raw-copy evidence only under
 the existing custody procedure above. No production rollback is part of this drill.
+
+Once a profile or generation contains a drill storage budget, use this image or a
+compatible successor for recovery. Older images cannot interpret those fields;
+forward-fix rather than removing custody evidence to roll back. Disabling the
+existing drill flag prevents new scheduled captures and changes no retained copy.

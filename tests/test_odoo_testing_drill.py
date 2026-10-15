@@ -233,10 +233,13 @@ class TestingDrillScenario(unittest.TestCase):
         self.storage_executor = self.enterContext(
             patch(
                 "control_plane.odoo_testing_storage.execute_maintenance",
-                side_effect=lambda root, target, spec: {
-                    "capacity": True,
-                    "disposals": ["disposed"] * len(spec["storage_maintenance"]["copies"]),
-                },
+                side_effect=lambda root, target, spec, dispatch: (
+                    dispatch(lambda: None)
+                    or {
+                        "capacity": True,
+                        "disposals": ["disposed"] * len(spec["storage_maintenance"]["copies"]),
+                    }
+                ),
             )
         )
 
@@ -293,7 +296,9 @@ class TestingDrillScenario(unittest.TestCase):
                 lease_expires_at=datetime.fromtimestamp(self.now + 300, timezone.utc).isoformat(),
             )
         assert operation is not None
-        prepare_drill_storage(self.store, operation, Path("."), now=self.now)
+        prepare_drill_storage(
+            self.store, operation, Path("."), now=self.now, checkpoint=lambda: None
+        )
         self.store.activate_odoo_testing_drill(operation, self.now)
         return operation
 

@@ -677,7 +677,7 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
     # A persistent write-ahead witness is required before DROP. It survives a
     # successful drop followed by failed filestore removal or lost transport.
     if receipt_root is None:
-        volume = json.loads(docker('volume','inspect',gen['namespace']+'-db'))[0]
+        volume = json.loads(docker('volume','inspect',gen['namespace']+'-logs'))[0]
         receipt_root = Path(volume['Mountpoint']) / '.launchplane-drill-disposal'
     root = Path(receipt_root)
     if root.resolve() != root.absolute() or root.is_symlink():
@@ -704,11 +704,12 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
             descriptor = os.open(receipt, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
             with os.fdopen(descriptor,'w') as handle:
                 json.dump(expected,handle,sort_keys=True);handle.flush();os.fsync(handle.fileno())
-            descriptor = os.open(root, os.O_RDONLY|os.O_DIRECTORY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
+            for directory in (root, root.parent):
+                descriptor = os.open(directory, os.O_RDONLY|os.O_DIRECTORY)
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
         # No FORCE or connection termination. Unexpected connections retain it.
         current()
         docker('exec','-i',database_container,'sh','-c',
@@ -719,7 +720,7 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
             "from pathlib import Path;import sys;p=Path('/volumes/data/filestore')/sys.argv[1];assert p.resolve()==p.absolute() and not p.is_symlink();print('absent' if not p.exists() else 'present')",previous).decode().strip()
         if absent == 'absent':
             return
-        raise RuntimeError('Absent database lacks a committed disposal receipt')
+        return 'retained'
     current()
     docker('exec',runner,'python3','-c',
         "from pathlib import Path;import re,shutil,sys;name=sys.argv[1];assert re.fullmatch(r'lp_drill_[a-f0-9]{32}',name);p=Path('/volumes/data/filestore')/name;assert p.resolve()==p.absolute() and not p.is_symlink();shutil.rmtree(p) if p.exists() else None", previous)
@@ -848,7 +849,13 @@ def restore_main():
             artifacts=files['artifacts']
         print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1','artifacts':artifacts}),flush=True)
         return
-    if gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget']):
+    present = docker("exec", "-i", containers["database"][0], "sh", "-c",
+        'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
+        "_", database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
+    if present not in {"0", "1"}:
+        raise RuntimeError("Fresh testing database inventory is ambiguous")
+    resume = present == "1"
+    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget']):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -856,12 +863,6 @@ def restore_main():
         "true" if spec["clear_stale_lock"] else "false", "/volumes/data", "/proc", database, spec["runner_healthcheck_command"], stdin=spec["stale_lock_program"].encode())
     print("testing_copy_runtime_isolated=true", flush=True)
     docker("exec", runner, "python3", "-c", "import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,name,None)) for name in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
-    present = docker("exec", "-i", containers["database"][0], "sh", "-c",
-        'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
-        "_", database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
-    if present not in {"0", "1"}:
-        raise RuntimeError("Fresh testing database inventory is ambiguous")
-    resume = present == "1"
     staging = None
     try:
         dump_path = "/tmp/" + namespace + "-" + uuid.uuid4().hex + "-database.dump"

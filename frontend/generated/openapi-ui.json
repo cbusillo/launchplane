@@ -20536,6 +20536,12 @@
             "title": "Deployment Record Id",
             "type": "string"
           },
+          "disposal_attention": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Disposal Attention",
+            "type": "integer"
+          },
           "disposal_pending": {
             "default": 0,
             "minimum": 0,
@@ -20586,6 +20592,7 @@
         "required": [
           "alert_delivered",
           "deployment_record_id",
+          "disposal_attention",
           "disposal_pending",
           "observed_at",
           "operation_id",

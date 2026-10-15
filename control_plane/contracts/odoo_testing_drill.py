@@ -26,4 +26,5 @@ class OdooTestingDrillEvidence(BaseModel):
     trace: str = ""
     alert_delivered: bool = False
     disposal_pending: int = Field(default=0, ge=0)
+    disposal_attention: int = Field(default=0, ge=0)
     storage_status: Literal["unknown", "pass", "insufficient", "unconfigured"] = "unknown"

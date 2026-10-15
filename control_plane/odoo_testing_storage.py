@@ -27,7 +27,9 @@ from control_plane.odoo_testing_restore import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
-MAX_DISPOSALS_PER_PASS = 4
+from control_plane._odoo_testing_storage_program import MAX_DISPOSALS_PER_PASS
+
+MaintenanceDispatch = Callable[[Callable[[], None]], None]
 
 
 def storage_key(operation_id: str) -> str:
@@ -83,7 +85,9 @@ def maintenance_spec(
     }
 
 
-def execute_maintenance(root: Path, target_id: str, spec: dict[str, object]) -> dict[str, object]:
+def execute_maintenance(
+    root: Path, target_id: str, spec: dict[str, object], dispatch_guard: MaintenanceDispatch
+) -> dict[str, object]:
     host, token = source.read_dokploy_config(control_plane_root=root)
     target = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=target_id
@@ -100,6 +104,7 @@ def execute_maintenance(root: Path, target_id: str, spec: dict[str, object]) -> 
         payload={**spec, "compose_project": project},
         timeout_seconds=120,
         receive=frames.append,
+        dispatch_guard=dispatch_guard,
     )
     if len(frames) != 1 or frames[0].get("type") != "complete":
         raise DrillPrerequisite("testing_storage_readback_unavailable")
@@ -111,8 +116,10 @@ def prepare_drill_storage(
     operation: Any,
     root: Path,
     *,
-    execute: Callable[[Path, str, dict[str, object]], dict[str, object]] | None = None,
+    execute: Callable[[Path, str, dict[str, object], MaintenanceDispatch], dict[str, object]]
+    | None = None,
     now: float | None = None,
+    checkpoint: Callable[[], None],
 ) -> None:
     if operation.idempotency_scope != DRILL_SCOPE:
         return
@@ -120,7 +127,7 @@ def prepare_drill_storage(
 
     if read_staff_testing_hold(record_store=store, context=operation.context) is not None:
         raise DrillSkipped("staff_testing_hold")
-    now = time.time() if now is None else now
+    clock = time.time if now is None else lambda: now
     generation = read_current_testing_generation(
         store, product=operation.product, context=operation.context, instance="testing"
     )
@@ -151,18 +158,21 @@ def prepare_drill_storage(
     pending = store.list_odoo_testing_disposal_receipts(operation.product, operation.context)
     copies = []
     selected = []
+    retained = {}
     protected = {generation.drill_database, generation.retained_drill_database}
     for receipt in pending:
         planned = FreshOdooTestingGeneration.model_validate(
             receipt.response_payload["planned_generation"]
         )
         if planned.discard_drill_database in protected or not planned.discard_drill_database:
+            retained[receipt.idempotency_key] = planned.model_dump(mode="json")
             continue
         if (planned.namespace, planned.target_id, planned.resources_binding_sha256) != (
             generation.namespace,
             generation.target_id,
             generation.resources_binding_sha256,
         ):
+            retained[receipt.idempotency_key] = planned.model_dump(mode="json")
             continue
         copies.append(
             {
@@ -180,6 +190,7 @@ def prepare_drill_storage(
         "receipts": selected,
         "budget": budget,
         "phase": "dispatching",
+        "retained_receipts": retained,
     }
     if intent is not None and intent.response_payload.get("phase") == "dispatching":
         # Unknown transport outcomes retain the original cleanup identities.
@@ -192,19 +203,26 @@ def prepare_drill_storage(
             drill_receipt(storage_key(operation.operation_id), time.time(), cast(Any, payload))
         )
 
-    def perform(expires_at: float) -> dict[str, object]:
-        spec = maintenance_spec(store, generation, copies, budget, expires_at)
-        return (execute or execute_maintenance)(root, generation.target_id, spec)
+    def perform(dispatch_guard: MaintenanceDispatch) -> dict[str, object]:
+        safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
+        if safety is None:
+            raise DrillPrerequisite("usage_custody_or_isolation_unverified")
+        spec = maintenance_spec(store, generation, copies, budget, safety.expires_at.timestamp())
+        return (execute or execute_maintenance)(root, generation.target_id, spec, dispatch_guard)
 
     from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 
     try:
-        result = store.reconcile_odoo_testing_storage(operation, binding, payload, perform, now=now)
+        result = store.reconcile_odoo_testing_storage(
+            operation, binding, payload, perform, clock=clock, checkpoint=checkpoint
+        )
     except DisposableLaneSafetyUnknown as error:
         safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
         if safety is not None and (safety.usage == "in_use" or safety.data == "only_copy"):
             raise DrillSkipped("lane_use_or_only_copy_protected") from error
         raise DrillPrerequisite("usage_custody_or_isolation_unverified") from error
+    if not result["authority_current"]:
+        raise DrillPrerequisite("testing_storage_authority_changed")
     if not result["capacity"]:
         raise DrillPrerequisite("testing_storage_capacity_insufficient")
     if store.list_odoo_testing_disposal_receipts(operation.product, operation.context):

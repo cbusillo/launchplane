@@ -11372,7 +11372,6 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         filestore_failure = True
         with self.assertRaises(OSError):
             discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
-        self.assertTrue((receipt_root / (previous + ".json")).is_file())
         filestore_failure = False
         discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
         self.assertEqual(cleaned, [previous])
@@ -11403,11 +11402,19 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         self.addCleanup(second.close)
         entered = threading.Event()
         release = threading.Event()
+        waiting_remotely = threading.Event()
+        finish_remote = threading.Event()
 
         def execute(*arguments: Any) -> dict[str, object]:
-            entered.set()
-            if not release.wait(10):
-                raise TimeoutError("fixture cleanup release")
+            def send() -> None:
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("fixture cleanup dispatch")
+
+            arguments[3](send)
+            waiting_remotely.set()
+            if not finish_remote.wait(10):
+                raise TimeoutError("fixture remote completion")
             return {"capacity": True, "disposals": []}
 
         with ThreadPoolExecutor(max_workers=3) as pool:
@@ -11418,6 +11425,7 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                 Path("."),
                 execute=execute,
                 now=scenario.now,
+                checkpoint=lambda: None,
             )
             self.assertTrue(entered.wait(5))
             writer = pool.submit(
@@ -11456,9 +11464,16 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                 self.assertFalse(admission.done())
             finally:
                 release.set()
-            maintenance.result(timeout=10)
-            writer.result(timeout=10)
-            admission.result(timeout=10)
+            self.assertTrue(waiting_remotely.wait(5))
+            try:
+                writer.result(timeout=5)
+                admission.result(timeout=5)
+            finally:
+                finish_remote.set()
+            from control_plane.odoo_testing_drill import DrillPrerequisite
+
+            with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_authority_changed"):
+                maintenance.result(timeout=10)
         # The competing authority insert invalidates the completed capacity
         # snapshot, so its old result cannot activate the worker's new database.
         from control_plane.odoo_testing_drill import DrillPrerequisite

@@ -1994,6 +1994,7 @@ export type OdooSlotReadiness = {
 export type OdooTestingDrillEvidence = {
     alert_delivered: boolean;
     deployment_record_id: string;
+    disposal_attention: number;
     disposal_pending: number;
     observed_at: string;
     operation_id: string;

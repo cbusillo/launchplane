@@ -123,6 +123,7 @@ def _read_program(
     payload: dict[str, object],
     timeout_seconds: float,
     receive: Callable[[dict[str, object]], None],
+    dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     nonce = uuid.uuid4().hex
@@ -171,7 +172,14 @@ def _read_program(
     encoded_program = base64.b64encode(program.encode()).decode()
     if len(encoded) > 120 * 1024 or len(encoded_program) > 120 * 1024:
         raise NativeSourceUnavailable("The fixed remote read exceeds the transport argument bound.")
-    connection.send(json.dumps({"program": encoded_program, "payload": encoded}) + "\n")
+
+    def dispatch() -> None:
+        connection.send(json.dumps({"program": encoded_program, "payload": encoded}) + "\n")
+
+    if dispatch_guard is None:
+        dispatch()
+    else:
+        dispatch_guard(dispatch)
     complete = False
     for line in lines:
         if not line.startswith(prefix):
@@ -331,6 +339,7 @@ def _read_remote(
     payload: dict[str, object],
     receive: Callable[[dict[str, object]], None],
     timeout_seconds: float,
+    dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
     logger = logging.Logger("launchplane-private-source", level=logging.CRITICAL + 1)
     logger.disabled = True
@@ -355,6 +364,7 @@ def _read_remote(
                 payload=payload,
                 timeout_seconds=timeout_seconds,
                 receive=receive,
+                **({"dispatch_guard": dispatch_guard} if dispatch_guard is not None else {}),
             )
     except InvalidStatus as error:
         if error.response.status_code in {401, 403}:

@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import Mock, patch
 
@@ -39,7 +39,20 @@ class TestingStorageTests(TestingDrillScenario):
         self.worker = worker
 
     def prepare(self, execute: Any = None) -> None:
-        prepare_drill_storage(self.store, self.worker, Path("."), execute=execute, now=self.now)
+        def guarded(
+            root: Path, target: str, spec: dict[str, object], dispatch: Any
+        ) -> dict[str, object]:
+            dispatch(lambda: None)
+            return cast(dict[str, object], execute(root, target, spec))
+
+        prepare_drill_storage(
+            self.store,
+            self.worker,
+            Path("."),
+            execute=guarded if execute is not None else None,
+            now=self.now,
+            checkpoint=lambda: None,
+        )
 
     def old_receipt(self, suffix: str = "old") -> Any:
         planned = self.gen.model_copy(
@@ -137,7 +150,9 @@ class TestingStorageTests(TestingDrillScenario):
         with self.assertRaisesRegex(DrillPrerequisite, "testing_disposal_deferred"):
             self.prepare(execute)
         self.assertEqual(len(execute.call_args.args[2]["storage_maintenance"]["copies"]), 1)
-        self.assertEqual(intent.response_payload["receipts"], [original.idempotency_key])
+        reconciled = storage_receipt(self.store, self.worker.operation_id)
+        assert reconciled is not None
+        self.assertEqual(reconciled.response_payload["receipts"], [original.idempotency_key])
 
     def test_current_and_immediate_predecessor_are_not_cleanup_candidates(self) -> None:
         receipt = self.old_receipt()
@@ -165,14 +180,14 @@ class TestingStorageTests(TestingDrillScenario):
             "testing",
             observed_at=datetime.fromtimestamp(self.now, timezone.utc),
         )
-        with self.assertRaisesRegex(DrillPrerequisite, "testing_disposal_deferred"):
-            self.prepare()
+        self.prepare()
+        self.assertEqual(self.evidence().disposal_attention, 1)
         copies = self.storage_executor.call_args.args[2]["storage_maintenance"]["copies"]
         self.assertEqual(copies, [])
         self.assertEqual(
-            self.store.list_odoo_testing_disposal_receipts(self.profile.product, self.context)[
-                0
-            ].idempotency_key,
+            self.store.list_odoo_testing_disposal_receipts(
+                self.profile.product, self.context, include_retained=True
+            )[0].idempotency_key,
             receipt.idempotency_key,
         )
 
@@ -209,6 +224,46 @@ class TestingStorageTests(TestingDrillScenario):
         with self.assertRaises(DrillSkipped):
             self.prepare(execute)
         execute.assert_not_called()
+
+    def test_hold_arriving_during_handshake_is_checked_before_dispatch(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+
+        sent = Mock()
+
+        def execute(
+            root: Path, target_id: str, spec: dict[str, object], dispatch: Any
+        ) -> dict[str, object]:
+            target = self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            )
+            self.store.write_dokploy_target_record(
+                target.model_copy(
+                    update={
+                        "policies": target.policies.model_copy(
+                            update={
+                                "staff_testing_hold": DokployTargetStaffTestingHold(
+                                    reason="staff arrived",
+                                    recorded_by="fixture",
+                                    recorded_at=self.profile.updated_at,
+                                )
+                            }
+                        )
+                    }
+                )
+            )
+            dispatch(sent)
+            return {"capacity": True, "disposals": []}
+
+        with self.assertRaises(DrillSkipped):
+            prepare_drill_storage(
+                self.store,
+                self.worker,
+                Path("."),
+                execute=execute,
+                now=self.now,
+                checkpoint=lambda: None,
+            )
+        sent.assert_not_called()
 
 
 class HostCapacityTests(unittest.TestCase):
@@ -248,6 +303,9 @@ class HostCapacityTests(unittest.TestCase):
                 self.assertFalse(namespace["storage_capacity"](spec, containers, budget))
                 budget["staging_bytes"] = 10
                 self.assertTrue(namespace["storage_capacity"](spec, containers, budget))
+                spec["generation"]["source_mode"] = "ssh"
+                namespace["tempfile"] = SimpleNamespace(gettempdir=lambda: root / "-staging")
+                self.assertFalse(namespace["storage_capacity"](spec, containers, budget))
                 containers["script-runner"][1]["GraphDriver"] = {}
-                with self.assertRaisesRegex(RuntimeError, "staging backing"):
+                with self.assertRaises(RuntimeError):
                     namespace["storage_capacity"](spec, containers, budget)

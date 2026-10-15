@@ -2222,7 +2222,14 @@ def _execute_target_replacement_with_checkpoint(
         if isinstance(record_store, PostgresRecordStore):
             from control_plane.odoo_testing_storage import prepare_drill_storage
 
-            prepare_drill_storage(record_store, operation, control_plane_root_path)
+            prepare_drill_storage(
+                record_store,
+                operation,
+                control_plane_root_path,
+                checkpoint=lambda: authorization_guard.recheck_provider_effect(
+                    TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE
+                ),
+            )
             record_store.activate_odoo_testing_drill(operation, time.time())
         require_unchanged_production_artifact(
             record_store=record_store,

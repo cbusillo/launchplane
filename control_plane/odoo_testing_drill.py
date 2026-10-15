@@ -574,7 +574,7 @@ class OdooTestingDrillScheduler:
                     sender,
                     {
                         "allowed_mentions": {"parse": []},
-                        "content": f"Odoo testing {'storage cleanup deferred' if payload.get('failure_step') == 'testing_disposal_deferred' else 'rebuild failed'}: {safe(product)} / testing. Step: {safe(payload.get('failure_step', payload.get('step')))}. Trace: {safe(payload.get('failure_trace', payload.get('trace')))}. Inspect the retained drill operation; no automatic recapture.",
+                        "content": f"Odoo testing {'storage cleanup needs attention' if payload.get('failure_step') in {'testing_disposal_deferred', 'testing_disposal_retained'} else 'rebuild failed'}: {safe(product)} / testing. Step: {safe(payload.get('failure_step', payload.get('step')))}. Trace: {safe(payload.get('failure_trace', payload.get('trace')))}. Inspect the retained drill operation; no automatic recapture.",
                     },
                 )
                 delivered_destinations.append(destination_key)
@@ -603,6 +603,9 @@ def testing_drill_evidence(
         return None
     payload = dict(receipt.response_payload)
     payload["disposal_pending"] = len(store.list_odoo_testing_disposal_receipts(product, context))
+    payload["disposal_attention"] = len(
+        store.list_odoo_testing_disposal_receipts(product, context, include_retained=True)
+    ) - cast(int, payload["disposal_pending"])
     return OdooTestingDrillEvidence.model_validate(
         {
             "observed_at": receipt.response_payload.get("observed_at", receipt.recorded_at),
