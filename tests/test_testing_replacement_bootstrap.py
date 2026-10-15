@@ -325,3 +325,65 @@ class FreshTestingBootstrapObservationTests(unittest.TestCase):
             observation = adapter.observe("key", "bind_independent_testing_route", "reconcile")
             self.assertEqual(observation.outcome, "unknown")
             self.assertFalse(observation.retry_safe)
+
+
+class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.fixture = resource_tests.TestingReplacementResourceHttpTests()
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    async def post(self, **changes: object) -> Any:
+        from tests.support.http import request
+        from control_plane.testing_replacement_bootstrap import ROUTE
+
+        return await request(
+            self.fixture.app,
+            "POST",
+            ROUTE.format(product=self.fixture.profile.product),
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Idempotency-Key": "original-key",
+            },
+            payload={
+                "context": self.fixture.context,
+                "operation_id": self.fixture.operation.operation_id,
+                "domain_host": "fresh.example.invalid",
+                "reason": "fixture copy",
+                **changes,
+            },
+        )
+
+    async def test_wrong_context_operation_production_and_client_never_reach_provider(self) -> None:
+        from tests.support.auth import scoped_agent_transport
+
+        with patch(
+            "control_plane.testing_replacement_bootstrap.source.read_dokploy_config"
+        ) as provider:
+            for changes in (
+                {"instance": "prod"},
+                {"context": "another"},
+                {"operation_id": "missing"},
+            ):
+                with self.subTest(changes=changes):
+                    self.assertGreaterEqual((await self.post(**changes)).status_code, 400)
+            with scoped_agent_transport():
+                self.assertEqual((await self.post()).status_code, 403)
+            provider.assert_not_called()
+        self.assertIsNone(
+            self.fixture.store.read_fresh_odoo_testing_generation(
+                self.fixture.profile.product, self.fixture.context
+            )
+        )
+
+    async def test_sqlite_cannot_publish_bootstrap_or_private_failure_details(self) -> None:
+        for mode in ("apply", "readback"):
+            result = await self.post(mode=mode, reviewed_plan_sha256="a" * 64)
+            self.assertEqual(result.status_code, 503, result.text)
+        with patch(
+            "control_plane.http_routes.testing_replacement_bootstrap.bootstrap_plan",
+            side_effect=ValueError("private-value"),
+        ):
+            result = await self.post()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertNotIn("private-value", result.text)

@@ -353,6 +353,16 @@ checks reapplied instance settings before hooks. A final readback gates web star
 Browser-facing responses restrict external connections through the testing route.
 Only a completed, healthy deployment marks the generation complete; subsequent
 reconciliation uses its existing data rather than restoring production again.
+An incomplete generation refuses an existing-data deploy. After completion,
+deployments using existing data remain supported; another production refresh
+requires a separately qualified generation and is refused at planning time.
+Plans report incomplete or unverified authority as blockers without starting work.
+
+The web service uses the provider's shared ingress bridge for HTTPS. Its data
+services use only the internal testing network; storage, database credentials and
+host ports remain independent. The restored connection settings and live keys
+are removed before the first registry process, and browser responses restrict
+external connections.
 
 An interrupted route write is adopted only from exact provider readback. An
 unobservable dispatched write remains unknown; never repeat it under a new key.
@@ -362,8 +372,12 @@ another target, reassigning the retained host or queueing a second restore.
 Host dump/filestore staging is removed on success and ordinary failure. The raw
 container dump is removed before any registry hook. Failures leave retained
 resources and the stopped new copy available for exact recovery. A failed initial
-copy may drop only its own newly restored database; a resumed copy is preserved. Do not
-retry the historical operation, fabricate a recovery journal, delete old storage,
+copy may drop only its own newly restored database; a resumed copy is preserved.
+The host holds an exclusive generation lock across capture and startup, uses a
+unique dump path, clears the prior web-start gate, and rechecks database absence
+under the artifact's workflow lock before an initial restore. A stale workflow
+lock is removed only after terminal schedule proof and a dead owner process.
+Do not retry the historical operation, fabricate a recovery journal, delete old storage,
 or point the old hostname at the replacement to clear a refusal.
 
 The generation table survives schema downgrade. Older service images cannot

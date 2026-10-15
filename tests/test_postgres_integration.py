@@ -10773,3 +10773,54 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
 
     def test_crash_after_route_metadata_resumes_supersession_without_nested_lock(self) -> None:
         self.scenario("fence")
+
+    def test_http_lost_bootstrap_receipt_recovers_original_key_without_second_route(self) -> None:
+        from control_plane.testing_replacement_bootstrap import (
+            ROUTE,
+            TestingReplacementBootstrapAdapter,
+        )
+        from tests.support.http import request
+
+        self.patches()
+        self.review()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:bootstrap",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
+        apply = TestingReplacementBootstrapAdapter.apply
+
+        def lost(adapter: Any, *args: Any) -> Any:
+            apply(adapter, *args)
+            raise RuntimeError("private lost HTTP reply")
+
+        async def post() -> Any:
+            return await request(
+                self.fixture.app,
+                "POST",
+                ROUTE.format(product=self.profile.product),
+                headers={
+                    "Authorization": "Bearer local-operator-token",
+                    "Idempotency-Key": "original-key",
+                },
+                payload=self.request.model_dump(mode="json"),
+            )
+
+        with patch.object(TestingReplacementBootstrapAdapter, "apply", lost):
+            first = asyncio.run(post())
+        self.assertEqual(first.status_code, 409, first.text)
+        self.assertNotIn("private lost HTTP reply", first.text)
+        recovered = asyncio.run(post())
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        replay = asyncio.run(post())
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(self.route_writes, 1)

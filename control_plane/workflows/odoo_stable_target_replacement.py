@@ -15,6 +15,7 @@ from control_plane.integration_readback import web_held_until_integration_readba
 from control_plane.odoo_testing_restore import (
     read_current_testing_generation,
     fresh_testing_authority_sha256,
+    fresh_testing_mode_refusal,
 )
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
@@ -1408,9 +1409,23 @@ def build_odoo_stable_target_replacement_plan(
         block("target_not_compose", "Odoo stable replacement currently requires a compose target.")
     approval_issue_url = ""
     destructive_backup_required = _replacement_backup_required(profile, lane, request)
-    generation = read_current_testing_generation(
-        record_store, product=profile.product, context=lane.context, instance=lane.instance
-    )
+    try:
+        generation = read_current_testing_generation(
+            record_store,
+            product=profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            bootstrap_preparation=True,
+        )
+    except (ValueError, FileNotFoundError):
+        generation = None
+        block(
+            "fresh_testing_authority_unverified",
+            "The fresh testing generation's resource or credential authority is unverified.",
+        )
+    refusal = fresh_testing_mode_refusal(generation, request.data_source_mode)
+    if refusal is not None:
+        block(*refusal)
     fresh_bootstrap = bool(
         generation
         and not generation.completed_at
@@ -1810,6 +1825,9 @@ def execute_odoo_stable_target_replacement_apply(
     generation = read_current_testing_generation(
         record_store, product=profile.product, context=plan.context, instance=plan.instance
     )
+    refusal = fresh_testing_mode_refusal(generation, request.data_source_mode)
+    if refusal is not None:
+        raise OdooTargetReplacementStageError(*refusal)
     if target_record.target_type != "compose":
         raise OdooTargetReplacementStageError(
             "target_not_compose", "Odoo target replacement apply requires a compose target."
@@ -2699,7 +2717,11 @@ def execute_odoo_stable_target_replacement_apply(
                 schedule_execution_timeout_seconds=(
                     request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
                 ),
-                fresh_testing_generation=generation if post_deploy_phase == "restore" else None,
+                fresh_testing_generation=generation
+                if generation is not None
+                and post_deploy_phase == "restore"
+                and not generation.completed_at
+                else None,
                 fresh_restore_source_environment=fresh_restore_source_environment,
             )
     except OdooProviderEffectUncertainError:
@@ -2941,7 +2963,23 @@ def execute_odoo_stable_target_replacement_apply(
     record_store.write_environment_inventory(
         build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
     )
-    if generation is not None and not generation.completed_at:
+    if (
+        generation is not None
+        and not generation.completed_at
+        and request.data_source_mode == "upstream_restore"
+    ):
+        if any(
+            post_deploy_evidence.evidence.get(key) != "true"
+            for key in (
+                "testing_copy_sanitized",
+                "integration_readback_ok",
+                "odoo_restore_completed",
+            )
+        ):
+            raise OdooTargetReplacementStageError(
+                "fresh_testing_restore_unverified",
+                "This generation has no completed sanitized-copy restore evidence.",
+            )
         writer = getattr(record_store, "write_fresh_odoo_testing_generation")
         writer(generation.model_copy(update={"completed_at": finished_at}))
     with _failure_stage("release_tuple_mint_failed"):

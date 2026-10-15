@@ -15,6 +15,7 @@ from control_plane.odoo_testing_restore import (
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     FRESH_TESTING_OMITTED_SETTINGS,
     FRESH_TESTING_RESTORE_HOST_PROGRAM,
+    FRESH_TESTING_STALE_LOCK_PROGRAM,
     FreshOdooTestingGeneration,
     generation_binding,
     narrow_fresh_testing_requirements,
@@ -156,6 +157,10 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             "readback_program": "fixture readback",
             "readback_spec": "fixture-spec",
             "copy_binding_sha256": self.gen.bootstrap_plan_sha256,
+            "data_workflow_lock_path": "/volumes/data/.fixture_workflow_lock",
+            "clear_stale_lock": False,
+            "stale_lock_program": FRESH_TESTING_STALE_LOCK_PROGRAM,
+            "expected_overrides_payload": "",
         }
         self.containers: dict[str, dict[str, Any]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
@@ -261,6 +266,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         with (
             patch.object(sys, "argv", ["copy", encoded]),
             patch("subprocess.run", side_effect=self.command),
+            patch("tempfile.gettempdir", return_value=str(self.root)),
             redirect_stdout(output),
         ):
             try:
@@ -283,7 +289,13 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertLess(stop, source)
         self.assertLess(source, start)
         remote = self.calls[source][-1]
-        self.assertIn("pg_dump -Fc -- source_db", remote)
+        import shlex
+
+        remote_arguments = shlex.split(remote)
+        self.assertEqual(remote_arguments[0], "sudo")
+        self.assertEqual(remote_arguments[-1], self.spec["source"]["ODOO_UPSTREAM_DB_NAME"])
+        self.assertIn("pg_dump", remote_arguments)
+        self.assertIn("--", remote_arguments)
         self.assertEqual(len([call for call in self.calls if call[0] == "ssh"]), 1)
         copies = [call for call in self.calls if call[:2] == ["docker", "cp"]]
         self.assertTrue(copies)
@@ -388,6 +400,9 @@ class TestingCopyBoundaryTests(unittest.TestCase):
 
                 def execute(self, query: str, params: Any = ()) -> None:
                     if query == "SET TRANSACTION READ ONLY":
+                        return
+                    if "FROM pg_database" in query:
+                        self.cursor.execute("SELECT 0")
                         return
                     super().execute(query, params)
 
@@ -545,3 +560,230 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 self.assertNotIn("restore-fresh", events)
             self.assertEqual(events[0], "lock")
             self.assertEqual(events[-1], "unlock")
+
+
+class FreshTestingIntentTests(unittest.TestCase):
+    def test_exact_modules_and_no_live_override_can_reach_capture(self) -> None:
+        from control_plane.odoo_testing_restore import validate_fresh_testing_intent
+        from control_plane.integration_readback import INTEGRATION_FAMILIES
+
+        policy = {
+            "families": [
+                {"config_parameters": list(item.config_parameters)} for item in INTEGRATION_FAMILIES
+            ]
+        }
+        spec = base64.b64encode(json.dumps(policy).encode()).decode()
+        validate_fresh_testing_intent(modules="website,web", encoded_payload="", readback_spec=spec)
+        for modules in ("", "AUTO", "auto", "web,Auto", "web;untrusted"):
+            with self.subTest(modules=modules), self.assertRaises(ValueError):
+                validate_fresh_testing_intent(
+                    modules=modules, encoded_payload="", readback_spec=spec
+                )
+        for family in INTEGRATION_FAMILIES:
+            for key in family.config_parameters:
+                payload = base64.b64encode(
+                    json.dumps(
+                        {
+                            "config_parameters": [
+                                {
+                                    "key": key,
+                                    "value": {"source": "literal", "value": "copied-live-setting"},
+                                }
+                            ]
+                        }
+                    ).encode()
+                ).decode()
+                with self.subTest(key=key), self.assertRaises(ValueError):
+                    validate_fresh_testing_intent(
+                        modules="website", encoded_payload=payload, readback_spec=spec
+                    )
+        addon_payload: dict[str, Any] = {
+            "addon_settings": [
+                {
+                    "addon": "shopify",
+                    "setting": "action",
+                    "value": {"source": "literal", "value": "apply"},
+                }
+            ]
+        }
+        with self.assertRaises(ValueError):
+            validate_fresh_testing_intent(
+                modules="website",
+                encoded_payload=base64.b64encode(json.dumps(addon_payload).encode()).decode(),
+                readback_spec=spec,
+            )
+        addon_payload["addon_settings"][0]["value"]["value"] = "clear"
+        validate_fresh_testing_intent(
+            modules="website",
+            encoded_payload=base64.b64encode(json.dumps(addon_payload).encode()).decode(),
+            readback_spec=spec,
+        )
+
+    def test_stale_lock_requires_terminal_schedule_and_dead_owner_and_stays_in_copy(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            processes = root / "processes"
+            processes.mkdir()
+            lock = root / "workflow.lock"
+            for alive, terminal, removed in (
+                (True, True, False),
+                (False, False, False),
+                (False, True, True),
+            ):
+                with self.subTest(alive=alive, terminal=terminal):
+                    lock.write_text("pid=1234\nstarted_at=1\n")
+                    with (
+                        patch.object(
+                            sys,
+                            "argv",
+                            [
+                                "lock",
+                                str(lock),
+                                "true" if terminal else "false",
+                                str(root),
+                                str(processes),
+                                "fixture-database",
+                            ],
+                        ),
+                        patch("os.kill", side_effect=None if alive else ProcessLookupError),
+                    ):
+                        if removed:
+                            exec(
+                                compile(FRESH_TESTING_STALE_LOCK_PROGRAM, "<stale-lock>", "exec"),
+                                {},
+                            )
+                        else:
+                            with self.assertRaises(RuntimeError):
+                                exec(
+                                    compile(
+                                        FRESH_TESTING_STALE_LOCK_PROGRAM, "<stale-lock>", "exec"
+                                    ),
+                                    {},
+                                )
+                    self.assertEqual(lock.exists(), not removed)
+            lock.write_text("pid=1234\nstarted_at=1\n")
+            child = processes / str(os.getpid() + 1)
+            child.mkdir()
+            (child / "cmdline").write_bytes(b"python3\x00/odoo/odoo-bin\x00-d\x00fixture-database")
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    ["lock", str(lock), "true", str(root), str(processes), "fixture-database"],
+                ),
+                patch("os.kill", side_effect=ProcessLookupError),
+                self.assertRaises(RuntimeError),
+            ):
+                exec(compile(FRESH_TESTING_STALE_LOCK_PROGRAM, "<stale-lock>", "exec"), {})
+            self.assertTrue(lock.exists())
+            lock.unlink()
+            outside = root.parent / (root.name + "-outside-lock")
+            outside.write_text("pid=1234\n")
+            self.addCleanup(outside.unlink, missing_ok=True)
+            lock.symlink_to(outside)
+            with (
+                patch.object(
+                    sys,
+                    "argv",
+                    ["lock", str(lock), "true", str(root), str(processes), "fixture-database"],
+                ),
+                patch("os.kill", side_effect=ProcessLookupError),
+                self.assertRaises(RuntimeError),
+            ):
+                exec(compile(FRESH_TESTING_STALE_LOCK_PROGRAM, "<stale-lock>", "exec"), {})
+            self.assertTrue(outside.exists())
+
+
+class FreshTestingPlannerModeTests(unittest.TestCase):
+    def test_planner_requires_copy_first_and_keeps_later_existing_data_deploys_supported(
+        self,
+    ) -> None:
+        from typing import cast
+        from control_plane.contracts.odoo_stable_target_replacement import (
+            OdooStableTargetReplacementRequest,
+        )
+        from control_plane.workflows.odoo_stable_target_replacement import (
+            build_odoo_stable_target_replacement_plan,
+        )
+        from control_plane.odoo_testing_restore import fresh_testing_mode_refusal
+        from tests.test_odoo_stable_target_replacement import (
+            _Store,
+            _target_record,
+            _target_id_record,
+            _inventory,
+            _request,
+            _DATABASE_ENV_LINES,
+        )
+
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+        target = store.target_record
+        target_id = store.target_id_record
+        assert target is not None and target_id is not None
+        for completed, mode in (
+            (False, "existing"),
+            (True, "upstream_restore"),
+            (True, "existing"),
+        ):
+            current = generation().model_copy(
+                update={
+                    "product": store.profile.product,
+                    "context": target.context,
+                    "target_id": target_id.target_id,
+                    "reconcile_requested_at": "queued",
+                    "completed_at": "done" if completed else "",
+                }
+            )
+            payload = {
+                "name": target.target_name,
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": "services: {}",
+                "env": "\n".join(
+                    (
+                        *_DATABASE_ENV_LINES,
+                        "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                    )
+                ),
+            }
+            with (
+                self.subTest(completed=completed, mode=mode),
+                patch(
+                    "control_plane.workflows.odoo_stable_target_replacement.read_current_testing_generation",
+                    return_value=current,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                    return_value=("host", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                    return_value=payload,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                    return_value={"deploymentId": "fixture", "status": "success"},
+                ),
+            ):
+                plan = build_odoo_stable_target_replacement_plan(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooStableTargetReplacementRequest(
+                        product=store.profile.product,
+                        instance="testing",
+                        data_source_mode=cast(Any, mode),
+                        allow_empty_data=True,
+                    ),
+                    dokploy_request=cast(Any, _request),
+                )
+                refusal = fresh_testing_mode_refusal(current, mode)
+                if refusal is not None:
+                    self.assertIn(refusal[0], plan.blocker_codes)
+                    self.assertEqual(plan.plan_status, "blocked")
+                else:
+                    self.assertEqual(plan.plan_status, "ready")

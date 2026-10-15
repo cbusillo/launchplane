@@ -13,6 +13,9 @@ from control_plane.contracts.product_profile_record import (
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.odoo_connection_isolation import connection_isolation_library
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooTargetReplacementPlanBlockerCode,
+)
 
 
 Requirement = TypeVar(
@@ -38,6 +41,29 @@ class FreshOdooTestingGeneration(BaseModel):
     prepared_at: str
     completed_at: str = ""
     reconcile_requested_at: str = ""
+
+
+def fresh_testing_mode_refusal(
+    generation: FreshOdooTestingGeneration | None, mode: str
+) -> tuple[OdooTargetReplacementPlanBlockerCode, str] | None:
+    if generation is None:
+        return None
+    if not generation.reconcile_requested_at:
+        return (
+            "fresh_testing_bootstrap_incomplete",
+            "Finish the original bootstrap route and queue preparation before executing this generation.",
+        )
+    if not generation.completed_at and mode != "upstream_restore":
+        return (
+            "fresh_testing_restore_required",
+            "Complete this generation's sanitized production-copy restore before deploying with existing data.",
+        )
+    if generation.completed_at and mode == "upstream_restore":
+        return (
+            "fresh_testing_refresh_unsupported",
+            "This generation's initial copy is complete. Deploy using existing data; a later production refresh requires a separately qualified generation.",
+        )
+    return None
 
 
 # This wrapper uses the artifact's SQL-only credential boundary before the first
@@ -112,6 +138,14 @@ try:
     dump = Path(sys.argv[1])
     copy_marker = "launchplane.testing_copy.restore_complete"
     if sys.argv[5] == "fresh":
+        observer = runner._connect_with_retry("postgres")
+        try:
+            with observer.cursor() as cursor:
+                cursor.execute("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = %s)", (runner.local.db_name,))
+                if cursor.fetchone()[0]:
+                    raise RuntimeError("Fresh copy destination appeared before the restore lock")
+        finally:
+            observer.close()
         subprocess.run(["pg_restore", "--file=/dev/null", str(dump)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         runner.overwrite_database(dump)
@@ -175,6 +209,43 @@ def encoded_restore_source(environment: dict[str, str]) -> str:
     return base64.b64encode(json.dumps(source, sort_keys=True).encode()).decode()
 
 
+def validate_fresh_testing_intent(
+    *, modules: str, encoded_payload: str, readback_spec: str
+) -> None:
+    """Refuse predictable execution failures before any production capture."""
+    import re
+    from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
+
+    names = [name.strip() for name in modules.split(",") if name.strip()]
+    if not names or any(
+        name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in names
+    ):
+        raise ValueError("Fresh testing requires exact declared module intent.")
+    if not encoded_payload:
+        return
+    payload = json.loads(base64.b64decode(encoded_payload, validate=True))
+    policy = json.loads(base64.b64decode(readback_spec, validate=True))
+    forbidden = {key for family in policy["families"] for key in family["config_parameters"]}
+    for item in payload.get("config_parameters", []):
+        key = item["key"]
+        if key in forbidden or key.startswith(
+            ("google_analytics.", "plausible.", "google_tag_manager.")
+        ):
+            raise ValueError("Fresh testing cannot apply integration connection settings.")
+        if key in CONNECTION_ISOLATION_PARAMETERS and item["value"] != {
+            "source": "literal",
+            "value": CONNECTION_ISOLATION_PARAMETERS[key],
+        }:
+            raise ValueError("Fresh testing cannot replace its connection fences.")
+    for item in payload.get("addon_settings", []):
+        if (
+            item.get("addon") == "shopify"
+            and item.get("setting") == "action"
+            and item.get("value") != {"source": "literal", "value": "clear"}
+        ):
+            raise ValueError("Fresh testing cannot enable a managed integration.")
+
+
 def build_fresh_testing_restore_script(
     *,
     generation: FreshOdooTestingGeneration,
@@ -185,8 +256,24 @@ def build_fresh_testing_restore_script(
     readback_spec: str,
     readback_program: str,
     workflow_environment: dict[str, str],
+    runtime_environment: dict[str, str],
+    clear_stale_lock: bool,
+    data_workflow_lock_path: str,
 ) -> str:
+    payload = workflow_environment.get(
+        "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64",
+        runtime_environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", ""),
+    )
+    validate_fresh_testing_intent(
+        modules=workflow_environment.get("ODOO_UPDATE_MODULES", ""),
+        encoded_payload=payload,
+        readback_spec=readback_spec,
+    )
     spec = {
+        "expected_overrides_payload": payload,
+        "stale_lock_program": FRESH_TESTING_STALE_LOCK_PROGRAM,
+        "clear_stale_lock": clear_stale_lock,
+        "data_workflow_lock_path": data_workflow_lock_path,
         "generation": generation.model_dump(mode="json"),
         "compose_project": compose_project,
         "image_reference": image_reference,
@@ -194,19 +281,10 @@ def build_fresh_testing_restore_script(
         "source": json.loads(base64.b64decode(encoded_restore_source(source_environment))),
         "readback_spec": readback_spec,
         "readback_program": readback_program,
-        "copy_binding_sha256": __import__("hashlib")
-        .sha256(
-            (
-                generation_binding(generation)
-                + "\n"
-                + image_reference
-                + "\n"
-                + database_name
-                + "\n"
-                + workflow_environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "")
-            ).encode()
-        )
-        .hexdigest(),
+        # This witnesses the completed source capture, not a particular future
+        # artifact or settings payload. Every resume re-runs their own boundary
+        # and module/readback proof before the payload-bound web gate opens.
+        "copy_binding_sha256": generation_binding(generation),
         "runner": TESTING_COPY_RUNNER,
         "workflow_environment": workflow_environment,
         "ssh_key_path": source_environment.get("DATA_WORKFLOW_SSH_KEY", ""),
@@ -222,9 +300,41 @@ def build_fresh_testing_restore_script(
     )
 
 
+FRESH_TESTING_STALE_LOCK_PROGRAM = """import os,sys
+from pathlib import Path
+path=Path(sys.argv[1])
+if not path.is_absolute() or '..' in path.parts or not path.resolve().is_relative_to(Path(sys.argv[3]).resolve()) or path.is_symlink():
+    raise RuntimeError('Unexpected testing workflow lock path')
+for process in Path(sys.argv[4]).iterdir():
+    if not process.name.isdigit() or int(process.name) == os.getpid():
+        continue
+    try:
+        arguments=(process/'cmdline').read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        continue
+    if any(marker in arguments for marker in (b'odoo-bin', b'run_odoo_', b'pg_restore', sys.argv[5].encode())):
+        raise RuntimeError('Testing data workflow still has an active process')
+if path.exists():
+    fields=dict(line.split('=',1) for line in path.read_text().splitlines() if '=' in line)
+    pid=int(fields['pid'])
+    if pid < 1:
+        raise RuntimeError('Invalid testing workflow lock owner')
+    try:
+        os.kill(pid,0)
+    except ProcessLookupError:
+        if sys.argv[2] != 'true':
+            raise RuntimeError('Testing workflow lock lacks terminal schedule proof')
+        path.unlink()
+    else:
+        raise RuntimeError('Testing workflow lock still has a live process')
+"""
+
+
 FRESH_TESTING_RESTORE_HOST_PROGRAM = r"""
 import base64
 import hashlib
+import fcntl
+import os
 import json
 from pathlib import Path
 import re
@@ -233,6 +343,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 
 
 def command(arguments, *, stdin=None, stdout=None):
@@ -254,7 +365,7 @@ def one_inspection(identifier):
     return values[0]
 
 
-def main():
+def restore_main():
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     gen = spec["generation"]
     namespace = gen["namespace"]
@@ -266,8 +377,9 @@ def main():
         raise RuntimeError("Testing compose identity changed")
     if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}", database):
         raise RuntimeError("Testing database identity is invalid")
-    if not str(spec["workflow_environment"].get("ODOO_UPDATE_MODULES", "")).strip():
-        raise RuntimeError("Testing restore has no declared module update intent")
+    modules = [name.strip() for name in str(spec["workflow_environment"].get("ODOO_UPDATE_MODULES", "")).split(",") if name.strip()]
+    if not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules):
+        raise RuntimeError("Testing restore has no exact declared module update intent")
     volumes = {namespace + "-data", namespace + "-db", namespace + "-logs"}
     containers = {}
     all_containers = []
@@ -284,7 +396,7 @@ def main():
         raise RuntimeError("Testing compose inventory is incomplete")
     for service, (identifier, container) in containers.items():
         configuration = container["Config"]
-        if container.get("HostConfig", {}).get("Privileged") or container.get("HostConfig", {}).get("NetworkMode") == "host":
+        if container.get("HostConfig", {}).get("Privileged") or container.get("HostConfig", {}).get("NetworkMode") == "host" or container.get("HostConfig", {}).get("PidMode") not in (None, "", "private"):
             raise RuntimeError("Testing compose has host capabilities")
         if any(container.get("HostConfig", {}).get("PortBindings", {}).values()):
             raise RuntimeError("Testing compose publishes host ports")
@@ -298,6 +410,8 @@ def main():
             environment = dict(item.split("=", 1) for item in configuration.get("Env", []) if "=" in item)
             if environment.get("PLATFORM_INSTANCE") != "testing" or environment.get("ODOO_DB_HOST") != "database" or environment.get("ODOO_DB_NAME") != database:
                 raise RuntimeError("Testing database endpoint is not local")
+            if environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "") != spec["expected_overrides_payload"]:
+                raise RuntimeError("Testing settings changed after execution preflight")
             if environment.get("ODOO_MAX_CRON_THREADS") != "0":
                 raise RuntimeError("Fresh testing must have no cron workers")
             if container.get("HostConfig", {}).get("ExtraHosts"):
@@ -333,12 +447,12 @@ def main():
             raise RuntimeError("Testing backing storage overlaps")
         identities.add(identity)
         paths.append(backing)
-    own = {item[0] for item in containers.values()}
+    own = {item[1]["Id"] for item in containers.values()}
     for container in all_containers:
         if container.get("Id") in own:
             continue
         for mount in container.get("Mounts", []):
-            if mount.get("Type") != "bind":
+            if not mount.get("Source"):
                 continue
             source_path = Path(mount["Source"]).resolve(strict=False)
             if any(source_path == path or source_path.is_relative_to(path)
@@ -347,6 +461,9 @@ def main():
                 raise RuntimeError("Testing storage has a bind consumer")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
+    docker("exec", "-i", runner, "python3", "-", spec["data_workflow_lock_path"],
+        "true" if spec["clear_stale_lock"] else "false", "/volumes/data", "/proc", database, stdin=spec["stale_lock_program"].encode())
+    docker("exec", "-u", "root", runner, "rm", "-f", "/volumes/data/.launchplane_integration_readback_passed")
     docker("stop", web)
     print("testing_copy_runtime_isolated=true", flush=True)
     docker("exec", runner, "python3", "-c", "import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,name,None)) for name in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
@@ -358,7 +475,7 @@ def main():
     resume = present == "1"
     staging = None
     try:
-        dump_path = "/tmp/" + namespace + "-database.dump"
+        dump_path = "/tmp/" + namespace + "-" + uuid.uuid4().hex + "-database.dump"
         if not resume:
             source = spec["source"]
             for key in ("ODOO_UPSTREAM_HOST", "ODOO_UPSTREAM_USER", "ODOO_UPSTREAM_DB_USER", "ODOO_UPSTREAM_DB_NAME"):
@@ -374,6 +491,10 @@ def main():
                     raise RuntimeError("Unsupported existing host SSH location")
             ssh_directory = Path(spec["ssh_directory"] or "/home/ubuntu/.ssh")
             key_path = spec["ssh_key_path"]
+            for mount_prefix in ("/root/.ssh/", "/home/ubuntu/.ssh/"):
+                if key_path.startswith(mount_prefix):
+                    key_path = str(ssh_directory / Path(key_path).name)
+                    break
             if not key_path:
                 key_path = next((str(ssh_directory / name) for name in ("id_ed25519", "id_ecdsa", "id_rsa", "id_dsa") if (ssh_directory / name).is_file()), "")
             if not key_path:
@@ -434,6 +555,20 @@ def main():
         finally:
             if staging is not None:
                 shutil.rmtree(staging)
+
+
+def main():
+    spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
+    namespace = spec["generation"]["namespace"]
+    if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
+        raise RuntimeError("Invalid testing host lock identity")
+    path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
+    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        restore_main()
+    finally:
+        os.close(descriptor)
 
 
 try:

@@ -757,6 +757,9 @@ def run_compose_post_deploy_update(
             readback_spec=readback_policy.encoded_spec(),
             readback_program=INTEGRATION_READBACK_PROGRAM,
             workflow_environment=resolved_workflow_environment_overrides,
+            runtime_environment=desired_env_map,
+            clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
+            data_workflow_lock_path=data_workflow_lock_path,
         )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
