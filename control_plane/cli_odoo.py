@@ -364,9 +364,13 @@ def _migrate_odoo_override_secret_transport_record(
                 plan.bundle, expected_records=records
             )
     except OdooInstanceOverrideConflictError as error:
-        raise click.ClickException("Odoo overrides changed; re-run the migration.") from error
+        raise click.ClickException(
+            f"Odoo overrides {record.context}/{record.instance} changed; re-run the migration."
+        ) from error
     except ValueError as error:
-        raise click.ClickException(str(error)) from error
+        raise click.ClickException(
+            f"Odoo secret transport {record.context}/{record.instance}: {error}"
+        ) from error
     if apply_changes:
         for change in plan.changes:
             if change["action"] == "pending":

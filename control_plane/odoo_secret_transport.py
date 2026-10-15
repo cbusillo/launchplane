@@ -62,7 +62,9 @@ def plan_odoo_secret_transport(
             return value
         binding = binding_by_id.get(value.secret_binding_id)
         if binding is None:
-            raise ValueError("Odoo override references a missing secret binding.")
+            raise ValueError(
+                f"{kind} {key!r} references missing secret binding {value.secret_binding_id!r}."
+            )
         desired_id = expected_secret_binding_id(
             secret_id=binding.secret_id, binding_key=desired_key
         )
@@ -95,9 +97,13 @@ def plan_odoo_secret_transport(
                 )
                 != replacement
             ):
-                raise ValueError("Odoo secret transport destination binding conflicts with source.")
+                raise ValueError(
+                    f"{kind} {key!r} destination binding {desired_id!r} conflicts with source."
+                )
             if binding.status != "configured" and target is None:
-                raise ValueError("Odoo override secret binding is not configured.")
+                raise ValueError(
+                    f"{kind} {key!r} secret binding {binding.binding_id!r} is not configured."
+                )
             if target is None:
                 writes[desired_id] = replacement.model_copy(
                     update={"created_at": now, "updated_at": now}

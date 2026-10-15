@@ -19,7 +19,12 @@ from control_plane.contracts.odoo_website_settings import (
     OdooWebsiteSettings,
     OdooWebsiteSettingsIntent,
 )
-from control_plane.contracts.secret_record import SecretBinding, SecretSharingReason
+from control_plane.contracts.secret_record import (
+    SecretBinding,
+    SecretRecord,
+    SecretSharingReason,
+    SecretVersion,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
@@ -253,6 +258,25 @@ class OdooSecretTransportTests(unittest.TestCase):
         )
 
     def test_dry_run_is_read_only_and_reports_only_metadata(self) -> None:
+        version = SecretVersion(
+            version_id="synthetic-version",
+            secret_id=self.binding.secret_id,
+            ciphertext="synthetic-ciphertext-never-for-output",
+            created_at=self.binding.created_at,
+        )
+        self.store.write_secret_record(
+            SecretRecord(
+                secret_id=self.binding.secret_id,
+                scope="context",
+                context=self.binding.context,
+                integration=self.binding.integration,
+                name="synthetic-token",
+                current_version_id=version.version_id,
+                created_at=self.binding.created_at,
+                updated_at=self.binding.updated_at,
+            )
+        )
+        self.store.write_secret_version(version)
         result = CliRunner().invoke(
             main,
             ["odoo-overrides", "migrate-secret-transport", "--database-url", self.database_url],
@@ -260,7 +284,7 @@ class OdooSecretTransportTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(self.read(), self.record)
         self.assert_unmigrated()
-        self.assertNotIn(self.intent.settings.public_origin, result.output)
+        self.assertNotIn(version.ciphertext, result.output)
 
     def test_late_missing_binding_leaves_earlier_planned_relabel_untouched(self) -> None:
         record = self.record.model_copy(
