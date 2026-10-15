@@ -256,8 +256,8 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
           <ul>
             <li>Search indexing: {checklist.website_settings.settings.public_indexing_enabled ? "enabled" : "disabled"}</li>
             <li>Google Analytics: {checklist.website_settings.settings.google_analytics_key || "disabled"}</li>
-            <li>Cookie consent bar: {checklist.website_settings.settings.cookies_bar ? "enabled" : "disabled"}</li>
-            <li>Third-party blocking: {checklist.website_settings.settings.block_third_party_domains ? "enabled" : "disabled"}</li>
+            <li>Cookie consent bar: {checklist.website_settings.settings.cookies_bar == null ? "unchanged" : checklist.website_settings.settings.cookies_bar ? "enabled" : "disabled"}</li>
+            <li>Third-party blocking: {checklist.website_settings.settings.block_third_party_domains == null ? "unchanged" : checklist.website_settings.settings.block_third_party_domains ? "enabled" : "disabled"}</li>
           </ul>
           <p>Testing and previews keep production analytics and search indexing disabled.</p>
         </section> : null}

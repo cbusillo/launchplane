@@ -179,6 +179,7 @@ def prepare_website_settings(
         store.write_odoo_instance_override_record(
             replacement,
             expected_record=existing,
+            require_absent=existing is None,
             **LaneProductConfigWriteRequirements(
                 required_context_owner=required_context_owner,
                 required_product_config_target=required_product_config_target,

@@ -4,6 +4,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Any
 from unittest.mock import patch
 
 from pydantic import ValidationError
@@ -29,6 +30,7 @@ from control_plane.odoo_website_settings import (
 from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane.release_review import build_release_review
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from tests.test_release_review import (
     seed as release_seed,
@@ -91,6 +93,56 @@ def prepare(store: FilesystemRecordStore) -> None:
 
 
 class WebsiteSettingsTests(unittest.TestCase):
+    def test_concurrent_first_preparation_cannot_overwrite_a_new_record(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            value = request()
+            plan = plan_website_settings(store, value)
+            write = store.write_odoo_instance_override_record
+
+            def concurrent_write(record: object, **kwargs: Any) -> object:
+                from control_plane.contracts.odoo_instance_override_record import (
+                    OdooInstanceOverrideRecord,
+                )
+
+                assert isinstance(record, OdooInstanceOverrideRecord)
+                write(
+                    record.model_copy(
+                        update={
+                            "website_settings": None,
+                            "config_parameters": (
+                                OdooConfigParameterOverride(
+                                    key="web.base.url",
+                                    value=OdooOverrideValue(
+                                        source="literal", value="https://other.example"
+                                    ),
+                                ),
+                            ),
+                        }
+                    )
+                )
+                return write(record, **kwargs)
+
+            with patch.object(
+                store, "write_odoo_instance_override_record", side_effect=concurrent_write
+            ):
+                with self.assertRaises(OdooInstanceOverrideConflictError):
+                    prepare_website_settings(
+                        store,
+                        value.model_copy(
+                            update={
+                                "mode": "apply",
+                                "reviewed_plan_sha256": plan["plan_sha256"],
+                            }
+                        ),
+                    )
+            retained = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            self.assertIsNone(retained.website_settings)
+            self.assertEqual(retained.config_parameters[0].value.value, "https://other.example")
+
     def test_preparation_and_dry_run_do_not_activate_or_supply_acceptance(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))

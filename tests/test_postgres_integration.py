@@ -1461,6 +1461,25 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_first_override_write_requires_the_reviewed_absence(self) -> None:
+        from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
+
+        with _store_for_fresh_head_database() as store:
+            record = _import_override_record()
+            store.write_odoo_instance_override_record(record, require_absent=True)
+            with self.assertRaises(OdooInstanceOverrideConflictError):
+                store.write_odoo_instance_override_record(
+                    record.model_copy(update={"updated_at": "concurrent replacement"}),
+                    require_absent=True,
+                )
+            self.assertEqual(
+                store.read_odoo_instance_override_record(
+                    context_name=record.context,
+                    instance_name=record.instance,
+                ),
+                record,
+            )
+
     def test_odoo_copy_connections_are_repaired_with_postgres_sql(self) -> None:
         import psycopg
         from control_plane.odoo_connection_isolation import connection_isolation_library

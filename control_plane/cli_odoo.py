@@ -213,6 +213,21 @@ def _find_odoo_instance_override_record(
     return None
 
 
+def _write_reviewed_odoo_override(
+    store: PostgresRecordStore,
+    record: OdooInstanceOverrideRecord,
+    existing_records: tuple[OdooInstanceOverrideRecord, ...],
+) -> None:
+    expected = _find_odoo_instance_override_record(
+        existing_records=existing_records,
+        context_name=record.context,
+        instance_name=record.instance,
+    )
+    store.write_odoo_instance_override_record(
+        record, expected_record=expected, require_absent=expected is None
+    )
+
+
 def _build_odoo_instance_override_record_with_config_parameter(
     *,
     existing_records: tuple[OdooInstanceOverrideRecord, ...],
@@ -710,7 +725,7 @@ def odoo_overrides_put_config_param(
             override_value=override_value,
             source_label=source_label,
         )
-        postgres_store.write_odoo_instance_override_record(record)
+        _write_reviewed_odoo_override(postgres_store, record, existing_records)
     finally:
         postgres_store.close()
     click.echo(
@@ -770,7 +785,7 @@ def odoo_overrides_put_addon_setting(
             override_value=override_value,
             source_label=source_label,
         )
-        postgres_store.write_odoo_instance_override_record(record)
+        _write_reviewed_odoo_override(postgres_store, record, existing_records)
     finally:
         postgres_store.close()
     click.echo(
@@ -828,7 +843,7 @@ def odoo_overrides_put_website_bootstrap(
             website_bootstrap=website_bootstrap,
             source_label=source_label,
         )
-        postgres_store.write_odoo_instance_override_record(record)
+        _write_reviewed_odoo_override(postgres_store, record, existing_records)
     finally:
         postgres_store.close()
     click.echo(
@@ -1010,7 +1025,7 @@ def odoo_overrides_mark_apply(
             applied_at=applied_at,
             source_label=source_label,
         )
-        postgres_store.write_odoo_instance_override_record(record)
+        _write_reviewed_odoo_override(postgres_store, record, existing_records)
     finally:
         postgres_store.close()
     click.echo(

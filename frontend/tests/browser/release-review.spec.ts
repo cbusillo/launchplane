@@ -600,9 +600,21 @@ test("Client sees website settings before accepting the bound release", { tag: "
   const settings = page.getByRole("region", { name: "Website settings in this release" });
   await expect(settings).toContainText(review.review.checklist!.website_settings.settings.public_origin);
   await expect(settings).toContainText(review.review.checklist!.website_settings.settings.google_analytics_key);
+  await expect(settings).toContainText("Cookie consent bar: enabled");
+  await expect(settings).toContainText("Third-party blocking: enabled");
   await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("website-settings-before-accept.png"), fullPage: true });
   await page.getByRole("button", { name: "Accept release", exact: true }).click();
   await expect.poll(() => submittedDigest).toBe(review.review.checklist_digest);
+  review.review.checklist!.website_settings.settings = {
+    ...review.review.checklist!.website_settings.settings, operation: "disable_collection",
+    public_indexing_enabled: false, google_analytics_key: "",
+    cookies_bar: null, block_third_party_domains: null,
+  };
+  await page.reload();
+  await expect(settings).toContainText("Search indexing: disabled");
+  await expect(settings).toContainText("Google Analytics: disabled");
+  await expect(settings).toContainText("Cookie consent bar: unchanged");
+  await expect(settings).toContainText("Third-party blocking: unchanged");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

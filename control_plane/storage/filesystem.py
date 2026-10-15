@@ -7109,14 +7109,18 @@ class FilesystemRecordStore:
         required_context_owner: tuple[str, str] | None = None,
         required_product_config_target: tuple[str, str, str] | None = None,
         expected_record: OdooInstanceOverrideRecord | None = None,
+        require_absent: bool = False,
     ) -> Path:
         with self._product_authority_bundle_lock():
-            if expected_record is not None:
-                current = self._read_model_locked(
-                    OdooInstanceOverrideRecord,
-                    "odoo_instance_overrides",
-                    f"{record.context}-{record.instance}",
-                )
+            if expected_record is not None or require_absent:
+                try:
+                    current = self._read_model_locked(
+                        OdooInstanceOverrideRecord,
+                        "odoo_instance_overrides",
+                        f"{record.context}-{record.instance}",
+                    )
+                except FileNotFoundError:
+                    current = None
                 if current != expected_record:
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             if required_context_owner is not None or required_product_config_target is not None:
