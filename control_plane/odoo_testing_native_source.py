@@ -416,12 +416,26 @@ def prepare_native_testing_delivery(
                     "sha256": hashlib.sha256(content).hexdigest(),
                 }
                 expected[key] = value
+                upload_required = True
                 if key in observed:
-                    if observed[key] != value:
-                        raise ValueError(
-                            "An existing source chunk differs; retain it for recovery."
-                        )
-                else:
+                    if observed[key] == value:
+                        upload_required = False
+                    else:
+                        size = observed[key].get("size")
+                        if (
+                            not isinstance(size, int)
+                            or isinstance(size, bool)
+                            or not 0 <= size < len(content)
+                            or observed[key].get("sha256")
+                            != hashlib.sha256(content[:size]).hexdigest()
+                        ):
+                            raise ValueError(
+                                "An existing source chunk differs; retain it for recovery."
+                            )
+                        # A failed provider cp may leave an exact prefix of our
+                        # original immutable chunk. Only that proved partial is
+                        # repaired with the same original bytes.
+                if upload_required:
                     if before_mutation is not None:
                         before_mutation("native_testing_copy_chunk")
                     api.upload_native_testing_chunk(

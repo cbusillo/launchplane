@@ -2119,15 +2119,21 @@ def execute_odoo_stable_target_replacement_apply(
         ):
             # Source inspection/probe happens outside DB authority locks and before
             # the first testing provider write. It never exports or changes source.
-            native_source = resolve_native_testing_source(
-                cast(PostgresRecordStore, record_store),
-                root=control_plane_root,
-                profile=profile,
-                testing_context=plan.context,
-                probe=True,
-            )
-            if native_source.binding_sha256 != generation.source_binding_sha256:
-                raise ValueError("The reviewed native copy source changed.")
+            try:
+                native_source = resolve_native_testing_source(
+                    cast(PostgresRecordStore, record_store),
+                    root=control_plane_root,
+                    profile=profile,
+                    testing_context=plan.context,
+                    probe=True,
+                )
+                if native_source.binding_sha256 != generation.source_binding_sha256:
+                    raise ValueError("The reviewed native copy source changed.")
+            except ValueError:
+                raise OdooTargetReplacementStageError(
+                    deploy_blocked_code("upstream_restore_blocked"),
+                    "The reviewed native source capability or identity is unverified.",
+                ) from None
         with _failure_stage(deploy_blocked_code("provider_target_unreadable")):
             host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
             target_payload = dokploy_api.fetch_dokploy_target_payload(

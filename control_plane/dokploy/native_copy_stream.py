@@ -117,26 +117,32 @@ def _read_program(
         prompt_text = prompt.decode() if isinstance(prompt, bytes) else prompt
     if "Authentication failed" in prompt_text or "Unauthorized" in prompt_text:
         raise NativeSourceAuthorizationDenied("The registered source refused authentication.")
+    loader = (
+        "import base64,json,sys,termios; a=termios.tcgetattr(0);"
+        "a[3]&=~(termios.ECHO|termios.ICANON|termios.IEXTEN);"
+        "a[0]&=~(termios.ICRNL|termios.IXON);a[6][termios.VMIN]=1;a[6][termios.VTIME]=0;"
+        "termios.tcsetattr(0,termios.TCSANOW,a);print('\\n'+sys.argv[1]+'\\n',flush=True);"
+        "line=sys.stdin.readline(262145);"
+        "assert line.endswith('\\n') and len(line)<=262144;v=json.loads(line);"
+        "sys.argv=[sys.argv[0],v['payload'],sys.argv[2]];"
+        "exec(base64.b64decode(v['program'],validate=True))"
+    )
+    # Replace the interactive shell before sending any private payload. The
+    # loader itself disables canonical input/echo and then proves readiness;
+    # shell readline can otherwise reset tty settings and truncate long input.
     connection.send(
         "HISTFILE=/dev/null; export HISTFILE; unset PROMPT_COMMAND; "
-        "set +o history; set +o emacs; set +o vi; stty -echo -icanon min 1 time 0 && "
-        + "printf '\\n%s\\n' "
-        + shlex.quote(ready)
-        + "\n"
+        "set +o history; exec " + shlex.join(["python3", "-u", "-c", loader, ready, prefix]) + "\n"
     )
     lines = _lines(connection, deadline)
     for line in lines:
         if line == ready:
             break
     encoded = base64.b64encode(json.dumps(payload, sort_keys=True).encode()).decode()
-    script = (
-        "import base64;exec(base64.b64decode("
-        + repr(base64.b64encode(program.encode()).decode())
-        + "))"
-    )
-    if len(encoded) > 120 * 1024 or len(script) > 120 * 1024:
+    encoded_program = base64.b64encode(program.encode()).decode()
+    if len(encoded) > 120 * 1024 or len(encoded_program) > 120 * 1024:
         raise NativeSourceUnavailable("The fixed remote read exceeds the transport argument bound.")
-    connection.send(shlex.join(["python3", "-u", "-c", script, encoded, prefix]) + "\n")
+    connection.send(json.dumps({"program": encoded_program, "payload": encoded}) + "\n")
     complete = False
     for line in lines:
         if not line.startswith(prefix):
@@ -154,7 +160,6 @@ def _read_program(
             break
     if not complete:
         raise NativeSourceUnavailable("The source read has no completion witness.")
-    connection.send("exit\n")
 
 
 def read_native_source(

@@ -434,7 +434,7 @@ if path.exists():
 
 
 NATIVE_TESTING_FILES_PROGRAM = r"""
-import base64,hashlib,json,os,re,sys,tarfile
+import base64,hashlib,json,os,re,sys,tarfile,tempfile
 from pathlib import Path,PurePosixPath
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 capture=spec['capture']
@@ -473,11 +473,20 @@ artifacts={}
 try:
     for part in ('database','filestore'):
         destination=Path('/tmp')/('lp-native-'+identity+'-'+part+'.artifact')
-        if destination.exists() or destination.is_symlink():
+        if destination.is_symlink():
             raise RuntimeError('Unclaimed assembled artifact exists')
         artifacts[part]=destination
+        if destination.exists():
+            with destination.open('rb') as handle:
+                existing=hashlib.file_digest(handle,'sha256').hexdigest()
+            if not destination.is_file() or destination.stat().st_size!=capture[part]['size'] or existing!=capture[part]['sha256']:
+                raise RuntimeError('An existing assembled artifact differs')
+            continue
         digest=hashlib.sha256();size=0
-        with destination.open('xb') as output:
+        temporary=None
+        try:
+          with tempfile.NamedTemporaryFile(dir='/tmp',prefix='lp-native-'+identity+'-assemble-',delete=False) as output:
+            temporary=Path(output.name)
             for index in chunks(part):
                 path=path_for(part,index)
                 if path.is_symlink():
@@ -488,8 +497,13 @@ try:
                 if len(data)!=expected:
                     raise RuntimeError('Artifact staging is incomplete')
                 output.write(data);digest.update(data);size+=len(data)
-        if size!=capture[part]['size'] or digest.hexdigest()!=capture[part]['sha256']:
-            raise RuntimeError('Artifact integrity readback failed')
+            output.flush();os.fsync(output.fileno())
+          if size!=capture[part]['size'] or digest.hexdigest()!=capture[part]['sha256']:
+              raise RuntimeError('Artifact integrity readback failed')
+          os.link(temporary,destination)
+        finally:
+          if temporary is not None:
+              temporary.unlink(missing_ok=True)
     database=spec['database_name']
     if not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}',database):
         raise RuntimeError('Invalid testing database')
@@ -523,8 +537,26 @@ try:
                 if not path.is_file() or path.read_bytes()!=data:
                     raise RuntimeError('An existing testing attachment differs')
             else:
-                with path.open('xb') as handle:
-                    handle.write(data)
+                temporary=None
+                try:
+                    with tempfile.NamedTemporaryFile(dir=path.parent,prefix='.lp-native-'+identity+'-',delete=False) as handle:
+                        temporary=Path(handle.name)
+                        handle.write(data);handle.flush();os.fsync(handle.fileno())
+                    os.link(temporary,path)
+                    descriptor=os.open(path.parent,os.O_RDONLY|os.O_DIRECTORY)
+                    try:
+                        os.fsync(descriptor)
+                    finally:
+                        os.close(descriptor)
+                finally:
+                    if temporary is not None:
+                        temporary.unlink(missing_ok=True)
+    for directory in (root,root.parent):
+        descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
     destination=Path(spec['dump_path'])
     if destination.parent!=Path('/tmp') or not re.fullmatch(r'lp-testing-[a-f0-9]{32}-[a-f0-9]{32}-database.dump',destination.name):
         raise RuntimeError('Unsafe testing dump destination')

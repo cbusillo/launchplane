@@ -10,9 +10,11 @@ import json
 import os
 from pathlib import Path
 import shlex
+import select
+import subprocess
 import sys
 import tarfile
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, NamedTemporaryFile
 from typing import Any, cast
 import unittest
 from urllib.error import HTTPError
@@ -74,15 +76,65 @@ class Connection:
     def send(self, message: str) -> None:
         self.sent.append(message)
         if message.startswith("HISTFILE="):
-            ready = shlex.split(message)[-1]
+            ready = shlex.split(message)[-2]
+            self.prefix = shlex.split(message)[-1]
             self.pending.extend(["\r\n" + ready[:8], ready[8:] + "\r\n"])
-        elif message.startswith("python3 "):
-            prefix = shlex.split(message)[-1]
-            payload = prefix + json.dumps(self.frame) + "\r\n"
+        elif message.startswith("{"):
+            payload = self.prefix + json.dumps(self.frame) + "\r\n"
             self.pending.extend([payload[:7], payload[7:31], payload[31:]])
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "posix", "The registered terminal transport uses a POSIX tty")
+    def test_long_private_payload_is_read_after_loader_disables_tty_echo_and_canonical_mode(
+        self,
+    ) -> None:
+        import pty
+
+        master, slave = pty.openpty()
+        # A controlled fixture shell, using this test's interpreter, accepts only
+        # the emitted exec-loader command and replaces itself with that loader.
+        shell = "import os,shlex,sys; print('Connecting...\\n\\x1bcfixture# ',end='',flush=True); args=shlex.split(sys.stdin.readline()); args=args[args.index('exec')+1:]; os.execv(sys.executable,[sys.executable,*args[1:]])"
+        child = subprocess.Popen(
+            [sys.executable, "-u", "-c", shell], stdin=slave, stdout=slave, stderr=slave
+        )
+        os.close(slave)
+        raw = bytearray()
+
+        class Terminal:
+            def recv(self, timeout: float | None = None) -> bytes:
+                readable, _, _ = select.select([master], [], [], timeout)
+                if not readable:
+                    raise TimeoutError()
+                data = os.read(master, 65536)
+                raw.extend(data)
+                return data
+
+            def send(self, message: str) -> None:
+                data = message.encode()
+                while data:
+                    data = data[os.write(master, data) :]
+
+        frames: list[dict[str, object]] = []
+        payload: dict[str, object] = {"fixture": "private-fixture" * 5000}
+        program = "import sys,json,base64; value=json.loads(base64.b64decode(sys.argv[1])); print(sys.argv[2]+json.dumps({'type':'complete','length':len(value['fixture'])}),flush=True)"
+        try:
+            transport._read_program(
+                Terminal(),
+                program=program,
+                payload=payload,
+                timeout_seconds=10,
+                receive=frames.append,
+            )
+            child.wait(timeout=5)
+            self.assertEqual(frames, [{"type": "complete", "length": len(str(payload["fixture"]))}])
+            self.assertLess(len(raw), 4096)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+            os.close(master)
+
     def test_upload_journal_contains_only_metadata_and_provider_error_body_stays_private(
         self,
     ) -> None:
@@ -359,6 +411,84 @@ class NativeCopyCustodyTests(unittest.TestCase):
         self.assertLess(events.index("inspection"), events.index("capture"))
         self.assertTrue(upload.called)
 
+    def test_retry_repairs_only_proven_prefix_of_original_chunk(self) -> None:
+        with patch(
+            "control_plane.odoo_testing_native_source.read_native_source", side_effect=self.stream
+        ):
+            receipt = self.capture()
+        self.store.read_native_testing_copy_capture.return_value = receipt
+        for prefix_matches in (True, False):
+            with self.subTest(prefix_matches=prefix_matches):
+                prefix = self.data["database"][:5] if prefix_matches else b"wrong"
+                observed = {
+                    ("database", 0): {
+                        "type": "chunk",
+                        "part": "database",
+                        "index": 0,
+                        "size": len(prefix),
+                        "sha256": hashlib.sha256(prefix).hexdigest(),
+                    }
+                }
+
+                def inspect(**kwargs: Any) -> None:
+                    for value in observed.values():
+                        kwargs["receive"](value)
+                    kwargs["receive"]({"type": "complete", "runner": "e" * 64, "resume": False})
+
+                def upload(**kwargs: Any) -> None:
+                    part = str(kwargs["filename"]).rsplit("-", 2)[1]
+                    data = kwargs["content"]
+                    observed[(part, 0)] = {
+                        "type": "chunk",
+                        "part": part,
+                        "index": 0,
+                        "size": len(data),
+                        "sha256": hashlib.sha256(data).hexdigest(),
+                    }
+
+                with (
+                    patch(
+                        "control_plane.odoo_testing_native_source.inspect_native_testing_receiver",
+                        side_effect=inspect,
+                    ),
+                    patch(
+                        "control_plane.odoo_testing_native_source.api.upload_native_testing_chunk",
+                        side_effect=upload,
+                    ) as uploads,
+                    patch("control_plane.odoo_testing_native_source.read_native_source") as read,
+                ):
+                    if prefix_matches:
+                        self.assertEqual(
+                            prepare_native_testing_delivery(
+                                cast(PostgresRecordStore, self.store),
+                                root=self.root,
+                                generation=self.generation,
+                                descriptor=self.source,
+                                host="https://provider.invalid",
+                                token="fixture",
+                                server_id="receiver",
+                                spec={},
+                                before_mutation=None,
+                            ),
+                            receipt,
+                        )
+                        self.assertEqual(uploads.call_count, len(self.data))
+                    else:
+                        with self.assertRaisesRegex(ValueError, "existing source chunk differs"):
+                            prepare_native_testing_delivery(
+                                cast(PostgresRecordStore, self.store),
+                                root=self.root,
+                                generation=self.generation,
+                                descriptor=self.source,
+                                host="https://provider.invalid",
+                                token="fixture",
+                                server_id="receiver",
+                                spec={},
+                                before_mutation=None,
+                            )
+                        uploads.assert_not_called()
+                    read.assert_not_called()
+
 
 class NativeIdentityCompatibilityTests(unittest.TestCase):
     def test_existing_generation_hash_is_unchanged_by_defaulted_new_fields(self) -> None:
@@ -450,11 +580,17 @@ class NativeArtifactConsumptionTests(unittest.TestCase):
             "database_name": self.database,
             "dump_path": self.dump_path,
         }
+
+        def temporary_file(**kwargs: Any) -> Any:
+            kwargs["dir"] = self.mapped_path(str(kwargs["dir"]))
+            return NamedTemporaryFile(**kwargs)
+
         with (
             patch.object(
                 sys, "argv", ["consume", base64.b64encode(json.dumps(spec).encode()).decode()]
             ),
             patch("pathlib.Path", side_effect=self.mapped_path),
+            patch("tempfile.NamedTemporaryFile", side_effect=temporary_file),
         ):
             exec(compile(NATIVE_TESTING_FILES_PROGRAM, "<native-files>", "exec"), {})
 

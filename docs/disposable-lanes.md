@@ -551,7 +551,10 @@ Delivery uses at most 64 KiB per provider upload into the qualified runner's
 writable temporary layer, with metadata-only effect journaling. Provider upload
 success is provisional: actual receiver sizes and hashes must agree before the
 restore schedule runs. Retry retains the original receipt and bytes, skips
-already matching chunks and refuses a different existing chunk. An existing
+already matching chunks. A partial chunk is repaired only when its actual bytes
+are proven to be an exact prefix of the same immutable original; other differing
+chunks remain held. Attachment publication is atomic, so an interrupted write
+does not publish a partial content-addressed file. An existing
 database must hold the exact generation's committed copy witness; that resume
 does not recapture or require the raw cache. A receipt whose raw files are
 missing without that database witness is held for recovery, never silently
