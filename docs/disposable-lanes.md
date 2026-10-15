@@ -20,6 +20,9 @@ minutes. A changed binding, expired observation, positive
 staff-testing hold or any required unknown fact refuses the new permission.
 A target ID also bound to another lane refuses it independently of the observation.
 Global and lane runtime configuration and secret metadata participate in the binding.
+For an Odoo preview, the binding also includes its copied template-lane runtime
+settings, secret metadata and bootstrap override. Changing those inputs
+invalidates preview safety even when no record under the preview slug changes.
 Recording or refreshing an observation changes no profile or ownership digest.
 Actual ownership and runtime/secret authority still must match, and each
 destructive checkpoint validates fresh facts.
@@ -98,6 +101,79 @@ Before a restored copy runs, its live keys and outbound email, payment, carrier,
 analytics and similar connections must be removed or neutralized and verified
 without exposing their values. A successful policy readback does not prove that
 work happened or permit apply while required physical isolation is unknown.
+
+## Fresh Odoo testing replacement resources
+
+`POST /v1/products/{product}/testing-replacement-resources` prepares a separate,
+empty Odoo testing target without requiring an assertion about unknown historical
+effects. Its input names the owned testing context, retained service operation,
+reason and mode. The service derives the placement from the retained testing
+target and allocates its own resource namespace. It accepts no production
+destination, existing volume, credential, domain or caller-selected placement.
+
+The dry run captures the retained target identity as inert preparation evidence
+and returns a review digest. Apply uses the existing durable provider-operation
+runner and the original idempotency key. Only new project, environment and empty
+raw-compose creation calls are permitted; the old target, operation, routes and
+storage are preserved. An interrupted create with no complete receipt stays
+unknown and is never blindly repeated.
+
+The preparation schedule creates three local volumes with no driver options,
+bound to the service allocation. Readback checks their labels, actual backing
+directories, distinct filesystem identities, emptiness and every existing
+container's mounts, including stopped containers and parent bind mounts. An
+existing foreign volume, nonempty directory, external backing option, active
+preparation or incomplete provider response refuses qualification. Nothing is
+deleted to recover. The new compose must remain empty, unconfigured, unrouted and without
+deployment history. No application, host port or credential is installed.
+Dokploy's unconfigured default source type is accepted, and its returned compose
+project name is used for actual container inspection.
+
+PostgreSQL excludes authority inserts, updates, aliases and evidence writers
+while metadata is checked or published. Provider I/O holds no global authority
+lock; each effect and final publication rechecks the captured configuration.
+The retained executor stays excluded throughout. Referenced secret
+metadata participates in that snapshot, including cross-context references.
+SQLite remains a rehearsal backend and cannot publish these enabling facts.
+After actual provider readback, only the testing instance's volume settings are
+changed; other configuration and production records remain unchanged.
+
+Use the bounded client with the installed authenticated transport:
+
+```bash
+uv run python scripts/prepare-testing-replacement-resources.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <testing-context> \
+  --operation-id <retained-operation> --reason '<reason>' \
+  --evidence-file <private-review-file>
+```
+
+Review the private receipt, then repeat with `apply`, `--reviewed-dry-run` and
+the original stable `--idempotency-key`. Use `readback` with the same product,
+context, operation and reason for a separate actual resource read. Readback
+requires the current testing volume authority to agree with the allocation;
+drift cannot refresh positive evidence. A complete allocation with a lost final
+HTTP receipt can be adopted only after another actual readback. Target adoption
+and its allocation identity commit together. If terminal readback proves only
+missing service-named volumes while all existing ones are empty, correctly
+labelled, independently backed and unused, original-key apply can resume storage
+preparation on that same target. It cannot create another target. Active remote
+jobs, foreign resources or uncertain creation stay unknown. Keep the original
+key and retained resources; never delete them to make recovery pass.
+
+This producer establishes unused, empty replacement resources and
+`separation_ready`, not permission to start restored testing. It supplies no
+production-capable key and performs no production copy. The separate continuation
+must render without host SSH mounts or host ports, use the qualified volume
+authority, sanitize the copy before any Odoo registry or module code runs, and
+prove credentials and integrations safe before web starts. Supersession still
+requires `isolated`; this preparation alone cannot release it. The old hostname
+is not moved by preparation. Recovery retains partial new resources and their
+service namespace in an additive allocation table. The retained custody payload
+is unchanged; downgrade retains allocation metadata and re-upgrade adopts it.
+An older image cannot continue the new resource route. After activation, retain
+the qualifying image and forward-fix rather than erasing custody or restoring
+an old database to clear the fence.
 
 ## First service collector
 
@@ -198,3 +274,33 @@ separate collections. After an actual supersession, the new terminal status and
 replacement evidence need compatible readers: retain such an image and
 forward-fix the service; do not rewrite history or restore an old DB snapshot to
 clear a fence. This source session performs no live qualification or deployment.
+
+Creation recovery reads the unique service namespace from complete provider
+project/environment/compose inventory. Each create dispatch records its exact
+phase. A realized project can resume environment creation, and a realized
+environment can resume compose creation; a missing object for the last dispatched
+phase remains unknown. A unique, empty, unrouted compose with complete empty
+deployment history can be captured atomically after a lost adoption transaction.
+No missing response or inventory entry alone permits repeating a dispatched call.
+Host qualification resolves the Docker data-root path and permits read-only host
+monitoring binds; writable parent mounts and any exact existing named-volume
+consumer still refuse qualification. No backing directory or monitor is changed.
+
+Target adoption also snapshots the complete retained target record in allocation
+custody, in the same transaction as the new binding. Old domains, public hosts,
+pending effects and target settings remain recoverable there. Protection policies
+and the test gate carry onto the new target; old routes and writable settings do
+not. Current target overrides and secret bindings cannot replace qualified volume
+names when positive evidence is published.
+
+Only protection policies carry onto the fresh target. Integration allowances stay
+in the retained snapshot and are not granted to the new generation. Retained
+hostnames remain reserved across target and public-host writers, including a
+claim from the replacement lane itself. Preparation refuses unresolved pending
+route effects so their provider identities cannot be detached from their target.
+The reviewed plan authorizes this exact empty allocation; recovery re-derives
+current separation evidence and never starts an application under that receipt.
+After target adoption, an older image may read the unchanged custody identity but
+cannot enforce the new hostname reservations. Keep the qualifying service image
+or forward-fix with compatible readers; retaining additive tables through schema
+rollback does not make old code a supported continuation.

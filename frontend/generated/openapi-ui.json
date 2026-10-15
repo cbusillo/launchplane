@@ -14277,6 +14277,16 @@
             "title": "Production Use",
             "type": "string"
           },
+          "production_use_authority": {
+            "default": "explicit",
+            "enum": [
+              "explicit",
+              "director_agent"
+            ],
+            "title": "Production Use Authority",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "promotion_workflow": {
             "$ref": "#/components/schemas/ProductPromotionWorkflowProfile"
           },
