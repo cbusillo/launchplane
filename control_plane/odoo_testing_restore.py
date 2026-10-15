@@ -651,7 +651,7 @@ def discard_previous_drill(gen, database_container, runner, database):
     if present == '1':
         observed = docker('exec','-i',database_container,'sh','-c',
             'psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"',
-            '_', previous, stdin=b"SELECT value FROM ir_config_parameter WHERE key='launchplane.testing_copy.restore_complete';\n").decode().strip()
+            '_', previous, stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
         if observed != witness:
             raise RuntimeError('Prior database lacks its committed drill witness')
         # No FORCE: an unexpected user/connection retains the database and fails the drill.
@@ -768,7 +768,7 @@ def restore_main():
         if present not in {'0','1'}:
             raise RuntimeError('Ambiguous testing database')
         if present=='1':
-            marker=docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',database,stdin=b"SELECT value FROM ir_config_parameter WHERE key='launchplane.testing_copy.restore_complete';\n").decode().strip()
+            marker=docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',database,stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
             if marker!=spec['copy_binding_sha256']:
                 raise RuntimeError('Existing testing database lacks its generation witness')
         prefix=sys.argv[2]
@@ -922,6 +922,11 @@ except Exception:
     # Failed copies and their stopped web remain for exact-generation recovery.
     sys.exit(1)
 """
+
+
+FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
+    "__LP_COPY_WITNESS__", TESTING_COPY_COMPLETION_PARAMETER
+)
 
 
 def read_current_testing_generation(

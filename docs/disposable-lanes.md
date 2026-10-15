@@ -732,7 +732,7 @@ in custody until separately authorized disposition.
 
 ## Scheduled Odoo testing rebuild drill
 
-The API service owns a daily drill for every active Odoo testing lane. It queues
+The API service owns a daily drill for each enabled active Odoo testing lane. It queues
 an ordinary durable target-replacement operation; the Odoo worker performs the
 existing upstream restore, module work, integration sanitization, website
 exclusions and health checks. There is no GitHub workflow or product-repository
@@ -760,6 +760,15 @@ expired or conflicting safety facts record a failed prerequisite and alert;
 they never become inferred permission. The general positive-fact producer gap
 on #3611 therefore remains a real activation prerequisite. This feature cannot
 make an unqualified lane rebuild automatically.
+Deployment leaves the per-lane `odoo_testing_drill_enabled` flag false. After
+landing, configure it through the existing authenticated `POST /v1/product-profiles`
+path: read and preserve the current complete profile, change only that testing
+lane's flag, and post the updated profile with its normal idempotency key and
+existing `product_profile.write` authority. No new grant is needed. Refresh the
+actual safety facts against the resulting binding before admission. Production
+lanes cannot enable the flag. An unchanged failed prerequisite produces no
+repeated admission; corrected facts/configuration can retry the same daily slot
+before an operation has been queued.
 
 Queueing archives the prior generation and planned copy in the private slot
 receipt without changing the running lane's settings. After its hold check,
@@ -770,8 +779,9 @@ refuses before selection. The original collector row is never rebound or renewed
 Its accepted snapshot is stored on the active worker attempt; an unchanged snapshot
 does not expire in the middle of that continuously leased restore. A reclaimed
 attempt requires fresh admission against the selected database. Every provider
-checkpoint rechecks the generation, unchanged admitted use/custody/isolation facts
-and current hold. Changed evidence or a person starting a test session
+checkpoint rechecks the generation, admitted use/custody/isolation facts and
+current hold. Routine renewal of the same facts does not cancel a running copy;
+changed bindings require fresh current proof. A person starting a test session
 or placing a hold therefore protects the lane even after queueing. Protect a
 lane through the existing staff-testing hold before starting a session. Unknown
 or expired observations cannot substitute for that hold.
@@ -805,11 +815,16 @@ destination's outage does not repeat their notices. Webhook delivery is
 at least once: a lost acknowledgement may repeat a notice. Arbitrary provider
 errors, source settings, copy bytes and secrets never enter the notice or lane
 projection.
+Pending notices are coalesced to the latest failure per lane while retaining
+older failure receipts. Alert retries never refresh the drill's observation
+time, and scheduler projection/delivery updates preserve the worker's admission
+fields under a row lock. Retired or removed lanes stop participating.
 
 For updates, deploy the compatible API and Odoo worker together after the PR
 lands; no schema migration or new grant is needed. Before the first live run,
-read the lane's hold/use/custody/isolation facts, initial-copy qualification,
-source configuration and existing Discord policy through the service. A failed
+configure the flag only after initial-copy qualification, source configuration
+and the existing Discord policy are prepared. Then obtain current hold/use/
+custody/isolation facts through the service before admission. A failed
 prerequisite is corrected on its supported service path, then a later slot can
 admit work. The first live run is separate from source/CI qualification and must
 never run against a lane in use. Inspect the lane receipt and its exact operation

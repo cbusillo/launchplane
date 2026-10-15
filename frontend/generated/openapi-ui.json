@@ -28447,6 +28447,12 @@
           },
           "odoo_stable_bootstrap": {
             "$ref": "#/components/schemas/ProductOdooStableBootstrapPolicy"
+          },
+          "odoo_testing_drill_enabled": {
+            "default": false,
+            "title": "Odoo Testing Drill Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [

@@ -11145,7 +11145,10 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         import re
         import shlex
         from psycopg import sql
-        from control_plane.odoo_testing_restore import FRESH_TESTING_RESTORE_HOST_PROGRAM
+        from control_plane.odoo_testing_restore import (
+            FRESH_TESTING_RESTORE_HOST_PROGRAM,
+            TESTING_COPY_COMPLETION_PARAMETER,
+        )
 
         root_url = _postgres_root_database_url()
         previous = "lp_drill_" + uuid4().hex
@@ -11163,9 +11166,8 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                 text("CREATE TABLE ir_config_parameter (key text PRIMARY KEY, value text)")
             )
             connection.execute(
-                text(
-                    "INSERT INTO ir_config_parameter VALUES ('launchplane.testing_copy.restore_complete', 'foreign-copy')"
-                )
+                text("INSERT INTO ir_config_parameter VALUES (:key, 'foreign-copy')"),
+                {"key": TESTING_COPY_COMPLETION_PARAMETER},
             )
         previous_engine.dispose()
         cleaned: list[str] = []
@@ -11228,3 +11230,31 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                     {"name": previous},
                 ).scalar_one()
             )
+
+    def test_scheduler_receipt_merge_keeps_worker_admission_under_real_row_lock(self) -> None:
+        from control_plane.odoo_testing_drill import (
+            DRILL_SCOPE,
+            DRILL_ROUTE,
+            require_drill_checkpoint,
+        )
+
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        before = scenario.store.read_idempotency_record(
+            scope=DRILL_SCOPE,
+            route_path=DRILL_ROUTE,
+            idempotency_key=scenario.operation().idempotency_key,
+        )
+        assert before is not None
+        operation = scenario.activate()
+        scenario.store.update_odoo_testing_drill_receipt(
+            operation.idempotency_key,
+            scenario.now,
+            {**before.response_payload, "status": "fail", "step": "fixture-late-observation"},
+        )
+        require_drill_checkpoint(scenario.store, operation)
+        self.assertTrue(
+            scenario.store.list_pending_odoo_testing_drill_alerts(
+                scenario.profile.product, scenario.context
+            )
+        )

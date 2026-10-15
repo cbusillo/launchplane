@@ -36,6 +36,7 @@ from control_plane.odoo_testing_drill import (
     DRILL_SCOPE,
     DRILL_ROUTE,
     DRILL_DEADLINE_STEP,
+    lane_key,
     OdooTestingDrillScheduler,
     require_drill_checkpoint,
     testing_drill_evidence,
@@ -76,7 +77,8 @@ class TestingDrillScenario(unittest.TestCase):
                                 data_authority="resettable",
                                 allowed_rebuild_sources=("upstream_restore",),
                                 upstream_source=f"{self.profile.product}:{production.context}:prod",
-                            )
+                            ),
+                            "odoo_testing_drill_enabled": True,
                         }
                     )
                     if lane.instance == "testing"
@@ -512,8 +514,12 @@ class TestingDrillTests(TestingDrillScenario):
             original,
         )
         assert original is not None
-        with patch("control_plane.odoo_testing_drill.datetime") as clock:
+        with (
+            patch("control_plane.odoo_testing_drill.datetime", wraps=datetime) as clock,
+            patch("control_plane.disposable_lanes.datetime", wraps=datetime) as admission_clock,
+        ):
             clock.now.return_value = original.expires_at + timedelta(minutes=20)
+            admission_clock.now.return_value = clock.now.return_value
             require_drill_checkpoint(self.store, operation)
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -709,3 +715,106 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertEqual(failed.retained_copy_binding, generation_binding(second))
         self.assertEqual(failed.discard_drill_database, first.drill_database)
         self.assertNotEqual(failed.discard_drill_database, failed.retained_drill_database)
+
+    def test_identical_facts_can_be_renewed_during_active_attempt(self) -> None:
+        self.scheduler.run_once()
+        operation = self.activate()
+        safety = self.store.read_disposable_lane_safety(
+            self.profile.product, self.context, "testing"
+        )
+        assert safety is not None
+        self.store.write_disposable_lane_safety(
+            safety.model_copy(
+                update={
+                    "observed_at": safety.observed_at + timedelta(minutes=1),
+                    "expires_at": safety.expires_at + timedelta(minutes=1),
+                    "usage_evidence": "fixture:renewed-source",
+                }
+            )
+        )
+        require_drill_checkpoint(self.store, operation)
+
+    def test_repaired_precondition_can_admit_same_daily_slot(self) -> None:
+        self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "fail")
+        record_safety(self.store, self.profile.product, self.context, "testing")
+        self.now = datetime.now(timezone.utc).timestamp()
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "queued")
+
+    def test_rollout_is_inert_until_testing_lane_is_enabled(self) -> None:
+        profile = self.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"odoo_testing_drill_enabled": False})
+                    for lane in self.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        self.scheduler.run_once()
+        self.assertIsNone(self.evidence())
+        self.assertFalse(self.notifications.called)
+        self.assertFalse(self.store.list_odoo_stable_target_replacement_operation_records())
+
+    def test_scheduler_update_preserves_concurrent_worker_admission(self) -> None:
+        self.scheduler.run_once()
+        operation = self.operation()
+        before = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+        )
+        assert before is not None
+        operation = self.activate()
+        stale = {**before.response_payload, "status": "fail", "step": DRILL_DEADLINE_STEP}
+        self.store.update_odoo_testing_drill_receipt(operation.idempotency_key, self.now, stale)
+        require_drill_checkpoint(self.store, operation)
+
+    def test_cancellation_after_activation_alerts_and_preserves_exact_incomplete_copy(self) -> None:
+        from control_plane.testing_lane_hold import staff_testing_hold_cancellation
+
+        self.scheduler.run_once()
+        operation = self.activate()
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "cancelled",
+                    "phase": "cancelled",
+                    "finished_at": datetime.fromtimestamp(self.now, timezone.utc).isoformat(),
+                    "cancellation": staff_testing_hold_cancellation(
+                        datetime.fromtimestamp(self.now, timezone.utc).isoformat()
+                    ),
+                }
+            )
+        )
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "fail")
+        self.assertTrue(self.notifications.called)
+        self.assertEqual(self.evidence().operation_id, operation.operation_id)
+
+    def test_alert_retry_does_not_refresh_observation_and_duplicate_backlog_is_coalesced(
+        self,
+    ) -> None:
+        self.notifications.return_value = False
+        self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
+        for offset in range(3):
+            self.store.enqueue_odoo_testing_drill(
+                self.profile.product,
+                self.context,
+                f"{lane_key(self.profile.product, self.context)}:failure-{offset}",
+                self.now + offset,
+            )
+        before = self.evidence().observed_at
+        self.scheduler._deliver_alerts(
+            self.profile.product, self.context, self.now + DRILL_ALERT_RETRY_SECONDS
+        )
+        self.assertEqual(self.notifications.call_count, 1)
+        self.assertEqual(self.evidence().observed_at, before)
+        self.assertEqual(
+            len(
+                self.store.list_pending_odoo_testing_drill_alerts(
+                    self.profile.product, self.context
+                )
+            ),
+            1,
+        )

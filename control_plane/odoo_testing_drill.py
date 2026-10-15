@@ -32,6 +32,8 @@ from control_plane.disposable_lanes import (
     DisposableLaneStore,
     DisposableLaneSafetyUnknown,
     require_disposable_lane,
+    disposable_lane_binding_sha256,
+    disposable_lane_configuration,
 )
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
@@ -74,6 +76,39 @@ def timestamp(now: float) -> str:
 
 def lane_key(product: str, context: str) -> str:
     return canonical_json_sha256([product, context, "testing"])
+
+
+def drill_admission_revision(store: PostgresRecordStore, product: str, context: str) -> str:
+    def optional[T](read: Callable[[], T]) -> T | None:
+        try:
+            return read()
+        except FileNotFoundError:
+            return None
+
+    target = optional(
+        lambda: store.read_dokploy_target_record(context_name=context, instance_name="testing")
+    )
+    target_id = optional(
+        lambda: store.read_dokploy_target_id_record(context_name=context, instance_name="testing")
+    )
+    safety = store.read_disposable_lane_safety(product, context, "testing")
+    generation = store.read_fresh_odoo_testing_generation(product, context)
+    inventory = optional(
+        lambda: store.read_environment_inventory(context_name=context, instance_name="testing")
+    )
+    return canonical_json_sha256(
+        [
+            disposable_lane_binding_sha256(
+                store.read_product_profile_record(product),
+                target,
+                target_id,
+                configuration=disposable_lane_configuration(store, context, "testing"),
+            ),
+            safety.model_dump(mode="json") if safety else None,
+            generation.model_dump(mode="json") if generation else None,
+            inventory.model_dump(mode="json") if inventory else None,
+        ]
+    )
 
 
 def drill_receipt(
@@ -135,6 +170,8 @@ def prepare_drill(
     lane = next(
         lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
     )
+    if not lane.odoo_testing_drill_enabled:
+        raise DrillSkipped("drill_disabled")
     production = [candidate for candidate in profile.lanes if candidate.instance == "prod"]
     if (
         len(production) != 1
@@ -250,9 +287,29 @@ def require_drill_checkpoint(
         or safety.usage != "unused"
         or safety.data != "reproducible"
         or safety.production_resources != "isolated"
-        or safety.model_dump(mode="json") != receipt.response_payload.get("activation_safety")
     ):
         raise DrillSkipped("testing_drill_use_evidence_changed")
+    admitted = DisposableLaneSafety.model_validate(
+        receipt.response_payload.get("activation_safety")
+    )
+    stable = {
+        "usage",
+        "data",
+        "production_resources",
+        "binding_sha256",
+        "replaces_operation_id",
+        "replaced_target_id",
+    }
+    if safety.model_dump(include=stable) != admitted.model_dump(include=stable):
+        try:
+            require_disposable_lane(
+                cast(DisposableLaneStore, store),
+                product=operation.product,
+                context=operation.context,
+                instance="testing",
+            )
+        except (ValueError, FileNotFoundError) as error:
+            raise DrillSkipped("testing_drill_use_evidence_changed") from error
 
 
 class OdooTestingDrillScheduler:
@@ -345,11 +402,16 @@ class OdooTestingDrillScheduler:
         self._deliver_alerts(profile.product, context, now)
         if blocked:
             return
+        if not any(
+            lane.context == context
+            and lane.instance == "testing"
+            and lane.odoo_testing_drill_enabled
+            for lane in profile.lanes
+        ):
+            return
         # Spread recurring slots across the day without storing a second lane catalog.
         offset = int(prefix[:8], 16) % DRILL_INTERVAL_SECONDS
         key = f"{prefix}:{int((now - offset) // DRILL_INTERVAL_SECONDS)}"
-        if self._read(key) is not None:
-            return
         self.store.enqueue_odoo_testing_drill(profile.product, context, key, now)
 
     def _observe(
@@ -389,7 +451,15 @@ class OdooTestingDrillScheduler:
                 else:
                     payload.update(status="fail", step="copy_completion_missing")
             elif operation.status == "cancelled":
-                payload.update(status="skipped", step="staff_testing_hold")
+                generation = self.store.read_fresh_odoo_testing_generation(product, context)
+                activated = (
+                    generation is not None
+                    and generation_binding(generation) == payload["generation_binding"]
+                )
+                payload.update(
+                    status="fail" if activated else "skipped",
+                    step="protected_use_after_activation" if activated else "staff_testing_hold",
+                )
             else:
                 payload.update(
                     status="fail",
@@ -410,9 +480,8 @@ class OdooTestingDrillScheduler:
                         next_alert_at=0,
                     )
             if payload != receipt.response_payload:
-                self.store.write_idempotency_record(
-                    drill_receipt(receipt.idempotency_key, now, payload)
-                )
+                payload["observed_at"] = timestamp(now)
+                self.store.update_odoo_testing_drill_receipt(receipt.idempotency_key, now, payload)
         # Never replace an unfinished or held generation with a new snapshot/key.
         if payload.get("operation_id") and payload["status"] == "fail":
             operation = self.store.read_odoo_stable_target_replacement_operation_record(
@@ -426,15 +495,18 @@ class OdooTestingDrillScheduler:
         return False
 
     def _deliver_alerts(self, product: str, context: str, now: float) -> None:
-        for receipt in self.store.list_pending_odoo_testing_drill_alerts(product, context):
+        pending = self.store.list_pending_odoo_testing_drill_alerts(product, context)
+        for receipt in pending[:-1]:
+            self.store.update_odoo_testing_drill_receipt(
+                receipt.idempotency_key, now, {"alert_superseded_by": pending[-1].idempotency_key}
+            )
+        for receipt in pending[-1:]:
             payload = dict(receipt.response_payload)
             if now < float(str(payload.get("next_alert_at", 0))):
                 continue
             payload["alert_delivered"] = self.notify(product, context, payload)
             payload["next_alert_at"] = now + DRILL_ALERT_RETRY_SECONDS
-            self.store.write_idempotency_record(
-                drill_receipt(receipt.idempotency_key, now, payload)
-            )
+            self.store.update_odoo_testing_drill_receipt(receipt.idempotency_key, now, payload)
 
     def _notify(self, product: str, context: str, payload: dict[str, JsonValue]) -> bool:
         from control_plane.notifications import post_discord_webhook
@@ -503,7 +575,7 @@ def testing_drill_evidence(
         return None
     return OdooTestingDrillEvidence.model_validate(
         {
-            "observed_at": receipt.recorded_at,
+            "observed_at": receipt.response_payload.get("observed_at", receipt.recorded_at),
             **{
                 key: value
                 for key, value in receipt.response_payload.items()

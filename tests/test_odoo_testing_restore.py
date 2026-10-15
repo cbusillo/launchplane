@@ -186,11 +186,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.website_settings_call: list[str] | None = None
         self.existing_database = False
         self.resume_verified = False
-        self.previous_drill = ""
-        self.previous_drill_witness = ""
-        self.previous_drill_busy = False
-        self.previous_drill_dropped = False
-        self.previous_drill_query = 0
         self.gate_payload = "payload-fixture"
         self.gate_hash = ""
         for suffix in ("data", "logs", "db"):
@@ -254,24 +249,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         elif command[:3] == ["docker", "volume", "inspect"]:
             result = json.dumps([self.volumes[command[-1]]]).encode()
         elif command[:2] == ["docker", "exec"]:
-            if (
-                self.previous_drill
-                and command[-1] == self.previous_drill
-                and "psql " in " ".join(command)
-            ):
-                phase = self.previous_drill_query
-                self.previous_drill_query += 1
-                if phase == 0:
-                    result = b"1"
-                elif phase == 1:
-                    result = self.previous_drill_witness.encode()
-                elif phase == 2:
-                    if self.previous_drill_busy:
-                        return subprocess.CompletedProcess(
-                            command, 1, stdout=b"", stderr=b"database is in use"
-                        )
-                    self.previous_drill_dropped = True
-            elif "psql " in " ".join(command):
+            if "psql " in " ".join(command):
                 result = b"1" if self.existing_database else b"0"
             elif command[-2:] in (["id", "-u"], ["id", "-g"]):
                 result = b"1000"
@@ -314,7 +292,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         return subprocess.CompletedProcess(command, 0, stdout=result, stderr=b"")
 
     def run_program(self) -> tuple[int, str]:
-        self.previous_drill_query = 0
         encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
         output = io.StringIO()
         status = 0
@@ -334,39 +311,15 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 status = int(error.code or 0)
         return status, output.getvalue()
 
-    def test_drill_disposal_requires_exact_old_copy_witness_and_never_forces_connections(
-        self,
-    ) -> None:
-        self.previous_drill = "lp_drill_" + "b" * 32
-        self.spec["generation"].update(
-            discard_drill_database=self.previous_drill, discard_copy_binding="c" * 64
-        )
-        self.previous_drill_witness = "foreign-copy"
-        code, _ = self.run_program()
-        self.assertNotEqual(code, 0)
-        self.assertFalse(self.previous_drill_dropped)
-        self.assertNotIn(["docker", "start", "web"], self.calls)
-
-        self.previous_drill_witness = self.spec["generation"]["discard_copy_binding"]
-        self.previous_drill_busy = True
-        code, _ = self.run_program()
-        self.assertNotEqual(code, 0)
-        self.assertFalse(self.previous_drill_dropped)
-        self.previous_drill_busy = False
-        code, _ = self.run_program()
-        self.assertEqual(code, 0)
-        self.assertTrue(self.previous_drill_dropped)
-
     def test_failed_new_copy_never_disposes_prior_drill(self) -> None:
-        self.previous_drill = "lp_drill_" + "b" * 32
+        previous_drill = "lp_drill_" + "b" * 32
         self.spec["generation"].update(
-            discard_drill_database=self.previous_drill, discard_copy_binding="c" * 64
+            discard_drill_database=previous_drill, discard_copy_binding="c" * 64
         )
-        self.previous_drill_witness = self.spec["generation"]["discard_copy_binding"]
         self.sanitized = False
         code, _ = self.run_program()
         self.assertNotEqual(code, 0)
-        self.assertFalse(self.previous_drill_dropped)
+        self.assertFalse(any(previous_drill in call for call in self.calls))
 
     def test_read_only_capture_never_copies_identity_and_web_starts_after_sanitization(
         self,

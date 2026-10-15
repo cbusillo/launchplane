@@ -10689,9 +10689,48 @@ class PostgresRecordStore(HumanSessionStore):
                     payload["alert_delivered"].as_boolean().is_(False),
                     payload["alert_delivered"].as_boolean().is_(None),
                 ),
+                payload["alert_superseded_by"].as_string().is_(None),
             ),
-            order_by=(LaunchplaneIdempotencyRow.recorded_at.asc(),),
+            order_by=(LaunchplaneIdempotencyRow.created_at.asc(),),
         )
+
+    def update_odoo_testing_drill_receipt(
+        self, key: str, now: float, payload: dict[str, Any]
+    ) -> None:
+        """Merge only scheduler-owned projection/delivery fields, preserving worker admission."""
+        from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE, timestamp
+
+        fields = {
+            "status",
+            "step",
+            "trace",
+            "observed_at",
+            "deployment_record_id",
+            "failure_step",
+            "failure_trace",
+            "alert_delivered",
+            "delivered_destinations",
+            "next_alert_at",
+            "alert_superseded_by",
+        }
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            row = session.scalar(
+                self._idempotency_statement(
+                    scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=key, for_update=True
+                )
+            )
+            if row is None:
+                raise FileNotFoundError(key)
+            current = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            current.response_payload.update(
+                {name: value for name, value in payload.items() if name in fields}
+            )
+            current = current.model_copy(
+                update={"recorded_at": timestamp(now), "updated_at": timestamp(now)}
+            )
+            self._sync_idempotency_row(row, current)
+            session.commit()
 
     def enqueue_odoo_testing_drill(self, product: str, context: str, key: str, now: float) -> None:
         """Atomically archive the completed copy, select a fresh database and queue its restore.
@@ -10707,6 +10746,7 @@ class PostgresRecordStore(HumanSessionStore):
             drill_receipt,
             lane_key,
             prepare_drill,
+            drill_admission_revision,
         )
         from control_plane.odoo_testing_restore import generation_binding
 
@@ -10715,19 +10755,28 @@ class PostgresRecordStore(HumanSessionStore):
                 session, product=product, context=context, instance="testing"
             )
             self._lock_product_authority_bundle_write(session)
-            if (
-                session.scalar(
-                    self._idempotency_statement(
-                        scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=key
-                    )
+            existing_row = session.scalar(
+                self._idempotency_statement(
+                    scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=key
                 )
-                is not None
+            )
+            revision = drill_admission_revision(self, product, context)
+            previous_receipt = (
+                LaunchplaneIdempotencyRecord.model_validate(existing_row.payload)
+                if existing_row is not None
+                else None
+            )
+            if previous_receipt is not None and (
+                previous_receipt.response_payload.get("operation_id")
+                or previous_receipt.response_payload.get("admission_revision") == revision
             ):
                 return
             payload: dict[str, Any] = {
                 "key": key,
                 "status": "queued",
                 "trace": "testing-drill:" + key,
+                "admission_revision": revision,
+                "observed_at": datetime.fromtimestamp(now, timezone.utc).isoformat(),
             }
             prepared = None
             try:
@@ -10793,7 +10842,19 @@ class PostgresRecordStore(HumanSessionStore):
                         payload=self._payload_dict(operation),
                     )
                 )
-            session.add(self._idempotency_row(drill_receipt(key, now, payload)))
+            if (
+                previous_receipt is not None
+                and payload["status"] == "fail"
+                and previous_receipt.response_payload.get("step") == payload.get("step")
+            ):
+                payload.update(
+                    {
+                        name: value
+                        for name, value in previous_receipt.response_payload.items()
+                        if name in {"alert_delivered", "delivered_destinations", "next_alert_at"}
+                    }
+                )
+            session.merge(self._idempotency_row(drill_receipt(key, now, payload)))
             session.merge(
                 self._idempotency_row(drill_receipt(lane_key(product, context), now, {"key": key}))
             )

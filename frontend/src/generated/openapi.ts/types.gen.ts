@@ -3331,6 +3331,7 @@ export type ProductLaneProfile = {
     odoo_data_policy: ProductOdooLaneDataPolicy;
     odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy;
     odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy;
+    odoo_testing_drill_enabled?: boolean;
 };
 
 export type ProductManagedSecretConfigStatusItem = {
