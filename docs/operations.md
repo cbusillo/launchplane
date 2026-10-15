@@ -4565,3 +4565,46 @@ preview without `fishbowl_source` is again source-free, including on a new PR
 head. Reselect the source explicitly when new-head import proof is needed.
 There is no production
 or stable-lane rollback because neither was changed.
+
+### Testing import diagnostics
+
+`GET /v1/products/{product}/environments/testing/odoo-import-diagnostics`
+requires the existing `product_environment.read` authorization for the selected
+product and testing instance. It accepts no query parameters, SQL, endpoints,
+usernames or credentials. The response is `Cache-Control: no-store`.
+
+The read resolves the product's current testing lane and verifies its running
+Odoo container, immutable artifact and runtime identity. Through that verified
+origin it reads only the fixed cm_data, RepairShopr and Fishbowl import parameter
+keys. Comparisons with current lane runtime authority and the selected managed
+password stay inside Launchplane; the response contains presence and agreement
+categories only. Missing, ambiguous, unsafe or undecryptable bindings never
+select a personal/writer fallback. A source needs an exact testing binding
+classified `testing`, or `shared_safe` with read-only sharing evidence, and its
+existing `read_only_source` allowance. Classification alone proves no privilege.
+
+Each source's selected managed connection is independently inspected using
+`SHOW GRANTS`, without reading customer tables or trying a write. Connections
+require verified TLS. A separate process bounds each attempt, including DNS,
+to ten seconds and discards stderr. Only SELECT, SHOW VIEW, SHOW DATABASES and
+USAGE are accepted; grant options or other privileges are unsafe. Role grants,
+partial revokes, unrecognized syntax and incomplete results stay unknown.
+Applicable roles are not expanded by this version. This follows the
+[MySQL SHOW GRANTS contract](https://dev.mysql.com/doc/refman/8.0/en/show-grants.html).
+
+`managed_connection_grants` describes the account MySQL selected for the
+connection from Launchplane, not a connection originating in Odoo. MySQL can
+select different host-qualified accounts for those two origins, so
+`applied_connection_grants` remains unknown. Even matching applied parameters
+and a read-only managed observation do not establish the runtime account's
+effective privileges or complete credential qualification. Do not use this
+read as authorization to run an importer or as proof that testing holds no
+production-capable key. No production credential is decrypted or tested.
+
+The service rechecks lane authority, binding/version selection, the same
+container and applied parameters after source I/O. Changes discard the evidence.
+Unavailable runtime reads return a fixed unknown result; individual source
+failures do not hide other source observations. Responses, errors and logs
+contain no passwords, hashes, host/account values or raw grant rows. This read
+changes no configuration, binding, account, grants, runtime, source data or
+business data, and invokes no importer, deployment or synchronization.

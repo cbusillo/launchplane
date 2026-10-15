@@ -1,0 +1,382 @@
+"""Value-free testing import agreement and managed-source grant observations."""
+
+import hmac
+import json
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from http.cookiejar import CookieJar
+from pathlib import Path
+from typing import Literal, Protocol, cast
+from urllib.parse import urlsplit
+from urllib.request import HTTPCookieProcessor, Request, build_opener
+
+from pydantic import BaseModel, ConfigDict
+
+from control_plane import odoo_runtime_reads as reads
+from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
+from control_plane.odoo_import_overrides import ImportRuntimeStore, import_runtime_authority
+from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
+from control_plane.odoo_product_driver_http import resolve_odoo_product_route
+from control_plane.product_secret_copy import ProductSecretCopyStore, product_secret_bindings
+from control_plane.secrets import _decrypt_secret_value
+from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
+from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
+
+SOURCE_PREFIXES = {
+    "cm_data": "cm_data.db",
+    "repairshopr": "repairshopr.sync_db",
+    "fishbowl": "fishbowl",
+}
+FIELDS = ("host", "user", "db", "port", "ssl_verify")
+Agreement = Literal["match", "mismatch", "missing", "unknown"]
+
+
+class DiagnosticStore(
+    reads.OdooRuntimeReadStore, ProductSecretCopyStore, ImportRuntimeStore, Protocol
+):
+    pass
+
+
+class ParameterAgreement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    field: Literal["host", "user", "db", "port", "ssl_verify", "password"]
+    applied_present: bool
+    agreement: Agreement
+
+
+class SourceDiagnostic(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    source: Literal["cm_data", "repairshopr", "fishbowl"]
+    binding: Literal["selected", "missing_or_unsafe"] = "missing_or_unsafe"
+    parameters: tuple[ParameterAgreement, ...] = ()
+    managed_connection_grants: Literal["read_only", "unsafe", "unknown"] = "unknown"
+    # A connection from the service can select a different host-qualified MySQL
+    # account than a connection from Odoo. Never promote that observation to proof.
+    applied_connection_grants: Literal["unknown"] = "unknown"
+
+
+class ImportDiagnosticResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    runtime: Literal["verified", "unknown"] = "unknown"
+    sources: tuple[SourceDiagnostic, ...]
+    applied: Literal[False] = False
+    values_redacted: Literal[True] = True
+
+
+def unknown_result() -> ImportDiagnosticResult:
+    return ImportDiagnosticResult(
+        sources=tuple(
+            SourceDiagnostic(source=cast(Literal["cm_data", "repairshopr", "fishbowl"], name))
+            for name in SOURCE_PREFIXES
+        )
+    )
+
+
+@dataclass(frozen=True, repr=False)
+class SourceAuthority:
+    binding: SecretBinding
+    record: SecretRecord
+    version: SecretVersion
+    settings: dict[str, str] = field(repr=False)
+
+
+@dataclass(frozen=True, repr=False)
+class ImportAuthority:
+    profile: LaunchplaneProductProfileRecord
+    private_snapshot: str = field(repr=False)
+    sources: dict[str, SourceAuthority] = field(repr=False)
+
+
+def import_authority(store: DiagnosticStore, product: str) -> ImportAuthority:
+    profile = resolve_odoo_product_route(record_store=store, product=product, instance="testing")
+    lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+    values, expectation = import_runtime_authority(
+        record_store=store, context=lane.context, instance=lane.instance
+    )
+    target = store.read_dokploy_target_record(
+        context_name=lane.context, instance_name=lane.instance
+    )
+    target_id = store.read_dokploy_target_id_record(
+        context_name=lane.context, instance_name=lane.instance
+    )
+    pairs = product_secret_bindings(store, product=product)
+    sources: dict[str, SourceAuthority] = {}
+    selected_metadata: list[object] = []
+    for name, prefix in SOURCE_PREFIXES.items():
+        key = config_parameter_secret_env_key(prefix + ".password")
+        candidates = [
+            (binding, record)
+            for binding, record in pairs
+            if binding.binding_key == key
+            and record.context == lane.context
+            and record.instance in {"", lane.instance}
+        ]
+        exact = [pair for pair in candidates if pair[1].scope == "context_instance"]
+        selected = exact or candidates
+        # Snapshot even refused candidates, so a concurrent correction invalidates
+        # stale missing/unsafe evidence as well as successful observations.
+        selected_metadata.extend(
+            (binding.model_dump(mode="json"), record.model_dump(mode="json"))
+            for binding, record in candidates
+        )
+        if len(selected) != 1:
+            continue
+        binding, record = selected[0]
+        sharing = binding.sharing_reason
+        if (
+            record.scope != "context_instance"
+            or binding.declared_secret_class not in {"testing", "shared_safe"}
+            or (
+                binding.declared_secret_class == "shared_safe"
+                and (sharing is None or sharing.kind != "read_only_source")
+            )
+        ):
+            continue
+        if (
+            sum(
+                item.integration == name and item.kind == "read_only_source"
+                for item in target.policies.integration_allowances
+            )
+            != 1
+        ):
+            continue
+        try:
+            version = store.read_secret_version(record.current_version_id)
+        except FileNotFoundError:
+            continue
+        if version.secret_id != record.secret_id or version.version_id != record.current_version_id:
+            continue
+        settings = {
+            field_name: values.get(config_parameter_runtime_key(prefix + "." + field_name), "")
+            for field_name in FIELDS
+        }
+        sources[name] = SourceAuthority(binding, record, version, settings)
+    snapshot = json.dumps(
+        {
+            "profile": profile.model_dump(mode="json"),
+            "target": target.model_dump(mode="json"),
+            "target_id": target_id.model_dump(mode="json"),
+            "runtime": expectation.model_dump(mode="json"),
+            "bindings": selected_metadata,
+            "versions": {
+                name: authority.version.model_dump(mode="json")
+                for name, authority in sources.items()
+            },
+        },
+        sort_keys=True,
+    )
+    return ImportAuthority(profile, snapshot, sources)
+
+
+def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str, str]:
+    origin = connection.selection.base_url.rstrip("/")
+    url = urlsplit(origin)
+    if (
+        url.scheme != "https"
+        or not url.hostname
+        or url.username
+        or url.password
+        or url.path
+        or url.query
+        or url.fragment
+    ):
+        raise ValueError("Invalid diagnostic origin")
+    if not odoo_compose_has_domain(
+        host=connection.host,
+        token=connection.token,
+        compose_id=connection.evidence.target_id,
+        domain_host=url.hostname,
+    ):
+        raise ValueError("Diagnostic origin mismatch")
+    credentials = connection.credentials
+    if not credentials["ODOO_DB_NAME"] or not credentials["ODOO_ADMIN_PASSWORD"]:
+        raise ValueError("Missing diagnostic credentials")
+    opener = build_opener(reads._NoRedirects(), HTTPCookieProcessor(CookieJar()))
+
+    def health() -> None:
+        reads.require_runtime_identity(
+            connection.selection.identity,
+            runtime_identity_from_health_payload(
+                reads._http_json(opener, Request(origin + "/launchplane/health"))
+            ),
+        )
+
+    health()
+    authenticated = reads._rpc(
+        opener,
+        origin,
+        "/web/session/authenticate",
+        {
+            "db": credentials["ODOO_DB_NAME"],
+            "login": credentials["ODOO_ADMIN_LOGIN"] or "admin",
+            "password": credentials["ODOO_ADMIN_PASSWORD"],
+        },
+    )
+    if (
+        not isinstance(authenticated, dict)
+        or type(authenticated.get("uid")) is not int
+        or authenticated["uid"] <= 0
+    ):
+        raise ValueError("Diagnostic authentication unavailable")
+    keys = [
+        prefix + "." + name for prefix in SOURCE_PREFIXES.values() for name in (*FIELDS, "password")
+    ]
+    try:
+        raw = reads._rpc(
+            opener,
+            origin,
+            "/web/dataset/call_kw",
+            {
+                "model": "ir.config_parameter",
+                "method": "search_read",
+                "args": [[["key", "in", keys]]],
+                "kwargs": {"fields": ["key", "value"], "limit": len(keys) + 1, "order": "key"},
+            },
+        )
+    finally:
+        reads._rpc(opener, origin, "/web/session/destroy", {}, expect_result=False)
+    health()
+    if not isinstance(raw, list) or len(raw) > len(keys):
+        raise ValueError("Invalid diagnostic rows")
+    result: dict[str, str] = {}
+    for row in raw:
+        if (
+            not isinstance(row, dict)
+            or row.get("key") not in keys
+            or not isinstance(row.get("value"), str)
+            or row["key"] in result
+        ):
+            raise ValueError("Invalid diagnostic parameter")
+        result[row["key"]] = row["value"]
+    return result
+
+
+def managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "unknown"]:
+    if not all(settings.get(key) for key in ("host", "user", "password")):
+        return "unknown"
+    if settings.get("ssl_verify", "").lower() not in {"", "true", "1"}:
+        return "unknown"
+    private_input = {
+        key: value
+        for key, value in settings.items()
+        if key in {"host", "user", "password", "port"} and value
+    }
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-I", str(Path(__file__).with_name("odoo_source_probe.py"))],
+            input=json.dumps(private_input),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+            check=False,
+        )
+        if completed.returncode == 0 and len(completed.stdout) < 128:
+            payload = json.loads(completed.stdout)
+            if payload == {"grants": "read_only"}:
+                return "read_only"
+            if payload == {"grants": "unsafe"}:
+                return "unsafe"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return "unknown"
+
+
+def diagnose_imports(
+    *, store: DiagnosticStore, product: str, control_plane_root: Path, database_url: str | None
+) -> ImportDiagnosticResult:
+    try:
+        authority = import_authority(store, product)
+        selection = reads.select_stable_runtime(store, authority.profile, "testing")
+        connection = reads.connect_runtime(
+            store=store,
+            selection=selection,
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
+        applied = read_applied_parameters(connection)
+        results: list[SourceDiagnostic] = []
+        for name, prefix in SOURCE_PREFIXES.items():
+            source_name = cast(Literal["cm_data", "repairshopr", "fishbowl"], name)
+            selected = authority.sources.get(name)
+            if selected is None:
+                results.append(
+                    SourceDiagnostic(
+                        source=source_name,
+                        parameters=tuple(
+                            ParameterAgreement(
+                                field=cast(
+                                    Literal["host", "user", "db", "port", "ssl_verify", "password"],
+                                    key,
+                                ),
+                                applied_present=bool(applied.get(prefix + "." + key)),
+                                agreement="unknown"
+                                if applied.get(prefix + "." + key)
+                                else "missing",
+                            )
+                            for key in (*FIELDS, "password")
+                        ),
+                    )
+                )
+                continue
+            try:
+                password = _decrypt_secret_value(
+                    selected.version.ciphertext, selected.version.key_id
+                )
+                settings = {**selected.settings, "password": password}
+                parameters = tuple(
+                    ParameterAgreement(
+                        field=cast(
+                            Literal["host", "user", "db", "port", "ssl_verify", "password"], key
+                        ),
+                        applied_present=bool(applied.get(prefix + "." + key)),
+                        agreement=(
+                            "missing"
+                            if not applied.get(prefix + "." + key)
+                            else "unknown"
+                            if not settings[key]
+                            else "match"
+                            if hmac.compare_digest(
+                                applied[prefix + "." + key].encode(), settings[key].encode()
+                            )
+                            else "mismatch"
+                        ),
+                    )
+                    for key in (*FIELDS, "password")
+                )
+                results.append(
+                    SourceDiagnostic(
+                        source=source_name,
+                        binding="selected",
+                        parameters=parameters,
+                        managed_connection_grants=managed_grants(settings),
+                    )
+                )
+            except Exception:
+                results.append(SourceDiagnostic(source=source_name))
+        reads.assert_selection_current(store, selection)
+        if import_authority(store, product).private_snapshot != authority.private_snapshot:
+            return unknown_result()
+        # Observe the same immutable container again, including its image and
+        # runtime payload, after source I/O and before releasing any agreement.
+        reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
+        if read_applied_parameters(connection) != applied:
+            return unknown_result()
+        if import_authority(store, product).private_snapshot != authority.private_snapshot:
+            return unknown_result()
+        reads.assert_selection_current(store, selection)
+        return ImportDiagnosticResult(runtime="verified", sources=tuple(results))
+    except Exception:
+        # No provider/RPC/driver/decryption exception text or chained context is
+        # returned. This fixed response contains no caller/server-controlled text.
+        return unknown_result()

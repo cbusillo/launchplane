@@ -5,10 +5,15 @@ from pathlib import Path as FilePath
 from typing import Annotated, Iterator, Literal, cast
 
 import click
-from fastapi import Depends, Path, Query, Response
+from fastapi import Depends, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
+from control_plane.odoo_import_diagnostics import (
+    DiagnosticStore,
+    ImportDiagnosticResult,
+    diagnose_imports,
+)
 from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyPhase,
     OdooWebsiteBootstrapPayload,
@@ -67,6 +72,14 @@ class OdooWebsiteBootstrapResponse(BaseModel):
     apply_on: tuple[OdooOverrideApplyPhase, ...]
     updated_at: str
     source_label: str
+
+
+class OdooImportDiagnosticResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    result: ImportDiagnosticResult
 
 
 def register_odoo_runtime_read_routes(
@@ -291,7 +304,59 @@ def register_odoo_runtime_read_routes(
                 source_label=record.source_label,
             )
 
+    def read_import_diagnostics(
+        product: str,
+        environment: str,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> OdooImportDiagnosticResponse:
+        trace_id = common.next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        if environment != "testing" or request.query_params:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Import diagnostics require testing and accept no overrides.",
+            )
+        with errors(trace_id):
+            profile = resolve_odoo_product_route(
+                record_store=record_store, product=product, instance="testing"
+            )
+            lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+            if not common.authorization_allows(
+                identity=identity,
+                action="product_environment.read",
+                product=profile.product,
+                context=lane.context,
+                target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),
+            ):
+                raise common.http_error(
+                    status_code=403,
+                    trace_id=trace_id,
+                    code="authorization_denied",
+                    message="The caller cannot read this product's testing diagnostics.",
+                )
+            return OdooImportDiagnosticResponse(
+                trace_id=trace_id,
+                result=diagnose_imports(
+                    store=cast(DiagnosticStore, record_store),
+                    product=profile.product,
+                    control_plane_root=dependencies.control_plane_root,
+                    database_url=dependencies.database_url,
+                ),
+            )
+
     for path, endpoint, model, operation_id, summary in (
+        (
+            "/v1/products/{product}/environments/{environment}/odoo-import-diagnostics",
+            read_import_diagnostics,
+            OdooImportDiagnosticResponse,
+            "read_odoo_import_diagnostics",
+            "Read value-free Odoo testing import binding and source-grant evidence",
+        ),
         (
             "/v1/previews/{preview_id}/logs",
             read_preview_logs,
