@@ -54,4 +54,4 @@ Continue with `--offset N --inventory-digest DIGEST`. This helper is a bounded
 local extension until the public agent contract projects the route. Runtime use
 requires normal service delivery; this source task authorizes no deployment,
 provider change, record change or naming mutation. After delivery, the naming
-inventory owner reruns the read and reconciles provider labels with guest data.
+inventory session reruns the read and reconciles provider labels with guest data.
