@@ -1041,16 +1041,23 @@ class RealPostgresLegacyPreviewReconciliationTests(
 
     async def test_orphan_inspection_waits_for_current_executor(self) -> None:
         from control_plane.workflows.generic_web_preview import (
+            resolve_generic_web_preview_slug,
             serialize_generic_web_preview_operation,
         )
 
         generation = self.seed_nonterminal_history()
+        slug = resolve_generic_web_preview_slug(
+            profile=self.profile,
+            preview_slug="",
+            anchor_pr_number=self.preview.anchor_pr_number,
+            label="Fixture",
+        )
         entered = threading.Event()
         release = threading.Event()
 
         def executor() -> None:
             with serialize_generic_web_preview_operation(
-                record_store=self.store, profile=self.profile, preview_slug="pr-1"
+                record_store=self.store, profile=self.profile, preview_slug=slug
             ):
                 entered.set()
                 if not release.wait(10):
@@ -1081,7 +1088,7 @@ class RealPostgresLegacyPreviewReconciliationTests(
                 self.search.assert_not_called()
                 self.assertFalse(
                     self.store.preview_refresh_is_excluded(
-                        preview_id=f"{self.profile.product}:{self.profile.preview.context}:pr-1"
+                        preview_id=f"{self.profile.product}:{self.profile.preview.context}:{slug}"
                     )
                 )
             finally:

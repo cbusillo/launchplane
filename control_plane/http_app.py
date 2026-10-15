@@ -23030,7 +23030,8 @@ def create_launchplane_fastapi_app(
                 )
                 effective_context = plan_record.context
             else:
-                bound = control_plane_product_retirement.bind_product_retirement_authority(
+                bound = await asyncio.to_thread(
+                    control_plane_product_retirement.bind_product_retirement_authority,
                     record_store=retirement_store,
                     request=retirement_request,
                 )
@@ -23186,12 +23187,11 @@ def create_launchplane_fastapi_app(
                 else:
                     if bound.provider_target is None:
                         raise RuntimeError("Tracked retirement requires a provider target.")
-                    observation = (
-                        control_plane_product_retirement.observe_tracked_dokploy_application(
-                            control_plane_root=resolved_control_plane_root,
-                            target_id=bound.provider_target.target_id,
-                            observed_at=requested_at,
-                        )
+                    observation = await asyncio.to_thread(
+                        control_plane_product_retirement.observe_tracked_dokploy_application,
+                        control_plane_root=resolved_control_plane_root,
+                        target_id=bound.provider_target.target_id,
+                        observed_at=requested_at,
                     )
                 preview_plans: tuple[ProductRetirementPreviewPlan, ...] = ()
                 if retirement_request.include_previews:
@@ -23204,10 +23204,10 @@ def create_launchplane_fastapi_app(
                         root=resolved_control_plane_root,
                         observed_at=requested_at,
                     )
-                    current_bound = (
-                        control_plane_product_retirement.bind_product_retirement_authority(
-                            record_store=retirement_store, request=retirement_request
-                        )
+                    current_bound = await asyncio.to_thread(
+                        control_plane_product_retirement.bind_product_retirement_authority,
+                        record_store=retirement_store,
+                        request=retirement_request,
                     )
                     if control_plane_product_retirement.authority_snapshot(
                         current_bound
