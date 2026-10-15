@@ -191,6 +191,64 @@ authority does not authorize isolation apply. See the
 for reviewed plan binding, stable idempotency, independent readback and current
 evidence-producer limitations.
 
+### Reviewed never-live classification and preview execution
+
+The existing Director-agent identity can record a reviewed `unknown` to
+`prelaunch` classification through the production-use route for an active
+product whose recorded stable lanes are testing only. A live classification,
+production lane, historical context, production deployment or promotion history
+refuses this path. The full reviewed profile digest, atomic profile comparison,
+idempotency and audit receipt remain. Release-acceptance settings cannot change
+through this path. The request's reason records the reviewed product facts; it
+cannot assert resource isolation or remove a usage hold. The metadata correction
+satisfies retirement's never-live prerequisite; retirement still performs its
+resource, ownership and protected-use checks. It creates no general provider,
+backup, release or promotion authority. The profile persists
+`production_use_authority=director_agent`: this bounded attestation cannot
+supply the existing prelaunch production-bootstrap exemption, even if a
+production lane is later added. Retirement with this provenance still requires
+testing-only ownership. Missing history alone is not evidence that a product
+never went live; the Director's reviewed fact is the input, and contradictory
+records refuse it. An already explicitly authorized prelaunch classification
+keeps its provenance. The existing `product_profile.write` review/apply path can
+explicitly reconfirm a classification for production bootstrap; this source path
+cannot do so. Prelaunch and held products still cannot start an
+acceptance-triggered release.
+
+Existing full-profile writes cannot change classification or its provenance;
+they point to that reviewed endpoint. Changing only release-acceptance settings
+preserves provenance. Explicit re-confirmation of an agent attestation returns
+the before/after bootstrap-exemption effect in the reviewed plan, and the
+Client-settings panel displays it before Apply. Ordinary bounded agent
+classification keeps its existing response shape and supplies no exemption.
+
+Odoo preview apply uses the same source-owned Director identity boundary as
+[testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
+including preview destruction. It requires the caller's exact service-issued
+plan, an existing uniquely owned preview, and current disposable-lane facts.
+Stable lanes cannot be substituted for a preview. The route checks the binding
+under the durable reservation and immediately before the first provider
+effect. The frozen service plan must name the discovered preview compose and cannot
+alias a recorded stable target. Real previews need no synthetic stable target-ID
+record; the driver revalidates complete provider discovery before effects.
+Safety also binds the settings and bootstrap override copied from the template
+lane and the active runtime key-safety policy, so changes invalidate older
+qualification. Completed same-key
+replays and outcome reconciliation remain available after safety expires or
+lifecycle evidence changes; only a new effect needs fresh safety. Expired or changed safety, actual use,
+only-copy data, shared production resources and unknown isolation stop execution.
+Existing scoped callers retain their explicit policy rules; they inherit no
+Director authority. Source-read permission for an import credential is still
+separate from preview execution.
+
+The current conservative collector cannot establish positive usage, custody or
+physical-isolation facts for an existing preview. Such a preview returns
+`disposable_lane_safety_unknown` until the authoritative producer tracked by
+#3611 supplies them or the operation preserves protected resources by
+construction. Neither a ready preview plan nor an agent-supplied assertion
+supplies those facts. This source correction removes the wrong grant refusal;
+it does not claim that an unqualified copy can run or that an import succeeded.
+
 ## Current Transitional Model
 
 The current service has a DB-backed managed-rule reconciliation endpoint with
