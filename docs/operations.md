@@ -2819,24 +2819,38 @@ Dry-run and readback use the separate instance-scoped
 `odoo_connection_isolation.plan` and `odoo_connection_isolation.read` actions.
 The authenticated Director agent inherits these SQL observations without a
 post-deploy write grant. They run a fixed read-only program through a disabled
-manual provider schedule and hold the lane during the observation. A scoped
+manual provider schedule dedicated to observations and hold the lane during the observation. A scoped
 `agent.read` rule alone does not confer this provider-execution path. Existing
 post-deploy callers retain observation access.
 Every isolation mode accepts only the exact `testing` lane. Apply is a separate
 `odoo_connection_isolation.apply` effect. The Director agent can use it without
-a DB grant only when current,
-binding-matched disposable-lane evidence proves unused, reproducible data and
-production isolation. Missing, expired or unknown evidence, staff holds, target
-aliases, protected usage and only-copy data refuse with
-`disposable_lane_safety_unknown`. The current conservative collector cannot prove
-all these facts; an observation must not manufacture them. Source delivery alone
-therefore does not promise an eligible apply on an existing lane.
+a DB grant after operation-specific qualification. This fixed SQL preserves
+application records; it does not require declaring an existing copy disposable,
+unused or reproducible. Staff holds, target aliases, recorded protected usage,
+only-copy data, shared production resources and staged `separation_ready` lanes still refuse with
+`disposable_lane_safety_unknown`, including expired protective observations.
+Before SQL, the service checks the actual testing web/database/runner identity,
+their private project network, the database endpoint and local writable volumes.
+Published database ports, foreign network members, overlapping foreign writable
+mounts, unsupported storage and unverified metadata refuse. The script pins SQL
+to the verified database address for that execution. It neither inspects other
+containers' environment nor executes their code.
+Collection failures, oversized metadata or a changed container inventory return
+named refusal markers. The qualifier uses isolated Python standard-library imports.
 General maintenance retains `odoo_post_deploy.execute`; observing a copy gives
 no maintenance, production, grant or credential authority.
 
 Every isolation mode rejects production before provider access and reserves
-the lane against concurrent release work. Apply rechecks disposable safety
+the lane against concurrent release work. Apply rechecks recorded protections
 inside the reservation and immediately before dispatching the provider repair.
+Testing/preview data workflows and isolation use the same host `flock` through
+SQL, readback and web restart. The supported Linux schedule host needs `flock`
+and a writable `/var/lock`; a busy execution refuses before Docker or SQL.
+The remote job retains this lock when the service's wait times out. Each new
+testing job also refuses while Docker reports existing runner execs, covering
+container work left behind after a transport exits; a brief bounded retry lets
+ordinary short health probes finish. Isolation
+also refuses an existing shared workflow admitted before this lock was deployed.
 It operates on the current tracked target and database. No SQL,
 credentials, carrier requests, notification probes, staff-account changes,
 addon upgrades, or restore inputs are accepted.
@@ -2851,19 +2865,39 @@ uv run python scripts/repair-odoo-copy-connections.py dry-run \
   --evidence-file /private/path/to/new-receipt.json
 ```
 
-The service uses its existing disabled manual data-workflow schedule to
-return boolean verdicts and setting names only. Review that receipt, then use
+The service uses disabled manual connection-isolation schedules to return
+boolean verdicts and setting names only. Each apply key has its own schedule,
+separate from observations and ordinary data workflows, so later deployments
+cannot replace the original script or rotate its job out of shared history.
+Retain uncertain operation schedules and their logs as recovery evidence.
+Review the dry-run receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding
-again before any effect. Its durable provider reservation retains uncertain
+before dispatch and the receipt's `connection_isolation_resource_sha256` against
+actual Docker resources before stopping web or executing SQL.
+Its durable provider reservation retains uncertain
 outcomes under the original key and fences a new apply key as well. Retain the
 evidence and original idempotency key if the response is uncertain; do not submit
 a new repair. Independent observations never replay or store keyed apply results.
-Connection-isolation recovery of an uncertain provider operation is not yet a
-supported service capability. Its reservation remains fenced; a readback alone
-cannot prove the original web/schedule outcome or clear it. Actual repair
-qualification must include a supported recovery procedure before enabling apply.
-Do not release the reservation through direct database edits.
+To reconcile, repeat exactly the original apply request with its original
+receipt and key. This reads schedule history for the original operation marker;
+it does not dispatch the repair again. A unique terminal matching job settles
+success only with qualified resources, isolation and complete integration
+readback. A normal failed job can settle failure with SQL-completion readback
+evidence or a fixed resource refusal proving it stopped before web/SQL effects.
+Cancelled, killed, timed-out and SQL-incomplete jobs stay
+fenced. A normally completed job with successfully fetched but missing log
+markers can settle failure only when the original disabled per-key script
+verifies against its reviewed plan and resource digest; later runtime, policy
+or service-code changes do not replace that original artifact. A log-fetch
+failure remains unknown. Failure settlement permits a fresh dry-run/new key
+and never establishes isolation success. A reservation checkpointed only at
+disabled schedule upsert can settle as not triggered only with empty history.
+Missing, queued, active, ambiguous or unverified
+trigger evidence keeps the fence. A lease lost before any provider checkpoint
+can retry safely under the same key after current protections are rechecked.
+An independent readback cannot clear a triggered operation.
+Do not release reservations through direct database edits.
 
 Dry-run includes the complete integration readback, including settings outside
 this repair's carrier/SMS/IAP scope. Review those findings before apply. A failed
