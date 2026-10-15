@@ -1,4 +1,6 @@
 from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
+from control_plane.dokploy.api import DokployScheduleExecutionFailed
+from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
 from control_plane.action_effects import (
     AGENT_READ_ROLE_ACTION,
     agent_read_role_covers,
@@ -7625,6 +7627,20 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="not_found",
                 message=f"No Launchplane route for {_ODOO_POST_DEPLOY_ROUTE}.",
+            ) from error
+        except DokployScheduleExecutionFailed as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="provider_outcome_unverified",
+                message="The Odoo data workflow outcome is unverified. Inspect the original operation and retain its evidence and idempotency key.",
+            ) from error
+        except ConnectionIsolationPreconditionFailed as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
             ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(

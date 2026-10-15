@@ -17,6 +17,7 @@ from control_plane.integration_readback import (
 )
 from control_plane.odoo_connection_isolation import (
     CONNECTION_ISOLATION_PROGRAM,
+    ConnectionIsolationPreconditionFailed,
     OdooConnectionIsolationMode,
 )
 
@@ -51,10 +52,13 @@ if [ "$mode" = apply ]; then
     docker stop "$web" >/dev/null
     docker exec -u root "$runner" rm -f {shlex.quote(INTEGRATION_READBACK_PASSED_PATH)}
 fi
-docker exec -i "$runner" python3 - "$database" {shlex.quote(instance)} "$mode" <<'PY'
+isolation_status=0
+docker exec -i "$runner" python3 - "$database" {shlex.quote(instance)} "$mode" <<'PY' || isolation_status=$?
 {CONNECTION_ISOLATION_PROGRAM}PY
-docker exec -i "$runner" python3 - "$database" {shlex.quote(readback_spec)} "$mode" <<'PY'
+readback_status=0
+docker exec -i "$runner" python3 - "$database" {shlex.quote(readback_spec)} "$mode" <<'PY' || readback_status=$?
 {INTEGRATION_READBACK_PROGRAM}PY
+[ "$isolation_status" -eq 0 ] && [ "$readback_status" -eq 0 ] || exit 1
 if [ "$mode" = apply ]; then
     # Release only the actual current database and payload after full readback.
     payload=$(docker exec "$runner" sh -c 'printf %s "${{ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64-}}"')
@@ -87,6 +91,11 @@ def run_connection_isolation(
     database = environment.get("ODOO_DB_NAME", "").strip()
     if not database:
         raise click.ClickException("Connection isolation requires a tracked database name.")
+    policy = integration_readback_policy(
+        instance_name=target_definition.instance,
+        policies=target_definition.policies,
+        workflow_mode="maintenance",
+    )
     plan_digest = canonical_json_sha256(
         {
             "context": target_definition.context,
@@ -96,10 +105,12 @@ def run_connection_isolation(
             "app_name": payload.get("appName"),
             "runtime_identity": environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
             "repair_program": hashlib.sha256(CONNECTION_ISOLATION_PROGRAM.encode()).hexdigest(),
+            "readback_program": hashlib.sha256(INTEGRATION_READBACK_PROGRAM.encode()).hexdigest(),
+            "readback_spec": policy.encoded_spec(),
         }
     )
     if mode == "apply" and reviewed_plan_sha256 != plan_digest:
-        raise click.ClickException("Connection isolation plan changed; run a new dry-run.")
+        raise ConnectionIsolationPreconditionFailed("plan_changed")
     schedule_type, lookup_id, compose_app_name, server_id = (
         post_deploy._resolve_dokploy_schedule_runtime(
             host=host,
@@ -123,12 +134,7 @@ def run_connection_isolation(
         app_name=app_name,
     )
     if post_deploy._has_running_schedule_deployment(existing):
-        raise click.ClickException("Another data workflow is active on this lane.")
-    policy = integration_readback_policy(
-        instance_name=target_definition.instance,
-        policies=target_definition.policies,
-        workflow_mode="maintenance",
-    )
+        raise ConnectionIsolationPreconditionFailed("workflow_active")
     schedule_payload: api.JsonObject = {
         "name": name,
         "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
@@ -157,7 +163,7 @@ def run_connection_isolation(
         schedule_name=name,
         schedule_app_name=app_name,
         schedule_payload=schedule_payload,
-        resolved_schedule_execution_timeout_seconds=target_definition.deploy_timeout_seconds or 300,
+        resolved_schedule_execution_timeout_seconds=300,
     )
     evidence["connection_isolation_plan_sha256"] = plan_digest
     if mode != "dry-run":

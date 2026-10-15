@@ -65,7 +65,7 @@ def main() -> int:
             path=ODOO_POST_DEPLOY_ROUTE,
             settings=settings,
             body=payload.model_dump(mode="json"),
-            timeout=330,
+            timeout=600,
             idempotency_key=args.idempotency_key,
         )
         result = response["result"]

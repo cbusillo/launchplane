@@ -6,8 +6,21 @@ It deliberately does not read, compare or retain the source database's secrets.
 """
 
 from typing import Literal
+import click
 
 OdooConnectionIsolationMode = Literal["dry-run", "apply", "readback"]
+
+
+class ConnectionIsolationPreconditionFailed(click.ClickException):
+    def __init__(self, reason: Literal["plan_changed", "workflow_active"]) -> None:
+        self.code = "connection_isolation_" + reason
+        super().__init__(
+            {
+                "plan_changed": "The connection isolation plan changed; run a new dry-run.",
+                "workflow_active": "A data workflow is active on this lane; wait for it, then run a new dry-run.",
+            }[reason]
+        )
+
 
 # Invalid URI schemes make requests reject the URL before opening a connection,
 # including for an account recreated by an addon or a synchronous SMS call.
@@ -185,6 +198,8 @@ try:
         refused = connection_isolation(cursor, apply=mode == "apply")
         if mode == "apply":
             if refused:
+                print("connection_isolation_ok=false")
+                print("integration_readback_refused=" + ",".join(refused))
                 raise RuntimeError("Connection isolation did not pass")
             connection.commit()
         else:

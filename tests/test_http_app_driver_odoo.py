@@ -7253,6 +7253,53 @@ class FastApiOdooProdRollbackTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
+    async def test_connection_repair_preserves_uncertain_and_precondition_errors(self) -> None:
+        from control_plane.dokploy.api import DokployScheduleExecutionFailed
+        from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
+
+        for error, expected_status, expected_code in (
+            (
+                DokployScheduleExecutionFailed(
+                    schedule_id="fixture",
+                    deployment_id="",
+                    deployment_status="unknown",
+                    cause="trigger_outcome_unknown",
+                ),
+                503,
+                "provider_outcome_unverified",
+            ),
+            (
+                ConnectionIsolationPreconditionFailed("plan_changed"),
+                409,
+                "connection_isolation_plan_changed",
+            ),
+        ):
+            with self.subTest(error=type(error).__name__), TemporaryDirectory() as directory:
+                root = Path(directory)
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(self._identity()),
+                    authz_policy=self._policy(),
+                    record_store_factory=lambda: self._store_with_opw_profile(root / "state"),
+                    control_plane_root_path=root,
+                )
+                with patch(
+                    "control_plane.odoo_post_deploy_http.execute_odoo_post_deploy",
+                    side_effect=error,
+                ):
+                    response = await _post_odoo_post_deploy(
+                        app,
+                        {
+                            "product": "odoo-tenant-opw",
+                            "post_deploy": {
+                                "context": "opw",
+                                "instance": "testing",
+                                "connection_isolation": "readback",
+                            },
+                        },
+                    )
+                self.assertEqual(response.status_code, expected_status)
+                self.assertEqual(response.json()["error"]["code"], expected_code)
+
     async def test_connection_repair_keeps_authorization_and_production_boundary(self) -> None:
         for instance, action, expected_status in (
             ("testing", "odoo_post_deploy.execute", 202),

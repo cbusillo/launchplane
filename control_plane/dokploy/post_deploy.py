@@ -423,34 +423,36 @@ def run_manual_data_schedule(
         raise click.ClickException(
             f"Dokploy schedule {schedule_name!r} for {target_definition.context}/{target_definition.instance} did not expose a schedule id."
         )
-    latest_schedule_deployment = api.latest_deployment_for_schedule(
-        host=host,
-        token=token,
-        schedule_id=schedule_id,
-    )
     if before_provider_mutation is not None:
         before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
     try:
         completed_schedule_deployment_key = api.deployment_key_from_wait_result(
-            api.trigger_dokploy_schedule_and_wait(
+            api.run_dokploy_schedule(
                 host=host,
                 token=token,
                 schedule_id=schedule_id,
-                before_key=api.deployment_key(latest_schedule_deployment),
-                execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
+                timeout_seconds=resolved_schedule_execution_timeout_seconds,
             )
         )
-    except api.DokployDeploymentFailed as error:
+    except api.DokployScheduleExecutionFailed as error:
+        if error.cause != "remote_command_exit" or not error.deployment_id:
+            raise
         evidence = _read_odoo_post_deploy_log_markers(
             host=host,
             token=token,
             schedule_id=schedule_id,
             schedule_deployment_key=error.deployment_id,
             deployment_id=error.deployment_id,
-            deployment=error.deployment,
         )
         raise OdooPostDeployReadbackFailure(
-            "Odoo data workflow failed: " + integration_readback_refusal_detail(evidence),
+            "Odoo data workflow failed (deployment="
+            + error.deployment_id
+            + ")"
+            + (
+                ": " + integration_readback_refusal_detail(evidence)
+                if evidence.get("integration_readback_refused")
+                else "."
+            ),
             evidence=evidence,
         ) from None
     if not completed_schedule_deployment_key:
@@ -2833,7 +2835,11 @@ if [ "{int(probe_company_email_contract)}" = "1" ]; then
 {ODOO_COMPANY_EMAIL_CONTRACT_PROGRAM}PY
 fi
 
-if ! neutralize_copy_connections || ! enforce_integration_readback; then
+neutralization_status=0
+neutralize_copy_connections || neutralization_status=$?
+readback_status=0
+enforce_integration_readback || readback_status=$?
+if [ "$neutralization_status" -ne 0 ] || [ "$readback_status" -ne 0 ]; then
     echo "integration_readback_ok=false"
     web_restart_blocked=1
     exit 1

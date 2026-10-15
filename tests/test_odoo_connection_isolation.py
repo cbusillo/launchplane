@@ -45,13 +45,17 @@ def seed(connection: Any) -> None:
     connection.execute(
         "CREATE TABLE delivery_carrier (delivery_type TEXT, active BOOLEAN, prod_environment BOOLEAN, "
         "usps_api_key TEXT, usps_api_secret TEXT, usps_eps_account_number TEXT, "
-        "usps_access_token TEXT, usps_payment_token TEXT, ups_access_token TEXT)"
+        "usps_access_token TEXT, usps_payment_token TEXT, ups_client_id TEXT, "
+        "ups_client_secret TEXT, ups_shipper_number TEXT, ups_access_token TEXT)"
     )
     connection.execute(
-        "INSERT INTO delivery_carrier VALUES ('usps_rest', true, false, 'key', 'secret', 'account', 'access', 'payment', 'ups-access')"
+        "INSERT INTO delivery_carrier VALUES ('usps_rest', true, false, 'key', 'secret', 'account', 'access', 'payment', NULL, NULL, NULL, NULL)"
     )
     connection.execute(
-        "INSERT INTO delivery_carrier VALUES ('fixed', true, false, NULL, NULL, NULL, NULL, NULL, NULL)"
+        "INSERT INTO delivery_carrier VALUES ('ups_rest', false, true, NULL, NULL, NULL, NULL, NULL, 'client', 'secret', 'shipper', 'cached-token')"
+    )
+    connection.execute(
+        "INSERT INTO delivery_carrier VALUES ('fixed', true, false, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL)"
     )
     connection.execute(
         "INSERT INTO ir_config_parameter VALUES ('shopify.api_token', 'development-store-key')"
@@ -60,6 +64,54 @@ def seed(connection: Any) -> None:
 
 
 class ConnectionIsolationTests(unittest.TestCase):
+    def test_remote_command_exit_retains_findings_through_native_schedule_helper(self) -> None:
+        from control_plane.dokploy import api, post_deploy
+        from control_plane.dokploy.source import DokployTargetDefinition
+
+        target = DokployTargetDefinition(
+            context="example", instance="testing", target_type="compose", target_id="fixture"
+        )
+        with (
+            patch.object(api, "upsert_dokploy_schedule", return_value={"scheduleId": "fixture"}),
+            patch.object(
+                api,
+                "latest_deployment_for_schedule",
+                side_effect=[None, {"deploymentId": "failed-fixture", "status": "error"}],
+            ),
+            patch.object(
+                api,
+                "dokploy_request",
+                side_effect=api.DokployRequestFailed(
+                    method="POST",
+                    path="/api/schedule.runManually",
+                    detail="remote exit",
+                    remote_command_failed=True,
+                ),
+            ),
+            patch.object(api, "fetch_dokploy_deployment_logs", return_value=()),
+            patch.object(
+                post_deploy,
+                "_read_odoo_post_deploy_log_markers",
+                return_value={
+                    "integration_readback_refused": "carrier/usps_api_secret",
+                    "integration_readback_ok": "false",
+                },
+            ),
+        ):
+            with self.assertRaises(post_deploy.OdooPostDeployReadbackFailure) as raised:
+                post_deploy.run_manual_data_schedule(
+                    host="fixture",
+                    token="fixture",
+                    target_definition=target,
+                    schedule_lookup_id="fixture",
+                    schedule_type="server",
+                    schedule_name="fixture",
+                    schedule_app_name="fixture",
+                    schedule_payload={},
+                    resolved_schedule_execution_timeout_seconds=30,
+                )
+        self.assertIn("carrier/usps_api_secret", str(raised.exception))
+
     def test_failed_schedule_returns_value_free_findings(self) -> None:
         from control_plane.dokploy import api, post_deploy
         from control_plane.dokploy.source import DokployTargetDefinition
@@ -72,6 +124,7 @@ class ConnectionIsolationTests(unittest.TestCase):
                 api, "upsert_dokploy_schedule", return_value={"scheduleId": "schedule-fixture"}
             ),
             patch.object(api, "latest_deployment_for_schedule", return_value=None),
+            patch.object(api, "fetch_dokploy_deployment_logs", return_value=()),
             patch.object(
                 api,
                 "trigger_dokploy_schedule_and_wait",
@@ -197,11 +250,12 @@ class ConnectionIsolationTests(unittest.TestCase):
             ).fetchone(),
             ("development-store-key",),
         )
-        self.assertIsNone(
-            connection.execute(
-                "SELECT usps_api_secret FROM delivery_carrier WHERE delivery_type='usps_rest'"
-            ).fetchone()[0]
-        )
+        for values in connection.execute(
+            "SELECT usps_api_key, usps_api_secret, usps_eps_account_number, "
+            "usps_access_token, usps_payment_token, ups_client_id, ups_client_secret, "
+            "ups_shipper_number, ups_access_token FROM delivery_carrier"
+        ):
+            self.assertTrue(all(value is None for value in values), values)
         self.assertEqual(
             connection.execute("SELECT stock_move_sms_validation FROM res_company").fetchone(), (0,)
         )

@@ -2838,6 +2838,12 @@ return boolean verdicts and setting names only. Review that receipt, then use
 again before any effect. Retain the evidence and original idempotency key if
 the response is uncertain; do not submit a new repair.
 
+Dry-run includes the complete integration readback, including settings outside
+this repair's carrier/SMS/IAP scope. Review those findings before apply. A failed
+remote command returns its named findings and deployment evidence; an unverified
+provider outcome returns 503 and must be investigated with the original evidence
+and key. A changed plan or active workflow returns a named 409 with its next step.
+
 Apply stops only this lane's web, replaces copied IAP tokens with an inert
 disabled dummy, disables delivery SMS on every company, deactivates external
 carriers, clears their known stored credential columns (including USPS REST),
