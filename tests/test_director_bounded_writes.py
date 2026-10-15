@@ -701,7 +701,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             self.store, "compare_and_write_product_profile_record", side_effect=insert_then_compare
         ):
             result = await self.classify()
-        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(result.status_code, 403, result.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
     async def test_uncertain_preview_can_reconcile_after_safety_expires(self) -> None:

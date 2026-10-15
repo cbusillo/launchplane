@@ -4671,7 +4671,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 release.set()
                 event.remove(store._engine, "after_cursor_execute", pause_writer)
-            self.assertEqual(result.status, "changed")
+            self.assertEqual(result.status, "history_conflict")
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(store.read_deployment_record(history.record_id), history)
 
@@ -4683,18 +4683,32 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             DeploymentEvidence,
             PromotionRecord,
         )
-        from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
+        from control_plane.http_app import (
+            _PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+            create_launchplane_fastapi_app,
+            idempotency_scope,
+        )
         from control_plane.service_auth import configured_local_operator_identity
         from control_plane.storage.postgres import (
             LaunchplaneDeploymentRow,
             LaunchplanePromotionRow,
             LaunchplanePreviewRow,
+            LaunchplaneProductProfileRow,
+            NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS,
         )
         from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
         from tests.support.http import request
         from tests.support.profiles import _odoo_preview_profile_payload
 
-        for kind in ("production", "testing", "promotion", "preview", "rolled_back"):
+        for kind in (
+            "production",
+            "testing",
+            "promotion",
+            "preview",
+            "rolled_back",
+            "profile_write",
+            "profile_recovery",
+        ):
             with self.subTest(writer=kind), _head_postgres_database() as url:
                 store = PostgresRecordStore(database_url=url)
                 self.addCleanup(store.close)
@@ -4745,7 +4759,38 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     target_type="compose",
                 )
                 write: Callable[[], None]
-                if kind == "promotion":
+                if kind == "profile_write":
+                    changed_profile = profile.model_copy(update={"display_name": "Changed"})
+                    write = partial(store.write_product_profile_record, changed_profile)
+                    table = LaunchplaneProductProfileRow.__tablename__
+                elif kind == "profile_recovery":
+                    reservation = store.reserve_mutation(
+                        scope="fixture-recovery",
+                        route_path="/fixture-recovery",
+                        idempotency_key="fixture-recovery",
+                        request_fingerprint="fixture",
+                        lease_owner="fixture",
+                        reconciliation_key="fixture",
+                    ).record
+                    assert reservation is not None
+                    held = store.mark_mutation_reconcile_required(
+                        reservation=reservation,
+                        reconciliation_key="fixture",
+                    ).record
+                    assert held is not None
+
+                    def write() -> None:
+                        adopted = store.adopt_reconciled_mutation(
+                            reservation=held,
+                            response_status_code=202,
+                            response_trace_id="fixture-adoption",
+                            response_payload={},
+                            expected_binding_evidence=(profile,),
+                        )
+                        self.assertEqual(adopted.status, "adopted")
+
+                    table = LaunchplaneProductProfileRow.__tablename__
+                elif kind == "promotion":
                     promotion = PromotionRecord(
                         record_id="held-promotion",
                         context=profile.lanes[0].context,
@@ -4792,9 +4837,25 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     context: Any,
                     _many: Any,
                 ) -> None:
-                    if context.isinsert and context.compiled.statement.table.name == table:
+                    statement = context.compiled.statement if context.compiled is not None else None
+                    holds_profile = (
+                        kind == "profile_recovery"
+                        and statement is not None
+                        and statement.is_select
+                        and statement._for_update_arg is not None
+                        and any(
+                            source.compare(LaunchplaneProductProfileRow.__table__)
+                            for source in statement.get_final_froms()
+                        )
+                    )
+                    holds_write = (
+                        (context.isinsert or context.isupdate)
+                        and statement is not None
+                        and statement.table.name == table
+                    )
+                    if holds_profile or holds_write:
                         written.set()
-                        if not release.wait(30):
+                        if not release.wait(6 * NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS):
                             raise AssertionError("History writer was not resumed")
                         if kind == "rolled_back":
                             raise RuntimeError("Roll back the fixture writer")
@@ -4805,7 +4866,9 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         writer = workers.submit(write)
                         try:
                             self.assertTrue(written.wait(5))
-                            busy = workers.submit(classify).result(timeout=15)
+                            busy = workers.submit(classify).result(
+                                timeout=3 * NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS
+                            )
                             self.assertEqual(busy.status_code, 409, busy.text)
                             self.assertEqual(
                                 busy.json()["error"]["code"], "production_history_busy"
@@ -4816,7 +4879,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                             self.assertIsNone(
                                 store.read_idempotency_record(
                                     scope=idempotency_scope(identity),
-                                    route_path="/v1/product-profiles/{product}/production-use",
+                                    route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
                                     idempotency_key=key,
                                 )
                             )
@@ -4831,7 +4894,13 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     release.set()
                     event.remove(store._engine, "after_cursor_execute", pause_writer)
                 retry = classify()
-                if kind in {"production", "promotion"}:
+                if kind == "profile_write":
+                    self.assertEqual(retry.status_code, 409, retry.text)
+                    self.assertEqual(retry.json()["error"]["code"], "stale")
+                    self.assertEqual(
+                        store.read_product_profile_record(profile.product), changed_profile
+                    )
+                elif kind in {"production", "promotion"}:
                     self.assertEqual(retry.status_code, 403, retry.text)
                     self.assertEqual(store.read_product_profile_record(profile.product), profile)
                 else:

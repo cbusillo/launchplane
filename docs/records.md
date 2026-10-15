@@ -1029,7 +1029,9 @@ reason and timestamps. The Client panel reads the resulting profile back.
 The never-live check waits at most five seconds for each classification authority
 or history lock. If a writer still holds a lock, Apply returns `409
 production_history_busy` and rolls back its transaction, including its new
-reservation. Retry the same reviewed request with the same `Idempotency-Key`;
+reservation. An expired reservation reclaimed in that transaction retains its
+previous expired state and can be retried immediately too. Retry the same
+reviewed request with the same `Idempotency-Key`;
 the retry checks the current profile and history again. A changed profile needs
 a fresh review, and committed contradictory production history still refuses
 classification. Contention never records a successful result or relaxes production

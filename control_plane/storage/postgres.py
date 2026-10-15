@@ -651,9 +651,11 @@ class OrdinaryAgentDeliveryActivationStore(Protocol):
 
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
+NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS = 5
 ProductProfileCompareWriteStatus = Literal[
     "written",
     "history_busy",
+    "history_conflict",
     "missing",
     "changed",
     "replayed",
@@ -23970,10 +23972,15 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="changed")
-        if require_never_live_history:
-            try:
+        try:
+            if require_never_live_history:
                 if self._engine.dialect.name == "postgresql":
-                    session.execute(text("SET LOCAL lock_timeout = '5s'"))
+                    session.execute(
+                        text(
+                            "SET LOCAL lock_timeout = "
+                            f"'{NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS}s'"
+                        )
+                    )
                 self._lock_product_authority_bundle_write(session)
                 if self._engine.dialect.name == "postgresql":
                     # Include concurrent history insertions, not only existing rows.
@@ -23986,17 +23993,20 @@ class PostgresRecordStore(HumanSessionStore):
                         )
                     )
                     session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
-            except DBAPIError as error:
-                if getattr(error.orig, "sqlstate", None) != "55P03":
-                    raise
-                # No profile or provider effect has occurred. The reservation is
-                # in this transaction too; rollback permits a same-key retry.
-                session.rollback()
-                return ProductProfileCompareWriteResult(status="history_busy")
-        self._lock_landing_authority(
-            session, landing_authority.product_profile(expected_record.product)
-        )
-        row = session.scalar(statement)
+            self._lock_landing_authority(
+                session, landing_authority.product_profile(expected_record.product)
+            )
+            row = session.scalar(statement)
+        except DBAPIError as error:
+            if not require_never_live_history or getattr(error.orig, "sqlstate", None) not in {
+                "55P03",
+                "40P01",
+            }:
+                raise
+            # No profile or provider effect has occurred. The reservation is
+            # in this transaction too; rollback permits a same-key retry.
+            session.rollback()
+            return ProductProfileCompareWriteResult(status="history_busy")
         if row is None:
             if reservation_row is not None:
                 session.delete(reservation_row)
@@ -24066,7 +24076,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if reservation_row is not None:
                     session.delete(reservation_row)
                     session.commit()
-                return ProductProfileCompareWriteResult(status="changed")
+                return ProductProfileCompareWriteResult(status="history_conflict")
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id
