@@ -4569,7 +4569,7 @@ or stable-lane rollback because neither was changed.
 ### Testing import diagnostics
 
 `GET /v1/products/{product}/environments/testing/odoo-import-diagnostics`
-requires the existing `product_environment.read` authorization for the selected
+requires the existing `operations.read` authorization for the selected
 product and testing instance. It accepts no query parameters, SQL, endpoints,
 usernames or credentials. The response is `Cache-Control: no-store`.
 
@@ -4587,7 +4587,8 @@ Retired password keys are excluded by the same binding selector used for lane
 delivery. Non-secret agreement remains visible when a password binding is refused.
 A source is probed only when its managed host and port agree with the applied
 Odoo parameters; changing runtime intent cannot send a password to an unapplied
-endpoint.
+endpoint. A password mismatch for the same applied source account also leaves
+grants unknown without attempting a login.
 
 Each source's selected managed connection is independently inspected using
 `SHOW GRANTS`, without reading customer tables or trying a write. Connections

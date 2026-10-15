@@ -6,7 +6,6 @@ import subprocess
 import sys
 import threading
 import time
-from secrets import token_bytes
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
@@ -17,6 +16,7 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
+from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
@@ -31,16 +31,21 @@ from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
 from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
 
 SOURCE_PREFIXES = {
-    "cm_data": "cm_data.db",
-    "repairshopr": "repairshopr.sync_db",
-    "fishbowl": "fishbowl",
+    name: next(
+        key.removesuffix(".password")
+        for family in INTEGRATION_FAMILIES
+        if family.integration == name
+        for key in family.config_parameters
+        if key.endswith(".password")
+    )
+    for name in ("cm_data", "repairshopr", "fishbowl")
 }
 FIELDS = ("host", "user", "db", "port", "ssl_verify")
 Agreement = Literal["match", "mismatch", "missing", "unknown"]
-_PROBE_KEY = token_bytes(32)
+ProbeKey = tuple[str, str, str, str, str]
 _PROBE_LOCK = threading.Lock()
-_ACTIVE_PROBES: set[bytes] = set()
-_FAILED_PROBES: dict[bytes, float] = {}
+_ACTIVE_PROBES: set[ProbeKey] = set()
+_FAILED_PROBES: dict[ProbeKey, float] = {}
 
 
 class DiagnosticStore(
@@ -179,6 +184,7 @@ def import_authority(store: DiagnosticStore, product: str) -> ImportAuthority:
             "target_id": target_id.model_dump(mode="json"),
             "runtime": expectation.model_dump(mode="json"),
             "bindings": selected_metadata,
+            "settings": source_settings,
             "versions": {
                 name: authority.version.model_dump(mode="json")
                 for name, authority in sources.items()
@@ -272,11 +278,19 @@ def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str
     return result
 
 
-def managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "unknown"]:
-    # Single-flight and failure cooldown, keyed privately so plaintext passwords
-    # are never retained in a cache or a key's repr. Successful grants are never
+def managed_grants(
+    settings: dict[str, str], *, binding_id: str, version_id: str
+) -> Literal["read_only", "unsafe", "unknown"]:
+    # Single-flight and failure cooldown use immutable credential references,
+    # never plaintext or password-derived hashes. Successful grants are never
     # cached: every successful result is a fresh source observation.
-    key = hmac.digest(_PROBE_KEY, json.dumps(settings, sort_keys=True).encode(), "sha256")
+    key = (
+        binding_id,
+        version_id,
+        settings.get("host", ""),
+        settings.get("user", ""),
+        settings.get("port", ""),
+    )
     now = time.monotonic()
     with _PROBE_LOCK:
         for expired in [item for item, until in _FAILED_PROBES.items() if until <= now]:
@@ -405,10 +419,21 @@ def diagnose_imports(
                         source=source_name,
                         binding="selected",
                         parameters=parameters,
-                        managed_connection_grants=managed_grants(settings)
+                        managed_connection_grants=managed_grants(
+                            settings,
+                            binding_id=selected.binding.binding_id,
+                            version_id=selected.version.version_id,
+                        )
                         if all(
                             settings[key] and settings[key] == applied.get(prefix + "." + key)
                             for key in ("host", "port")
+                        )
+                        and not (
+                            settings["user"] == applied.get(prefix + ".user")
+                            and parameter_agreement(
+                                "password", password, applied.get(prefix + ".password", "")
+                            )
+                            != "match"
                         )
                         else "unknown",
                     )

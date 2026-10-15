@@ -335,7 +335,7 @@ def register_odoo_runtime_read_routes(
             lane = next(lane for lane in profile.lanes if lane.instance == "testing")
             if not common.authorization_allows(
                 identity=identity,
-                action="product_environment.read",
+                action="operations.read",
                 product=profile.product,
                 context=lane.context,
                 target=AuthorizationTarget(scope="instance", instances=(lane.instance,)),

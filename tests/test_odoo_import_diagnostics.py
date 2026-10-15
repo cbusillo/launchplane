@@ -300,13 +300,19 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(fields["host"], "mismatch")
         self.assertEqual(self.mocks[-1].call_count, 2)
 
+    def test_same_account_password_mismatch_does_not_attempt_login(self) -> None:
+        self.fixture.applied["cm_data.db.password"] = "new-upstream-password-fixture"
+        result = self.run_diagnostic()
+        self.assertEqual(result.sources[0].managed_connection_grants, "unknown")
+        self.assertEqual(self.mocks[-1].call_count, 2)
+
     def test_runtime_and_config_drift_discard_evidence(self) -> None:
-        for kind in ("runtime", "settings", "binding", "container", "applied"):
+        for kind in ("runtime", "settings", "binding", "container", "applied", "nonsecret_binding"):
             with self.subTest(kind=kind):
                 fixture = DiagnosticFixture()
                 self.fixture = fixture
 
-                def drift(settings: dict[str, str]) -> str:
+                def drift(settings: dict[str, str], **reference: object) -> str:
                     if kind == "runtime":
                         fixture.store.read_environment_inventory.return_value = (
                             fixture.inventory.model_copy(update={"deployment_record_id": "changed"})
@@ -317,6 +323,15 @@ class DiagnosticTests(unittest.TestCase):
                         )
                     elif kind == "binding":
                         fixture.bindings.clear()
+                    elif kind == "nonsecret_binding":
+                        fixture.bindings.append(
+                            fixture.bindings[0].model_copy(
+                                update={
+                                    "binding_id": "host-binding",
+                                    "binding_key": config_parameter_runtime_key("cm_data.db.host"),
+                                }
+                            )
+                        )
                     elif kind == "applied":
                         fixture.applied["fishbowl.password"] = "changed-fixture-password"
                     else:
@@ -410,28 +425,58 @@ class GrantTests(unittest.TestCase):
                 "control_plane.odoo_import_diagnostics.subprocess.run", side_effect=OSError(PRIVATE)
             ) as run,
         ):
-            self.assertEqual(diagnostic.managed_grants(settings), "unknown")
-            self.assertEqual(diagnostic.managed_grants(settings), "unknown")
+            self.assertEqual(
+                diagnostic.managed_grants(
+                    settings, binding_id="fixture-binding", version_id="fixture-version"
+                ),
+                "unknown",
+            )
+            self.assertEqual(
+                diagnostic.managed_grants(
+                    settings, binding_id="fixture-binding", version_id="fixture-version"
+                ),
+                "unknown",
+            )
             run.assert_called_once()
             self.assertNotIn(PRIVATE, repr(diagnostic._FAILED_PROBES))
             clock.return_value = 1000
             run.side_effect = None
             run.return_value = subprocess.CompletedProcess([], 0, stdout='{"grants":"read_only"}')
-            self.assertEqual(diagnostic.managed_grants(settings), "read_only")
-            self.assertEqual(diagnostic.managed_grants(settings), "read_only")
+            self.assertEqual(
+                diagnostic.managed_grants(
+                    settings, binding_id="fixture-binding", version_id="fixture-version"
+                ),
+                "read_only",
+            )
+            self.assertEqual(
+                diagnostic.managed_grants(
+                    settings, binding_id="fixture-binding", version_id="fixture-version"
+                ),
+                "read_only",
+            )
             self.assertEqual(run.call_count, 3)
 
     def test_same_source_has_one_in_flight_probe(self) -> None:
         settings = {"host": "source.invalid", "user": "reader", "password": PRIVATE}
 
         def concurrent(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-            self.assertEqual(diagnostic.managed_grants(settings), "unknown")
+            self.assertEqual(
+                diagnostic.managed_grants(
+                    settings, binding_id="fixture-binding", version_id="fixture-version"
+                ),
+                "unknown",
+            )
             return subprocess.CompletedProcess([], 0, stdout='{"grants":"read_only"}')
 
         with patch(
             "control_plane.odoo_import_diagnostics.subprocess.run", side_effect=concurrent
         ) as run:
-            self.assertEqual(diagnostic.managed_grants(settings), "read_only")
+            self.assertEqual(
+                diagnostic.managed_grants(
+                    settings, binding_id="fixture-binding", version_id="fixture-version"
+                ),
+                "read_only",
+            )
             run.assert_called_once()
 
     def test_privilege_categories_roles_and_grant_options_fail_closed(self) -> None:
@@ -528,7 +573,12 @@ class GrantTests(unittest.TestCase):
                 {"side_effect": value} if isinstance(value, Exception) else {"return_value": value}
             )
             with patch("control_plane.odoo_import_diagnostics.subprocess.run", **kwargs) as run:
-                self.assertEqual(diagnostic.managed_grants(settings), "unknown")
+                self.assertEqual(
+                    diagnostic.managed_grants(
+                        settings, binding_id="fixture-binding", version_id="fixture-version"
+                    ),
+                    "unknown",
+                )
             self.assertNotIn(PRIVATE, repr(run.call_args.args))
             self.assertGreater(run.call_args.kwargs["timeout"], 0)
 
