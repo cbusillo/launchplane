@@ -30,6 +30,11 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.workflows.dokploy_target_adoption import (
+    PROJECT_CREATE_PATH,
+    ENVIRONMENT_CREATE_PATH,
+    COMPOSE_CREATE_PATH,
+)
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -48,6 +53,7 @@ from tests.test_odoo_addon_settings_override import _existing_record as _addon_o
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetRecordChanged,
+    DokployTargetIntegrationAllowance,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from tests import test_http_app_product_retirement as retirement_tests
@@ -258,7 +264,6 @@ from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     ProductContextOwnershipError,
     ProductAuthorityBundle,
-    SecretRecordConflictError,
     RuntimeEnvironmentConflictError,
     RuntimeEnvironmentWrite,
 )
@@ -2336,9 +2341,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(store.list_runtime_environment_records(), (runtime,))
 
-    def test_adopted_secret_insert_loses_to_a_record_written_after_the_absence_check(
-        self,
-    ) -> None:
+    def test_direct_secret_writer_waits_for_atomic_adoption_after_absence_check(self) -> None:
         with _store_for_fresh_head_database() as store:
             recorded = SecretRecord(
                 secret_id="secret-adopted",
@@ -2352,28 +2355,37 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 updated_at="2026-10-03T00:00:00Z",
                 updated_by="other-writer",
             )
-            database_url = store.database_url
+            other = PostgresRecordStore(database_url=store.database_url)
+            self.addCleanup(other.close)
+            reached_lock = threading.Event()
+            original_lock = other._lock_product_authority_bundle_write
+            futures = []
+            with ThreadPoolExecutor(max_workers=1) as workers:
 
-            class _RacingStore(PostgresRecordStore):
-                def _after_product_authority_bundle_step(self, step_name: str) -> None:
-                    # Another writer commits the same secret after the absence check,
-                    # outside the bundle lock, as a direct secret write does.
+                def lock(session: Any) -> None:
+                    reached_lock.set()
+                    original_lock(session)
+
+                def after_step(step_name: str) -> None:
                     if step_name == "write_secret_version":
-                        other_store = PostgresRecordStore(database_url=database_url)
-                        try:
-                            other_store.write_secret_record(recorded)
-                        finally:
-                            other_store.close()
+                        future = workers.submit(other.write_secret_record, recorded)
+                        futures.append(future)
+                        self.assertTrue(reached_lock.wait(10))
+                        with self.assertRaises(TimeoutError):
+                            future.result(timeout=0.1)
 
-            racing_store = _RacingStore(database_url=database_url)
-            try:
-                with self.assertRaises(SecretRecordConflictError):
-                    racing_store.write_product_authority_bundle(
+                with (
+                    patch.object(other, "_lock_product_authority_bundle_write", side_effect=lock),
+                    patch.object(
+                        store, "_after_product_authority_bundle_step", side_effect=after_step
+                    ),
+                ):
+                    store.write_product_authority_bundle(
                         ProductAuthorityBundle(
                             secret_versions=(
                                 SecretVersion(
                                     version_id="version-adopted",
-                                    secret_id="secret-adopted",
+                                    secret_id=recorded.secret_id,
                                     created_at="2026-10-03T00:00:01Z",
                                     key_id="test-key",
                                     ciphertext="ciphertext",
@@ -2387,12 +2399,15 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                                     }
                                 ),
                             ),
-                            absent_secret_ids=("secret-adopted",),
+                            absent_secret_ids=(recorded.secret_id,),
                         )
                     )
-            finally:
-                racing_store.close()
-            self.assertEqual(store.read_secret_record("secret-adopted"), recorded)
+                    for future in futures:
+                        future.result(timeout=10)
+            self.assertEqual(store.read_secret_record(recorded.secret_id), recorded)
+            self.assertEqual(
+                store.read_secret_version("version-adopted").secret_id, recorded.secret_id
+            )
 
     def test_historical_preflight_scopes_database_history_before_limits(self) -> None:
         with TemporaryDirectory() as directory, _store_for_fresh_head_database() as store:
@@ -10166,6 +10181,436 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_resource_guard_excludes_absent_configuration_alias_and_evidence_writers(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from tests.support.disposable_lanes import record_safety
+        from tests.support.profiles import _generic_site_profile_payload
+
+        for change in ("global-insert", "instance-insert", "new-alias", "evidence-refresh"):
+            with self.subTest(change=change), _head_postgres_database() as url:
+                first = PostgresRecordStore(database_url=url)
+                second = PostgresRecordStore(database_url=url)
+                self.addCleanup(first.close)
+                self.addCleanup(second.close)
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload()
+                )
+                first.write_product_profile_record(profile)
+                lane = next(item for item in profile.lanes if item.instance == "testing")
+                target = DokployTargetIdRecord(
+                    context=lane.context,
+                    instance="testing",
+                    target_id="fresh-compose",
+                    updated_at=profile.updated_at,
+                )
+                first.write_dokploy_target_id_record(target)
+                reached_lock = threading.Event()
+                original_lock = second._lock_product_authority_bundle_write
+
+                def signal_lock(session: Any) -> None:
+                    reached_lock.set()
+                    original_lock(session)
+
+                def competing_write() -> None:
+                    if change == "new-alias":
+                        second.write_dokploy_target_id_record(
+                            target.model_copy(
+                                update={"context": "another-lane", "instance": "prod"}
+                            )
+                        )
+                    elif change == "evidence-refresh":
+                        record_safety(second, profile.product, lane.context, "testing")
+                    else:
+                        second.write_runtime_environment_record(
+                            RuntimeEnvironmentRecord(
+                                scope="global" if change == "global-insert" else "instance",
+                                context="" if change == "global-insert" else lane.context,
+                                instance="" if change == "global-insert" else "testing",
+                                env={"EXAMPLE_RUNTIME_SETTING": "new"},
+                                updated_at=profile.updated_at,
+                            )
+                        )
+
+                with (
+                    patch.object(
+                        second, "_lock_product_authority_bundle_write", side_effect=signal_lock
+                    ),
+                    ThreadPoolExecutor(max_workers=1) as pool,
+                ):
+                    with first.serialize_disposable_testing_resources() as checkpoint:
+                        future = pool.submit(competing_write)
+                        self.assertTrue(reached_lock.wait(10))
+                        with self.assertRaises(TimeoutError):
+                            future.result(timeout=0.1)
+                        checkpoint()
+                        # Same-thread evidence writes can commit under the held
+                        # coordinator without deadlocking its separate connection.
+                        record_safety(first, profile.product, lane.context, "testing")
+                        checkpoint()
+                    future.result(timeout=10)
+
+    def test_fresh_resource_preparation_replay_and_readback_preserve_retained_operation(
+        self,
+    ) -> None:
+        self._fresh_resource_preparation_case("normal")
+
+    def test_lost_resource_receipt_adopts_actual_work_without_another_create(self) -> None:
+        self._fresh_resource_preparation_case("lost-receipt")
+
+    def test_partial_empty_resources_resume_only_on_the_recorded_target(self) -> None:
+        self._fresh_resource_preparation_case("partial")
+
+    def test_created_compose_is_recovered_after_adoption_transaction_was_lost(self) -> None:
+        self._fresh_resource_preparation_case("lost-adoption")
+
+    def test_alias_insert_during_provider_io_refuses_positive_publication(self) -> None:
+        self._fresh_resource_preparation_case("alias")
+
+    def _fresh_resource_preparation_case(self, fault: str) -> None:
+        from tests.test_testing_replacement_resources import TestingReplacementResourceHttpTests
+        from control_plane.odoo_testing_resources import OdooTestingResources
+
+        with _head_postgres_database() as url:
+            fixture = TestingReplacementResourceHttpTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            retained_record = fixture.store.read_dokploy_target_record(
+                context_name=fixture.context, instance_name="testing"
+            )
+            retained_record = retained_record.model_copy(
+                update={
+                    "domains": ("retained.example.invalid",),
+                    "public_hosts": ("retained-public.example.invalid",),
+                    "env": {"ODOO_DATA_VOLUME": "retained-data"},
+                    "require_test_gate": True,
+                    "policies": retained_record.policies.model_copy(
+                        update={
+                            "integration_allowances": (
+                                DokployTargetIntegrationAllowance(
+                                    integration="shopify",
+                                    kind="pre_live",
+                                    reason="retained lane evidence",
+                                ),
+                            ),
+                            "shopify": retained_record.policies.shopify.model_copy(
+                                update={"protected_store_keys": ("protected-store",)}
+                            ),
+                        }
+                    ),
+                }
+            )
+            fixture.store.write_dokploy_target_record(retained_record)
+            policy = LaunchplaneAuthzPolicy()
+            fixture.store.seed_authz_policy_if_absent(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id=build_authz_policy_record_id(
+                        revision=1, policy_sha256=authz_policy_sha256(policy)
+                    ),
+                    revision=1,
+                    status="active",
+                    source="test:resource-preparation",
+                    updated_at=fixture.profile.updated_at,
+                    policy=policy,
+                )
+            )
+            calls: list[tuple[str, dict[str, Any]]] = []
+            phases: list[str] = []
+            adoption_lost = False
+            original_merge = fixture.store._merge_authority_row
+
+            def merge(session: Any, row: Any, *, step_name: str) -> None:
+                nonlocal adoption_lost
+                if (
+                    fault == "lost-adoption"
+                    and step_name == "write_dokploy_target_id"
+                    and not adoption_lost
+                ):
+                    adoption_lost = True
+                    raise RuntimeError("fixture lost adoption transaction")
+                original_merge(session, row, step_name=step_name)
+
+            def projects(**kwargs: Any) -> Any:
+                project = next(
+                    (payload for path, payload in calls if path == PROJECT_CREATE_PATH), None
+                )
+                if project is None:
+                    return ()
+                namespace = project["name"]
+                return (
+                    {
+                        "projectId": "fresh-projectId",
+                        "name": namespace,
+                        "environments": [
+                            {
+                                "name": namespace,
+                                "environmentId": "fresh-environmentId",
+                                "applications": [],
+                                "composes": [{"composeId": "fresh-composeId", "name": namespace}],
+                            }
+                        ],
+                    },
+                )
+
+            def mutate(host: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+                calls.append((path, payload))
+                identifiers = {
+                    PROJECT_CREATE_PATH: "projectId",
+                    ENVIRONMENT_CREATE_PATH: "environmentId",
+                    COMPOSE_CREATE_PATH: "composeId",
+                }
+                self.assertIn(path, identifiers)
+                return {identifiers[path]: "fresh-" + identifiers[path]}
+
+            def fetch(host: str, token: str, target_type: str, target_id: str) -> dict[str, Any]:
+                self.assertEqual(target_type, "compose")
+                namespace = next(
+                    (payload["name"] for path, payload in calls if path == COMPOSE_CREATE_PATH),
+                    "fixture-compose",
+                )
+                return {
+                    "composeId": target_id,
+                    "name": namespace,
+                    "appName": namespace + "-abc123",
+                    "environmentId": "fresh-environmentId",
+                    "serverId": "fixture-server",
+                    "sourceType": "raw",
+                    "env": "",
+                    "composeFile": "",
+                }
+
+            def schedule(**kwargs: Any) -> dict[str, str]:
+                resources = kwargs["resources"]
+                self.assertIsInstance(resources, OdooTestingResources)
+                self.assertNotEqual(resources.target_id, "compose-testing")
+                kwargs["checkpoint"]()
+                # Unrelated authority remains writable while the provider is
+                # doing I/O; final positive publication still serializes.
+                second = PostgresRecordStore(database_url=url)
+                pool = ThreadPoolExecutor(max_workers=1)
+                try:
+                    pool.submit(
+                        second.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="unrelated",
+                            env={"SETTING": "value"},
+                            updated_at=fixture.profile.updated_at,
+                        ),
+                    ).result(timeout=5)
+                finally:
+                    pool.shutdown(wait=False)
+                    second.close()
+                phases.append(kwargs["mode"])
+                if fault == "alias":
+                    fixture.store.write_dokploy_target_id_record(
+                        DokployTargetIdRecord(
+                            context="another-context",
+                            instance="prod",
+                            target_id=resources.target_id,
+                            updated_at=fixture.profile.updated_at,
+                        )
+                    )
+                    kwargs["checkpoint"]()
+                if fault in {"lost-receipt", "partial"} and phases == ["prepare"]:
+                    # Remote work completed (or is partially prepared) but the
+                    # request died before the allocation receipt publication.
+                    raise RuntimeError("fixture lost schedule reply")
+                if (fault == "partial" and phases == ["prepare", "readback"]) or (
+                    fault == "lost-adoption" and phases == ["readback"]
+                ):
+                    from control_plane.testing_replacement_resources import (
+                        IncompleteTestingResources,
+                    )
+
+                    raise IncompleteTestingResources("fixture actual missing empty volumes")
+                return {
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": resources.binding_sha256,
+                    "schedule_id": "resource-schedule",
+                }
+
+            async def scenario() -> None:
+                before_profile = fixture.store.read_product_profile_record(fixture.profile.product)
+                before_production = fixture.store.read_dokploy_target_id_record(
+                    context_name=fixture.context, instance_name="prod"
+                )
+                plan = await fixture.post()
+                self.assertEqual(plan.status_code, 202, plan.text)
+                body = {
+                    "mode": "apply",
+                    "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
+                }
+                with (
+                    patch.object(fixture.store, "_merge_authority_row", side_effect=merge),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.fetch_dokploy_projects",
+                        side_effect=projects,
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.list_deployments_for_target",
+                        return_value=(),
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.fetch_dokploy_compose_domains_for_target_setup",
+                        return_value=(),
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.source.read_dokploy_config",
+                        return_value=("provider.invalid", "fixture-token"),
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.dokploy_source.read_dokploy_config",
+                        return_value=("provider.invalid", "fixture-token"),
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup",
+                        side_effect=mutate,
+                    ),
+                    patch(
+                        "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
+                        side_effect=fetch,
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.fetch_dokploy_target_payload",
+                        side_effect=lambda **kw: fetch(
+                            kw["host"], kw["token"], kw["target_type"], kw["target_id"]
+                        ),
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.run_resource_schedule",
+                        side_effect=schedule,
+                    ),
+                ):
+                    invalid = await fixture.post(mode="apply", reviewed_plan_sha256="0" * 64)
+                    self.assertEqual(invalid.status_code, 409, invalid.text)
+                    self.assertFalse(calls)
+                    if fault == "alias":
+                        refused = await fixture.post(**body)
+                        self.assertEqual(refused.status_code, 409, refused.text)
+                        self.assertIsNone(
+                            fixture.store.read_disposable_lane_safety(
+                                fixture.profile.product, fixture.context, "testing"
+                            )
+                        )
+                        self.assertEqual(
+                            fixture.store.read_odoo_stable_target_replacement_operation_record(
+                                fixture.operation.operation_id
+                            ),
+                            fixture.operation,
+                        )
+                        return
+                    if fault != "normal":
+                        interrupted = await fixture.post(**body)
+                        self.assertEqual(interrupted.status_code, 409, interrupted.text)
+                        captured = fixture.store.read_disposable_resource_preparation(
+                            fixture.operation.operation_id
+                        )
+                        assert captured is not None
+                        if fault == "lost-adoption":
+                            self.assertFalse(captured.replacement_target_id)
+                        else:
+                            self.assertEqual(
+                                captured.replacement_target_id,
+                                fixture.store.read_dokploy_target_id_record(
+                                    context_name=fixture.context, instance_name="testing"
+                                ).target_id,
+                            )
+                        self.assertFalse(captured.resources_binding_sha256)
+                        count = len(calls)
+                    applied = await fixture.post(**body)
+                    self.assertEqual(applied.status_code, 202, applied.text)
+                    if fault != "normal":
+                        self.assertEqual(len(calls), count)
+                    count = len(calls)
+                    replay = await fixture.post(**body)
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertTrue(replay.json()["replayed"])
+                    self.assertEqual(len(calls), count)
+                    import click
+
+                    with patch(
+                        "control_plane.testing_replacement_resources.run_resource_schedule",
+                        side_effect=click.ClickException("private-provider-error"),
+                    ):
+                        failed = await fixture.post(mode="readback")
+                        self.assertEqual(failed.status_code, 409, failed.text)
+                        self.assertNotIn("private-provider-error", failed.text)
+                    readback = await fixture.post(mode="readback")
+                    self.assertEqual(readback.status_code, 202, readback.text)
+                    self.assertEqual(
+                        readback.json()["result"]["resources_binding_sha256"],
+                        applied.json()["result"]["resources_binding_sha256"],
+                    )
+                self.assertEqual(
+                    fixture.store.read_product_profile_record(fixture.profile.product),
+                    before_profile,
+                )
+                custody = fixture.store.read_disposable_resource_preparation(
+                    fixture.operation.operation_id
+                )
+                assert custody is not None
+                self.assertEqual(custody.retained_target_record, retained_record)
+                replacement_record = fixture.store.read_dokploy_target_record(
+                    context_name=fixture.context, instance_name="testing"
+                )
+                self.assertEqual(
+                    replacement_record.policies.shopify, retained_record.policies.shopify
+                )
+                self.assertFalse(replacement_record.policies.integration_allowances)
+                self.assertEqual(
+                    replacement_record.require_test_gate, retained_record.require_test_gate
+                )
+                self.assertFalse(replacement_record.domains)
+                self.assertFalse(replacement_record.public_hosts)
+                self.assertFalse(replacement_record.env)
+                self.assertTrue(
+                    set(retained_record.domains).issubset(
+                        fixture.store.retained_disposable_hostnames()
+                    )
+                )
+                with self.assertRaises(DokployTargetRecordChanged):
+                    fixture.store.write_dokploy_target_record(
+                        replacement_record.model_copy(update={"domains": retained_record.domains})
+                    )
+                production_record = fixture.store.read_dokploy_target_record(
+                    context_name=fixture.context, instance_name="prod"
+                )
+                with self.assertRaises(DokployTargetRecordChanged):
+                    fixture.store.write_dokploy_target_record(
+                        production_record.model_copy(
+                            update={"public_hosts": retained_record.public_hosts}
+                        )
+                    )
+                self.assertEqual(
+                    fixture.store.read_dokploy_target_record(
+                        context_name=fixture.context, instance_name="prod"
+                    ),
+                    production_record,
+                )
+                self.assertEqual(
+                    fixture.store.read_dokploy_target_id_record(
+                        context_name=fixture.context, instance_name="prod"
+                    ),
+                    before_production,
+                )
+                self.assertEqual(
+                    fixture.store.read_odoo_stable_target_replacement_operation_record(
+                        fixture.operation.operation_id
+                    ),
+                    fixture.operation,
+                )
+                safety = fixture.store.read_disposable_lane_safety(
+                    fixture.profile.product, fixture.context, "testing"
+                )
+                assert safety is not None
+                self.assertEqual(safety.production_resources, "separation_ready")
+                self.assertFalse(
+                    fixture.store.supersede_disposable_testing_replacement(fixture.operation)
+                )
+
+            asyncio.run(scenario())
+
     def test_disposable_records_survive_schema_rollback_without_changing_legacy_payloads(
         self,
     ) -> None:
@@ -10176,9 +10621,10 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
         from control_plane.storage.postgres import (
             LaunchplaneProductProfileRow,
             LaunchplaneOdooStableTargetReplacementOperationRow,
+            LaunchplaneDisposableReplacementPreparationRow,
         )
         from control_plane.storage.migrations.versions import (
-            de647804f004_disposable_lane_records as migration,
+            ef758915f005_disposable_testing_resource_allocations as migration,
         )
 
         with _head_postgres_database() as url:
@@ -10212,6 +10658,25 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             record_safety(store, profile.product, lane.context, "testing")
             evidence = store.read_disposable_lane_safety(profile.product, lane.context, "testing")
             preparation = store.read_disposable_replacement_preparation(operation.operation_id)
+            allocation = store.read_disposable_resource_preparation(operation.operation_id)
+            assert preparation is not None and allocation is not None
+            store.compare_and_write_disposable_resource_preparation(
+                expected=allocation,
+                replacement=allocation.model_copy(
+                    update={
+                        "resource_namespace": "lp-testing-" + "a" * 32,
+                        "replacement_target_id": "new-fixture",
+                    }
+                ),
+            )
+            allocation = store.read_disposable_resource_preparation(operation.operation_id)
+            with store._session_factory() as session:
+                custody = session.get(
+                    LaunchplaneDisposableReplacementPreparationRow, operation.operation_id
+                )
+                assert custody is not None
+                # The older strict reader still sees exactly its original payload.
+                self.assertEqual(custody.payload, preparation.model_dump(mode="json"))
             with store._session_factory() as session:
                 profile_row = session.get(LaunchplaneProductProfileRow, profile.product)
                 operation_row = session.get(
@@ -10230,6 +10695,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 store.read_disposable_replacement_preparation(operation.operation_id), preparation
             )
+            self.assertEqual(
+                store.read_disposable_resource_preparation(operation.operation_id), allocation
+            )
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(
                 store.read_odoo_stable_target_replacement_operation_record(operation.operation_id),
@@ -10239,6 +10707,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             store.verify_schema()
             self.assertEqual(
                 store.read_disposable_replacement_preparation(operation.operation_id), preparation
+            )
+            self.assertEqual(
+                store.read_disposable_resource_preparation(operation.operation_id), allocation
             )
 
     def test_disposable_replacement_safety_and_exclusion_on_postgres(self) -> None:

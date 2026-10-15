@@ -10,6 +10,9 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
+    PROJECT_CREATE_PATH,
+    ENVIRONMENT_CREATE_PATH,
+    COMPOSE_CREATE_PATH,
     DokployComposeTargetCreateResult,
     DokployTargetDomainRepairResult,
     DokployTargetAdoptionResult,
@@ -384,23 +387,31 @@ def execute_dokploy_target_setup(
     request: DokployTargetSetupEnvelope,
     required_context_owner: tuple[str, str] | None = None,
     disposable_checkpoint: Callable[[], None] | None = None,
+    disposable_before_create: Callable[[str], None] | None = None,
+    disposable_placement: tuple[str, str] | None = None,
 ) -> dict[str, object]:
     def mutate_setup(
         host: str, token: str, path: str, payload: dict[str, dokploy_api.JsonValue]
     ) -> dict[str, dokploy_api.JsonValue]:
         if disposable_checkpoint is not None:
             if path not in {
-                "/api/project.create",
-                "/api/environment.create",
-                "/api/compose.create",
+                PROJECT_CREATE_PATH,
+                ENVIRONMENT_CREATE_PATH,
+                COMPOSE_CREATE_PATH,
             }:
                 raise ValueError(
                     "Disposable rebuilding cannot mutate an existing provider resource."
                 )
             disposable_checkpoint()
+            if disposable_before_create is not None:
+                disposable_before_create(path)
         return mutate_dokploy_payload_for_target_setup(host, token, path, payload)
 
     apply_changes = request.mode == "apply"
+    if set(request.domains).intersection(record_store.retained_disposable_hostnames()):
+        raise ValueError("A hostname remains reserved by retained testing custody.")
+    if disposable_placement is not None and disposable_checkpoint is None:
+        raise ValueError("Resuming fresh placement requires its service-owned checkpoint.")
     ensure_dokploy_target_setup_context_is_not_historical(
         record_store=record_store,
         context=request.context,
@@ -544,10 +555,12 @@ def execute_dokploy_target_setup(
             context=request.context,
             instance=request.instance,
             target_name=request.target_name,
-            project_id=request.project_id,
+            project_id=disposable_placement[0] if disposable_placement else request.project_id,
             project_name=request.project_name,
             project_description=request.project_description,
-            environment_id=request.environment_id,
+            environment_id=disposable_placement[1]
+            if disposable_placement
+            else request.environment_id,
             environment_name=request.environment_name,
             environment_description=request.environment_description,
             server_id=request.server_id,
