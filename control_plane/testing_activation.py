@@ -232,7 +232,10 @@ def runtime_values(
             code=TestingActivationRefusalCode.CARRIED_KEYS_UNVERIFIED,
         ) from error
     if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
-        raise TestingActivationRefusal("Carried-key safety remains unproved.")
+        raise TestingActivationRefusal(
+            "Carried-key safety remains unproved.",
+            code=TestingActivationRefusalCode.CARRIED_KEYS_UNVERIFIED,
+        )
     bindings = runtime_environments.site_delivered_secret_bindings_from_store(
         record_store=store, context_name=record.context, instance_name="testing"
     )
