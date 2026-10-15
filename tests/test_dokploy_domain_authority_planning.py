@@ -1,3 +1,5 @@
+from contextlib import nullcontext
+import os
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from tempfile import TemporaryDirectory
@@ -17,18 +19,21 @@ from tests.http_app_test_support import (
     _local_operator_bearer_config,
     _seed_dokploy_target_inspect_records,
 )
-from tests.support.auth import _identity, _StubVerifier
+from tests.support.auth import _identity, _StubVerifier, scoped_agent_transport
+from tests.support.profiles import product_profile_payload
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.secrets import LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.support.http import lifespan_client
 from tests.support.stores import _sqlite_database_url
 
 
-def _repair_body(observed: dict[str, Any]) -> dict[str, object]:
+def _repair_body(observed: dict[str, Any]) -> dict[str, Any]:
     provider = observed["provider_target_record"]
     expected = DeployedTargetReference.model_validate(
         {key: provider[key] for key in DeployedTargetReference.model_fields if key in provider}
     )
-    return {
+    body: dict[str, Any] = {
         "operation": "repair-domain-authority",
         "mode": "dry-run",
         "product": "launchplane",
@@ -40,6 +45,10 @@ def _repair_body(observed: dict[str, Any]) -> dict[str, object]:
         "expected_current_provider_target": expected.model_dump(mode="json"),
         "reason": "Synthetic inspection-to-planner proof.",
     }
+
+    if provider.get("comparison_fingerprint"):
+        body["expected_current_provider_target_fingerprint"] = provider["comparison_fingerprint"]
+    return body
 
 
 class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
@@ -202,7 +211,22 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                     authority,
                 )
 
-    async def test_unrecognized_or_inconsistent_evidence_is_a_redacted_prerequisite(self) -> None:
+    async def test_unrecognized_evidence_without_key_is_a_redacted_prerequisite(self) -> None:
+        await self._noncanonical_round_trip(fingerprint_available=False, lane_scoped=False)
+
+    async def test_noncanonical_fingerprint_plans_and_preserves_boundaries(self) -> None:
+        await self._noncanonical_round_trip(fingerprint_available=True, lane_scoped=False)
+
+    async def test_lane_scoped_comparison_and_missing_input_diagnostics(self) -> None:
+        await self._noncanonical_round_trip(fingerprint_available=True, lane_scoped=True)
+        await self._noncanonical_round_trip(fingerprint_available=False, lane_scoped=True)
+
+    async def _noncanonical_round_trip(
+        self, *, fingerprint_available: bool, lane_scoped: bool
+    ) -> None:
+        self.enterContext(patch.dict(os.environ, {}, clear=True))
+        if fingerprint_available:
+            os.environ[LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR] = "synthetic-comparison-key"
         for evidence in (
             {"project_name": "odoo", "private_payload": "hidden-evidence-value"},
             {"project_name": "hidden-evidence-value"},
@@ -217,9 +241,40 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                     context_name="cm_website", instance_name="prod"
                 ).model_copy(update={"provider_evidence": evidence})
                 store.write_provider_target_record(authority)
+                profile_payload = product_profile_payload("synthetic-product")
+                profile_payload["lanes"] = (
+                    {
+                        "instance": authority.instance,
+                        "context": authority.context,
+                        "base_url": "https://synthetic.invalid",
+                        "health_url": "https://synthetic.invalid/health",
+                    },
+                )
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile_payload)
+                )
+                policy = (
+                    LaunchplaneAuthzPolicy.model_validate(
+                        {
+                            "schema_version": 2,
+                            "local_operators": [
+                                {
+                                    "subjects": ["local-owner-agent"],
+                                    "token_labels": ["local-owner-read"],
+                                    "products": ["synthetic-product", "launchplane"],
+                                    "contexts": [authority.context],
+                                    "instances": [authority.instance],
+                                    "actions": ["agent.read"],
+                                }
+                            ],
+                        }
+                    )
+                    if lane_scoped
+                    else LaunchplaneAuthzPolicy()
+                )
                 app = create_launchplane_fastapi_app(
                     verifier=_StubVerifier(_identity()),
-                    authz_policy=LaunchplaneAuthzPolicy(),
+                    authz_policy=policy,
                     database_url=database_url,
                     record_store_factory=lambda: store,
                     control_plane_root_path=root,
@@ -245,6 +300,7 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                     "domains": [{"host": "new.synthetic.invalid"}],
                 }
                 with (
+                    scoped_agent_transport() if lane_scoped else nullcontext(),
                     patch(
                         "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
                         return_value=("https://provider.synthetic.invalid", "synthetic-token"),
@@ -300,16 +356,21 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(response.status_code, 200, response.text)
                         observed = response.json()["inspect"]
                         self.assertTrue(observed["runtime_evidence"]["proof_ready"])
-                        self.assertEqual(
-                            observed["provider_target_record"].get("comparison_evidence_status"),
-                            "unavailable",
-                        )
+                        if not fingerprint_available:
+                            self.assertEqual(
+                                observed["provider_target_record"].get(
+                                    "comparison_evidence_status"
+                                ),
+                                "unavailable",
+                            )
                         self.assertNotIn("provider_evidence", observed["provider_target_record"])
                         self.assertNotIn("private_payload", response.text)
                         self.assertNotIn("hidden-evidence-value", response.text)
                         body = _repair_body(observed)
+                        missing_body = dict(body)
+                        missing_body.pop("expected_current_provider_target_fingerprint", None)
                         prerequisite = await client.post(
-                            "/v1/dokploy-targets/setup", json=body, headers=headers
+                            "/v1/dokploy-targets/setup", json=missing_body, headers=headers
                         )
                         self.assertEqual(prerequisite.status_code, 400, prerequisite.text)
                         self.assertEqual(
@@ -319,13 +380,92 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(prerequisite.json()["trace_id"])
                         self.assertNotIn("hidden-evidence-value", prerequisite.text)
                         fetch_domains.assert_not_called()
+                        if fingerprint_available:
+                            planned = await client.post(
+                                "/v1/dokploy-targets/setup", json=body, headers=headers
+                            )
+                            self.assertEqual(planned.status_code, 202, planned.text)
+                            self.assertFalse(planned.json()["result"]["applied"])
+                            self.assertNotIn("hidden-evidence-value", planned.text)
+                            self.assertNotIn("private_payload", planned.text)
+                            self.assertNotIn(
+                                "provider_evidence",
+                                planned.json()["result"]["setup"]["provider_target_record"],
+                            )
+                            fetch_domains.reset_mock()
+                            for changes in (
+                                {"expected_current_provider_target_fingerprint": "tampered"},
+                                {"context": "foreign-context"},
+                                {"instance": "testing"},
+                                {
+                                    "expected_current_provider_target": {
+                                        **body["expected_current_provider_target"],
+                                        "target_id": "foreign-target",
+                                    }
+                                },
+                                {
+                                    "expected_current_provider_target": {
+                                        **body["expected_current_provider_target"],
+                                        "provider_evidence": {"unexpected": "conflicting"},
+                                    }
+                                },
+                            ):
+                                denied = await client.post(
+                                    "/v1/dokploy-targets/setup",
+                                    json={**body, **changes},
+                                    headers=headers,
+                                )
+                                self.assertIn(denied.status_code, (400, 403), denied.text)
+                                fetch_domains.assert_not_called()
+                            for changes in (
+                                {"provider_evidence": {"private_payload": "changed"}},
+                                {"display_name": "changed-name"},
+                            ):
+                                store.write_provider_target_record(
+                                    authority.model_copy(update=changes)
+                                )
+                                stale = await client.post(
+                                    "/v1/dokploy-targets/setup", json=body, headers=headers
+                                )
+                                self.assertIn(stale.status_code, (400, 403), stale.text)
+                                fetch_domains.assert_not_called()
+                            store.write_provider_target_record(authority)
+                            with patch.dict(
+                                os.environ,
+                                {LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "rotated-synthetic-key"},
+                            ):
+                                rotated = await client.post(
+                                    "/v1/dokploy-targets/setup", json=body, headers=headers
+                                )
+                                self.assertIn(rotated.status_code, (400, 403), rotated.text)
+                                fetch_domains.assert_not_called()
+                            live_target["composeId"] = "drifted-provider-target"
+                            identity_drift = await client.post(
+                                "/v1/dokploy-targets/setup", json=body, headers=headers
+                            )
+                            self.assertEqual(identity_drift.status_code, 400, identity_drift.text)
+                            fetch_domains.assert_not_called()
+                            live_target["composeId"] = authority.target_id
+                            for provider_domains in ((), ({"host": "foreign.synthetic.invalid"},)):
+                                fetch_domains.return_value = provider_domains
+                                mismatch = await client.post(
+                                    "/v1/dokploy-targets/setup", json=body, headers=headers
+                                )
+                                self.assertEqual(mismatch.status_code, 400, mismatch.text)
+                            fetch_domains.return_value = ({"host": "new.synthetic.invalid"},)
+                            denied_apply = await client.post(
+                                "/v1/dokploy-targets/setup",
+                                json={**body, "mode": "apply"},
+                                headers=headers,
+                            )
+                            self.assertGreaterEqual(denied_apply.status_code, 400)
                         # A caller that already has the complete private expectation
                         # retains the existing full-comparison path; no record repair
                         # or new grant is required by this source change.
                         complete = await client.post(
                             "/v1/dokploy-targets/setup",
                             json={
-                                **body,
+                                **missing_body,
                                 "expected_current_provider_target": authority.to_deployed_target_reference().model_dump(
                                     mode="json"
                                 ),

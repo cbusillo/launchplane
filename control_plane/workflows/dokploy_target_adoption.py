@@ -8,6 +8,7 @@ from control_plane.contracts.deploy_target import DeployedTargetReference, Provi
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.dokploy_target_comparison import require_provider_target_expectation
 from control_plane.dokploy.target_source_setup import (
     configure_empty_compose_source,
     DokployComposeSourcePartialError,
@@ -93,15 +94,6 @@ MutateDokployPayload = Callable[[str, str, str, JsonObject], JsonObject]
 _DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 
 
-class DokployTargetComparisonEvidenceUnavailableError(ValueError):
-    def __init__(self) -> None:
-        super().__init__(
-            "Complete expected-current provider evidence is unavailable from supported "
-            "inspection. Planning requires an inspection-safe comparison capability for "
-            "this stored evidence shape; no record repair or grant is implied."
-        )
-
-
 def normalize_dokploy_domain_host(raw_host: str) -> str:
     host = raw_host.strip().lower()
     if not host or any(character.isspace() for character in host):
@@ -146,6 +138,7 @@ def repair_dokploy_target_domain_authority(
     target_id: str,
     domains: tuple[str, ...],
     expected_current_provider_target: DeployedTargetReference,
+    expected_current_provider_target_fingerprint: str = "",
     source_label: str = "service:dokploy-targets:setup:repair-domain-authority",
     updated_at: str = "",
     apply: bool = False,
@@ -186,23 +179,15 @@ def repair_dokploy_target_domain_authority(
         raise ValueError(
             "Dokploy domain authority repair target id does not match the tracked target."
         )
-    current_reference = provider_target_record.to_deployed_target_reference()
-    if current_reference != expected_current_provider_target:
-        canonical_evidence = ProviderTargetRecord.from_dokploy_records(
-            target_record=target_record, target_id_record=target_id_record
-        ).provider_evidence
-        if (
-            not expected_current_provider_target.provider_evidence
-            and provider_target_record.provider_evidence != canonical_evidence
-            and expected_current_provider_target.model_copy(
-                update={"provider_evidence": current_reference.provider_evidence}
-            )
-            == current_reference
-        ):
-            raise DokployTargetComparisonEvidenceUnavailableError()
-        raise ValueError(
-            "Dokploy domain authority repair provider-target expectation did not match current authority."
-        )
+    if apply and expected_current_provider_target_fingerprint:
+        raise ValueError("Comparison fingerprints support domain-authority dry runs only.")
+    require_provider_target_expectation(
+        current=provider_target_record,
+        expected=expected_current_provider_target,
+        fingerprint=expected_current_provider_target_fingerprint,
+        target=target_record,
+        target_id=target_id_record,
+    )
     if (
         provider_target_record.provider_id != "dokploy"
         or provider_target_record.target_id != normalized_target_id

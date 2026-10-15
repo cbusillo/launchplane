@@ -16,6 +16,7 @@ from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
     privileged_operation_worker_heartbeat_freshness_seconds,
 )
+from control_plane.dokploy_target_comparison import provider_target_comparison_fingerprint
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 
@@ -431,7 +432,13 @@ def inspect_dokploy_target(
                 # Keep identity/runtime inspection available when a complete safe
                 # planner input cannot be projected. The planner reports the missing
                 # comparison capability rather than weakening its authority check.
-                provider_target_summary["comparison_evidence_status"] = "unavailable"
+                try:
+                    provider_target_summary["comparison_fingerprint"] = (
+                        provider_target_comparison_fingerprint(provider_target_record)
+                    )
+                except click.ClickException:
+                    # Missing bootstrap key configuration must not break runtime reads.
+                    provider_target_summary["comparison_evidence_status"] = "unavailable"
     return result
 
 
