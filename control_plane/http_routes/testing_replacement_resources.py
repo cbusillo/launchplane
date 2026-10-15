@@ -79,24 +79,31 @@ def register_testing_replacement_resource_routes(
                     "Apply requires the reviewed resource plan and original key.",
                 )
             adapter = TestingReplacementResourceAdapter(root, record_store, product, body, trace)
-            return await run_provider_mutation(
-                record_store=record_store,
-                identity=identity,
-                route_path=ROUTE.replace("{product}", product),
-                idempotency_key=idempotency_key.strip(),
-                request_fingerprint=request_fingerprint(
-                    {"product": product, **body.model_dump(mode="json")}
-                ),
-                trace_id=trace,
-                adapter=adapter,
-                in_progress_message="Testing resource preparation is running with the original key.",
-                reconcile_message="The original preparation has an unknown outcome; do not create another target.",
-            )
+            try:
+                return await run_provider_mutation(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=ROUTE.replace("{product}", product),
+                    idempotency_key=idempotency_key.strip(),
+                    request_fingerprint=request_fingerprint(
+                        {"product": product, **body.model_dump(mode="json")}
+                    ),
+                    trace_id=trace,
+                    adapter=adapter,
+                    in_progress_message="Testing resource preparation is running with the original key.",
+                    reconcile_message="The original preparation has an unknown outcome; do not create another target.",
+                )
+            except (ValueError, FileNotFoundError, click.ClickException, RuntimeError, OSError):
+                refuse(
+                    409,
+                    "testing_resources_unverified",
+                    "Resource preparation has no verified outcome. Inspect the original key and retained allocation.",
+                )
         if body.mode == "readback":
             adapter = TestingReplacementResourceAdapter(root, record_store, product, body, trace)
             try:
                 result = await run_in_worker_thread(adapter.readback)
-            except (ValueError, FileNotFoundError, click.ClickException):
+            except (ValueError, FileNotFoundError, click.ClickException, RuntimeError, OSError):
                 refuse(
                     409,
                     "testing_resources_unverified",

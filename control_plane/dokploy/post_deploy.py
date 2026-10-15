@@ -38,6 +38,7 @@ from control_plane.integration_readback import (
 )
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
+from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MARKER
 
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
@@ -140,7 +141,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
         "testing_resources_ok",
-        "testing_resources_incomplete",
+        TESTING_RESOURCES_INCOMPLETE_MARKER,
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(

@@ -384,6 +384,8 @@ def execute_dokploy_target_setup(
     request: DokployTargetSetupEnvelope,
     required_context_owner: tuple[str, str] | None = None,
     disposable_checkpoint: Callable[[], None] | None = None,
+    disposable_before_create: Callable[[str], None] | None = None,
+    disposable_placement: tuple[str, str] | None = None,
 ) -> dict[str, object]:
     def mutate_setup(
         host: str, token: str, path: str, payload: dict[str, dokploy_api.JsonValue]
@@ -398,9 +400,13 @@ def execute_dokploy_target_setup(
                     "Disposable rebuilding cannot mutate an existing provider resource."
                 )
             disposable_checkpoint()
+            if disposable_before_create is not None:
+                disposable_before_create(path)
         return mutate_dokploy_payload_for_target_setup(host, token, path, payload)
 
     apply_changes = request.mode == "apply"
+    if disposable_placement is not None and disposable_checkpoint is None:
+        raise ValueError("Resuming fresh placement requires its service-owned checkpoint.")
     ensure_dokploy_target_setup_context_is_not_historical(
         record_store=record_store,
         context=request.context,
@@ -544,10 +550,12 @@ def execute_dokploy_target_setup(
             context=request.context,
             instance=request.instance,
             target_name=request.target_name,
-            project_id=request.project_id,
+            project_id=disposable_placement[0] if disposable_placement else request.project_id,
             project_name=request.project_name,
             project_description=request.project_description,
-            environment_id=request.environment_id,
+            environment_id=disposable_placement[1]
+            if disposable_placement
+            else request.environment_id,
             environment_name=request.environment_name,
             environment_description=request.environment_description,
             server_id=request.server_id,

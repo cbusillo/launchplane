@@ -263,3 +263,14 @@ separate collections. After an actual supersession, the new terminal status and
 replacement evidence need compatible readers: retain such an image and
 forward-fix the service; do not rewrite history or restore an old DB snapshot to
 clear a fence. This source session performs no live qualification or deployment.
+
+Creation recovery reads the unique service namespace from complete provider
+project/environment/compose inventory. Each create dispatch records its exact
+phase. A realized project can resume environment creation, and a realized
+environment can resume compose creation; a missing object for the last dispatched
+phase remains unknown. A unique, empty, unrouted compose with complete empty
+deployment history can be captured atomically after a lost adoption transaction.
+No missing response or inventory entry alone permits repeating a dispatched call.
+Host qualification resolves the Docker data-root path and permits read-only host
+monitoring binds; writable parent mounts and any exact existing named-volume
+consumer still refuse qualification. No backing directory or monitor is changed.

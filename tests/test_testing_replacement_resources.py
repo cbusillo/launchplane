@@ -151,10 +151,6 @@ class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestingResourceScheduleTests(unittest.TestCase):
     def test_real_created_compose_defaults_and_provider_app_name_reach_host_readback(self) -> None:
         from unittest.mock import Mock
@@ -250,3 +246,59 @@ class TestingResourceScheduleTests(unittest.TestCase):
                                 mode="prepare",
                                 checkpoint=lambda: None,
                             )
+
+
+class TestingResourceCaptureRecoveryTests(unittest.TestCase):
+    def test_only_realized_prior_phases_allow_missing_next_phase_to_resume(self) -> None:
+        from contextlib import nullcontext
+        from datetime import datetime, timezone
+        from unittest.mock import Mock
+        from uuid import uuid4
+        from control_plane.contracts.disposable_lane import DisposableTestingResourcePreparation
+        from control_plane.testing_replacement_resources import (
+            TestingReplacementResourceAdapter,
+            TestingReplacementResourcesRequest,
+        )
+
+        preparation = DisposableTestingResourcePreparation(
+            operation_id="retained",
+            product="example",
+            context="example",
+            retained_target_id="old",
+            prepared_by="service",
+            recorded_at=datetime.now(timezone.utc),
+            resource_namespace=f"lp-testing-{uuid4().hex}",
+        )
+        store = Mock()
+        store.read_disposable_resource_preparation.return_value = preparation
+        store.testing_replacement_execution_lock.side_effect = lambda *_: nullcontext(lambda: None)
+        adapter = TestingReplacementResourceAdapter(
+            Path("."),
+            store,
+            "example",
+            TestingReplacementResourcesRequest(
+                context="example", operation_id="retained", reason="recover bounded creation"
+            ),
+            "fixture-trace",
+        )
+        for placement, phase, expected in (
+            (("", "", ""), "", "absent"),
+            (("", "", ""), "/api/project.create", "unknown"),
+            (("project", "", ""), "/api/project.create", "absent"),
+            (("project", "", ""), "/api/environment.create", "unknown"),
+            (("project", "environment", ""), "/api/environment.create", "absent"),
+            (("project", "environment", ""), "/api/compose.create", "unknown"),
+        ):
+            with (
+                self.subTest(placement=placement, phase=phase),
+                patch.object(adapter, "created_placement", return_value=placement),
+                patch.object(adapter, "capture_checkpoint"),
+            ):
+                observation = adapter.recover_created_target(phase)
+                assert observation is not None
+                self.assertEqual(observation.outcome, expected)
+                self.assertEqual(observation.retry_safe, expected == "absent")
+
+
+if __name__ == "__main__":
+    unittest.main()

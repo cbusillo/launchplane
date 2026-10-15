@@ -12,6 +12,7 @@ from uuid import uuid4
 
 from control_plane.odoo_testing_resources import (
     ODOO_TESTING_RESOURCE_PROGRAM,
+    TESTING_RESOURCES_INCOMPLETE_MARKER,
     OdooTestingResources,
     resource_readback_passes,
 )
@@ -157,6 +158,21 @@ class TestingResourceProgramTests(unittest.TestCase):
         }
         self.assertNotEqual(self.run_program("readback", project=project)[0], 0)
 
+    def test_resolved_data_root_and_read_only_host_monitor_do_not_make_storage_shared(self) -> None:
+        self.prepare()
+        alias = self.root / "docker-data-root"
+        alias.symlink_to(self.root, target_is_directory=True)
+        for name, volume in self.volumes.items():
+            volume["Mountpoint"] = str(alias / name / "_data")
+        self.containers["host-monitor"] = {
+            "Mounts": [{"Type": "bind", "RW": False, "Source": str(self.root)}]
+        }
+        status, evidence = self.run_program("readback")
+        self.assertEqual(status, 0)
+        self.assertTrue(resource_readback_passes(evidence, self.resources))
+        self.containers["host-monitor"]["Mounts"][0]["RW"] = True
+        self.assertNotEqual(self.run_program("readback")[0], 0)
+
     def test_partial_empty_preparation_can_be_classified_but_foreign_data_cannot(self) -> None:
         self.prepare()
         missing_name = next(iter(self.volumes))
@@ -166,13 +182,13 @@ class TestingResourceProgramTests(unittest.TestCase):
         (self.root / missing_name).rmdir()
         status, evidence = self.run_program("readback")
         self.assertNotEqual(status, 0)
-        self.assertEqual(evidence.get("testing_resources_incomplete"), "true")
+        self.assertEqual(evidence.get(TESTING_RESOURCES_INCOMPLETE_MARKER), "true")
         remaining = next(iter(self.volumes.values()))
         kept = Path(str(remaining["Mountpoint"])) / "needed-copy"
         kept.write_text("keep me")
         status, evidence = self.run_program("readback")
         self.assertNotEqual(status, 0)
-        self.assertNotIn("testing_resources_incomplete", evidence)
+        self.assertNotIn(TESTING_RESOURCES_INCOMPLETE_MARKER, evidence)
         self.assertEqual(kept.read_text(), "keep me")
 
 
