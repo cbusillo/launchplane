@@ -13,6 +13,9 @@ from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 ODOO_DATABASE_DATA_DIRECTORY = "/var/lib/postgresql/data"
+ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND = (
+    "test -x /odoo/odoo-bin && test -f /volumes/scripts/run_odoo_data_workflows.py"
+)
 
 
 def _traefik_route_name(*, domain_host: str) -> str:
@@ -29,6 +32,7 @@ def _render_odoo_web_traefik_labels(
     domain_hosts: tuple[str, ...],
     runtime_port: int,
     domain_certificate_type: Literal["none", "letsencrypt"],
+    isolated_testing: bool = False,
 ) -> str:
     if not domain_hosts:
         return ""
@@ -36,7 +40,7 @@ def _render_odoo_web_traefik_labels(
         raise click.ClickException("Odoo Traefik label rendering requires a positive port.")
     lines: list[str] = [
         "    networks:",
-        "      - default",
+        "      - testing-data" if isolated_testing else "      - default",
         "      - dokploy-network",
         "    labels:",
         '      - "traefik.enable=true"',
@@ -66,6 +70,14 @@ def _render_odoo_web_traefik_labels(
                 f'      - "traefik.http.routers.{route_name}-websecure.tls=true"',
             ]
         )
+        if isolated_testing:
+            middleware = route_name + "-copy-connections"
+            lines.extend(
+                [
+                    f"      - \"traefik.http.middlewares.{middleware}.headers.contentsecuritypolicy=default-src 'self' data: blob:; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-src 'self'\"",
+                    f'      - "traefik.http.routers.{route_name}-websecure.middlewares={middleware}"',
+                ]
+            )
         if domain_certificate_type == "letsencrypt":
             lines.append(
                 f'      - "traefik.http.routers.{route_name}-websecure.tls.certresolver=letsencrypt"'
@@ -106,9 +118,15 @@ def render_odoo_raw_compose_file(
     domain_hosts: tuple[str, ...] = (),
     runtime_port: int = 8069,
     publish_host_ports: bool = True,
+    mount_workflow_ssh: bool = True,
+    isolated_testing: bool = False,
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
 ) -> str:
     normalized_image_reference = image_reference.strip()
+    if isolated_testing and (
+        publish_host_ports or mount_workflow_ssh or not hold_web_until_integration_readback
+    ):
+        raise ValueError("Isolated testing must hold web without host ports or SSH mounts.")
     if not normalized_image_reference:
         raise click.ClickException(
             "Odoo raw compose rendering requires a non-empty image reference."
@@ -123,6 +141,7 @@ def render_odoo_raw_compose_file(
         domain_hosts=domain_hosts,
         runtime_port=runtime_port,
         domain_certificate_type=domain_certificate_type,
+        isolated_testing=isolated_testing,
     )
     web_host_ports = ""
     if publish_host_ports:
@@ -130,6 +149,23 @@ def render_odoo_raw_compose_file(
       - "${ODOO_WEB_HOST_PORT:-8069}:8069"
       - "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"
 """
+    workflow_ssh_mounts = ""
+    if mount_workflow_ssh:
+        workflow_ssh_mounts = """      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro
+      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro
+"""
+    web_networks = "    networks: [testing-data]" if isolated_testing and not domain_hosts else ""
+    private_network = "    networks: [testing-data]" if isolated_testing else ""
+    testing_networks = "  testing-data:\n    internal: true\n" if isolated_testing else ""
+    web_extra_hosts = (
+        ""
+        if isolated_testing
+        else '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
+    )
+    cron_threads = '"0"' if isolated_testing else "${ODOO_MAX_CRON_THREADS:-2}"
+    extra_secrets = (
+        "" if isolated_testing else "secrets:\n  github_token:\n    environment: GITHUB_TOKEN\n"
+    )
     # Keep this intentionally close to odoo-devkit/docker-compose.yml. Launchplane
     # renders the image reference directly so Dokploy git checkout state cannot
     # decide what Odoo artifact is deployed.
@@ -154,7 +190,7 @@ x-odoo-env: &odoo-env
   ODOO_ADMIN_LOGIN: ${{ODOO_ADMIN_LOGIN:-}}
   ODOO_ADMIN_PASSWORD: ${{ODOO_ADMIN_PASSWORD:-}}
   ODOO_DB_MAXCONN: ${{ODOO_DB_MAXCONN:-44}}
-  ODOO_MAX_CRON_THREADS: ${{ODOO_MAX_CRON_THREADS:-2}}
+  ODOO_MAX_CRON_THREADS: {cron_threads}
   ODOO_WORKERS: ${{ODOO_WORKERS:-6}}
   ODOO_LIMIT_TIME_CPU: ${{ODOO_LIMIT_TIME_CPU:-600}}
   ODOO_LIMIT_TIME_REAL: ${{ODOO_LIMIT_TIME_REAL:-1800}}
@@ -182,6 +218,7 @@ name: ${{ODOO_PROJECT_NAME:-odoo}}
 services:
   web:
     <<: *odoo-base
+{web_networks}
     command:
       - /bin/sh
       - -lc
@@ -198,12 +235,12 @@ services:
         curl -fsS http://127.0.0.1:${{ODOO_HTTP_PORT:-8069}}/web/health || exit 1
       retries: 5
       start_period: 20s
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+{web_extra_hosts.rstrip()}
 {web_route_labels}
 
   database:
     image: postgres:17
+{private_network}
     restart: unless-stopped
     ulimits:
       nofile:
@@ -248,18 +285,18 @@ services:
 
   script-runner:
     <<: *odoo-base
+{private_network}
     volumes:
       - odoo_data:/volumes/data
       - odoo_logs:/volumes/logs
-      - ${{DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}}:/home/ubuntu/.ssh:ro
-      - ${{DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}}:/root/.ssh:ro
+{workflow_ssh_mounts.rstrip()}
     command: tail -f /dev/null
     working_dir: /opt/project
     shm_size: "2gb"
     healthcheck:
       <<: *healthcheck-defaults
       test: >-
-        test -x /odoo/odoo-bin && test -f /volumes/scripts/run_odoo_data_workflows.py
+        {ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND}
       retries: 3
       start_period: 10s
     environment:
@@ -282,11 +319,10 @@ volumes:
   testkit_data:
   testkit_logs:
 
-secrets:
-  github_token:
-    environment: GITHUB_TOKEN
+{extra_secrets}
 
 networks:
+{testing_networks.rstrip()}
   dokploy-network:
     external: true
 """
