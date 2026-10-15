@@ -2668,6 +2668,24 @@ return a typed blocked result rather than guessing a domain.
 
 ## Runtime Environment Contracts
 
+- For retirement investigation, `uv run python scripts/inspect-retirement-inventory.py
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py
+  settings --context <context> [--instance <instance>]` reads the existing service
+  settings route and prints key names, scopes and timestamps only. It omits all
+  values, including non-secret values. Its coverage is caller-visible records;
+  an empty result does not prove global or hidden-record absence.
+  The `policy` subcommand reads managed GitHub Actions rule IDs and fingerprints
+  from the active policy summary. Optional `--repository OWNER/REPO` and repeatable
+  `--workflow OWNER/REPO/.github/workflows/FILE.yml` compare exact unmanaged caller
+  workflows through the service's read-only retirement-evidence operation;
+  `--binding job_workflow_ref` selects reusable-workflow bindings instead.
+  The client resolves routes from canonical OpenAPI and uses the installed
+  operator helper's existing configuration, transport and bounded errors. It
+  has no apply mode, creates no grant and never switches identity or retries a
+  refusal. Policy summary fingerprints do not expose full workflow scopes, and
+  unmanaged comparison results do not inventory managed rules' dependencies.
+  Any missing scope/dependency proof must be resolved before removal. This is
+  a repo-owned bounded client, not an installed catalog command.
 - `GET /v1/contexts/{context}/runtime-settings` and
   `GET /v1/contexts/{context}/instances/{instance}/runtime-settings` return the
   plain settings that apply (global, the context's, and the lane's), with
