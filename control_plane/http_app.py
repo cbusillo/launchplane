@@ -4,6 +4,7 @@ from control_plane.odoo_connection_isolation import (
     ConnectionIsolationOutcomeUnknown,
     ConnectionIsolationPreconditionFailed,
 )
+from control_plane.connection_isolation_qualification import require_connection_isolation_lane
 from control_plane.action_effects import (
     ODOO_CONNECTION_ISOLATION_ACTIONS,
     AGENT_READ_ROLE_ACTION,
@@ -550,6 +551,7 @@ from control_plane.odoo_preview_apply_http import (
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_post_deploy_http import (
     ConnectionIsolationApplyAdapter,
+    observe_odoo_connection_isolation_result,
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE as _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
     ODOO_POST_DEPLOY_ROUTE as _ODOO_POST_DEPLOY_ROUTE,
     ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE as _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
@@ -7473,7 +7475,7 @@ def create_launchplane_fastapi_app(
         def isolation_checkpoint() -> None:
             nonlocal isolation_binding
             try:
-                binding = require_disposable_lane(
+                binding = require_connection_isolation_lane(
                     cast(DisposableLaneStore, record_store),
                     product=authorization_product,
                     context=post_deploy_request.post_deploy.context,
@@ -7509,11 +7511,12 @@ def create_launchplane_fastapi_app(
             return replay_response
 
         def execute_isolation_apply(
-            before_mutation: Callable[[], None],
+            before_mutation: Callable[[str], None],
+            provider_operation_key: str,
         ) -> tuple[dict[str, object], dict[str, object]]:
-            def checkpoint() -> None:
+            def checkpoint(phase: str = "connection-isolation") -> None:
                 isolation_checkpoint()
-                before_mutation()
+                before_mutation(phase)
 
             with synchronous_odoo_lane(
                 record_store=record_store,
@@ -7528,6 +7531,7 @@ def create_launchplane_fastapi_app(
                     record_store=record_store,
                     request=post_deploy_request,
                     before_connection_isolation_mutation=checkpoint,
+                    connection_isolation_operation_key=provider_operation_key,
                 )
 
         try:
@@ -7546,9 +7550,16 @@ def create_launchplane_fastapi_app(
                         trace_id=trace_id,
                         reviewed_plan_sha256=post_deploy_request.post_deploy.reviewed_plan_sha256,
                         execute=execute_isolation_apply,
+                        observation=lambda key, phase: observe_odoo_connection_isolation_result(
+                            control_plane_root=resolved_control_plane_root,
+                            request=post_deploy_request,
+                            provider_operation_key=key,
+                            provider_effect_phase=phase,
+                            trace_id=trace_id,
+                        ),
                     ),
                     in_progress_message="This isolation repair is already running. Retain its original key.",
-                    reconcile_message="The original isolation repair is fenced. Keep its key and read back independently. Supported recovery is pending launchplane#3632; do not retry under another key.",
+                    reconcile_message="The original isolation repair is still unverified. Retry only its original request and key to read its terminal provider evidence; do not use a new key.",
                 )
             with synchronous_odoo_lane(
                 record_store=record_store,
