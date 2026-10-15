@@ -619,7 +619,9 @@ def recover_stranded_testing_replacements(
                         "error_message": "",
                         "cancellation": cancellation,
                         "recovery_journal": current.recovery_journal.model_copy(
-                            update={"inspection": inspection}
+                            update={
+                                "inspection": {**current.recovery_journal.inspection, **inspection}
+                            }
                         ),
                     }
                 )
