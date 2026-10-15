@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 import re
 import shutil
-import time
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, cast, TypeVar
 import uuid
@@ -16,6 +15,8 @@ import uuid
 from control_plane.contracts.odoo_testing_source import (
     NATIVE_TESTING_COPY_CHUNK_BYTES,
     NATIVE_TESTING_COPY_CACHE_DIRECTORY,
+    NATIVE_TESTING_COPY_ARTIFACT_BYTES,
+    NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT,
     NativeOdooSourceAuthority,
     NativeOdooTestingSource,
     NativeTestingCopyArtifact,
@@ -30,7 +31,7 @@ from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import read_native_source, NativeSourceUnavailable
 from control_plane.dokploy.native_copy_stream import inspect_native_testing_receiver
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
-from control_plane.dokploy.native_copy_stream import NativeUploadRejected
+from control_plane.dokploy.native_copy_stream import NativeSourceExceedsBound
 from collections.abc import Callable
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -88,14 +89,12 @@ def native_testing_source_authority(
     if target.target_type != "compose" or identity.target_id == recipient.target_id:
         raise ValueError("Native source and testing require different registered compose targets.")
     values: dict[str, str] = {}
-    versions: list[dict[str, str]] = []
     for scope in ("context", "instance"):
         for runtime in store.list_runtime_environment_records(context_name=lane.context):
             if runtime.scope == scope and runtime.instance == (
                 "prod" if scope == "instance" else ""
             ):
                 values.update({key: str(value) for key, value in runtime.env.items()})
-                versions.append({"scope": runtime.scope, "updated_at": runtime.updated_at})
     values.update({key: str(value) for key, value in target.env.items()})
     database = values.get("ODOO_DB_NAME", "")
     filestore = Path(values.get("ODOO_FILESTORE_PATH", "/volumes/data/filestore"))
@@ -111,9 +110,8 @@ def native_testing_source_authority(
         filestore_path=str(filestore),
         settings_sha256=canonical_json_sha256(
             {
-                "lane": lane.model_dump(mode="json"),
-                "runtime_versions": versions,
-                "target_updated_at": target.updated_at,
+                "lane": {"context": lane.context, "instance": lane.instance},
+                "target_type": target.target_type,
             }
         ),
     )
@@ -231,12 +229,43 @@ def _cache_directory(generation_binding: str) -> Path:
     state = os.environ.get("LAUNCHPLANE_STATE_DIR", "")
     if not state or not re.fullmatch(r"[a-f0-9]{64}", generation_binding):
         raise ValueError("Native copy needs the service's explicit artifact state directory.")
-    root = Path(state) / NATIVE_TESTING_COPY_CACHE_DIRECTORY / generation_binding
+    private = Path(state) / NATIVE_TESTING_COPY_CACHE_DIRECTORY
+    require_private_copy_mount(private)
+    root = private / generation_binding
     if not root.is_absolute() or root.resolve() != root.absolute():
         raise ValueError("Native copy cache cannot traverse symlinks.")
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
     root.chmod(0o700)
     return root
+
+
+def require_private_copy_mount(private: Path) -> None:
+    """Refuse a missing overlay rather than writing raw bytes to shared state."""
+    try:
+        mounts = Path("/proc/self/mountinfo").read_text().splitlines()
+    except OSError:
+        raise NativeSourceUnavailable(
+            "Native copy requires its dedicated mounted custody directory."
+        ) from None
+    parsed: list[tuple[str, Path, Path]] = []
+    for line in mounts:
+        fields = line.split()
+        if len(fields) > 4:
+
+            def decoded(value: str) -> Path:
+                return Path(re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value))
+
+            parsed.append((fields[2], decoded(fields[3]), decoded(fields[4])))
+    own = [row for row in parsed if row[2] == private]
+    parents = [row for row in parsed if private.parent.is_relative_to(row[2])]
+    if len(own) == 1 and parents:
+        parent = max(parents, key=lambda row: len(row[2].parts))
+        backing = parent[1] / private.parent.relative_to(parent[2])
+        if own[0][0] != parent[0] or not own[0][1].is_relative_to(backing):
+            return
+    raise NativeSourceUnavailable(
+        "The private copy volume is missing or shares its parent backing; no capture was started."
+    )
 
 
 def verify_native_capture_files(capture: NativeTestingCopyCapture) -> tuple[Path, Path]:
@@ -298,8 +327,8 @@ def capture_native_testing_source(
             part = str(frame["part"])
             data = base64.b64decode(str(frame.get("data") or ""), validate=True)
             sizes[part] += len(data)
-            if sizes[part] > 128 * 1024 * 1024:
-                raise NativeSourceUnavailable("The source artifact exceeds the transport bound.")
+            if sizes[part] > NATIVE_TESTING_COPY_ARTIFACT_BYTES:
+                raise NativeSourceExceedsBound("The source artifact exceeds the transport bound.")
             digests[part].update(data)
             handles[part].write(data)
 
@@ -425,9 +454,14 @@ def prepare_native_testing_delivery(
     }:
         return capture
     if capture is None:
-        capture = capture_native_testing_source(
-            store, root=root, generation=generation, descriptor=descriptor
-        )
+        try:
+            capture = capture_native_testing_source(
+                store, root=root, generation=generation, descriptor=descriptor
+            )
+        except NativeSourceExceedsBound:
+            if before_mutation is not None:
+                before_mutation(NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT)
+            raise
         runner, resume, observed, _ = inspect(capture)
         if resume:
             raise ValueError("The testing database appeared during source capture.")
@@ -470,21 +504,14 @@ def prepare_native_testing_delivery(
                     if before_mutation is not None and not delivery_started:
                         before_mutation("native_testing_copy_chunk")
                         delivery_started = True
-                    for attempt in range(3):
-                        try:
-                            api.upload_native_testing_chunk(
-                                host=host,
-                                token=token,
-                                server_id=server_id,
-                                container_id=runner,
-                                filename=f"lp-native-{capture.capture_id}-{part}-{index}",
-                                content=content,
-                            )
-                            break
-                        except NativeUploadRejected as error:
-                            if not error.retryable or attempt == 2:
-                                raise
-                            time.sleep(attempt + 1)
+                    api.upload_native_testing_chunk(
+                        host=host,
+                        token=token,
+                        server_id=server_id,
+                        container_id=runner,
+                        filename=f"lp-native-{capture.capture_id}-{part}-{index}",
+                        content=content,
+                    )
                 index += 1
     final_runner, resume, readback, _ = inspect(capture)
     if final_runner != runner or resume or readback != expected:

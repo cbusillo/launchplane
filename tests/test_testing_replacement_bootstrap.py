@@ -1,6 +1,7 @@
 """Fresh generation continuation against real record transactions and fake provider IO."""
 
 from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Any
 import unittest
 from unittest.mock import Mock, patch
@@ -345,6 +346,31 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
             testing_context=self.fixture.context,
         )
         self.assertEqual(authority.binding_sha256, generation.source_binding_sha256)
+        # An unrelated production setting or bookkeeping update does not change
+        # the exact database/filestore/target that this read was reviewed for.
+        source_runtime = next(
+            row
+            for row in self.store.list_runtime_environment_records(context_name=source_context)
+            if row.scope == "instance" and row.instance == "prod"
+        )
+        self.store.write_runtime_environment_record(
+            source_runtime.model_copy(
+                update={
+                    "env": {**source_runtime.env, "UNRELATED_SETTING": "fixture-update"},
+                    "updated_at": (
+                        datetime.fromisoformat(source_runtime.updated_at) + timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+        )
+        self.assertEqual(
+            native_testing_source_authority(
+                self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                testing_context=self.fixture.context,
+            ).binding_sha256,
+            authority.binding_sha256,
+        )
         observed = NativeOdooTestingSource(
             **authority.model_dump(mode="json"),
             server_id="source",

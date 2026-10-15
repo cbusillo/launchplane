@@ -15,8 +15,6 @@ from urllib.request import Request, urlopen
 
 import click
 import hashlib
-import uuid
-from urllib.request import HTTPRedirectHandler, build_opener
 
 from control_plane import runtime_platform_credentials
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
@@ -34,7 +32,8 @@ _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS = 10
 # a provider deployment to the trigger that started it.
 _DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS = 120
 MAX_DOKPLOY_LOG_LINE_COUNT = 1000
-NATIVE_TESTING_CHUNK_UPLOAD_PATH = "/api/trpc/docker.uploadFileToContainer"
+# Logical recovery effect; the fixed writer uses /terminal on its registered server.
+NATIVE_TESTING_CHUNK_UPLOAD_PATH = "/terminal/native-testing-chunk"
 _DOKPLOY_SCHEDULE_DIAGNOSTIC_LINE_COUNT = 20
 _MAX_DOKPLOY_ERROR_DETAIL_LENGTH = 2000
 _MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH = 4000
@@ -1897,15 +1896,9 @@ def upload_native_testing_chunk(
 ) -> None:
     """Upload a bounded chunk; only metadata enters the provider-effect journal.
 
-    Provider success is provisional. The caller must inspect the actual receiver
-    bytes, because the provider's final temporary-file cleanup can mask cp errors.
+    Only the qualified receiver gets bytes over stdin. Host argv and temporary
+    files never carry raw chunks. The caller also verifies receiver readback.
     """
-    from control_plane.dokploy.native_copy_stream import (
-        NativeSourceAuthorizationDenied,
-        NativeSourceUnavailable,
-        NativeUploadRejected,
-    )
-
     if (
         not re.fullmatch(r"[a-f0-9]{64}", container_id)
         or not re.fullmatch(r"[a-zA-Z0-9_-]+", server_id)
@@ -1924,89 +1917,17 @@ def upload_native_testing_chunk(
         "sha256": hashlib.sha256(content).hexdigest(),
     }
 
-    class NoRedirect(HTTPRedirectHandler):
-        def redirect_request(
-            self, req: Request, fp: object, code: int, msg: str, headers: object, newurl: str
-        ) -> None:
-            return None
-
     def send() -> JsonValue:
-        boundary = "lp-private-" + uuid.uuid4().hex
-        parts: list[bytes] = []
-        for key, value in (
-            ("serverId", server_id),
-            ("containerId", container_id),
-            ("destinationPath", "/tmp/" + filename),
-        ):
-            parts.append(
-                (
-                    f'--{boundary}\r\nContent-Disposition: form-data; name="{key}"\r\n\r\n{value}\r\n'
-                ).encode()
-            )
-        parts.append(
-            (
-                f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="{filename}"\r\nContent-Type: application/octet-stream\r\n\r\n'
-            ).encode()
-            + content
-            + b"\r\n"
+        from control_plane.dokploy.native_copy_stream import write_native_testing_chunk
+
+        write_native_testing_chunk(
+            host=host,
+            token=token,
+            server_id=server_id,
+            container_id=container_id,
+            filename=filename,
+            content=content,
         )
-        parts.append((f"--{boundary}--\r\n").encode())
-        request = Request(
-            host.rstrip("/") + path,
-            data=b"".join(parts),
-            method="POST",
-            headers={
-                "x-api-key": token,
-                "Content-Type": "multipart/form-data; boundary=" + boundary,
-            },
-        )
-        try:
-            with build_opener(NoRedirect()).open(request, timeout=60) as response:
-                if response.status != 200:
-                    raise NativeSourceUnavailable("The native testing upload did not pass.")
-                # Never copy provider response bodies to an error/journal: this
-                # endpoint may echo the encoded private artifact in a command.
-                response.read(4096)
-        except HTTPError as error:
-            status = error.code
-            if status in {401, 403}:
-                error.close()
-                raise NativeSourceAuthorizationDenied(
-                    "The provider refused the testing upload.",
-                    provider_effect_terminal=True,
-                ) from None
-            if status in {400, 404}:
-                error.close()
-                raise NativeUploadRejected() from None
-            try:
-                body = json.loads(error.read(4096))
-                message = body.get("message") if isinstance(body, dict) else None
-                if message is None and isinstance(body, dict):
-                    detail = body.get("error")
-                    if isinstance(detail, dict):
-                        detail = detail.get("json", detail)
-                        if isinstance(detail, dict):
-                            message = detail.get("message")
-            except (OSError, ValueError):
-                message = None
-            finally:
-                error.close()
-            # Installed remote execution distinguishes an actual channel exit
-            # from a connection error. HTTP 5xx alone supplies no terminal proof.
-            if isinstance(message, str) and re.fullmatch(
-                r"Failed to upload file to container: Remote command failed with exit code [1-9][0-9]*",
-                message,
-            ):
-                raise NativeUploadRejected(retryable=True) from None
-            if isinstance(message, str) and message.startswith(
-                "Failed to upload file to container: Authentication failed:"
-            ):
-                raise NativeSourceAuthorizationDenied(
-                    "The registered upload identity was refused.", provider_effect_terminal=True
-                ) from None
-            raise NativeSourceUnavailable("The native testing upload did not pass.") from None
-        except (OSError, URLError, TimeoutError):
-            raise NativeSourceUnavailable("The native testing upload is unverified.") from None
         return {"uploaded": True}
 
     observer = _mutation_observer.get()

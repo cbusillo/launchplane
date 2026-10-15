@@ -72,7 +72,8 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
   jq --arg image "$image" --arg postgres_image "$postgres_image" --arg env_file "$fixture_dir/.env" '
     {services: (.services | with_entries(select(.key == "launchplane" or
       .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers" or
-      .key == "launchplane-browser") |
+      .key == "launchplane-browser" or .key == "launchplane-merge-train-workers" or
+      .key == "launchplane-privileged-operation-workers") |
       .value.image = $image | .value.pull_policy = "never" | .value.restart = "no" |
       .value.deploy.replicas = 1 |
       .value.networks = ["qualification"] |
@@ -100,7 +101,9 @@ check_private_copy_custody() {
 import hashlib,os
 from pathlib import Path
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CACHE_DIRECTORY
+from control_plane.odoo_testing_native_source import require_private_copy_mount
 root=Path(os.environ['LAUNCHPLANE_STATE_DIR'])/NATIVE_TESTING_COPY_CACHE_DIRECTORY
+require_private_copy_mount(root)
 marker=root/'.qualification-copy-custody'
 if os.environ['QUALIFICATION_COPY_MODE']=='create':
     root.mkdir(parents=True,exist_ok=True)
@@ -119,6 +122,15 @@ if os.environ['QUALIFICATION_COPY_SERVICE']=='launchplane-odoo-workers':
     assert hashlib.sha256(marker.read_bytes()).hexdigest()==os.environ['QUALIFICATION_COPY_SHA256']
 else:
     assert not marker.exists(), 'Unrelated worker can read the Odoo copy volume'
+PY
+  done
+  for service in launchplane-merge-train-workers launchplane-privileged-operation-workers; do
+    run_interruptible "${compose[@]}" run --rm --no-deps -T "$service" /app/.venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CACHE_DIRECTORY
+marker=Path(os.environ['LAUNCHPLANE_STATE_DIR'])/NATIVE_TESTING_COPY_CACHE_DIRECTORY/'.qualification-copy-custody'
+assert not marker.exists(), 'Unrelated worker can read the Odoo copy volume'
 PY
   done
 }

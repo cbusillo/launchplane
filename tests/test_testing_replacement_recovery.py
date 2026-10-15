@@ -7,7 +7,7 @@ import json
 from tempfile import TemporaryDirectory
 from time import monotonic
 import unittest
-from unittest.mock import patch, Mock
+from unittest.mock import patch
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -20,6 +20,10 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy import api
+from control_plane.contracts.odoo_testing_source import (
+    NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT,
+    NATIVE_TESTING_COPY_ARTIFACT_BYTES,
+)
 from control_plane.dokploy.post_deploy import _build_dokploy_data_workflow_schedule_app_name
 from control_plane.launchplane_reconcile_authorization import (
     build_launchplane_reconcile_authorization,
@@ -1002,29 +1006,26 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             fenced = self.fence(store)
             with self.provider():
                 view = testing_replacement_recovery_read(store, fenced, root)
-                self.assertEqual(view["reason"], "recovery_dispatch_unacknowledged")
+                self.assertFalse(view["effects_acknowledged"])
                 self.assertEqual(recover_stranded_testing_replacements(store, root), ())
 
-    def test_native_upload_http_status_does_not_replace_remote_exit_evidence(self) -> None:
-        import io
-        from email.message import Message
-        from urllib.error import HTTPError
-        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+    def test_native_writer_failure_acknowledges_only_its_terminal_witness(self) -> None:
+        from control_plane.dokploy.native_copy_stream import (
+            NativeSourceUnavailable,
+            NativeUploadRejected,
+        )
 
         for store, root in self.stores():
             operation = self.running(store)
-            opener = Mock()
-            messages = [
-                "Failed to upload file to container: Remote command failed with exit code 1",
-                "Failed to upload file to container: SSH connection error: fixture transport lost",
-            ]
             with guard_testing_replacement(store, operation, "worker", lambda _: None):
-                for message in messages:
-                    body = json.dumps({"error": {"json": {"message": message}}}).encode()
-                    opener.open.side_effect = HTTPError(
-                        "https://provider.test", 500, "fixture", Message(), io.BytesIO(body)
-                    )
-                    with patch.object(api, "build_opener", return_value=opener):
+                for error in (
+                    NativeUploadRejected(),
+                    NativeSourceUnavailable("fixture interrupted writer"),
+                ):
+                    with patch(
+                        "control_plane.dokploy.native_copy_stream.write_native_testing_chunk",
+                        side_effect=error,
+                    ):
                         with self.assertRaises(NativeSourceUnavailable):
                             api.upload_native_testing_chunk(
                                 host="https://provider.test",
@@ -1038,13 +1039,34 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                         operation.operation_id
                     ).recovery_journal
                     assert journal is not None
-                    self.assertEqual(journal.effects[0].acknowledged, message == messages[0])
+                    self.assertEqual(
+                        journal.effects[-1].acknowledged, isinstance(error, NativeUploadRejected)
+                    )
+            self.fence(store)
+            with self.provider():
+                self.assertEqual(recover_stranded_testing_replacements(store, root), ())
+
+    def test_determinate_source_bound_refuses_recovery_without_reading_provider(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(
+                store, operation, "worker", lambda _: None
+            ) as checkpoint:
+                checkpoint(NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT)
             fenced = self.fence(store)
             with self.provider():
-                self.assertFalse(
-                    testing_replacement_recovery_read(store, fenced, root)["effects_acknowledged"]
-                )
+                view = testing_replacement_recovery_read(store, fenced, root)
+                self.assertEqual(view["status"], "refused")
+                self.assertFalse(view["provider_inspected"])
                 self.assertEqual(recover_stranded_testing_replacements(store, root), ())
+                with patch(
+                    "control_plane.testing_replacement_recovery.NATIVE_TESTING_COPY_ARTIFACT_BYTES",
+                    NATIVE_TESTING_COPY_ARTIFACT_BYTES * 2,
+                ):
+                    self.assertEqual(
+                        recover_stranded_testing_replacements(store, root),
+                        (operation.operation_id,),
+                    )
 
     def test_classifier_requires_exact_terminal_deploy_and_bound_provider(self) -> None:
         for store, root in self.stores():

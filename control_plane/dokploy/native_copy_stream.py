@@ -1,13 +1,14 @@
 """Bounded artifact reads through Dokploy's existing remote terminal transport.
 
-The only programs accepted by the public helpers are fixed source inspection /
-export programs. Provider credentials stay on the connection to Dokploy; its
+The public helpers use fixed source inspection/export and qualified testing
+receiver programs. Provider credentials stay on the connection to Dokploy; its
 existing SSH identity stays inside Dokploy. Raw terminal output is never logged.
 """
 
 import base64
 from collections.abc import Callable, Iterator
 import json
+import hashlib
 import logging
 import re
 import shlex
@@ -18,6 +19,8 @@ import uuid
 import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 from websockets.sync.client import connect
@@ -35,13 +38,16 @@ class NativeSourceUnavailable(click.ClickException, ValueError):
     """The bounded source read did not produce complete evidence."""
 
 
+class NativeSourceExceedsBound(NativeSourceUnavailable):
+    """A determinate capture limit; recovery must not repeat this source read."""
+
+
 class NativeUploadRejected(NativeSourceUnavailable):
-    """A provider validation refusal or explicit remote exit, never a timeout."""
+    """A fixed receiver writer refusal after closing its file, never a timeout."""
 
     provider_effect_terminal = True
 
-    def __init__(self, *, retryable: bool = False):
-        self.retryable = retryable
+    def __init__(self) -> None:
         super().__init__("The provider rejected the native upload with terminal evidence.")
 
 
@@ -177,6 +183,10 @@ def _read_program(
             raise NativeSourceAuthorizationDenied("The registered source refused the read.")
         if value.get("type") == "failed":
             raise NativeSourceUnavailable("The registered source read did not pass.")
+        if value.get("type") == "source_exceeds_bound":
+            raise NativeSourceExceedsBound("The source exceeds the bounded native copy capacity.")
+        if value.get("type") == "upload_failed":
+            raise NativeUploadRejected()
         receive(value)
         if value.get("type") == "complete":
             complete = True
@@ -227,6 +237,89 @@ def inspect_native_testing_receiver(
         receive=receive,
         timeout_seconds=120,
     )
+
+
+def write_native_testing_chunk(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    container_id: str,
+    filename: str,
+    content: bytes,
+) -> None:
+    if (
+        not re.fullmatch(r"[a-f0-9]{64}", container_id)
+        or not re.fullmatch(r"lp-native-[a-f0-9]{32}-(database|filestore)-[0-9]+", filename)
+        or not 0 < len(content) <= NATIVE_TESTING_COPY_CHUNK_BYTES
+    ):
+        raise NativeSourceUnavailable("The native chunk requires a qualified bounded receiver.")
+    receipt = {"sha256": hashlib.sha256(content).hexdigest(), "size": len(content)}
+    frames: list[dict[str, object]] = []
+    _read_remote(
+        host=host,
+        token=token,
+        server_id=server_id,
+        program=NATIVE_TESTING_CHUNK_WRITE_PROGRAM,
+        payload={
+            "container": container_id,
+            "filename": filename,
+            "content": base64.b64encode(content).decode(),
+        },
+        receive=frames.append,
+        timeout_seconds=90,
+    )
+    if frames != [{"type": "complete", **receipt}]:
+        raise NativeSourceUnavailable("The native chunk has no exact receiver witness.")
+
+
+NATIVE_TESTING_CHUNK_WRITE_PROGRAM = r"""
+import base64,hashlib,json,re,subprocess,sys
+spec=json.loads(base64.b64decode(sys.argv[1],validate=True));prefix=sys.argv[2]
+def emit(value):
+    print(prefix+json.dumps(value,sort_keys=True),flush=True)
+try:
+    if not re.fullmatch(r'[a-f0-9]{64}',spec['container']) or not re.fullmatch(r'lp-native-[a-f0-9]{32}-(database|filestore)-[0-9]+',spec['filename']):
+        raise RuntimeError('Unqualified receiver')
+    data=base64.b64decode(spec['content'],validate=True)
+    if not 0 < len(data) <= __CHUNK_BYTES__:
+        raise RuntimeError('Chunk bound')
+    writer=r'''
+import hashlib,json,os,sys
+from pathlib import Path
+try:
+    data=sys.stdin.buffer.read(__CHUNK_BYTES__+1)
+    if not 0 < len(data) <= __CHUNK_BYTES__:
+        raise RuntimeError('Chunk bound')
+    path=Path('/tmp')/sys.argv[1]
+    fd=os.open(path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+    with os.fdopen(fd,'r+b') as handle:
+        existing=handle.read(__CHUNK_BYTES__+1)
+        if len(existing)>len(data) or existing!=data[:len(existing)]:
+            raise RuntimeError('Existing receiver bytes differ')
+        handle.seek(0);handle.write(data);handle.truncate();os.fchmod(handle.fileno(),0o600)
+        handle.flush();os.fsync(handle.fileno())
+    print(json.dumps({'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'size':path.stat().st_size}))
+except Exception:
+    print(json.dumps({'failed':True}))
+'''
+    result=subprocess.run(['docker','exec','-i',spec['container'],'python3','-c',writer,spec['filename']],input=data,capture_output=True,check=False,timeout=60)
+    if result.returncode:
+        # A lost Docker transport can leave its exec running. Only a fixed
+        # writer witness proves that the remote mutation ended.
+        emit({'type':'failed'})
+    else:
+        receipt=json.loads(result.stdout)
+        if receipt=={'failed':True}:
+            emit({'type':'upload_failed'})
+        elif receipt!={'sha256':hashlib.sha256(data).hexdigest(),'size':len(data)}:
+            emit({'type':'upload_failed'})
+        else:
+            emit({'type':'complete',**receipt})
+except BaseException:
+    # A timeout gives no remote-process exclusion proof.
+    emit({'type':'failed'})
+""".replace("__CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES))
 
 
 def _read_remote(
@@ -289,6 +382,9 @@ def emit(value):
     print(prefix+json.dumps(value,sort_keys=True),flush=True)
 
 class ReadDenied(Exception):
+    pass
+
+class SourceExceedsBound(Exception):
     pass
 
 def denied(error):
@@ -356,8 +452,8 @@ def stream(part, arguments):
                 if not chunk:
                     break
                 size+=len(chunk)
-                if size>128*1024*1024:
-                    raise RuntimeError('Source artifact exceeds the bounded transport')
+                if size>__ARTIFACT_BYTES__:
+                    raise SourceExceedsBound()
                 digest.update(chunk)
                 emit({'type':'data','part':part,'data':base64.b64encode(chunk).decode()})
             status=process.wait()
@@ -396,10 +492,15 @@ try:
         emit({'type':'complete','database':database_receipt,'filestore':filestore_receipt})
     else:
         raise RuntimeError('Invalid source read mode')
+except SourceExceedsBound:
+    emit({'type':'source_exceeds_bound'})
+    raise SystemExit(1)
 except ReadDenied:
     emit({'type':'denied'})
     raise SystemExit(1)
 except BaseException:
     emit({'type':'failed'})
     raise SystemExit(1)
-""".replace("__RUNTIME_IDENTITY_ENV_KEY__", RUNTIME_IDENTITY_ENV_KEY)
+""".replace("__RUNTIME_IDENTITY_ENV_KEY__", RUNTIME_IDENTITY_ENV_KEY).replace(
+    "__ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES)
+)

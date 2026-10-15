@@ -29,6 +29,8 @@ from control_plane.contracts.testing_replacement_recovery import (
     TestingReplacementRecoveryJournal,
 )
 from control_plane.dokploy import api, source
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT
 from control_plane.launchplane_reconcile_authorization import (
     launchplane_reconcile_authorization_allows,
 )
@@ -82,6 +84,16 @@ def recovery_binding_fingerprint(bindings: Sequence[object]) -> str:
     return hashlib.sha256(
         json.dumps(bindings, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def source_exceeds_current_capacity(journal: TestingReplacementRecoveryJournal) -> bool:
+    if journal.inspection.get("native_source_result") != "source_exceeds_bound":
+        return False
+    try:
+        previous_capacity = int(journal.inspection["native_source_bound_bytes"])
+    except (KeyError, ValueError):
+        return True
+    return previous_capacity <= 0 or NATIVE_TESTING_COPY_ARTIFACT_BYTES <= previous_capacity
 
 
 def current_binding_fingerprint(
@@ -179,6 +191,16 @@ def guard_testing_replacement(
             nonlocal journal
             authorization_checkpoint(name)
             journal = initialize()
+            if name == NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT:
+                journal = journal.model_copy(
+                    update={
+                        "inspection": {
+                            **journal.inspection,
+                            "native_source_result": "source_exceeds_bound",
+                            "native_source_bound_bytes": str(NATIVE_TESTING_COPY_ARTIFACT_BYTES),
+                        }
+                    }
+                )
             if name == "target_replacement_records_commit":
                 # An interrupted publication cannot be classified as safe to retry.
                 journal = journal.model_copy(
@@ -290,8 +312,8 @@ _SYNCHRONOUS_PATHS = frozenset(
         "/api/schedule.create",
         "/api/schedule.update",
         "/api/schedule.delete",
-        # The provider awaits upload/cp/cleanup before its reply. This is proof
-        # of quiescence, not file integrity: retry still inspects actual bytes.
+        # The fixed writer supplies a completion witness after closing the file.
+        # Retry still independently inspects the original receiver bytes.
         # An unacknowledged upload remains fenced just like other lost replies.
         api.NATIVE_TESTING_CHUNK_UPLOAD_PATH,
     }
@@ -307,6 +329,8 @@ def inspect_testing_replacement(
 ) -> dict[str, str] | None:
     journal = operation.recovery_journal
     if journal is None or journal.attempt != operation.attempt:
+        return None
+    if source_exceeds_current_capacity(journal):
         return None
     if any(not effect.acknowledged for effect in journal.effects):
         return None
@@ -455,6 +479,8 @@ def testing_replacement_recovery_read(
                 return refuse("recovery_journal_absent")
             if not view["attempt_matches"]:
                 return refuse("recovery_attempt_changed")
+            if source_exceeds_current_capacity(journal):
+                return refuse("recovery_source_exceeds_bound")
             view["binding_matches"] = (
                 current_binding_fingerprint(store, current) == journal.target_fingerprint
             )
@@ -511,6 +537,10 @@ def recover_stranded_testing_replacements(
         limit=10,
     ):
         if not service_testing_operation(operation):
+            continue
+        if operation.recovery_journal is not None and source_exceeds_current_capacity(
+            operation.recovery_journal
+        ):
             continue
         try:
             # Rebuilding is a new resource generation, not historical-effect proof.

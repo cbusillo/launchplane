@@ -7,7 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.canonical_json import canonical_json_sha256
 
 NATIVE_TESTING_COPY_CHUNK_BYTES = 64 * 1024
+NATIVE_TESTING_COPY_ARTIFACT_BYTES = 128 * 1024 * 1024
 NATIVE_TESTING_COPY_CACHE_DIRECTORY = "private-testing-source"
+NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT = "native_testing_source_exceeds_bound"
 
 
 class NativeOdooSourceAuthority(BaseModel):

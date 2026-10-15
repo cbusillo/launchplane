@@ -4,9 +4,6 @@ import base64
 import click
 from collections import deque
 from collections.abc import Mapping, Callable
-from email.message import Message
-from email.parser import BytesParser
-from email.policy import default as email_policy
 import hashlib
 import io
 import json
@@ -20,7 +17,6 @@ import tarfile
 from tempfile import TemporaryDirectory, NamedTemporaryFile
 from typing import Any, cast
 import unittest
-from urllib.error import HTTPError
 from unittest.mock import Mock, patch
 from contextlib import redirect_stdout
 
@@ -30,6 +26,7 @@ from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     NativeTestingCopyArtifact,
     NativeTestingCopyCapture,
+    NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT,
 )
 from control_plane.dokploy import native_copy_stream as transport
 from control_plane.dokploy import api
@@ -92,6 +89,27 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_private_cache_requires_a_mount_outside_the_shared_backing(self) -> None:
+        from control_plane.odoo_testing_native_source import require_private_copy_mount
+
+        private = Path("/fixture/private-testing-source")
+        shared = "1 0 0:1 /shared /fixture rw - ext4 fixture rw\n"
+        for private_root in (None, "/shared", "/shared/private-testing-source", "/dedicated-copy"):
+            mounts = shared + (
+                ("2 1 0:1 " + private_root + " " + str(private) + " rw - ext4 fixture rw")
+                if private_root
+                else ""
+            )
+            with (
+                self.subTest(private_root=private_root),
+                patch("pathlib.Path.read_text", return_value=mounts),
+            ):
+                if private_root == "/dedicated-copy":
+                    require_private_copy_mount(private)
+                else:
+                    with self.assertRaises(transport.NativeSourceUnavailable):
+                        require_private_copy_mount(private)
+
     def test_source_runtime_must_belong_to_the_registered_product_and_lane(self) -> None:
         source = descriptor().model_dump(mode="json")
         for changed in (
@@ -168,51 +186,60 @@ class NativeSourceTransportTests(unittest.TestCase):
                 "failed" if changed else "complete",
             )
 
-    def test_upload_preserves_bytes_at_the_exact_receiver_filename(self) -> None:
+    def test_chunk_delivery_uses_only_stdin_and_preserves_different_receiver_bytes(self) -> None:
+        content = b"PRIVATE_ARTIFACT_CONTENT"
         filename = "lp-native-" + "f" * 32 + "-database-0"
-        content = bytes(range(256))
         with TemporaryDirectory() as directory:
-            root = Path(directory)
+            receiver = Path(directory)
+            arguments_seen = []
 
-            def receive(request: Any, **kwargs: Any) -> Any:
-                envelope = (
-                    "Content-Type: "
-                    + request.get_header("Content-type")
-                    + "\r\nMIME-Version: 1.0\r\n\r\n"
-                ).encode() + request.data
-                message = BytesParser(policy=email_policy).parsebytes(envelope)
-                parts = {
-                    part.get_param("name", header="content-disposition"): part
-                    for part in message.iter_parts()
+            def docker_exec(arguments: list[str], **kwargs: Any) -> Any:
+                arguments_seen.append(arguments)
+                self.assertNotIn(content.decode(), " ".join(arguments))
+                self.assertNotIn(base64.b64encode(content).decode(), " ".join(arguments))
+                result = io.StringIO()
+                with (
+                    patch.object(sys, "argv", ["writer", arguments[-1]]),
+                    patch.object(sys, "stdin", io.TextIOWrapper(io.BytesIO(kwargs["input"]))),
+                    patch("pathlib.Path", return_value=receiver),
+                    redirect_stdout(result),
+                ):
+                    exec(compile(arguments[-2], "<receiver-writer>", "exec"), {})
+                return subprocess.CompletedProcess(
+                    arguments, 0, stdout=result.getvalue().encode(), stderr=b""
+                )
+
+            for data in (content, b"different receiver attempt"):
+                spec = {
+                    "container": "e" * 64,
+                    "filename": filename,
+                    "content": base64.b64encode(data).decode(),
                 }
-                upload = parts["file"]
-                # Provider cp semantics: a directory destination uses its own
-                # temporary basename; an exact path preserves our receiver name.
-                temporary = root / ("dokploy-upload-fixture-" + str(upload.get_filename()))
-                temporary.write_bytes(cast(bytes, upload.get_payload(decode=True)))
-                destination = root / parts["destinationPath"].get_content().strip().removeprefix(
-                    "/tmp/"
-                )
-                import shutil
-
-                shutil.copyfile(temporary, destination)
-                response = Mock(status=200)
-                response.__enter__ = Mock(return_value=response)
-                response.__exit__ = Mock(return_value=False)
-                return response
-
-            opener = Mock()
-            opener.open.side_effect = receive
-            with patch("control_plane.dokploy.api.build_opener", return_value=opener):
-                api.upload_native_testing_chunk(
-                    host="https://provider.invalid",
-                    token="fixture",
-                    server_id="receiver",
-                    container_id="e" * 64,
-                    filename=filename,
-                    content=content,
-                )
-            self.assertEqual((root / filename).read_bytes(), content)
+                output = io.StringIO()
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "fixture",
+                            base64.b64encode(json.dumps(spec).encode()).decode(),
+                            "fixture:",
+                        ],
+                    ),
+                    patch("subprocess.run", side_effect=docker_exec),
+                    redirect_stdout(output),
+                ):
+                    exec(
+                        compile(
+                            transport.NATIVE_TESTING_CHUNK_WRITE_PROGRAM, "<native-upload>", "exec"
+                        ),
+                        {},
+                    )
+                frame = json.loads(output.getvalue().removeprefix("fixture:"))
+                self.assertEqual(frame["type"], "complete" if data == content else "upload_failed")
+                self.assertEqual((receiver / filename).read_bytes(), content)
+            self.assertTrue(arguments_seen)
+            self.assertEqual((receiver / filename).stat().st_mode & 0o777, 0o600)
 
     def test_source_program_refuses_wrong_compose_before_export_without_private_output(
         self,
@@ -333,18 +360,12 @@ class NativeSourceTransportTests(unittest.TestCase):
             payloads.append(payload)
             return send()
 
-        error = HTTPError(
-            "https://provider.invalid",
-            403,
-            "refused",
-            Message(),
-            io.BytesIO(b"PRIVATE_ARTIFACT_CONTENT"),
-        )
-        opener = Mock()
-        opener.open.side_effect = error
         with (
             api.observe_dokploy_mutations(observe),
-            patch("control_plane.dokploy.api.build_opener", return_value=opener),
+            patch(
+                "control_plane.dokploy.native_copy_stream.write_native_testing_chunk",
+                side_effect=transport.NativeSourceAuthorizationDenied("fixture refusal"),
+            ),
         ):
             with self.assertRaises(transport.NativeSourceAuthorizationDenied) as caught:
                 api.upload_native_testing_chunk(
@@ -430,21 +451,16 @@ class NativeSourceTransportTests(unittest.TestCase):
             )
         self.assertFalse(connection.sent)
 
-    def test_truncation_and_oversize_never_supply_completion(self) -> None:
-        for value in (
-            {"type": "data", "part": "database", "data": "Zml4dHVyZQ=="},
-            {"type": "data", "private": "x" * (129 * 1024)},
-        ):
-            with self.subTest(kind=value["type"], oversize="private" in value):
-                connection = Connection(value)
-                with self.assertRaises((transport.NativeSourceUnavailable, TimeoutError)):
-                    transport._read_program(
-                        connection,
-                        program=transport.NATIVE_ODOO_SOURCE_READ_PROGRAM,
-                        payload={},
-                        timeout_seconds=5,
-                        receive=lambda _: None,
-                    )
+    def test_truncation_never_supplies_completion(self) -> None:
+        connection = Connection({"type": "data", "part": "database", "data": "Zml4dHVyZQ=="})
+        with self.assertRaises(TimeoutError):
+            transport._read_program(
+                connection,
+                program=transport.NATIVE_ODOO_SOURCE_READ_PROGRAM,
+                payload={},
+                timeout_seconds=5,
+                receive=lambda _: None,
+            )
 
     def test_local_key_setup_and_untrusted_provider_urls_are_refused_before_connect(self) -> None:
         with patch.object(transport, "connect") as connect:
@@ -471,6 +487,9 @@ class NativeCopyCustodyTests(unittest.TestCase):
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
         self.enterContext(patch.dict(os.environ, {"LAUNCHPLANE_STATE_DIR": str(self.root)}))
+        self.enterContext(
+            patch("control_plane.odoo_testing_native_source.require_private_copy_mount")
+        )
         self.source = descriptor()
         self.generation = generation().model_copy(
             update={
@@ -555,6 +574,40 @@ class NativeCopyCustodyTests(unittest.TestCase):
         with patch("control_plane.odoo_testing_native_source.read_native_source") as read:
             self.assertEqual(self.capture(), receipt)
             read.assert_not_called()
+
+    def test_source_capacity_refusal_is_checkpointed_before_upload(self) -> None:
+        checkpoint = Mock()
+
+        def inspect(**kwargs: Any) -> None:
+            kwargs["receive"]({"type": "complete", "runner": "e" * 64, "resume": False})
+
+        with (
+            patch(
+                "control_plane.odoo_testing_native_source.inspect_native_testing_receiver",
+                side_effect=inspect,
+            ),
+            patch(
+                "control_plane.odoo_testing_native_source.capture_native_testing_source",
+                side_effect=transport.NativeSourceExceedsBound("fixture source capacity"),
+            ),
+            patch(
+                "control_plane.odoo_testing_native_source.api.upload_native_testing_chunk"
+            ) as upload,
+        ):
+            with self.assertRaises(transport.NativeSourceExceedsBound):
+                prepare_native_testing_delivery(
+                    cast(PostgresRecordStore, self.store),
+                    root=self.root,
+                    generation=self.generation,
+                    descriptor=self.source,
+                    host="https://provider.invalid",
+                    token="fixture",
+                    server_id="receiver",
+                    spec={},
+                    before_mutation=checkpoint,
+                )
+        checkpoint.assert_called_once_with(NATIVE_TESTING_SOURCE_BOUND_CHECKPOINT)
+        upload.assert_not_called()
 
     def test_complete_receiver_artifacts_do_not_require_private_cache_or_recapture(self) -> None:
         with patch(
@@ -715,13 +768,8 @@ class NativeCopyCustodyTests(unittest.TestCase):
                         kwargs["receive"](value)
                     kwargs["receive"]({"type": "complete", "runner": "e" * 64, "resume": False})
 
-                attempts: dict[str, int] = {}
-
                 def upload(**kwargs: Any) -> None:
                     part = str(kwargs["filename"]).rsplit("-", 2)[1]
-                    attempts[part] = attempts.get(part, 0) + 1
-                    if attempts[part] == 1:
-                        raise transport.NativeUploadRejected(retryable=True)
                     data = kwargs["content"]
                     observed[(part, 0)] = {
                         "type": "chunk",
@@ -741,7 +789,6 @@ class NativeCopyCustodyTests(unittest.TestCase):
                         side_effect=upload,
                     ) as uploads,
                     patch("control_plane.odoo_testing_native_source.read_native_source") as read,
-                    patch("control_plane.odoo_testing_native_source.time.sleep"),
                 ):
                     if prefix_matches:
                         self.assertEqual(
@@ -758,7 +805,7 @@ class NativeCopyCustodyTests(unittest.TestCase):
                             ),
                             receipt,
                         )
-                        self.assertEqual(uploads.call_count, len(self.data) * 2)
+                        self.assertEqual(uploads.call_count, len(self.data))
                     else:
                         with self.assertRaises(ValueError):
                             prepare_native_testing_delivery(
