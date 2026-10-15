@@ -1899,6 +1899,47 @@ not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced
 by delivery-attempt records. The DB-backed monitor commits enabled destinations'
 material-event deliveries in the same transaction as the observation and incident.
+
+Production delivery has separate `production-delivery-*` provider incidents.
+Rejected production deploy/promotion requests record a bounded reason code and
+the caller's trace even when refusal precedes deployment-record creation.
+The service's independent delivery-monitor thread checks terminal deployment,
+promotion and queued Odoo release failures once per minute, including products
+without HTTP health checks. As with other incidents, existing matching
+notification policies select the Discord destination; no credential or new
+destination is created by monitoring. Check-scoped HTTP-only policies do not
+match provider incidents. Confirm the product's existing Director notification
+policy covers provider incidents when qualifying notification delivery. The
+route must have passed its existing product-scope authorization check; ordinary
+in-progress retries and idempotency-protocol errors do not open delivery incidents.
+
+The same monitor compares each Live product's recorded default branch with
+production through the existing read-only source adapter. A durable pending
+source receipt raises attention after one hour (`PRODUCTION_DELIVERY_LAG_SECONDS`),
+including missing/failed builds, testing qualification, held Client acceptance,
+backup refusals and stalled promotion. New merges and service restarts do not
+reset an outstanding deadline. The source's recorded merge-commit time starts the
+deadline when available, otherwise first observation does. Source-read failure
+opens separate monitoring-unavailable attention and cannot resolve a delivery
+incident. A later verified source read resolves only that monitoring incident.
+Explicit lifecycle retirement resolves automatic delivery monitoring; prelaunch
+products have no automatic production deadline. This is notification evidence,
+never acceptance or a release gate.
+
+Exact replays of an unresolved candidate retain its original reason and trace and
+reuse the incident/outbox. A different failure stage updates that incident, and
+the existing policy controls reminders. Healthy checks of the old artifact cannot clear it.
+A later successful delivery clears only the matching candidate. Production-lag
+attention clears when production reaches the observed default-branch source.
+Unidentified requests retain their request identity rather than borrowing a
+testing artifact, especially for rollback; they require matching recovery
+evidence and are never cleared by an unrelated promotion. Unexpected Client
+release failures before a step record exists also create delivery attention.
+Runtime-health observations stay independent. Inspect the product environment's
+incident detail for material events, delivery attempts and outbox state; transport
+recovery does not resolve a delivery failure. Existing outbox retry and
+unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
+durable notification delivery runs through the service's DB-backed outbox.
 The outbox worker sends email and Discord as well as GitHub notifications, so a
 healthy probe after recovery does not need to manufacture another resolution
 for delivery to resume. Each delivery keeps the original event and rendered body;
@@ -2297,6 +2338,8 @@ re-encryption apply unless the Director approves the exact new plan digest. If
 automatic compensation is rejected or fails, require manual admin follow-up
 and a clean legacy-only dry-run baseline before proceeding.
 
+### Dokploy domain authority
+
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact
 tracked target type and target ID, a comma-separated tuple of bare DNS hosts,
@@ -2309,6 +2352,28 @@ preserves all target metadata except `domains`, `updated_at`, and
 `source_label`. The same atomic write advances only `updated_at` and
 `source_label` on the canonical provider-target projection so downstream
 projection checks remain consistent.
+
+For domain-authority dry runs, `GET /v1/dokploy-targets/inspect`
+continues to expose complete empty/canonical evidence privately. When the stored
+provider evidence cannot be safely exposed, it instead supplies
+`provider_target_record.comparison_fingerprint`, a keyed commitment to the full
+reference plus its context and instance. Send it as
+`expected_current_provider_target_fingerprint` with the visible
+`expected_current_provider_target` and the exact observed domains to the setup
+route in dry-run mode. Both inspection and this dry-run response omit arbitrary
+stored evidence. The fingerprint supplies comparison evidence only; authorization,
+exclusive lane ownership, visible target identity, live provider identity and the
+exact domain set are still checked. Neither read nor plan writes records.
+
+Fingerprint comparison uses the existing managed-secret key ring, with its own
+purpose. If that bootstrap configuration is unavailable, ordinary inspection
+still works and the plan reports `dokploy_target_comparison_evidence_unavailable`
+with its trace. Repeat inspection after configuration is available. Authority
+drift, a different lane, or key rotation invalidates the fingerprint; inspect
+again rather than retrying an old expectation. Fingerprints are accepted only
+for domain-authority dry runs. Apply retains the complete private reference and
+its existing credential, confirmation and idempotency gates. Keep fingerprints
+and private comparison input out of public helper receipts.
 
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:

@@ -1239,6 +1239,10 @@ def build_generic_web_write_route_handlers(
                     " for the requested product/context."
                 ),
             )
+        request.state.production_delivery_scope = (profile.product, lane.context, lane.instance)
+        request.state.production_delivery_candidate = (
+            deploy_request.deploy.artifact_id or deploy_request.deploy.source_git_ref
+        )
         normalized_key = idempotency_key.strip()
         if not normalized_key:
             raise dependencies.http_error(
@@ -1407,6 +1411,12 @@ def build_generic_web_write_route_handlers(
                 ),
             )
         live_promotion = not promotion_request.promotion.dry_run
+        if live_promotion:
+            request.state.production_delivery_scope = (profile.product, lane.context, lane.instance)
+            request.state.production_delivery_candidate = (
+                promotion_request.promotion.artifact_id
+                or promotion_request.promotion.source_git_ref
+            )
         promotion_intent_id = promotion_request.promotion.promotion_intent_id.strip()
         release_evaluation: tuple[bool, ReleaseReviewStatus] | Exception | None = None
         if live_promotion:
@@ -1648,6 +1658,7 @@ def build_generic_web_write_route_handlers(
                     " for the requested product/context."
                 ),
             )
+        request.state.production_delivery_scope = (profile.product, lane.context, "prod")
         (
             normalized_key,
             payload_fingerprint,

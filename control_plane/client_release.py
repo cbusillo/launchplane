@@ -1067,6 +1067,25 @@ def advance_client_releases(
                 profile.product,
                 type(error).__name__,
             )
+            # A failure before a step record exists must still reach delivery attention.
+            from control_plane.production_delivery_monitor import record_production_delivery_failure
+
+            accepted_profile, decision = covered
+            lane = next((lane for lane in accepted_profile.lanes if lane.instance == "prod"), None)
+            if lane is not None:
+                try:
+                    record_production_delivery_failure(
+                        store,
+                        accepted_profile,
+                        lane,
+                        candidate=decision.checklist.candidate.artifact_id,
+                        reason="client_release_failed",
+                        trace_id=f"client-release-{decision.record_id}",
+                    )
+                except Exception:
+                    _LOGGER.exception(
+                        "Could not persist client release failure product=%s", profile.product
+                    )
             continue
         if operation_id:
             queued.append(operation_id)

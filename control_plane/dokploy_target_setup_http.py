@@ -117,6 +117,7 @@ class DokployTargetSetupEnvelope(BaseModel):
     runtime_port: int | None = Field(default=None, ge=1, le=65535)
     deploy_timeout_seconds: int | None = Field(default=None, ge=1)
     expected_current_provider_target: DeployedTargetReference | None = None
+    expected_current_provider_target_fingerprint: str = Field(default="", max_length=256)
     replaces_operation_id: str = ""
     confirmation: str = ""
     reason: str = ""
@@ -197,6 +198,10 @@ class DokployTargetSetupEnvelope(BaseModel):
             raise ValueError("Dokploy target setup requires instance.")
         if self.operation == "adopt" and not self.target_id:
             raise ValueError("Dokploy target adoption requires target_id.")
+        if self.expected_current_provider_target_fingerprint and (
+            self.operation != "repair-domain-authority" or self.mode != "dry-run"
+        ):
+            raise ValueError("Comparison fingerprints support domain-authority dry runs only.")
         if self.operation == "repair-domain-authority":
             if not self.target_id:
                 raise ValueError("Dokploy domain authority repair requires target_id.")
@@ -545,6 +550,7 @@ def execute_dokploy_target_setup(
             target_id=request.target_id,
             domains=request.domains,
             expected_current_provider_target=request.expected_current_provider_target,
+            expected_current_provider_target_fingerprint=request.expected_current_provider_target_fingerprint,
             apply=apply_changes,
             fetch_target_payload=fetch_setup
             if disposable_checkpoint
@@ -668,6 +674,14 @@ def execute_dokploy_target_setup(
                 pending_domain=pending_domain,
                 stage="route-create",
             ) from error
+    setup_payload = dokploy_target_setup_result_payload(result)
+    if request.expected_current_provider_target_fingerprint:
+        provider_payload = setup_payload.get("provider_target_record")
+        if isinstance(provider_payload, dict):
+            provider_payload.pop("provider_evidence", None)
+            provider_payload["comparison_fingerprint"] = (
+                request.expected_current_provider_target_fingerprint
+            )
     return {
         "mode": request.mode,
         "operation": request.operation,
@@ -675,7 +689,7 @@ def execute_dokploy_target_setup(
         "instance": request.instance,
         "applied": apply_changes,
         "route_domain_ids": route_domain_ids,
-        "setup": dokploy_target_setup_result_payload(result),
+        "setup": setup_payload,
     }
 
 
