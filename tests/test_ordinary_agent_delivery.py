@@ -244,9 +244,17 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
             LaunchplaneOrdinaryAgentEffectCustodyRow,
         )
 
-        for attempted, unknown_custody in ((False, False), (False, True), (True, True)):
-            with self.subTest(attempted=attempted, unknown_custody=unknown_custody):
-                if attempted or unknown_custody:
+        for attempted, unknown_custody, request_state in (
+            (False, False, "waiting"),
+            (False, True, "waiting"),
+            (True, True, "waiting"),
+            (False, True, "reconciliation_required"),
+            (False, False, "completed"),
+        ):
+            with self.subTest(
+                attempted=attempted, unknown_custody=unknown_custody, request_state=request_state
+            ):
+                if attempted or unknown_custody or request_state != "waiting":
                     self.setUp()
                 self.seed_legacy_delivery()
                 candidate = self.credential
@@ -298,6 +306,7 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                 )
                 request = OrdinaryAgentFiniteRequestRecord.model_validate(
                     {
+                        "status": request_state,
                         "request_id": "legacy-request",
                         "idempotency_key": "legacy-request",
                         "principal_id": candidate.principal_id,
@@ -459,7 +468,10 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                         persisted_lease.payload["revoked_at"], None if attempted else now
                     )
                     self.assertEqual(
-                        persisted_request.payload["status"], "waiting" if attempted else "cancelled"
+                        persisted_request.payload["status"],
+                        request_state
+                        if attempted or request_state in {"reconciliation_required", "completed"}
+                        else "cancelled",
                     )
                     self.assertEqual(
                         persisted_effect.payload["state"],
