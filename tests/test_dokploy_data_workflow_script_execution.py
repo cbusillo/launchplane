@@ -89,7 +89,12 @@ def main(argv):
     if command == "inspect":
         template, container_id = argv[2], argv[3]
         if ".ExecIDs" in template:
-            print('["orphaned-exec"]' if os.environ.get("FAKE_RUNNER_EXEC_ACTIVE") == "1" else "null")
+            transient = state_dir / "runner-exec-probe.state"
+            active = os.environ.get("FAKE_RUNNER_EXEC_ACTIVE") == "1"
+            if os.environ.get("FAKE_RUNNER_EXEC_TRANSIENT") == "1" and not transient.exists():
+                transient.touch()
+                active = True
+            print('["orphaned-exec"]' if active else "null")
             return 0
         if '"kind"' in template:
             kind = "environment" if '"environment"' in template else "container"
@@ -537,6 +542,11 @@ def _render_post_deploy_script(
 
 @unittest.skipIf(BASH is None, "bash 4 or newer is required to run the rendered script")
 class DataWorkflowScriptExecutionTests(unittest.TestCase):
+    def test_finished_health_probe_does_not_refuse_post_deploy(self) -> None:
+        run = self._run(_render_post_deploy_script(None), FAKE_RUNNER_EXEC_TRANSIENT="1")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("exec workflow", run.docker_log)
+
     def test_runner_exec_left_after_transport_exit_blocks_repair_and_restore(self) -> None:
         from control_plane.dokploy.connection_isolation import isolation_script
 

@@ -2848,7 +2848,8 @@ SQL, readback and web restart. The supported Linux schedule host needs `flock`
 and a writable `/var/lock`; a busy execution refuses before Docker or SQL.
 The remote job retains this lock when the service's wait times out. Each new
 testing job also refuses while Docker reports existing runner execs, covering
-container work left behind after a transport exits. Isolation
+container work left behind after a transport exits; a brief bounded retry lets
+ordinary short health probes finish. Isolation
 also refuses an existing shared workflow admitted before this lock was deployed.
 It operates on the current tracked target and database. No SQL,
 credentials, carrier requests, notification probes, staff-account changes,
@@ -2882,8 +2883,9 @@ To reconcile, repeat exactly the original apply request with its original
 receipt and key. This reads schedule history for the original operation marker;
 it does not dispatch the repair again. A unique terminal matching job settles
 success only with qualified resources, isolation and complete integration
-readback. A normal failed job can settle failure only with SQL-completion
-readback evidence. Cancelled, killed, timed-out and SQL-incomplete jobs stay
+readback. A normal failed job can settle failure with SQL-completion readback
+evidence or a fixed resource refusal proving it stopped before web/SQL effects.
+Cancelled, killed, timed-out and SQL-incomplete jobs stay
 fenced. A normally completed job with successfully fetched but missing log
 markers can settle failure only when the original disabled per-key script
 verifies against its reviewed plan and resource digest; later runtime, policy

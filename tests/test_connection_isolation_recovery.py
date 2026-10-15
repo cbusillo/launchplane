@@ -3,12 +3,12 @@
 import hashlib
 import unittest
 from unittest.mock import Mock, patch
+from typing import Any
 
 from control_plane.dokploy import api, post_deploy
 from control_plane.dokploy.connection_isolation import (
     ConnectionIsolationObservation,
-    connection_isolation_plan_sha256,
-    isolation_script,
+    run_connection_isolation,
     observe_connection_isolation_operation,
 )
 from control_plane.dokploy.source import DokployTargetDefinition
@@ -136,6 +136,21 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
         self.markers.pop("integration_readback_ok")
         self.assertEqual(self.observe().outcome, "unknown")
 
+    def test_proven_before_effect_refusal_settles_without_a_new_repair(self) -> None:
+        self.dokploy_request.return_value = [{"deploymentId": "original", "status": "error"}]
+        self.logs.return_value = {
+            "log_available": "true",
+            "connection_isolation_operation_sha256": self.markers[
+                "connection_isolation_operation_sha256"
+            ],
+            "integration_readback_refused": "testing_resources/runner_exec_active",
+        }
+        observed = self.observe()
+        self.assertEqual(observed.outcome, "present")
+        self.assertFalse(observed.passed)
+        self.logs.return_value["connection_isolation_resources_ok"] = "true"
+        self.assertEqual(self.observe().outcome, "unknown")
+
     def test_upsert_only_checkpoint_is_a_known_non_triggered_failure(self) -> None:
         self.dokploy_request.return_value = []
         observed = self.observe(post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
@@ -155,7 +170,6 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
 
     def test_exact_terminal_script_can_settle_failure_when_logs_are_missing(self) -> None:
         from tests.test_connection_isolation_qualification import resource_fixture
-        from control_plane.integration_readback import integration_readback_policy
 
         _, identity = resource_fixture()
         environment = {
@@ -167,31 +181,40 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
             "appName": "app",
         }
         self.fetch_dokploy_target_payload.return_value = payload
-        policy = integration_readback_policy(
-            instance_name="testing", policies=self.target.policies, workflow_mode="maintenance"
-        )
-        review = {
-            "reviewed_plan_sha256": connection_isolation_plan_sha256(
-                self.target, payload, environment, policy
+        self.markers["connection_isolation_resource_sha256"] = "b" * 64
+        self.markers.pop("connection_isolation_operation_sha256")
+        captured: list[api.JsonObject] = []
+
+        def capture(**kwargs: Any) -> api.JsonObject:
+            stored = {"scheduleId": "schedule", **kwargs["schedule_payload"]}
+            captured.append(stored)
+            return stored
+
+        with (
+            patch.object(api, "upsert_dokploy_schedule", side_effect=capture),
+            patch.object(
+                api, "run_dokploy_schedule", return_value="deployment=original status=done"
             ),
-            "reviewed_resource_sha256": "b" * 64,
-        }
-        script = isolation_script(
-            compose_app_name="app",
-            database_name="example_testing",
-            instance="testing",
-            mode="apply",
-            readback_spec=policy.encoded_spec(),
-            context="example",
-            runtime_identity=identity,
-            reviewed_resource_sha256=review["reviewed_resource_sha256"],
-            operation_digest=self.markers["connection_isolation_operation_sha256"],
-        )
-        self.find_matching_dokploy_schedule.return_value = {
-            "scheduleId": "schedule",
-            "script": script,
-            "enabled": False,
-        }
+        ):
+            dry_run = run_connection_isolation(
+                host="fixture", token="fixture", target_definition=self.target, mode="dry-run"
+            )
+            review = {
+                "reviewed_plan_sha256": dry_run["connection_isolation_plan_sha256"],
+                "reviewed_resource_sha256": dry_run["connection_isolation_resource_sha256"],
+            }
+            run_connection_isolation(
+                host="fixture",
+                token="fixture",
+                target_definition=self.target,
+                mode="apply",
+                provider_operation_key=self.operation,
+                reviewed_plan_sha256=review["reviewed_plan_sha256"],
+                reviewed_resource_sha256=review["reviewed_resource_sha256"],
+            )
+        script = captured[-1]["script"]
+        assert isinstance(script, str)
+        self.find_matching_dokploy_schedule.return_value = captured[-1]
         self.logs.return_value = {"log_available": "true"}
         observed = self.observe(**review)
         self.assertEqual(observed.outcome, "present")

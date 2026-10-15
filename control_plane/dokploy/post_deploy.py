@@ -62,11 +62,16 @@ fi
 def odoo_testing_idle_runner_script(container_variable: str) -> str:
     if container_variable not in {"runner", "script_runner_container_id"}:
         raise ValueError("Unknown runner variable")
-    return f"""runner_execs=$(docker inspect -f '{{{{json .ExecIDs}}}}' "${{{container_variable}}}")
-case "$runner_execs" in
-    null|'[]') ;;
-    *) printf 'integration_readback_refused=testing_resources/runner_exec_active\\n' >&2; exit 1 ;;
-esac
+    return f"""for runner_probe in 1 2 3; do
+    runner_execs=$(docker inspect -f '{{{{json .ExecIDs}}}}' "${{{container_variable}}}")
+    case "$runner_execs" in null|'[]') break ;; esac
+    if [ "$runner_probe" = 3 ]; then
+        printf 'integration_readback_refused=testing_resources/runner_exec_active\\n' >&2
+        exit 1
+    fi
+    # Let a short native health probe finish without ignoring any active exec.
+    sleep 0.1
+done
 """
 
 

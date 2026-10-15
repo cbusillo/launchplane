@@ -451,16 +451,26 @@ def observe_connection_isolation_operation(
             deployment, evidence = next(iter(matching.values()))
             status = api._deployment_status(deployment)
             success = status in post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
-            # Interrupted transports may leave container execs behind. A normal
-            # error settles only after the readback program closed its SQL connection.
+            # Interrupted transports may leave container execs behind. Resource
+            # refusals occur before web/SQL effects; later errors need SQL completion.
             terminal = success or (
                 status in {"failed", "error"}
-                and evidence.get("connection_isolation_resources_ok") == "true"
-                and all(
-                    evidence.get(key) in {"true", "false"}
-                    for key in (
-                        "connection_isolation_ok",
-                        "integration_readback_ok",
+                and (
+                    (
+                        evidence.get("connection_isolation_resources_ok") == "true"
+                        and all(
+                            evidence.get(key) in {"true", "false"}
+                            for key in (
+                                "connection_isolation_ok",
+                                "integration_readback_ok",
+                            )
+                        )
+                    )
+                    or (
+                        evidence.get("connection_isolation_resources_ok") != "true"
+                        and evidence.get("integration_readback_refused", "").startswith(
+                            "testing_resources/"
+                        )
                     )
                 )
             )
