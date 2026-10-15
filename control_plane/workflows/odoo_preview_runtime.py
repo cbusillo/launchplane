@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane.product_secret_copy import ProductSecretCopyFrom
+from control_plane.odoo_preview_import_source import PREVIEW_FISHBOWL_SOURCE_ENV_KEY
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetPolicies,
@@ -1513,6 +1514,17 @@ def _execute_refresh(
         steps.append(_step("compose_update_raw_source", compose_id))
 
         environment_values = _preview_refresh_environment_values(request=request)
+        previous_source = dokploy_api.parse_dokploy_env_text(
+            str(target_payload.get("env") or "")
+        ).get(PREVIEW_FISHBOWL_SOURCE_ENV_KEY, "")
+        clear_previous_source = (
+            previous_source in {"true", "source-free"} and not integration_allowances
+        )
+        if clear_previous_source:
+            # Persist the cleanup intent through partial deploys and retries. Later
+            # source-free refreshes repeat this fixed, idempotent deletion.
+            environment_values[PREVIEW_FISHBOWL_SOURCE_ENV_KEY] = "source-free"
+
         env_text = dokploy_api.serialize_dokploy_env_text(environment_values)
         checkpoint_provider_effect("compose_update")
         dokploy_api.update_dokploy_target_env(
@@ -1602,6 +1614,7 @@ def _execute_refresh(
             env_file=None,
             workflow_environment_overrides=runtime_override_environment,
             bootstrap_missing_database=True,
+            clear_preview_fishbowl_source=clear_previous_source,
             before_provider_mutation=checkpoint_provider_effect,
             deployment_title=provider_operation_title,
         )

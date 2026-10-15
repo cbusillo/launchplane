@@ -4456,8 +4456,14 @@ The preview receives only Fishbowl's connection settings through the normal
 instance-overrides payload and the existing managed-secret transport. Its
 post-deploy readback allows only this selected source before web starts;
 other integrations remain fenced. Normal previews inherit no allowances; a later
-refresh without `fishbowl_source` clears the prior Fishbowl connection
-parameters before its readback, so ordinary event-driven refresh remains usable.
+refresh without `fishbowl_source` deletes the prior Fishbowl connection
+parameters before readback, so ordinary event-driven refresh remains usable.
+Only previews previously marked by this route get that fixed SQL cleanup. It
+runs in the existing post-deploy schedule with web stopped and requires both
+a preview lane and `PLATFORM_INSTANCE=preview` inside the container. The
+source-free marker persists so partial deploy retries repeat cleanup safely;
+ordinary previews have no new payload or cleanup. Missing optional source
+port and TLS-verification settings are reset to the connector defaults.
 
 Once deployed, verify the serving generation's artifact, source commit and image
 digest against the PR head. Activate the artifact's importer through Apps if

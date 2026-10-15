@@ -42,13 +42,30 @@ class PreviewImportSourceError(ValueError):
         self.code = code
 
 
-def cleared_fishbowl_parameters() -> tuple[OdooConfigParameterOverride, ...]:
-    return tuple(
-        OdooConfigParameterOverride(
-            key=f"fishbowl.{name}", value=OdooOverrideValue(source="literal", value="")
-        )
-        for name in FISHBOWL_CONNECTION_PARAMETERS
-    )
+PREVIEW_FISHBOWL_SOURCE_ENV_KEY = "LAUNCHPLANE_PREVIEW_FISHBOWL_SOURCE"
+FISHBOWL_OPTIONAL_DEFAULTS = {"port": "3306", "ssl_verify": "True"}
+
+
+def preview_fishbowl_clear_program() -> str:
+    """Fixed database-local cleanup; no arbitrary SQL or parameter names from callers."""
+    keys = [f"fishbowl.{name}" for name in FISHBOWL_CONNECTION_PARAMETERS]
+    return """
+import os
+import sys
+import psycopg2
+if os.environ.get("PLATFORM_INSTANCE") != "preview":
+    raise RuntimeError("Fishbowl source cleanup requires a preview container.")
+with psycopg2.connect(
+    host=os.environ.get("ODOO_DB_HOST") or "database",
+    port=os.environ.get("ODOO_DB_PORT") or "5432",
+    user=os.environ.get("ODOO_DB_USER") or "odoo",
+    password=os.environ.get("ODOO_DB_PASSWORD") or "",
+    dbname=sys.argv[1],
+) as connection:
+    with connection.cursor() as cursor:
+        cursor.execute("DELETE FROM ir_config_parameter WHERE key = ANY(%s)", (%s,))
+print("preview_fishbowl_source_cleared=true")
+""" % ("%s", repr(keys))
 
 
 class PreviewImportSourceStore(ProductSecretCopyStore, Protocol):
@@ -173,7 +190,7 @@ def resolve_fishbowl_preview_source(
                 raise PreviewImportSourceError(
                     "settings_incomplete", "Preview import source runtime settings are incomplete."
                 )
-            continue
+            value = FISHBOWL_OPTIONAL_DEFAULTS[name]
         selected_values[parameter_key] = str(value)
         parameters.append(
             OdooConfigParameterOverride(

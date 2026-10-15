@@ -31,6 +31,7 @@ from control_plane.odoo_instance_overrides import (
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.odoo_preview_apply_http import (
     _odoo_preview_service_environment,
+    execute_odoo_preview_apply_result,
     _build_odoo_preview_apply_inputs,
     refresh_odoo_preview_issued_plan,
     OdooPreviewPlanProvenanceError,
@@ -38,6 +39,8 @@ from control_plane.odoo_preview_apply_http import (
 )
 from control_plane.odoo_preview_import_source import (
     FishbowlPreviewSource,
+    FISHBOWL_OPTIONAL_DEFAULTS,
+    preview_fishbowl_clear_program,
     resolve_fishbowl_preview_source,
 )
 from control_plane.product_config import apply_product_config_bundle
@@ -139,12 +142,13 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.store.write_runtime_environment_record(self.runtime)
 
-    def resolve(self) -> FishbowlPreviewSource:
+    def resolve(self, *, include_secret_value: bool = False) -> FishbowlPreviewSource:
         return resolve_fishbowl_preview_source(
             store=self.store,
             profile=self.profile,
             preview_slug="pr-42",
             copy_from=self.reference,
+            include_secret_value=include_secret_value,
         )
 
     def test_only_selected_source_enters_normal_post_deploy_payload(self) -> None:
@@ -219,7 +223,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                     side_effect=AssertionError("must not decrypt"),
                 ):
                     with self.assertRaises(ValueError):
-                        self.resolve()
+                        self.resolve(include_secret_value=True)
 
     def test_missing_or_pre_live_allowance_refuses(self) -> None:
         for allowances in ((), (self.allowance.model_copy(update={"kind": "pre_live"}),)):
@@ -362,7 +366,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 headers={"Authorization": "Bearer test-operator-token", "Idempotency-Key": plan_id},
             )
         self.assertEqual(refused.status_code, 403, refused.text)
-        self.assertIn("source-value read authority", refused.json()["error"]["message"])
+        self.assertEqual(refused.json()["error"]["code"], "authorization_denied")
         prepare.assert_not_called()
 
     def test_context_values_instance_override_and_target_delivery_precedence(self) -> None:
@@ -406,29 +410,6 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             self.resolve()
-
-    def test_source_free_refresh_clears_previous_connection_and_keeps_other_integrations_fenced(
-        self,
-    ) -> None:
-        _write_odoo_preview_template_runtime_environment(store=self.store)
-        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
-        result = _odoo_preview_service_environment(
-            control_plane_root_path=self.root,
-            record_store=self.store,
-            profile=self.profile,
-            plan=request.apply.dry_run_plan,
-            manifest=request.apply.manifest,
-            database_url=self.store.database_url,
-        )
-        payload = json.loads(
-            base64.b64decode(result.values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY])
-        )
-        parameters = {item["key"]: item["value"]["value"] for item in payload["config_parameters"]}
-        previous = {"fishbowl.host": "source.example.test", "fishbowl.password": "stored-old-value"}
-        previous.update(parameters)
-        self.assertFalse(previous["fishbowl.host"])
-        self.assertFalse(previous["fishbowl.password"])
-        self.assertEqual(result.integration_allowances, ())
 
     def test_plan_never_decrypts_and_rotated_source_becomes_stale_before_apply(self) -> None:
         request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
@@ -490,3 +471,103 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         )
         with self.assertRaises(ValueError):
             self.resolve()
+
+    def test_absent_optional_source_settings_clear_previous_values(self) -> None:
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(
+                update={
+                    "env": {
+                        key: value
+                        for key, value in self.runtime.env.items()
+                        if key != config_parameter_runtime_key("fishbowl.port")
+                    },
+                }
+            )
+        )
+        parameters = {item.key: item.value.value for item in self.resolve().parameters}
+        self.assertEqual(parameters["fishbowl.port"], FISHBOWL_OPTIONAL_DEFAULTS["port"])
+        self.assertEqual(
+            parameters["fishbowl.ssl_verify"], FISHBOWL_OPTIONAL_DEFAULTS["ssl_verify"]
+        )
+
+    def test_authority_change_during_environment_resolution_refuses_before_provider(self) -> None:
+        _write_odoo_preview_template_runtime_environment(store=self.store)
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(
+                update={
+                    "env": {**self.runtime.env, "ODOO_DB_USER": "odoo"},
+                }
+            )
+        )
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        issued = _issued_plan(request)
+        issued = issued.model_copy(
+            update={
+                "plan_request": issued.plan_request.model_copy(
+                    update={"fishbowl_source": self.reference}
+                ),
+                "fishbowl_source_sha256": self.resolve().authority_sha256,
+            }
+        )
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(
+                update={
+                    "env": {
+                        **self.runtime.env,
+                        "ODOO_DB_USER": "odoo",
+                        config_parameter_runtime_key("fishbowl.host"): "changed.example.test",
+                    },
+                }
+            )
+        )
+        with (
+            patch(
+                "control_plane.odoo_preview_apply_http.refresh_odoo_preview_issued_plan",
+                return_value=request,
+            ),
+            patch(
+                "control_plane.odoo_preview_apply_http.execute_odoo_preview_dokploy_apply"
+            ) as provider,
+            self.assertRaises(OdooPreviewPlanProvenanceError) as refused,
+        ):
+            execute_odoo_preview_apply_result(
+                control_plane_root_path=self.root,
+                record_store=self.store,
+                profile=self.profile,
+                request=request,
+                issued_plan=issued,
+                database_url=self.store.database_url,
+                deployment_record_id="fixture",
+            )
+        self.assertEqual(refused.exception.code, "odoo_preview_plan_stale")
+        provider.assert_not_called()
+
+    def test_source_cleanup_refuses_production_and_testing_before_database_access(self) -> None:
+        import sys
+        from types import SimpleNamespace
+        from unittest.mock import Mock
+        from control_plane.dokploy.post_deploy import run_compose_post_deploy_update
+        from control_plane.dokploy.source import DokployTargetDefinition
+
+        connection = Mock(side_effect=AssertionError("must not connect"))
+        for instance in ("prod", "testing", ""):
+            with (
+                self.subTest(instance=instance),
+                patch.dict(os.environ, {"PLATFORM_INSTANCE": instance}),
+                patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=connection)}),
+                self.assertRaises(RuntimeError),
+            ):
+                exec(preview_fishbowl_clear_program(), {})
+        connection.assert_not_called()
+        with patch(
+            "control_plane.dokploy.post_deploy.api.fetch_dokploy_target_payload"
+        ) as provider:
+            with self.assertRaises(ValueError):
+                run_compose_post_deploy_update(
+                    host="https://provider.example.test",
+                    token="fixture",
+                    env_file=None,
+                    target_definition=DokployTargetDefinition(context="example", instance="prod"),
+                    clear_preview_fishbowl_source=True,
+                )
+            provider.assert_not_called()

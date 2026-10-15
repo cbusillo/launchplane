@@ -8,6 +8,7 @@ from unittest.mock import ANY, Mock, patch
 from urllib.error import HTTPError, URLError
 
 import click
+from control_plane.odoo_preview_import_source import PREVIEW_FISHBOWL_SOURCE_ENV_KEY
 from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
 
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
@@ -1441,8 +1442,16 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
         )
 
+    def test_source_free_refresh_cleans_a_previous_selected_source_and_keeps_retry_intent(
+        self,
+    ) -> None:
+        self._assert_refresh_readback_allowances((), previous_source=True)
+
     def _assert_refresh_readback_allowances(
-        self, allowances: tuple[DokployTargetIntegrationAllowance, ...]
+        self,
+        allowances: tuple[DokployTargetIntegrationAllowance, ...],
+        *,
+        previous_source: bool = False,
     ) -> None:
         manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
@@ -1485,6 +1494,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                         "composeId": "compose-cm-pr-45",
                         "environmentId": "env-cm-preview",
                         "serverId": "server-nonprod",
+                        "env": f"{PREVIEW_FISHBOWL_SOURCE_ENV_KEY}=true" if previous_source else "",
                     },
                 ),
             ) as fetch_target_payload,
@@ -1590,6 +1600,12 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         preview_target = module_update.call_args.kwargs["target_definition"]
         self.assertEqual(preview_target.instance, "pr-45")
         self.assertEqual(preview_target.policies.integration_allowances, allowances)
+        self.assertEqual(
+            module_update.call_args.kwargs["clear_preview_fishbowl_source"], previous_source
+        )
+        if previous_source:
+            self.assertEqual(env_map[PREVIEW_FISHBOWL_SOURCE_ENV_KEY], "source-free")
+
         self.assertEqual(
             module_update.call_args.kwargs["workflow_environment_overrides"],
             {
