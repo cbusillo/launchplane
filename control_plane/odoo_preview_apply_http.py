@@ -18,6 +18,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetIntegrati
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.odoo_preview_import_source import (
     PreviewImportSourceStore,
+    PreviewImportSourceError,
     resolve_fishbowl_preview_source,
     PREVIEW_FISHBOWL_SOURCE_ENV_KEY,
 )
@@ -374,7 +375,7 @@ def refresh_odoo_preview_issued_plan(
             request=issued_plan.plan_request,
             database_url=database_url,
         )
-    except (FileNotFoundError, ValueError, click.ClickException) as error:
+    except (FileNotFoundError, PreviewImportSourceError, click.ClickException) as error:
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_plan_stale",
             message="Odoo preview plan authority could not be revalidated.",

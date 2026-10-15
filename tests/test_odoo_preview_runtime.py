@@ -1445,14 +1445,27 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
     def test_source_free_refresh_cleans_a_previous_selected_source_and_keeps_retry_intent(
         self,
     ) -> None:
-        self._assert_refresh_readback_allowances((), previous_source=True)
+        marker = self._assert_refresh_readback_allowances((), previous_source="true")
+        self.assertTrue(marker)
+        self._assert_refresh_readback_allowances((), previous_source=marker)
+        self._assert_refresh_readback_allowances(
+            (
+                DokployTargetIntegrationAllowance(
+                    integration="fishbowl",
+                    kind="read_only_source",
+                    reason="Reselect the source",
+                    evidence="Fixture SELECT-only account",
+                ),
+            ),
+            previous_source=marker,
+        )
 
     def _assert_refresh_readback_allowances(
         self,
         allowances: tuple[DokployTargetIntegrationAllowance, ...],
         *,
-        previous_source: bool = False,
-    ) -> None:
+        previous_source: str = "",
+    ) -> str:
         manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
@@ -1494,7 +1507,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                         "composeId": "compose-cm-pr-45",
                         "environmentId": "env-cm-preview",
                         "serverId": "server-nonprod",
-                        "env": f"{PREVIEW_FISHBOWL_SOURCE_ENV_KEY}=true" if previous_source else "",
+                        "env": f"{PREVIEW_FISHBOWL_SOURCE_ENV_KEY}={previous_source}"
+                        if previous_source
+                        else "",
                     },
                 ),
             ) as fetch_target_payload,
@@ -1601,10 +1616,9 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(preview_target.instance, "pr-45")
         self.assertEqual(preview_target.policies.integration_allowances, allowances)
         self.assertEqual(
-            module_update.call_args.kwargs["clear_preview_fishbowl_source"], previous_source
+            module_update.call_args.kwargs["clear_preview_fishbowl_source"],
+            bool(previous_source) and not allowances,
         )
-        if previous_source:
-            self.assertEqual(env_map[PREVIEW_FISHBOWL_SOURCE_ENV_KEY], "source-free")
 
         self.assertEqual(
             module_update.call_args.kwargs["workflow_environment_overrides"],
@@ -1617,6 +1631,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.module_install_update_evidence, _module_update_evidence())
         self.assertIn("module_install_update", [step.name for step in result.steps])
         smoke_check.assert_called_once()
+        return env_map.get(PREVIEW_FISHBOWL_SOURCE_ENV_KEY, "")
 
     def test_observe_refresh_requires_module_update_evidence_after_terminal_deploy(self) -> None:
         dry_run = build_odoo_preview_dokploy_dry_run(
