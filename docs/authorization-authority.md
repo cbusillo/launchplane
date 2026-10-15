@@ -117,6 +117,13 @@ plan for a live product without changing its profile. The corresponding apply
 still refuses with `live_product_requires_operator`; browser CSRF and read-only
 identity restrictions remain in force.
 
+Product-config likewise lets the authenticated Director agent plan undeclared
+non-secret settings on a Live product, including testing, production and context
+scope. The plan saves only review evidence. Applying undeclared settings still
+requires admin authority and returns `live_product_requires_operator` for the
+`local_operator` credential, even after a successful matching plan. Scoped agents
+retain their existing grants and Live-product guard.
+
 For scoped agents, product reads authorize the returned product. Profile and product overview lists filter role access
 per returned product; contextual secret and runtime-setting collections omit
 global or other-product records unless their scopes are also granted; saved Client reviews resolve the repository's product.

@@ -16705,6 +16705,7 @@ def create_launchplane_fastapi_app(
             )
         if (
             isinstance(identity, LocalOperatorIdentity)
+            and (product_config_request.mode == "apply" or not director_agent_identity(identity))
             and config_profile.production_use == "live"
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload

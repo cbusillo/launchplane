@@ -8,7 +8,7 @@ from unittest.mock import patch
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import BearerIdentityConfig
+from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from tests.http_app_test_support import (
@@ -17,7 +17,7 @@ from tests.http_app_test_support import (
     _post_product_config_apply,
     _RejectingVerifier,
 )
-from tests.support.auth import _local_operator_policy
+from tests.support.auth import _local_operator_policy, scoped_agent_test
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import _sqlite_database_url
 
@@ -168,6 +168,87 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                 self.assertEqual(response.json()["error"]["code"], "runtime_setting_refused")
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
+    async def test_director_plans_live_settings_without_write_authority_or_effects(self) -> None:
+        profile = _profile(production_use="live")
+        self.store.write_product_profile_record(profile)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="local-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        with patch.object(
+            self.store,
+            "write_product_authority_bundle",
+            wraps=self.store.write_product_authority_bundle,
+        ) as write_bundle:
+            for instance in ("testing", "prod", ""):
+                routes = ("generic", "environment") if instance else ("generic",)
+                for route in routes:
+                    with self.subTest(instance=instance, route=route):
+                        payload: dict[str, object] = {
+                            "mode": "dry-run",
+                            "reason": "Inspect a non-secret setting without applying it.",
+                        }
+                        if route == "generic":
+                            payload.update(
+                                product="example-site",
+                                context="example-site",
+                                instance=instance,
+                                runtime_env={"env": {"SITE_MODE": "private-plan-value"}},
+                            )
+                            response = await _post_product_config_apply(
+                                app, payload, authorization=_TOKEN
+                            )
+                        else:
+                            payload["runtime_settings"] = {"SITE_MODE": "private-plan-value"}
+                            response = await _post_product_environment_config_apply(
+                                app, payload, environment=instance, authorization=_TOKEN
+                            )
+                        self.assertEqual(response.status_code, 202, response.text)
+                        self.assertIn(
+                            "SITE_MODE",
+                            response.json()["result"]["runtime_environment"]["changed_keys"],
+                        )
+                        self.assertNotIn("private-plan-value", response.text)
+            write_bundle.assert_not_called()
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+        self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
+        self.assertEqual(self.store.list_secret_records(), ())
+
+    async def test_director_live_setting_plan_does_not_authorize_apply(self) -> None:
+        profile = _profile(production_use="live")
+        self.store.write_product_profile_record(profile)
+        for instance in ("testing", "prod", ""):
+            with self.subTest(instance=instance):
+                payload: dict[str, object] = {
+                    "product": "example-site",
+                    "context": "example-site",
+                    "instance": instance,
+                    "reason": "Inspect an undeclared live-product setting.",
+                    "runtime_env": {"env": {"SITE_MODE": "public"}},
+                }
+                review = await _post_product_config_apply(
+                    self.app, {**payload, "mode": "dry-run"}, authorization=_TOKEN
+                )
+                self.assertEqual(review.status_code, 202, review.text)
+                applied = await _post_product_config_apply(
+                    self.app,
+                    {**payload, "mode": "apply"},
+                    authorization=_TOKEN,
+                    idempotency_key=f"live-plan-cannot-apply-{instance}",
+                )
+                self.assertEqual(applied.status_code, 403, applied.text)
+                self.assertEqual(applied.json()["error"]["code"], "live_product_requires_operator")
+        self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
+        self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
+        self.assertEqual(self.store.list_secret_records(), ())
+
+    @scoped_agent_test
     async def test_live_context_wide_declared_settings_keep_their_supported_scope(self) -> None:
         profile = _profile(production_use="live")
         requirement = profile.expected_config.runtime_environment_keys[0]
@@ -199,6 +280,7 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
             self.assertEqual(response.status_code, status, response.text)
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
+    @scoped_agent_test
     async def test_generic_route_live_guard_and_supported_declared_setting(self) -> None:
         self.store.write_product_profile_record(_profile(production_use="live"))
         for mode in ("dry-run", "apply"):
@@ -220,6 +302,7 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
             )
             self.assertEqual(applied.status_code, 202, applied.text)
 
+    @scoped_agent_test
     async def test_generic_route_live_guard_refuses_undeclared_provider_adoption(self) -> None:
         self.store.write_product_profile_record(_profile(production_use="live"))
         for alias in ("runtime_env", "runtime_environment"):
@@ -243,6 +326,7 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                 self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
         self.assertEqual(self.store.list_runtime_environment_records(), (_runtime_record(),))
 
+    @scoped_agent_test
     async def test_live_guard_checks_the_canonical_flat_and_extra_runtime_values(self) -> None:
         self.store.write_product_profile_record(_profile(production_use="live"))
         for alias in ("runtime_env", "runtime_environment"):
@@ -532,6 +616,7 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
                     )
                     self.assertEqual(self.store.list_secret_records(), ())
 
+    @scoped_agent_test
     async def test_local_operator_cannot_record_undeclared_settings_on_a_live_product(
         self,
     ) -> None:
