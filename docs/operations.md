@@ -3909,6 +3909,10 @@ structured attestation with a provider inspection timestamp between the fence
 and cancellation request, the observed provider state, an evidence reference,
 and explicit `safe_to_release=true`; running work returns
 `409 operation_not_pending`.
+Held service-owned testing replacements instead return
+`409 service_testing_recovery_required`; use [worker recovery or isolated
+testing-generation replacement](event-driven-deploys.md#stranded-odoo-testing-replacements),
+which does not accept a caller attestation in place of its safety checks.
 
 Runtime identity is a driver-owned breadcrumb, not tenant config. Launchplane
 injects `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`, `LAUNCHPLANE_DEPLOYMENT_RECORD_ID`,

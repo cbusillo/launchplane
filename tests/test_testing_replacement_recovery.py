@@ -1,6 +1,6 @@
 from collections.abc import Iterator, Sequence
 import asyncio
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from inspect import signature
 from pathlib import Path
@@ -82,25 +82,35 @@ class _FilesystemServiceStore(FilesystemRecordStore):
 class TestingReplacementRecoveryTests(unittest.TestCase):
     database_url = ""
 
-    def test_manual_attestation_cannot_cancel_service_testing_with_unknown_or_active_effects(
-        self,
-    ) -> None:
+    def test_manual_cancellation_preserves_service_recovery_boundary(self) -> None:
+        from control_plane.contracts.durable_operation_authorization import (
+            DurableOperationAuthorization,
+        )
         from control_plane.http_app import create_launchplane_fastapi_app
         from tests.http_app_test_support import (
             _odoo_operation_status_identity,
             _odoo_operation_status_policy,
         )
         from tests.support.auth import _StubVerifier
+        from tests.support.durable_operations import durable_operation_authorization_payload
         from tests.support.http import request
 
-        for journal_present in (False, True):
+        for service_owned, journal_present in ((True, False), (True, True), (False, False)):
             for store, root in self.stores():
-                with self.subTest(journal_present=journal_present, store=type(store).__name__):
+                with self.subTest(
+                    service_owned=service_owned,
+                    journal_present=journal_present,
+                    store=type(store).__name__,
+                ):
                     operation = self.running(store)
                     execution = (
                         guard_testing_replacement(store, operation, "worker", lambda _: None)
                         if journal_present
-                        else store.testing_replacement_execution_lock(operation.operation_id)
+                        else (
+                            store.testing_replacement_execution_lock(operation.operation_id)
+                            if service_owned
+                            else nullcontext(lambda: None)
+                        )
                     )
                     with execution as check:
                         self.assertIsNotNone(check)
@@ -114,6 +124,22 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                                     payload={"composeId": "compose-123"},
                                 )
                         fenced = self.fence(store)
+                        if not service_owned:
+                            fenced = fenced.model_copy(
+                                update={
+                                    "authorization": DurableOperationAuthorization.model_validate(
+                                        durable_operation_authorization_payload(
+                                            action="odoo_target_replacement_apply.execute",
+                                            managed_rule_id="fixture-testing-replacement",
+                                            product=fenced.product,
+                                            context=fenced.context,
+                                        )
+                                    ),
+                                }
+                            )
+                            getattr(store, "write_odoo_stable_target_replacement_operation_record")(
+                                fenced
+                            )
                         app = create_launchplane_fastapi_app(
                             control_plane_root_path=root,
                             verifier=_StubVerifier(_odoo_operation_status_identity()),
@@ -143,14 +169,21 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                                 },
                             )
                         )
+                        stored = store.read_odoo_stable_target_replacement_operation_record(
+                            fenced.operation_id
+                        )
+                        if not service_owned:
+                            self.assertEqual(response.status_code, 200, response.text)
+                            self.assertEqual(stored.status, "cancelled")
+                            self.assertEqual(stored.authorization, fenced.authorization)
+                            self.assertIsNotNone(stored.cancellation)
+                            continue
                         self.assertEqual(response.status_code, 409, response.text)
                         self.assertEqual(
                             response.json()["error"]["code"], "service_testing_recovery_required"
                         )
                         self.assertEqual(
-                            store.read_odoo_stable_target_replacement_operation_record(
-                                fenced.operation_id
-                            ),
+                            stored,
                             fenced,
                         )
 

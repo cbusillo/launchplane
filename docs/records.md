@@ -2133,6 +2133,10 @@ backfill or authorization change.
   reference. A claim that wins the race returns `409 operation_not_pending`;
   admins must inspect that running operation rather than assume cancellation
   prevented an effect.
+  Held service-owned testing replacements instead return
+  `409 service_testing_recovery_required`; [worker recovery or isolated
+  testing-generation replacement](event-driven-deploys.md#stranded-odoo-testing-replacements)
+  preserves their executor-exclusion and effect-evidence contract.
 - The target execution model for these Odoo long-running operation records is a
   dedicated Launchplane worker process backed by DB leases and heartbeats. The
   HTTP route creates or replays the operation record and returns the poll URL;
