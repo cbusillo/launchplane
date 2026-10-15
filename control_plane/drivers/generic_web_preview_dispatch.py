@@ -583,6 +583,8 @@ def _apply_generic_web_preview_verification_records(
         raise click.ClickException(
             f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
         )
+    if preview.state == "destroyed":
+        raise click.ClickException("Destroyed previews cannot accept verification evidence.")
     generation_id = preview.latest_generation_id or preview.active_generation_id
     if not generation_id:
         raise click.ClickException(

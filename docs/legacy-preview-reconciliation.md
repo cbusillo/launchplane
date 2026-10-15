@@ -63,8 +63,23 @@ product's repository, image or naming policy block reconciliation. Targets
 uniquely tracked to another live preview or stable lane are inspected and
 excluded unless this preview's exact identity or domain matches. Missing,
 malformed, truncated, duplicate, changing or uncertain inventory is not absence.
-Shared contexts, ambiguous anchors, running generations/reconciliation, missing
+Shared contexts, ambiguous anchors, current running generations/reconciliation, missing
 generation pointers, and existing preview target authority fail closed.
+
+An unreferenced historical generation can retain an interrupted nonterminal
+state. It no longer blocks inspection when all current generation pointers refer
+to terminal evidence and the service holds the preview's actual exclusive
+PostgreSQL executor lock (or retirement's exclusive product lock). The original
+lock transaction is checked, and the historical record is retained unchanged.
+This proves exclusion of current service execution, never provider absence,
+unused lanes or disposable eligibility. Provider observation and all existing
+ownership, authorization and reviewed-plan checks still apply. SQLite rehearsals
+cannot supply this execution proof. The service never substitutes generation
+age, a newer sequence, an assertion or another thread's lock for that proof.
+Preview verification and the reconciler's subsequent build-evidence write share
+the product/preview execution locks and recheck the active profile after waiting.
+Verification cannot reopen a destroyed preview. HTTP verification waits run off
+the event loop and retain completion/replay evidence after caller cancellation.
 
 Inspection and completion run off the HTTP event loop. Generic-web provider
 refresh, teardown and reconciliation share the database's preview serialization
