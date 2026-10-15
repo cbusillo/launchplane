@@ -2,18 +2,26 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.product_environment_read_model import (
+    ProductEnvironmentDetail,
+    build_product_environment_detail,
+)
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
     HealthcheckEvidence,
     PromotionRecord,
 )
-from control_plane.contracts.product_profile_record import ProductLaneHealthMonitoringPolicy
+from control_plane.contracts.product_profile_record import (
+    ProductLaneHealthMonitoringPolicy,
+    ProductOwnerProfile,
+)
 from control_plane.contracts.public_ingress_monitoring import (
+    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PublicIngressNotificationDestination,
     PublicIngressNotificationPolicyRecord,
 )
@@ -21,15 +29,16 @@ from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.outbox_worker import run_outbox_worker_once
 from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.production_delivery_monitor import (
-    DELIVERY_LAG_CHECK,
     monitor_production_delivery_once,
     record_production_delivery_failure,
     _record_rejected_payload,
+    _observe,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
     PublicIngressNotificationDriverSet,
+    deliver_public_ingress_notification_outbox_delivery,
     run_public_ingress_monitor_once,
 )
 from tests.support.stores import _sqlite_database_url
@@ -115,8 +124,124 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             self.store,
             observed_at=self.timestamp(),
             transport_factory=self.factory,
-            max_age_seconds=60,
         )
+
+    def seed_legacy_lag(self) -> None:
+        _observe(
+            self.store,
+            self.profile,
+            self.lane,
+            check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
+            failed=True,
+            summary="Merged source has not reached production; Client acceptance pending.",
+            observed_at=self.timestamp(),
+        )
+
+    def test_waiting_merged_source_never_opens_a_failure_or_notification(self) -> None:
+        self.profile = self.profile.model_copy(
+            update={
+                "owner": ProductOwnerProfile(github_login="example-client", github_id="1234"),
+                "release_on_acceptance": "promote",
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.transport.get_json.side_effect = lambda _path: {
+            "sha": self.head,
+            "commit": {"committer": {"date": (self.now - timedelta(days=7)).isoformat()}},
+        }
+        self.monitor()
+        self.now += timedelta(days=1)
+        self.head = "c" * 40
+        self.store.close()
+        self.store = PostgresRecordStore(database_url=self.store.database_url)
+        self.addCleanup(self.store.close)
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        self.assertEqual(self.store.list_outbox_delivery_records(), ())
+
+    def test_legacy_lag_retires_without_recovering_a_real_delivery_failure(self) -> None:
+        self.seed_legacy_lag()
+        self.reject()
+        before = self.store.list_outbox_delivery_records()
+        self.now += timedelta(seconds=1)
+        self.monitor()
+        incidents = self.store.list_public_ingress_incident_records(status="open")
+        self.assertEqual(len(incidents), 1)
+        self.assertIn("launchplane_req_failure", incidents[0].summary)
+        self.assertEqual(self.store.list_outbox_delivery_records(), before)
+        retired = self.store.list_public_ingress_incident_records(status="resolved")
+        self.assertEqual(retired[0].check_name, RETIRED_PRODUCTION_DELIVERY_LAG_CHECK)
+        self.assertEqual(retired[0].resolution_reason, "monitoring_intent_changed")
+        self.now += timedelta(days=1)
+        self.monitor()
+        self.assertEqual(
+            {
+                incident.incident_id
+                for incident in self.store.list_public_ingress_incident_records(status="open")
+            },
+            {incidents[0].incident_id},
+        )
+
+    def test_queued_legacy_lag_never_reaches_discord_even_before_monitor_runs(self) -> None:
+        self.seed_legacy_lag()
+        sender = Mock()
+        resolver = Mock(return_value="https://discord.com/api/webhooks/example/test")
+        result = run_outbox_worker_once(
+            record_store=self.store,
+            control_plane_root=self.root,
+            lease_owner="test",
+            notification_drivers=PublicIngressNotificationDriverSet(
+                secret_resolver=resolver,
+                discord_sender=sender,
+            ),
+        )
+        sender.assert_not_called()
+        resolver.assert_not_called()
+        self.assertEqual(result.status, "delivered")
+        attempts = self.store.list_public_ingress_notification_attempt_records()
+        self.assertEqual(attempts[0].delivery_status, "skipped")
+
+    @patch.dict(
+        "os.environ",
+        {
+            "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "incident-test-key",
+            "LAUNCHPLANE_SECRET_KEYS_JSON": "",
+        },
+    )
+    def test_retired_lag_is_absent_from_the_environment_used_by_the_ui(self) -> None:
+        self.seed_legacy_lag()
+
+        def detail() -> ProductEnvironmentDetail:
+            return build_product_environment_detail(
+                record_store=self.store,
+                product=self.profile.product,
+                environment="prod",
+                action_allowed=lambda *_: False,
+            )
+
+        self.assertTrue(detail().health_monitoring.open_incidents)
+        self.now += timedelta(seconds=1)
+        self.monitor()
+        self.assertEqual(detail().health_monitoring.open_incidents, ())
+
+    def test_retired_lag_with_an_interrupted_send_preserves_unknown_outcome(self) -> None:
+        self.seed_legacy_lag()
+        queued = self.store.list_outbox_delivery_records()[0].model_copy(
+            update={"provider_operation_key": "interrupted-send", "provider_id": "discord"}
+        )
+        sender = Mock()
+        started = Mock()
+        result = deliver_public_ingress_notification_outbox_delivery(
+            record=queued,
+            record_store=self.store,
+            drivers=PublicIngressNotificationDriverSet(discord_sender=sender),
+            mark_provider_started=started,
+        )
+        self.assertEqual(result.state, "failed")
+        self.assertEqual(result.error_code, "delivery_outcome_unknown")
+        self.assertEqual(result.provider_operation_key, queued.provider_operation_key)
+        sender.assert_not_called()
+        started.assert_not_called()
 
     def test_healthy_previous_artifact_does_not_erase_rejection_and_replays_deduplicate(
         self,
@@ -198,28 +323,6 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
         self.assertIn("deploy-" + self.head, incident.summary)
 
-    def test_lag_survives_restart_and_new_merges_without_resetting_deadline(self) -> None:
-        self.monitor()
-        self.now += timedelta(seconds=61)
-        self.head = "c" * 40
-        restarted = PostgresRecordStore(database_url=self.store.database_url)
-        self.addCleanup(restarted.close)
-        monitor_production_delivery_once(
-            restarted,
-            observed_at=self.timestamp(),
-            transport_factory=self.factory,
-            max_age_seconds=60,
-        )
-        incident = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.assertEqual(incident.check_name, DELIVERY_LAG_CHECK)
-        self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
-        self.monitor()
-        self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
-        self.now += timedelta(minutes=1)
-        self.deploy(self.head)
-        self.monitor()
-        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
-
     def test_failure_between_polls_is_not_hidden_by_an_unrelated_newer_success(self) -> None:
         self.monitor()
         self.now += timedelta(seconds=10)
@@ -231,9 +334,8 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(len(incidents), 1)
         self.assertIn("deploy-" + self.head, incidents[0].summary)
 
-    def test_source_read_failure_cannot_resolve_open_lag(self) -> None:
-        self.monitor()
-        self.now += timedelta(seconds=61)
+    def test_source_read_failure_cannot_resolve_a_real_failure(self) -> None:
+        self.reject()
         self.monitor()
         original = self.store.list_public_ingress_incident_records(status="open")[0]
         self.transport.get_json.side_effect = RuntimeError("source unavailable")
@@ -292,7 +394,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.monitor()
         self.now += timedelta(seconds=61)
         self.monitor()
-        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
 
     def test_delayed_failure_ingestion_is_detected_after_a_later_scan(self) -> None:
         failed_at = self.now
@@ -324,20 +426,6 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.monitor()
         self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
 
-    def test_delivered_pending_source_resolves_lag_before_timing_newer_main(self) -> None:
-        pending = self.head
-        self.monitor()
-        self.now += timedelta(seconds=61)
-        self.head = "c" * 40
-        self.monitor()
-        self.now += timedelta(seconds=1)
-        self.deploy(pending)
-        self.monitor()
-        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
-        self.now += timedelta(seconds=61)
-        self.monitor()
-        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
-
     def test_prelaunch_product_has_no_automatic_release_deadline(self) -> None:
         self.store.write_product_profile_record(
             self.profile.model_copy(update={"production_use": "prelaunch"})
@@ -368,9 +456,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_outbox_delivery_records()), 2)
 
     def test_explicit_lifecycle_change_retires_lag_attention(self) -> None:
-        self.monitor()
-        self.now += timedelta(seconds=61)
-        self.monitor()
+        self.seed_legacy_lag()
         self.store.write_product_profile_record(
             self.profile.model_copy(update={"production_use": "prelaunch"})
         )
@@ -379,15 +465,6 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
         incident = self.store.list_public_ingress_incident_records()[0]
         self.assertEqual(incident.resolution_reason, "monitoring_intent_changed")
-
-    def test_merged_source_time_counts_before_first_observation(self) -> None:
-        merged_at = self.now - timedelta(minutes=5)
-        self.transport.get_json.side_effect = lambda _path: {
-            "sha": self.head,
-            "commit": {"committer": {"date": merged_at.isoformat()}},
-        }
-        self.monitor()
-        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
 
     def test_unidentified_rollback_is_not_cleared_by_promoting_testing(self) -> None:
         testing = self.lane.model_copy(update={"instance": "testing"})

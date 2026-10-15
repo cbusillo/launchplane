@@ -53,6 +53,7 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     MONITOR_CADENCE_CHECK_PREFIX,
     monitored_check_identity,
     PUBLIC_TLS_EXPIRING_DAYS,
@@ -3375,6 +3376,36 @@ def deliver_public_ingress_notification_outbox_delivery(
         payload = record.payload
         attempt_payload = _dict_payload(payload.get("attempt"))
         destination_payload = _dict_payload(payload.get("destination"))
+        if record_store is not None:
+            incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
+            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK:
+                # An earlier send may have happened; preserve its uncertain outcome.
+                if record.provider_operation_key:
+                    return record.model_copy(
+                        update={
+                            "state": "failed",
+                            "error_code": "delivery_outcome_unknown",
+                            "lease_owner": "",
+                            "lease_expires_at": "",
+                        }
+                    )
+                attempt = PublicIngressNotificationAttemptRecord.model_validate(
+                    {
+                        **attempt_payload,
+                        "delivery_status": "skipped",
+                        "action": "retired_source_lag",
+                    }
+                )
+                return record.model_copy(
+                    update={
+                        "state": "delivered",
+                        "action": "skipped_retired_source_lag",
+                        "error_code": "",
+                        "lease_owner": "",
+                        "lease_expires_at": "",
+                        "payload": {**payload, "attempt_result": attempt.model_dump(mode="json")},
+                    }
+                )
         if destination_payload.get("kind") in {"email", "discord"}:
             return _deliver_direct_notification_outbox(
                 record=record,
