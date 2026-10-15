@@ -19270,7 +19270,9 @@ class PostgresRecordStore(HumanSessionStore):
         unresolved = session.scalar(
             select(LaunchplaneOrdinaryAgentEffectRow.effect_id)
             .where(
-                LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
+                func.lower(
+                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
+                )
                 == repository.lower(),
                 LaunchplaneOrdinaryAgentEffectRow.payload["target"]["base_branch"].as_string()
                 == base_branch,
