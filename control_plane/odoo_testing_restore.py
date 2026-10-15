@@ -47,11 +47,35 @@ class FreshOdooTestingGeneration(BaseModel):
     reconcile_requested_at: str = ""
     source_mode: Literal["ssh", "container-export"] = "ssh"
     source_binding_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
+    drill_database: str = Field(
+        default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
+    )
+    discard_drill_database: str = Field(
+        default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
+    )
+    discard_copy_binding: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
+    retained_drill_database: str = Field(
+        default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
+    )
+    retained_copy_binding: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
+        if bool(self.discard_drill_database) != bool(self.discard_copy_binding) or (
+            self.discard_drill_database and self.discard_drill_database == self.drill_database
+        ):
+            raise ValueError("Drill disposal requires a different witnessed prior drill database.")
+        if bool(self.retained_drill_database) != bool(self.retained_copy_binding) or (
+            self.retained_drill_database
+            and self.retained_drill_database in {self.drill_database, self.discard_drill_database}
+        ):
+            raise ValueError("A retained predecessor must differ from the new and disposed copies.")
         return self
 
 
@@ -630,6 +654,34 @@ def one_inspection(identifier):
     return values[0]
 
 
+def discard_previous_drill(gen, database_container, runner, database):
+    previous = gen.get('discard_drill_database', '')
+    witness = gen.get('discard_copy_binding', '')
+    if not previous:
+        if witness:
+            raise RuntimeError('Unbound drill disposal witness')
+        return
+    if not re.fullmatch(r'lp_drill_[a-f0-9]{32}', previous) or previous == database or not re.fullmatch(r'[a-f0-9]{64}', witness):
+        raise RuntimeError('Invalid prior drill database')
+    present = docker('exec','-i',database_container,'sh','-c',
+        'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
+        '_', previous, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
+    if present not in {'0','1'}:
+        raise RuntimeError('Ambiguous prior drill database')
+    if present == '1':
+        observed = docker('exec','-i',database_container,'sh','-c',
+            'psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"',
+            '_', previous, stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
+        if observed != witness:
+            raise RuntimeError('Prior database lacks its committed drill witness')
+        # No FORCE: an unexpected user/connection retains this old copy.
+        docker('exec','-i',database_container,'sh','-c',
+            'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
+            '_', previous, stdin=b'DROP DATABASE :"database_name";\n')
+    docker('exec',runner,'python3','-c',
+        "from pathlib import Path;import re,shutil,sys;name=sys.argv[1];assert re.fullmatch(r'lp_drill_[a-f0-9]{32}',name);p=Path('/volumes/data/filestore')/name;assert p.resolve()==p.absolute() and not p.is_symlink();shutil.rmtree(p) if p.exists() else None", previous)
+
+
 def restore_main():
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     gen = spec["generation"]
@@ -736,7 +788,7 @@ def restore_main():
         if present not in {'0','1'}:
             raise RuntimeError('Ambiguous testing database')
         if present=='1':
-            marker=docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',database,stdin=b"SELECT value FROM ir_config_parameter WHERE key='launchplane.testing_copy.restore_complete';\n").decode().strip()
+            marker=docker('exec','-i',containers['database'][0],'sh','-c','psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"','_',database,stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
             if marker!=spec['copy_binding_sha256']:
                 raise RuntimeError('Existing testing database lacks its generation witness')
         prefix=sys.argv[2]
@@ -844,6 +896,12 @@ def restore_main():
         if spec.get('native_capture') is not None:
             docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         docker("start", web)
+        try:
+            discard_previous_drill(gen, containers['database'][0], runner, database)
+        except Exception:
+            # Cleanup cannot take a sanitized new lane offline. Keep exact
+            # custody in the slot receipt; never expose provider error values.
+            print("testing_drill_disposal_deferred=true", flush=True)
         for marker in ("testing_copy_pre_registry_sanitized", "testing_copy_sanitized", "integration_readback_ok", "odoo_module_update_image_match", "odoo_restore_completed"):
             print(marker + "=true")
     finally:
@@ -889,6 +947,11 @@ except Exception:
     # Failed copies and their stopped web remain for exact-generation recovery.
     sys.exit(1)
 """
+
+
+FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
+    "__LP_COPY_WITNESS__", TESTING_COPY_COMPLETION_PARAMETER
+)
 
 
 def read_current_testing_generation(
@@ -959,6 +1022,7 @@ def read_current_testing_generation(
     if (
         values.get("ODOO_PROJECT_NAME") != generation.namespace
         or values.get("ODOO_STACK_NAME") != generation.namespace
+        or (generation.drill_database and values.get("ODOO_DB_NAME") != generation.drill_database)
     ):
         raise ValueError("Fresh testing project authority changed before deployment.")
     for other in getattr(store, "list_dokploy_target_id_records")():
