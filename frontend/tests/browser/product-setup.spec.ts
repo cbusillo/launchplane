@@ -61,6 +61,21 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
     await panel.getByRole("button", { name: "Run dry-run", exact: true }).click();
     await panel.getByRole("checkbox").check();
     await panel.getByRole("button", { name: "Apply reviewed change" }).click();
+    if (outcome === "readback") {
+      const signIn = page.getByRole("link", { name: "Sign in with GitHub" });
+      await expect(signIn).toBeVisible();
+      await expect(panel).toHaveCount(0);
+      expect(applies).toHaveLength(1);
+      await page.route("**/auth/github/login?*", route => route.fulfill({
+        status: 302,
+        headers: { location: new URL(route.request().url()).searchParams.get("return_to")! },
+      }));
+      await signIn.click();
+      panel = page.getByRole("region", { name: "Set up a non-production environment" });
+      // Signing in must restore the pending request without sending it again.
+      await expect(panel).toBeVisible();
+      expect(applies).toHaveLength(1);
+    }
     if (["uncertain", "uncertain-profile", "readback", "uncertain-stale"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
       if (outcome === "uncertain-profile") incompleteProfile = true;
