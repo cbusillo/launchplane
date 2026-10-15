@@ -65,18 +65,20 @@ class OdooCutoverProvider(PublicPauseProvider, Protocol):
 
 
 class _PauseStore:
-    def __init__(self, store: OdooCutoverStore, record_id: str) -> None:
+    def __init__(self, store: OdooCutoverStore, record_id: str, *, rollback: bool = False) -> None:
         self.store, self.record_id = store, record_id
+        self.field = "rollback_pause" if rollback else "pause"
 
     def load(self, pause_id: str) -> PublicPauseRecord:
-        pause = self.store.load(self.record_id).pause
+        record = self.store.load(self.record_id)
+        pause = record.rollback_pause if self.field == "rollback_pause" else record.pause
         if pause is None or pause.pause_id != pause_id:
             raise ValueError("cutover has no matching writer pause")
         return pause
 
     def save(self, pause: PublicPauseRecord) -> None:
         record = self.store.load(self.record_id)
-        self.store.save(record.model_copy(update={"pause": pause}))
+        self.store.save(record.model_copy(update={self.field: pause}))
 
 
 def _require_route(route: OdooRouteObservation, plan: OdooCutoverPlan, slot: OdooSlot) -> None:
@@ -123,6 +125,7 @@ def require_website_receipt(
         or receipt.image != slot.image
         or receipt.settings_sha256 != intent.settings.digest
         or receipt.startup_settings_sha256 != intent.settings.digest
+        or receipt.retained_startup_settings_sha256 != intent.settings.digest
     ):
         raise ValueError("website settings receipt is missing or differs from the slot snapshot")
 
@@ -164,7 +167,9 @@ def execute_odoo_cutover(
                 )
             else:
                 require_website_receipt(
-                    record.rollback_website_settings, slot, plan.rollback_website_settings
+                    record.rollback_website_settings,
+                    slot,
+                    plan.rollback_website_settings if record.website_settings_attempted else None,
                 )
             route = provider.current_route(plan)
             _require_route(route, plan, slot)
@@ -187,7 +192,10 @@ def execute_odoo_cutover(
                 checkpoint("prepare_candidate")
                 provider.prepare_candidate(plan)
                 site = None
-                if plan.compatibility.classification == "database_changing":
+                if (
+                    plan.compatibility.classification == "database_changing"
+                    or plan.website_settings is not None
+                ):
                     site = provider.prepare_public(plan)
                     verify_snapshot(site)
                     if site.plan.binding != plan.old.binding or site.plan.writers != plan.writers:
@@ -242,6 +250,11 @@ def execute_odoo_cutover(
                     raise ValueError("database-changing progress lacks its persisted writer pause")
             if record.step == "maintaining":
                 checkpoint("planned_maintenance")
+                if plan.website_settings is not None:
+                    record = store.load(record_id).model_copy(
+                        update={"website_settings_attempted": True}
+                    )
+                    store.save(record)
                 receipt = provider.maintenance(plan)
                 if (
                     receipt.release_id != plan.release_id
@@ -315,6 +328,7 @@ def rollback_compatible_cutover(
     record_id: str,
     *,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    settings_checkpoint: Callable[[], None] = lambda: None,
 ) -> OdooCutoverRecord:
     record = OdooCutoverRecord.model_validate(store.load(record_id).model_dump())
     plan = record.plan
@@ -323,14 +337,22 @@ def rollback_compatible_cutover(
     with provider.exclusive(plan):
         if record.step == "rolled_back":
             require_website_receipt(
-                record.rollback_website_settings, plan.old, plan.rollback_website_settings
+                record.rollback_website_settings,
+                plan.old,
+                plan.rollback_website_settings if record.website_settings_attempted else None,
             )
             _require_route(provider.current_route(plan), plan, plan.old)
             return record
         if record.step != "rolling_back":
             route = provider.current_route(plan)
-            slot = plan.old if route.slot_id == plan.old.slot_id else plan.new
-            _require_route(route, plan, slot)
+            if (
+                record.public_site is not None
+                and provider.observed_public_copy(record_id) == record.public_site.content_digest
+            ):
+                pass
+            else:
+                slot = plan.old if route.slot_id == plan.old.slot_id else plan.new
+                _require_route(route, plan, slot)
             started_at = clock()
             record = record.model_copy(
                 update={
@@ -340,23 +362,74 @@ def rollback_compatible_cutover(
                 }
             )
             store.save(record)
-        intent = plan.rollback_website_settings
+        intent = plan.rollback_website_settings if record.website_settings_attempted else None
         if intent is not None:
-            # Reapply/read back after an interrupted rollback; never trust an
-            # in-memory acknowledgement or switch traffic before commit.
-            receipt = provider.website_settings(plan, plan.old, intent)
-            require_website_receipt(receipt, plan.old, intent)
-            record = record.model_copy(update={"rollback_website_settings": receipt})
-            store.save(record)
+            if record.public_site is None:
+                raise ValueError("website rollback lacks its prepared public site")
+            pause_store = _PauseStore(store, record_id, rollback=True)
+            pause = record.rollback_pause
+            if pause is None:
+                pause = PublicPauseRecord(
+                    pause_id=record_id,
+                    binding=plan.old.binding,
+                    content_digest=record.public_site.content_digest,
+                    began_at=clock(),
+                )
+                pause_store.save(pause)
+            if pause.state == "fencing":
+                if provider.publish(record.public_site, record_id) != pause.content_digest:
+                    raise ValueError("rollback prepared serving publication was not read back")
+                PreparedPublicPause(record.public_site, pause_store, provider, clock=clock).drain(
+                    record_id
+                )
+            if record.rollback_website_settings is None:
+                # A crash before the durable receipt reuses the idempotent native
+                # operation under prepared serving; a saved receipt avoids
+                # changing the DB again after an uncertain successful switch.
+                if provider.observed_public_copy(record_id) != record.public_site.content_digest:
+                    raise ValueError("rollback settings require prepared serving authority")
+                settings_checkpoint()
+                receipt = provider.website_settings(plan, plan.old, intent)
+                require_website_receipt(receipt, plan.old, intent)
+                record = store.load(record_id).model_copy(
+                    update={"rollback_website_settings": receipt}
+                )
+                store.save(record)
+            require_website_receipt(record.rollback_website_settings, plan.old, intent)
         route = provider.current_route(plan)
         if route.slot_id != plan.old.slot_id:
-            _require_route(route, plan, plan.new)
+            if intent is not None:
+                assert record.public_site is not None
+                if provider.observed_public_copy(record_id) != record.public_site.content_digest:
+                    raise ValueError("rollback lost prepared serving authority")
+            elif (
+                record.public_site is None
+                or provider.observed_public_copy(record_id) != record.public_site.content_digest
+            ):
+                _require_route(route, plan, plan.new)
             _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
             route = provider.switch(plan, plan.old)
         _require_route(route, plan, plan.old)
         _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
-        provider.handoff_writers(plan, plan.old)
-        record = record.model_copy(
+        if intent is not None:
+            assert record.public_site is not None
+            PreparedPublicPause(
+                record.public_site,
+                _PauseStore(store, record_id, rollback=True),
+                provider,
+                clock=clock,
+            ).finish(record_id, expected=plan.old.binding)
+        elif (
+            record.public_site is not None
+            and record.pause is not None
+            and record.pause.state in {"drained", "resuming"}
+        ):
+            PreparedPublicPause(
+                record.public_site, _PauseStore(store, record_id), provider, clock=clock
+            ).finish(record_id, expected=plan.old.binding)
+        else:
+            provider.handoff_writers(plan, plan.old)
+        record = store.load(record_id).model_copy(
             update={"step": "rolled_back", "route": route, "updated_at": clock()}
         )
         store.save(record)

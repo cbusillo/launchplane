@@ -1748,11 +1748,13 @@ export type OdooCutoverRecord = {
     public_site: PreparedPublicSite | null;
     readiness: OdooSlotReadiness | null;
     record_id: string;
+    rollback_pause: PublicPauseRecord | null;
     rollback_started_at: string | null;
     rollback_website_settings: OdooWebsiteSettingsReceipt | null;
     route: OdooRouteObservation | null;
     step: 'preparing' | 'prepared' | 'pausing' | 'backing_up' | 'maintaining' | 'ready' | 'switching' | 'resuming' | 'draining' | 'complete' | 'rolling_back' | 'rolled_back';
     updated_at: string;
+    website_settings_attempted: boolean;
 };
 
 export type OdooInstanceOverrideRecord = {
@@ -2035,6 +2037,7 @@ export type OdooWebsiteSettingsReceipt = {
     binding: PublicSiteBinding;
     committed: true;
     image: string;
+    retained_startup_settings_sha256: string;
     settings_sha256: string;
     startup_settings_sha256: string;
 };

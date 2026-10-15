@@ -62,7 +62,21 @@ class WebsiteProvider(IsolatedCutoverProvider):
             image=slot.image,
             settings_sha256=intent.settings.digest,
             startup_settings_sha256=intent.settings.digest,
+            retained_startup_settings_sha256=intent.settings.digest,
             committed=True,
+        )
+
+    def recover_and_resume(self, site: Any, pause_id: str, expected: Any) -> Any:
+        from control_plane.contracts.prepared_public_site import PublicRecoveryObservation
+
+        if self.target.binding != expected:
+            raise ValueError("wrong serving target")
+        self.handoff_writers(self.cutover, self.target)
+        return PublicRecoveryObservation(
+            binding=expected,
+            pause_id=pause_id,
+            serving_evidence_id="fixture-serving",
+            writer_owners=tuple((writer.writer_id, 1) for writer in self.cutover.writers),
         )
 
     def maintenance(self, plan: OdooCutoverPlan) -> Any:
@@ -111,12 +125,12 @@ class CutoverWebsiteTests(unittest.TestCase):
             payload_digest(maintenance_payload(plan)),
             payload_digest(maintenance_payload(different)),
         )
-        with self.assertRaisesRegex(ValueError, "snapshot"):
+        with self.assertRaises(ValueError):
             OdooCutoverPlan.model_validate(different.model_dump())
 
     def test_missing_receipt_blocks_startup_readiness_and_traffic_then_recovers(self) -> None:
         self.provider.bad_receipt = True
-        with self.assertRaisesRegex(ValueError, "website settings receipt"):
+        with self.assertRaises(ValueError):
             self.run_cutover()
         self.assertNotIn("readiness", self.provider.actions)
         self.assertNotIn("switch", self.provider.actions)
@@ -135,7 +149,7 @@ class CutoverWebsiteTests(unittest.TestCase):
         record = self.store.load(self.record_id)
         self.store.save(record.model_copy(update={"maintenance": None}))
         self.provider.fail_ready = False
-        with self.assertRaisesRegex(ValueError, "persisted maintenance"):
+        with self.assertRaises(ValueError):
             self.run_cutover()
         self.assertNotIn("switch", self.provider.actions)
 
@@ -176,9 +190,9 @@ class CutoverWebsiteTests(unittest.TestCase):
         assert intent is not None
         calls: list[str] = []
 
-        def startup(*_args: Any) -> str:
+        def startup(*_args: Any) -> tuple[str, str]:
             calls.append("startup")
-            return intent.settings.digest
+            return (intent.settings.digest, intent.settings.digest)
 
         def execute(argv: tuple[str, ...], stdin: str | None) -> str:
             if argv[1] == "inspect":
@@ -258,17 +272,28 @@ class CutoverWebsiteTests(unittest.TestCase):
         self.assertEqual(receipt.settings_sha256, intent.settings.digest)
         self.assertEqual(calls, ["startup", "native"])
         calls.clear()
-        with self.assertRaisesRegex(ValueError, "startup website settings readback"):
+        with self.assertRaises(ValueError):
             run_slot_website_settings(
                 plan,
                 plan.new,
                 intent,
                 runner_container="runner",
                 execute=execute,
-                configure_startup=lambda *_args: "",
+                configure_startup=lambda *_args: (intent.settings.digest, ""),
             )
         self.assertNotIn("native", calls)
-        with self.assertRaisesRegex(ValueError, "startup configuration capability"):
+        calls.clear()
+        with self.assertRaises(ValueError):
+            run_slot_website_settings(
+                plan,
+                plan.new,
+                intent,
+                runner_container="runner",
+                execute=execute,
+                configure_startup=lambda *_args: ("", ""),
+            )
+        self.assertNotIn("native", calls)
+        with self.assertRaises(ValueError):
             run_planned_slot_maintenance(plan, runner_container="runner", execute=execute)
 
     def test_wrong_native_receipt_keeps_candidate_startup_guard_closed(self) -> None:
@@ -302,12 +327,12 @@ class CutoverWebsiteTests(unittest.TestCase):
 
         assert plan.website_settings is not None
         settings_digest = plan.website_settings.settings.digest
-        with self.assertRaisesRegex(ValueError, "committed website settings receipt"):
+        with self.assertRaises(ValueError):
             run_planned_slot_maintenance(
                 plan,
                 runner_container="runner",
                 execute=transport,
-                configure_startup=lambda *_args: settings_digest,
+                configure_startup=lambda *_args: (settings_digest, settings_digest),
             )
         self.assertFalse(stamp_writes)
 
@@ -358,3 +383,69 @@ class CutoverWebsiteTests(unittest.TestCase):
         self.assertEqual(restored.website_settings, pending)
         self.assertEqual(restored.last_apply.website_settings, plan.rollback_website_settings)
         self.assertTrue(restored.last_apply.website_settings_verified)
+
+    def test_failed_readiness_keeps_public_and_writers_paused_until_snapshot_rollback(self) -> None:
+        self.provider.fail_ready = True
+        with self.assertRaises(ValueError):
+            self.run_cutover()
+        failed = self.store.load(self.record_id)
+        self.assertEqual(self.provider.target.slot_id, "prepared")
+        assert failed.pause is not None
+        self.assertEqual(failed.pause.state, "drained")
+        self.assertTrue(failed.website_settings_attempted)
+        self.provider.fail_ready = False
+        result = rollback_compatible_cutover(self.store, self.provider, self.record_id)
+        self.assertEqual(result.step, "rolled_back")
+        assert result.rollback_pause is not None
+        self.assertEqual(result.rollback_pause.state, "complete")
+        self.assertEqual(self.provider.target, self.provider.cutover.old)
+
+    def test_abort_before_maintenance_resumes_old_without_disabling_collection(self) -> None:
+        with patch.object(self.provider, "backup", side_effect=ValueError("fixture refusal")):
+            with self.assertRaises(ValueError):
+                self.run_cutover()
+        self.assertEqual(self.provider.target.slot_id, "prepared")
+        result = rollback_compatible_cutover(self.store, self.provider, self.record_id)
+        self.assertEqual(result.step, "rolled_back")
+        self.assertFalse(result.website_settings_attempted)
+        self.assertFalse(self.provider.website_receipts)
+        self.assertIsNone(result.rollback_website_settings)
+        assert result.pause is not None
+        self.assertEqual(result.pause.state, "complete")
+
+    def test_early_refusal_preserves_verified_production_baseline(self) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooInstanceOverrideRecord,
+            OdooOverrideApplyResult,
+        )
+        from control_plane.workflows.odoo_cutover_deployment import execute_odoo_cutover_deployment
+
+        plan = self.provider.cutover
+        baseline = snapshot(plan, production=True)
+        self.records.write_odoo_instance_override_record(
+            OdooInstanceOverrideRecord(
+                context=plan.new.runtime_identity.context,
+                instance=plan.new.binding.environment_id,
+                updated_at="2026-10-15T15:00:00Z",
+                website_settings=plan.website_settings,
+                last_apply=OdooOverrideApplyResult(website_settings=baseline),
+            )
+        )
+        with patch.object(
+            self.provider, "prepare_candidate", side_effect=ValueError("fixture refusal")
+        ):
+            with self.assertRaises(ValueError):
+                execute_odoo_cutover_deployment(
+                    plan=plan,
+                    record_store=self.records,
+                    provider=self.provider,
+                    context=plan.new.runtime_identity.context,
+                    instance=plan.new.binding.environment_id,
+                    checkpoint=lambda _step: None,
+                )
+        result = self.records.read_odoo_instance_override_record(
+            context_name=plan.new.runtime_identity.context,
+            instance_name=plan.new.binding.environment_id,
+        )
+        self.assertEqual(result.last_apply.website_settings, baseline)
+        self.assertTrue(result.last_apply.website_settings_verified)

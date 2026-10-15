@@ -19093,6 +19093,16 @@
             "title": "Record Id",
             "type": "string"
           },
+          "rollback_pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicPauseRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "rollback_started_at": {
             "anyOf": [
               {
@@ -19148,6 +19158,11 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "website_settings_attempted": {
+            "default": false,
+            "title": "Website Settings Attempted",
+            "type": "boolean"
           }
         },
         "required": [
@@ -19163,11 +19178,13 @@
           "public_site",
           "readiness",
           "record_id",
+          "rollback_pause",
           "rollback_started_at",
           "rollback_website_settings",
           "route",
           "step",
-          "updated_at"
+          "updated_at",
+          "website_settings_attempted"
         ],
         "title": "OdooCutoverRecord",
         "type": "object"
@@ -20728,6 +20745,11 @@
             "title": "Image",
             "type": "string"
           },
+          "retained_startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Retained Startup Settings Sha256",
+            "type": "string"
+          },
           "settings_sha256": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Settings Sha256",
@@ -20743,6 +20765,7 @@
           "binding",
           "committed",
           "image",
+          "retained_startup_settings_sha256",
           "settings_sha256",
           "startup_settings_sha256"
         ],

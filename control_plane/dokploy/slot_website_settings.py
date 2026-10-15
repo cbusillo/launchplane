@@ -15,9 +15,9 @@ from control_plane.contracts.odoo_cutover import (
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 
 # The installed host adapter updates and reads back the slot's durable managed
-# startup payload, preserving all unrelated settings/secrets. It must also fence
+# startup payloads for BOTH slots, preserving unrelated settings/secrets. Fence
 # an already-running retained slot until this operation and native commit pass.
-StartupSettings = Callable[[OdooCutoverPlan, OdooSlot, OdooWebsiteSettingsIntent], str]
+StartupSettings = Callable[[OdooCutoverPlan, OdooSlot, OdooWebsiteSettingsIntent], tuple[str, str]]
 
 
 def run_slot_website_settings(
@@ -61,8 +61,8 @@ def run_slot_website_settings(
         "database": slot.binding.database,
         "database_uuid": slot.runtime_identity.database_uuid,
     }
-    startup_digest = configure_startup(plan, slot, intent)
-    if startup_digest != intent.settings.digest:
+    startup_digest, retained_digest = configure_startup(plan, slot, intent)
+    if startup_digest != intent.settings.digest or retained_digest != intent.settings.digest:
         raise ValueError("durable startup website settings readback differs from the snapshot")
     program = """
 import base64, json, os, subprocess, sys
@@ -99,5 +99,6 @@ print(json.dumps({'settings_sha256':lines[0]}))
         image=slot.image,
         settings_sha256=digest,
         startup_settings_sha256=startup_digest,
+        retained_startup_settings_sha256=retained_digest,
         committed=True,
     )

@@ -155,6 +155,7 @@ class OdooWebsiteSettingsReceipt(FrozenRecord):
     image: str
     settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     startup_settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    retained_startup_settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     committed: Literal[True]
 
 
@@ -214,6 +215,8 @@ class OdooCutoverRecord(FrozenRecord):
     backup: OdooRecoveryTuple | None = None
     maintenance: OdooMaintenanceReceipt | None = None
     rollback_website_settings: OdooWebsiteSettingsReceipt | None = None
+    website_settings_attempted: bool = False
+    rollback_pause: PublicPauseRecord | None = None
     readiness: OdooSlotReadiness | None = None
     route: OdooRouteObservation | None = None
     error: str = ""

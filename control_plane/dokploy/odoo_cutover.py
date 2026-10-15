@@ -60,6 +60,7 @@ class OdooSlotDriver:
     lane: OdooCutoverLane
     verify_endpoint: Callable[[OdooCutoverPlan, OdooSlot], HealthcheckEvidence]
 
+    website_settings_preflight: Callable[[OdooCutoverPlan], None] | None = None
     website_settings: (
         Callable[[OdooCutoverPlan, OdooSlot, OdooWebsiteSettingsIntent], OdooWebsiteSettingsReceipt]
         | None
@@ -98,8 +99,13 @@ class DokployOdooCutoverProvider:
         return self.driver.exclusive(plan)
 
     def prepare_candidate(self, plan: OdooCutoverPlan) -> None:
-        if plan.rollback_website_settings is not None and self.driver.website_settings is None:
+        if plan.rollback_website_settings is not None and (
+            self.driver.website_settings is None or self.driver.website_settings_preflight is None
+        ):
             raise ValueError("bound website settings/startup capability is unavailable")
+        if plan.rollback_website_settings is not None:
+            assert self.driver.website_settings_preflight is not None
+            self.driver.website_settings_preflight(plan)
         self.driver.prepare_candidate(plan)
         current = self.current_route(plan)
         if current.slot_id != plan.old.slot_id or current.binding != plan.old.binding:
@@ -132,7 +138,10 @@ class DokployOdooCutoverProvider:
         self.prepared_url = self.driver.stage_public(site, pause_id)
         if pause_id != self.pause_id or self.prepared_url != self.driver.lane.prepared_origin:
             raise ValueError("prepared endpoint/pause differs from its authoritative binding")
-        self.route.publish(self.prepared_url, expected=(self.plan.old.private_url,))
+        self.route.publish(
+            self.prepared_url,
+            expected=(self.plan.old.private_url, self.plan.new.private_url, self.prepared_url),
+        )
         return self.observed_public_copy(pause_id)
 
     def observed_public_copy(self, pause_id: str) -> str:

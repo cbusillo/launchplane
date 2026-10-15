@@ -93,13 +93,18 @@ def execute_odoo_cutover_deployment(
         ),
     )
     store = DeploymentCutoverStore(record_store, deployment)
-    record_website_application(record_store, plan, plan.website_settings, verified=False)
+
+    def before_step(step: str) -> None:
+        checkpoint(step)
+        if step == "planned_maintenance":
+            record_website_application(record_store, plan, plan.website_settings, verified=False)
+
     record = execute_odoo_cutover(
         plan,
         store,
         provider,
         record_id=record_id,
-        checkpoint=checkpoint,
+        checkpoint=before_step,
     )
     if record.step != "complete" or record.readiness is None or record.route is None:
         raise ValueError("cutover does not have verified completed traffic/writer evidence")
@@ -140,12 +145,19 @@ def execute_odoo_cutover_rollback_deployment(
     if record is None or artifact_id != record.plan.production.artifact_id:
         raise ValueError("cutover rollback requires its exact retained production artifact")
     store = DeploymentCutoverStore(record_store, deployment)
-    record_website_application(
-        record_store, record.plan, record.plan.rollback_website_settings, verified=False
+    rolled = rollback_compatible_cutover(
+        store,
+        provider,
+        record.record_id,
+        settings_checkpoint=lambda: record_website_application(
+            record_store, record.plan, record.plan.rollback_website_settings, verified=False
+        ),
     )
-    rolled = rollback_compatible_cutover(store, provider, record.record_id)
     record_website_application(
-        record_store, record.plan, record.plan.rollback_website_settings, verified=True
+        record_store,
+        record.plan,
+        record.plan.rollback_website_settings if rolled.website_settings_attempted else None,
+        verified=True,
     )
     rollback_started_at = rolled.rollback_started_at or rolled.updated_at
     old = rolled.plan.old

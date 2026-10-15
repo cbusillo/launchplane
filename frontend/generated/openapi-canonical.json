@@ -21293,6 +21293,16 @@
             "title": "Record Id",
             "type": "string"
           },
+          "rollback_pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicPauseRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "rollback_started_at": {
             "anyOf": [
               {
@@ -21348,6 +21358,11 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "website_settings_attempted": {
+            "default": false,
+            "title": "Website Settings Attempted",
+            "type": "boolean"
           }
         },
         "required": [
@@ -23489,6 +23504,11 @@
             "title": "Image",
             "type": "string"
           },
+          "retained_startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Retained Startup Settings Sha256",
+            "type": "string"
+          },
           "settings_sha256": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Settings Sha256",
@@ -23505,6 +23525,7 @@
           "image",
           "settings_sha256",
           "startup_settings_sha256",
+          "retained_startup_settings_sha256",
           "committed"
         ],
         "title": "OdooWebsiteSettingsReceipt",

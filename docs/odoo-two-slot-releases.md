@@ -163,21 +163,29 @@ including recovery from persisted intermediate steps. The deployment bridge
 records the verified applied baseline separately from pending preparation.
 
 The installed host adapter must bind `configure_startup` and the driver's
-`website_settings` capability. The former fences an already-running retained
-slot as needed, merges the selected snapshot and its legacy indexing parameter
-into that slot's durable managed startup payload, preserves unrelated settings
-and secrets, and returns the digest only after readback. It must keep the slot
+`website_settings` capability. The former merges the selected snapshot and its legacy indexing parameter
+into both slots' durable managed startup payloads, preserves unrelated settings
+and secrets, and returns both digests only after readback. A retained container
+must not restore stale settings into the shared database on a later restart.
+The driver also binds `website_settings_preflight` to verify both forward and
+rollback startup/native capabilities before any candidate preparation. It must keep the slot
 fenced on failure. `run_slot_website_settings` checks the immutable runner image,
 merges the native execution payload without exporting secrets, and requires the
 consumer's post-commit digest. Missing capability refuses the release before
 candidate preparation; there is no in-place fallback. Source support does not
 configure those installed host capabilities or activate a lane.
 
-Compatible switch-back applies the retained production snapshot before old-slot
+Typed-settings releases use prepared public serving and a measured writer pause
+even for compatible artifacts, so candidate settings never appear on the old
+public artifact during failed readiness. Compatible switch-back reuses that
+verified prepared bundle and records a separate rollback pause. It applies the
+retained production snapshot before old-slot
 readiness/traffic/writer activation. If the release has no historical snapshot,
 it disables analytics and indexing across websites while preserving native
 consent/embedding controls. The startup configuration must agree even for legacy
 images, so a restart cannot re-enable forward indexing. The rollback receipt and
-intent survive an uncertain switch; replay reads authority and repeats only the
-idempotent settings operation. Database-changing rollback still requires the
+intent survive an uncertain switch; replay reads authority and the saved
+receipt, repeating the idempotent settings operation only when its receipt was
+not persisted. An abort before maintenance leaves the verified baseline and
+collection unchanged. Database-changing rollback still requires the
 existing authorized coherent-tuple restore path.
