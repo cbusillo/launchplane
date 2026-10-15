@@ -10327,6 +10327,11 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
     def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
         self.scenario("normal")
 
+    def test_first_execution_result_keeps_intent_binding_and_original_bootstrap_receipt(
+        self,
+    ) -> None:
+        self.first_execution_result_transition()
+
     def test_native_capture_keeps_original_generation_source_and_immutable_receipt(self) -> None:
         self.native_capture_custody()
 

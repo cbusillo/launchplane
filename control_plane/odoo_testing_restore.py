@@ -1109,7 +1109,12 @@ def require_distinct_testing_credentials(
         )
 
 
-def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGeneration) -> str:
+def fresh_testing_authority_sha256(
+    store: object,
+    generation: FreshOdooTestingGeneration,
+    *,
+    include_override_results: bool = False,
+) -> str:
     """Bind rendered values to recipient and supported-source version metadata."""
     from typing import cast
     from control_plane import secrets
@@ -1176,6 +1181,17 @@ def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGe
             ).model_dump(mode="json"),
             "target_id": generation.target_id,
             "configuration": sorted(payloads, key=lambda item: json.dumps(item, sort_keys=True)),
-            "overrides": override.model_dump(mode="json") if override is not None else None,
+            # Apply results are observations written by this very execution. Bind
+            # every intent field, but do not make publishing a result look like
+            # a new restore intent. Legacy journals retain their exact digest;
+            # an absent preimage is never permission to rebind a held operation.
+            "overrides": override.model_dump(
+                mode="json",
+                exclude=set()
+                if include_override_results
+                else {"last_apply", "updated_at", "source_label"},
+            )
+            if override is not None
+            else None,
         }
     )

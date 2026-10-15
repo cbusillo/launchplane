@@ -2057,8 +2057,11 @@ def execute_odoo_stable_target_replacement_apply(
         else base_url,
         updated_at=started_at,
     )
+    # Fresh generations bind the recorded intent for recovery. Their canonical
+    # URL is a rendered lane value, not a persistent edit of that intent.
     if (
-        normalized_override_record is not None
+        generation is None
+        and normalized_override_record is not None
         and normalized_override_record is not odoo_override_record
     ):
         record_store.write_odoo_instance_override_record(

@@ -3373,6 +3373,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             "integration_readback_ok": "true",
             "odoo_restore_completed": "true",
         }
+        override = _opw_website_override_record().model_copy(
+            update={"instance": "testing"}, deep=True
+        )
+        assert override.website_bootstrap is not None
+        override.website_bootstrap.canonical_url = "https://retained.example.invalid"
         for missing in (None, *markers):
             with self.subTest(missing=missing):
                 readback = {key: value for key, value in markers.items() if key != missing}
@@ -3388,9 +3393,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 if missing is not None:
                     with self.assertRaises(OdooTargetReplacementStageError) as caught:
                         self._apply_upstream_restore(
-                            override_record=_opw_website_override_record().model_copy(
-                                update={"instance": "testing"}
-                            ),
+                            override_record=override,
                             post_deploy_results=(passed,),
                             test_instance="testing",
                             fresh_generation=fresh,
@@ -3402,14 +3405,22 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     self.assertIsNone(observed[0].fresh_generation)
                 else:
                     result, post_deploy, _verify, store = self._apply_upstream_restore(
-                        override_record=_opw_website_override_record().model_copy(
-                            update={"instance": "testing"}
-                        ),
+                        override_record=override,
                         post_deploy_results=(passed,),
                         test_instance="testing",
                         fresh_generation=fresh,
                     )
                     self.assertEqual(result.deploy_status, "pass")
+                    self.assertEqual(store.odoo_instance_override_record, override)
+                    rendered = json.loads(
+                        base64.b64decode(
+                            store.last_provider_env["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"]
+                        )
+                    )
+                    self.assertEqual(
+                        rendered["website_bootstrap"]["canonical_url"],
+                        store.profile.lanes[0].base_url,
+                    )
                     self.assertTrue(store.environment_inventories)
                     self.assertTrue(store.release_tuples)
                     self.assertIsNotNone(store.fresh_generation)

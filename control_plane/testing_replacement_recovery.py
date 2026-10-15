@@ -96,6 +96,9 @@ def source_exceeds_current_capacity(journal: TestingReplacementRecoveryJournal) 
     return previous_capacity <= 0 or NATIVE_TESTING_COPY_ARTIFACT_BYTES <= previous_capacity
 
 
+FRESH_TESTING_INTENT_BINDING_PREFIX = "fresh-intent-v2:"
+
+
 def current_binding_fingerprint(
     store: TestingRecoveryStore, operation: OdooStableTargetReplacementOperationRecord
 ) -> str:
@@ -117,7 +120,18 @@ def current_binding_fingerprint(
         store, product=operation.product, context=operation.context, instance=operation.instance
     )
     if generation is not None:
-        return fresh_testing_authority_sha256(store, generation)
+        legacy = bool(
+            operation.recovery_journal
+            and not operation.recovery_journal.target_fingerprint.startswith(
+                FRESH_TESTING_INTENT_BINDING_PREFIX
+            )
+        )
+        digest = fresh_testing_authority_sha256(
+            store,
+            generation,
+            include_override_results=legacy,
+        )
+        return digest if legacy else FRESH_TESTING_INTENT_BINDING_PREFIX + digest
     return recovery_binding_fingerprint(
         [item.model_dump(mode="json", exclude_none=True) for item in bindings]
     )
