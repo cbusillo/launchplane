@@ -5,8 +5,6 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
-
 
 CustodyEffectProfile = Literal[
     "guarded_merge",
@@ -26,43 +24,10 @@ CustodyIssueState = Literal[
     "closed",
 ]
 CustodyCloseReason = Literal["not_dispatched", "confirmed_revoked", "known_expired"]
-GITHUB_TOKEN_MAXIMUM_LIFETIME_SECONDS = 60 * 60
-KNOWN_TOKEN_CLOCK_SKEW_SECONDS = 60
-
-
-class OrdinaryAgentCustodyConflictError(ValueError):
-    pass
 
 
 class StrictCustodyModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-
-class OrdinaryAgentCustodyCandidate(StrictCustodyModel):
-    principal_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
-    repository_id: int = Field(gt=0, le=2**63 - 1)
-    repository: str = Field(pattern=r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", max_length=140)
-    base_branch: str = Field(min_length=1, max_length=255)
-    credential_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
-    credential_version: int = Field(ge=1, le=2**63 - 1)
-    secret_id: str = Field(min_length=1, max_length=256)
-    secret_binding_id: str = Field(min_length=1, max_length=256)
-    secret_version_id: str = Field(min_length=1, max_length=256)
-    expected_app_id: int = Field(gt=0, le=2**63 - 1)
-    # Expected identity is not evidence of an issued token; omit for legacy digests.
-    expected_installation_id: int | None = Field(
-        default=None, gt=0, le=2**63 - 1, exclude_if=lambda value: value is None
-    )
-    effect_profile: CustodyEffectProfile
-
-    @model_validator(mode="after")
-    def validate_target(self) -> OrdinaryAgentCustodyCandidate:
-        OrdinaryAgentTarget(
-            repository_id=self.repository_id,
-            repository=self.repository,
-            base_branch=self.base_branch,
-        )
-        return self
 
 
 class OrdinaryAgentCustodyIssueAttempt(StrictCustodyModel):

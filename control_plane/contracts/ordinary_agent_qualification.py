@@ -135,28 +135,3 @@ class OrdinaryAgentQualificationAttestation(StrictFrozenModel):
         if self.attestation_sha256 != expected:
             raise ValueError("qualification attestation digest does not match evidence")
         return self
-
-
-def qualification_identity(*, github_id: int, login: str) -> OrdinaryAgentQualificationIdentity:
-    return OrdinaryAgentQualificationIdentity(
-        github_id=github_id, login=login, login_normalized=login.casefold()
-    )
-
-
-def qualification_permission_ceiling_sha256(*, permissions: object) -> str:
-    return canonical_json_sha256(
-        {
-            "domain": "ordinary-agent-qualification-installed-permission-ceiling-v1",
-            "permissions": permissions,
-        }
-    )
-
-
-def qualification_read_profile_sha256(*, permissions: tuple[str, ...]) -> str:
-    return canonical_json_sha256(
-        {
-            "domain": "ordinary-agent-qualification-read-profile-v1",
-            "effect_profile": "merge_train_snapshot",
-            "permissions": list(permissions),
-        }
-    )
