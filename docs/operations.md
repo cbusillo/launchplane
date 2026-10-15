@@ -1940,7 +1940,9 @@ the new checkpoint, while the original legacy receipt remains intact. The filesy
 the explicit state directory. Use store APIs for file-backed evidence writes;
 editing historical JSON files directly does not update its derived index.
 New or changed evidence runs ahead of initial historical backfill, so an
-upgrade backlog cannot postpone a new failure behind the old history. The
+upgrade backlog cannot postpone a new failure behind the old history. The fixed
+latest identities from the first-scan snapshot are also read by key, so its
+existing latest failure can alert on the first pass while old pages drain. The
 migration uses a frozen schema and raw-JSON projection without validating
 historical rows against current runtime models or acquiring a lock per row.
 Installing capture and backfilling are one migration transaction: source-table

@@ -634,7 +634,11 @@ def _scan_failures(
         legacy_seen = checkpoint["legacy_seen"]
         failed = False
         for work in index.pending(
-            lane.context, profile.product, limit=DELIVERY_EVIDENCE_PAGE_SIZE, now=now
+            lane.context,
+            profile.product,
+            limit=DELIVERY_EVIDENCE_PAGE_SIZE,
+            now=now,
+            initial_latest=latest,
         ):
             try:
                 index.start(work)

@@ -232,7 +232,13 @@ class DeliveryEvidenceIndex:
             return checkpoint
 
     def pending(
-        self, context: str, product: str, *, limit: int, now: str = ""
+        self,
+        context: str,
+        product: str,
+        *,
+        limit: int,
+        now: str = "",
+        initial_latest: Mapping[str, Any] | None = None,
     ) -> tuple[DeliveryEvidenceWork, ...]:
         cutoff = normalized_time(now or datetime.now(timezone.utc).isoformat())
         # Keep each scope as an independent indexed query. A combined scope OR
@@ -249,6 +255,11 @@ class DeliveryEvidenceIndex:
                 sources.c.recheck_at <= cutoff,
             ),
         )
+        priority = {
+            kind + ":" + identity
+            for kind, identity in (initial_latest or {}).items()
+            if kind in SOURCE_KINDS.values() and identity
+        }
         candidates = {}
         with self.engine.connect() as connection:
             for scope in scopes:
@@ -260,8 +271,26 @@ class DeliveryEvidenceIndex:
                         .limit(limit)
                     ).mappings():
                         candidates[row["key"]] = dict(row)
+            if priority:
+                # The previous scanner surfaced the newest historical failure
+                # immediately. Read those fixed bootstrap identities by key so
+                # they cannot wait behind many otherwise silent history pages.
+                for row in connection.execute(
+                    select(sources).where(
+                        self.lane_filter(context, product),
+                        sources.c.key.in_(priority),
+                        sources.c.pending.is_(True),
+                    )
+                ).mappings():
+                    candidates[row["key"]] = dict(row)
         rows = sorted(
-            candidates.values(), key=lambda row: (row["baseline"], row["queued_at"], row["key"])
+            candidates.values(),
+            key=lambda row: (
+                row["baseline"],
+                row["key"] not in priority if row["baseline"] else False,
+                row["queued_at"],
+                row["key"],
+            ),
         )[:limit]
         return tuple(
             DeliveryEvidenceWork(

@@ -162,6 +162,26 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                         index.pending(self.lane.context, self.profile.product, limit=count)
                     )
 
+    def test_latest_initial_failure_does_not_wait_behind_bootstrap_history(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                for number in range(DELIVERY_EVIDENCE_PAGE_SIZE * 3):
+                    self.deploy(f"old-history-{number:05}", minutes_ago=number + 1)
+                self.now += timedelta(seconds=1)
+                self.deploy("latest-failure", failed=True)
+                self.monitor()
+                self.assertTrue(
+                    any(
+                        "latest-failure" in incident.summary
+                        for incident in self.store.list_public_ingress_incident_records(
+                            status="open"
+                        )
+                    )
+                )
+                with self.store.delivery_evidence_index() as index:
+                    self.assertTrue(index.pending(self.lane.context, self.profile.product, limit=1))
+
     def test_new_failure_is_prioritized_over_remaining_bootstrap_history(self) -> None:
         for backend in ("filesystem", "sqlite"):
             with self.subTest(backend=backend):
