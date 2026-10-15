@@ -3446,8 +3446,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
     def test_fresh_restore_schedule_and_runtime_use_the_same_generation_canonical(self) -> None:
         from tests.test_odoo_testing_restore import generation
+        from control_plane.odoo_testing_restore import fresh_testing_restore_spec
         from typing import Any
-        import shlex
 
         lane = _opw_profile_with_prelaunch_policy(enabled=True).lanes[0]
         fresh = generation().model_copy(
@@ -3466,10 +3466,12 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         override.website_bootstrap.canonical_url = "https://retained.example.invalid"
         schedules: list[dict[str, Any]] = []
 
+        def capture_spec(**kwargs: Any) -> dict[str, object]:
+            spec = fresh_testing_restore_spec(**kwargs)
+            schedules.append(spec)
+            return spec
+
         def run_schedule(**kwargs: Any) -> dict[str, str]:
-            script = kwargs["schedule_payload"]["script"]
-            encoded = shlex.split(script.splitlines()[2])[2]
-            schedules.append(json.loads(base64.b64decode(encoded)))
             return {
                 key: "true"
                 for key in (
@@ -3485,8 +3487,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 )
             }
 
-        with patch(
-            "control_plane.dokploy.post_deploy.run_manual_data_schedule", side_effect=run_schedule
+        with (
+            patch(
+                "control_plane.dokploy.post_deploy.run_manual_data_schedule",
+                side_effect=run_schedule,
+            ),
+            patch(
+                "control_plane.odoo_testing_restore.fresh_testing_restore_spec",
+                side_effect=capture_spec,
+            ),
         ):
             result, _, _, store = self._apply_upstream_restore(
                 override_record=override,
