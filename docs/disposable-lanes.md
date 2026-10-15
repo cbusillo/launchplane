@@ -376,7 +376,8 @@ copy may drop only its own newly restored database; a resumed copy is preserved.
 The host holds an exclusive generation lock across capture and startup, uses a
 unique dump path, clears the prior web-start gate, and rechecks database absence
 under the artifact's workflow lock before an initial restore. A stale workflow
-lock is removed only after terminal schedule proof and a dead owner process.
+lock is removed only after terminal schedule proof and confirmation that the
+process and its data-workflow children have exited.
 Do not retry the historical operation, fabricate a recovery journal, delete old storage,
 or point the old hostname at the replacement to clear a refusal.
 

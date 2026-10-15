@@ -363,12 +363,15 @@ class TestingCopyBoundaryTests(unittest.TestCase):
         self.boundary_case("foreign-witness", phase="resume")
 
     def boundary_case(self, fault: str, *, phase: str = "fresh") -> None:
+        import logging
         import sqlite3
         from types import ModuleType, SimpleNamespace
         from control_plane.odoo_testing_restore import TESTING_COPY_RUNNER
         from tests.test_odoo_connection_isolation import SqliteCursor, seed
 
         events: list[str] = []
+        self.addCleanup(logging.disable, logging.root.manager.disable)
+        self.enterContext(patch.object(sys, "path", list(sys.path)))
         with TemporaryDirectory() as directory:
             database = Path(directory) / "fresh.db"
             connection = sqlite3.connect(database)
