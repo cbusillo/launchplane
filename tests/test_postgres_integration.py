@@ -98,7 +98,7 @@ from tests.test_every_code_feedback_resume_storage import (
     T0 as FEEDBACK_T0,
     T1 as FEEDBACK_T1,
 )
-from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenario
+from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapPrerequisiteScenario
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
     _ReadOnlyTransport,
@@ -9862,12 +9862,18 @@ class RealPostgresPreviewReservationRecoveryTests(
         return self.enterContext(_head_postgres_database())
 
 
-class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
+class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteScenario):
     def setUp(self) -> None:
         self.seed(self.enterContext(_head_postgres_database()))
 
     def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
         self.scenario("normal")
+
+    def test_credential_comparison_failure_precedes_source_or_writes(self) -> None:
+        self.credential_comparison_failure()
+
+    def test_missing_source_refuses_after_existing_credentials_pass(self) -> None:
+        self.missing_source_failure()
 
     def test_lost_route_receipt_adopts_actual_route_without_another_write(self) -> None:
         self.scenario("route-receipt")
@@ -9884,6 +9890,8 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
     def test_http_lost_bootstrap_receipt_recovers_original_key_without_second_route(self) -> None:
         from control_plane.testing_replacement_bootstrap import (
             ROUTE,
+            BootstrapPrerequisiteCode,
+            TestingBootstrapPrerequisiteError,
             TestingReplacementBootstrapAdapter,
         )
         from tests.support.http import request
@@ -9904,12 +9912,15 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
             )
         )
         apply = TestingReplacementBootstrapAdapter.apply
+        prerequisite = TestingBootstrapPrerequisiteError(
+            BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
+        )
 
         def lost(adapter: Any, *args: Any) -> Any:
             apply(adapter, *args)
-            raise RuntimeError("private lost HTTP reply")
+            raise prerequisite
 
-        async def post() -> Any:
+        async def post(mode: str = "apply") -> Any:
             return await request(
                 self.fixture.app,
                 "POST",
@@ -9918,13 +9929,17 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
                     "Authorization": "Bearer local-operator-token",
                     "Idempotency-Key": "original-key",
                 },
-                payload=self.request.model_dump(mode="json"),
+                payload=self.request.model_copy(update={"mode": mode}).model_dump(mode="json"),
             )
 
         with patch.object(TestingReplacementBootstrapAdapter, "apply", lost):
             first = asyncio.run(post())
         self.assertEqual(first.status_code, 409, first.text)
-        self.assertNotIn("private lost HTTP reply", first.text)
+        self.assertNotEqual(first.json()["error"]["code"], prerequisite.code)
+        with patch.object(TestingReplacementBootstrapAdapter, "readback", side_effect=prerequisite):
+            readback = asyncio.run(post("readback"))
+        self.assertEqual(readback.status_code, first.status_code, readback.text)
+        self.assertEqual(readback.json()["error"], first.json()["error"])
         recovered = asyncio.run(post())
         self.assertEqual(recovered.status_code, 202, recovered.text)
         replay = asyncio.run(post())

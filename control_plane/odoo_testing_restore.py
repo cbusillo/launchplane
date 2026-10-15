@@ -784,6 +784,14 @@ def narrow_fresh_testing_requirements(
     ).validate_write_contract()
 
 
+class TestingCredentialVersionsMissing(ValueError):
+    """The service cannot compare both sets of existing managed versions."""
+
+
+class TestingCredentialsOverlap(ValueError):
+    """A testing credential equals one of the production source's values."""
+
+
 def require_distinct_testing_credentials(
     store: object, profile: LaunchplaneProductProfileRecord, context: str
 ) -> None:
@@ -820,7 +828,7 @@ def require_distinct_testing_credentials(
     if any(not testing_values.get(key) for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS) or any(
         not source_values.get(key) for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
     ):
-        raise ValueError(
+        raise TestingCredentialVersionsMissing(
             "Credential comparison needs the existing testing and production source versions."
         )
     if any(
@@ -829,7 +837,9 @@ def require_distinct_testing_credentials(
         for value in source_values.values()
         if value
     ):
-        raise ValueError("Existing testing credentials overlap the supported production source.")
+        raise TestingCredentialsOverlap(
+            "Existing testing credentials overlap the supported production source."
+        )
 
 
 def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGeneration) -> str:
