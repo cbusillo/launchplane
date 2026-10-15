@@ -151,8 +151,8 @@ try:
             observer.close()
         subprocess.run(["pg_restore", "--file=/dev/null", str(dump)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        runner.overwrite_database(dump)
         restored = True
+        runner.overwrite_database(dump)
         dump.unlink()
         runner.connect_to_db()
         with runner.local.db_conn.cursor() as cursor:

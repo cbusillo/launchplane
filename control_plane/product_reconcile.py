@@ -561,7 +561,7 @@ def reconcile_testing_target(
             instance="testing",
             bootstrap_preparation=True,
         )
-    except (ValueError, FileNotFoundError):
+    except (ValueError, FileNotFoundError, click.ClickException):
         plan.update(action="wait", held=True, reason="fresh_testing_authority_unverified")
         return ReconcileOutcome(plan)
     if generation is not None and not generation.reconcile_requested_at:

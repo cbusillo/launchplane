@@ -1417,7 +1417,7 @@ def build_odoo_stable_target_replacement_plan(
             instance=lane.instance,
             bootstrap_preparation=True,
         )
-    except (ValueError, FileNotFoundError):
+    except (ValueError, FileNotFoundError, click.ClickException):
         generation = None
         block(
             "fresh_testing_authority_unverified",

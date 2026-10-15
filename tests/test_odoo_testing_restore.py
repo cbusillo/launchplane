@@ -3,6 +3,7 @@ from contextlib import closing, redirect_stdout
 import io
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from control_plane.odoo_testing_restore import (
     TESTING_COPY_COMPLETION_PARAMETER,
     FreshOdooTestingGeneration,
     generation_binding,
+    build_fresh_testing_restore_script,
     narrow_fresh_testing_requirements,
     require_distinct_testing_credentials,
 )
@@ -145,33 +147,32 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.root = Path(self.temporary.name).resolve()
         self.gen = generation()
         self.database = self.gen.namespace.replace("-", "_")
-        self.spec: dict[str, Any] = {
-            "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
-            "generation": self.gen.model_dump(),
-            "compose_project": self.gen.namespace,
-            "image_reference": "registry.invalid/odoo@sha256:" + "f" * 64,
-            "database_name": self.database,
-            "source": {
-                "ODOO_UPSTREAM_HOST": "source.invalid",
-                "ODOO_UPSTREAM_USER": "restore-reader",
-                "ODOO_UPSTREAM_DB_USER": "postgres",
-                "ODOO_UPSTREAM_DB_NAME": "source_db",
-                "ODOO_UPSTREAM_FILESTORE_PATH": "/source/filestore/source_db",
-            },
-            "ssh_key_path": "/existing/read-only-identity",
-            "ssh_directory": "/existing/ssh",
-            "runner": "fixture runner",
-            "workflow_environment": {"ODOO_UPDATE_MODULES": "website"},
-            "readback_program": "fixture readback",
-            "readback_spec": "fixture-spec",
-            "copy_binding_sha256": self.gen.bootstrap_plan_sha256,
-            "data_workflow_lock_path": "/volumes/data/.fixture_workflow_lock",
-            "clear_stale_lock": False,
-            "stale_lock_program": FRESH_TESTING_STALE_LOCK_PROGRAM,
-            "runner_healthcheck_command": ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
-            "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
-            "expected_overrides_payload": "",
+        source = {
+            "ODOO_UPSTREAM_HOST": "source.invalid",
+            "ODOO_UPSTREAM_USER": "restore-reader",
+            "ODOO_UPSTREAM_DB_USER": "postgres",
+            "ODOO_UPSTREAM_DB_NAME": "source_db",
+            "ODOO_UPSTREAM_FILESTORE_PATH": "/source/filestore/source_db",
+            "DATA_WORKFLOW_SSH_KEY": "/existing/read-only-identity",
+            "DATA_WORKFLOW_SSH_DIR": "/existing/ssh",
         }
+        script = build_fresh_testing_restore_script(
+            generation=self.gen,
+            compose_project=self.gen.namespace,
+            image_reference="registry.invalid/odoo@sha256:" + "f" * 64,
+            database_name=self.database,
+            source_environment=source,
+            readback_spec="fixture-spec",
+            readback_program="fixture readback",
+            workflow_environment={"ODOO_UPDATE_MODULES": "website"},
+            runtime_environment={},
+            clear_stale_lock=False,
+            data_workflow_lock_path="/volumes/data/.fixture_workflow_lock",
+        )
+        # Execute the host payload actually emitted for the schedule, with fake
+        # provider commands below. A producer/consumer spec mismatch must fail.
+        encoded = shlex.split(script.splitlines()[2])[2]
+        self.spec: dict[str, Any] = json.loads(base64.b64decode(encoded))
         self.containers: dict[str, dict[str, Any]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
@@ -243,7 +244,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 result = b"1" if self.existing_database else b"0"
             elif command[-2:] in (["id", "-u"], ["id", "-g"]):
                 result = b"1000"
-            elif kwargs.get("input") == b"fixture runner":
+            elif kwargs.get("input") == self.spec["runner"].encode():
                 result = (
                     b"testing_copy_pre_registry_sanitized=true\ntesting_copy_sanitized=true\nodoo_module_update_completed=true\nodoo_module_update_modules_configured=true\n"
                     if self.sanitized
@@ -266,7 +267,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     exec(command[-1], {})
                     self.gate_hash = write.call_args.args[0]
         if (
-            kwargs.get("input") == b"fixture runner"
+            kwargs.get("input") == self.spec["runner"].encode()
             and self.existing_database
             and not self.resume_verified
         ):
@@ -392,6 +393,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
 
 
 class TestingCopyBoundaryTests(unittest.TestCase):
+    def test_partial_initial_restore_drops_only_its_new_copy(self) -> None:
+        self.boundary_case("restore-partial")
+
     def test_committed_isolation_precedes_first_registry_and_runs_again_after_hooks(self) -> None:
         self.boundary_case("normal")
 
@@ -507,6 +511,8 @@ class TestingCopyBoundaryTests(unittest.TestCase):
 
                 def overwrite_database(self, _: Path) -> None:
                     events.append("restore-fresh")
+                    if fault == "restore-partial":
+                        raise RuntimeError("partial initial restore")
 
                 def prepare_credentials_before_registry(self, **_: object) -> None:
                     connection.execute("UPDATE res_users SET password=NULL")

@@ -196,6 +196,7 @@ class _Store:
         self.environment_inventories: list[EnvironmentInventory] = []
         self.release_tuples: list[object] = []
         self.fresh_generation: FreshOdooTestingGeneration | None = None
+        self.last_provider_env: dict[str, str] = {}
         self.secret_bindings: tuple[SecretBinding, ...] = ()
         self.secret_records: tuple[SecretRecord, ...] = ()
         self.runtime_key_safety_policy_records: tuple[RuntimeKeySafetyPolicyRecord, ...] = ()
@@ -3236,6 +3237,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         def _update_env(*, env_text: str, **_: object) -> None:
             nonlocal persisted_env
             persisted_env = env_text
+            store.last_provider_env = control_plane_dokploy.parse_dokploy_env_text(env_text)
 
         with (
             patch(
@@ -3383,14 +3385,17 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 )
                 observed: list[_Store] = []
                 if missing is not None:
-                    with self.assertRaises(OdooTargetReplacementStageError):
+                    with self.assertRaises(OdooTargetReplacementStageError) as caught:
                         self._apply_upstream_restore(
-                            override_record=None,
+                            override_record=_opw_website_override_record().model_copy(
+                                update={"instance": "testing"}
+                            ),
                             post_deploy_results=(passed,),
                             test_instance="testing",
                             fresh_generation=fresh,
                             mutate_before_restore=observed.append,
                         )
+                    self.assertEqual(caught.exception.code, "fresh_testing_restore_unverified")
                     self.assertFalse(observed[0].environment_inventories)
                     self.assertFalse(observed[0].release_tuples)
                     self.assertIsNone(observed[0].fresh_generation)
@@ -3413,6 +3418,15 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         post_deploy.call_args.kwargs["fresh_testing_generation"], fresh
                     )
                     post_deploy.assert_called_once()
+                    self.assertTrue(
+                        post_deploy.call_args.kwargs["fresh_restore_source_environment"]
+                    )
+                    self.assertFalse(
+                        any(
+                            key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+                            for key in store.last_provider_env
+                        )
+                    )
 
     def test_real_restore_schedule_does_not_trigger_after_authorization_revocation(self) -> None:
         from control_plane.contracts.durable_operation_authorization import (
