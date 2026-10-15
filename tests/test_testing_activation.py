@@ -8,13 +8,19 @@ from typing import Any
 from collections.abc import Callable
 from unittest.mock import patch
 
-from control_plane.contracts.testing_activation import TestingActivationRequest
+from control_plane.contracts.testing_activation import (
+    TestingActivationRequest,
+    TestingActivationRecord,
+    TestingActivationRefusal,
+    TestingActivationRefusalCode,
+)
 from control_plane.integration_allowances import target_record_sha256
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.testing_activation import (
     ROUTE,
     TestingActivationAdapter,
     activation_record,
+    configuration_digest,
     retained_fence_is_separated,
     runtime_values as resolve_activation_runtime,
 )
@@ -125,6 +131,7 @@ class ComposeQualificationTests(unittest.TestCase):
 
 class ActivationTests(unittest.TestCase):
     database_url = ""
+    private_product = True
 
     def setUp(self) -> None:
         self.preparation = preparation.SeparationResourceTests()
@@ -138,6 +145,16 @@ class ActivationTests(unittest.TestCase):
         fixture.retained.env.update(
             DB_PORT="3307", CONFIG_VOLUME="production-config", OLD_RECIPIENT_ONLY="old"
         )
+        fixture.retained.domains = ()
+        retained_origin = "old-origin.example.invalid"
+        if self.private_product:
+            fixture.retained.domains = (retained_origin,)
+            profile = fixture.fixture.profile.model_dump()
+            profile["public_website"] = "none"
+            for lane in profile["lanes"]:
+                lane.update(base_url="", health_url="")
+            fixture.fixture.profile = type(fixture.fixture.profile).model_validate(profile)
+            self.store.write_product_profile_record(fixture.fixture.profile)
         self.store.write_dokploy_target_record(fixture.retained)
         self.product, self.context, self.scope = (
             fixture.product,
@@ -178,6 +195,10 @@ class ActivationTests(unittest.TestCase):
         self.payloads = {
             fixture.fixture.target.resolved_target.target_id: deepcopy(fixture.fixture.payload)
         }
+        if self.private_product:
+            self.payloads[fixture.fixture.target.resolved_target.target_id]["domains"] = [
+                {"domainId": "retained-origin", "host": retained_origin}
+            ]
         self.writes: list[tuple[str, Any]] = []
         self.projects: list[dict[str, Any]] = []
         self.inspections: list[bool] = []
@@ -407,6 +428,9 @@ class ActivationTests(unittest.TestCase):
             set(self.planned_record.host_ports),
         )
         self.assertNotIn("OLD_RECIPIENT_ONLY", current.env)
+        self.assertEqual(current.domains, ())
+        self.assertEqual(current.public_hosts, ())
+        self.assertEqual(current.pending_public_host_effects, ())
         self.assertEqual(
             self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
             production,
@@ -543,7 +567,7 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(self.run_activation().response_status_code, 202)
         self.assertEqual(sum(path == "/api/compose.create" for path, _ in self.writes), 1)
 
-    def test_existing_domain_refuses_dry_run_without_provider_effects_or_custody(self) -> None:
+    def test_declared_public_host_refuses_without_provider_effects_or_custody(self) -> None:
         target = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
         )
@@ -556,6 +580,72 @@ class ActivationTests(unittest.TestCase):
             self.adapter.current()
         self.assertEqual(self.writes, [])
         self.assertIsNone(activation_record(self.store, self.product, self.context))
+
+    def test_public_product_origin_domain_requires_accepted_cutover(self) -> None:
+        profile = self.store.read_product_profile_record(self.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"public_website": "required"})
+        )
+        with self.assertRaises(TestingActivationRefusal) as refused:
+            self.adapter.current()
+        self.assertEqual(
+            refused.exception.code, TestingActivationRefusalCode.ROUTES_REQUIRE_CUTOVER
+        )
+        self.assertEqual(self.writes, [])
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+
+    def test_public_website_authority_change_after_review_refuses_before_effects(self) -> None:
+        profile = self.store.read_product_profile_record(self.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"public_website": "required"})
+        )
+        with self.assertRaises(TestingActivationRefusal) as refused:
+            self.adapter.require_unchanged(self.planned_record)
+        self.assertEqual(refused.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
+        self.assertEqual(self.writes, [])
+
+    def public_activation_fixture(self) -> "ActivationTests":
+        public = ActivationTests()
+        public.private_product = False
+        if self.database_url:
+            from tests.test_postgres_integration import _head_postgres_database
+
+            database = _head_postgres_database()
+            public.database_url = database.__enter__()
+            self.addCleanup(database.__exit__, None, None, None)
+        self.addCleanup(public.doCleanups)
+        public.setUp()
+        return public
+
+    def test_new_public_product_without_routes_activates(self) -> None:
+        public = self.public_activation_fixture()
+        self.assertEqual(public.run_activation().response_status_code, 202)
+        current = public.adapter.current()
+        public.adapter.require_unchanged(current)
+        public.adapter.verify_provider(current)
+        self.assertTrue(current.published)
+
+    def test_public_product_without_routes_resumes_pre_website_digest_custody(self) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        public = self.public_activation_fixture()
+        payload = public.planned_record.model_dump(exclude={"configuration_version"})
+        payload["configuration_sha256"] = configuration_digest(
+            public.store, public.product, public.context, version=1
+        )
+        record = TestingActivationRecord.model_validate(payload)
+        record.plan_sha256 = canonical_json_sha256(record.model_dump(exclude={"plan_sha256"}))
+        public.store.write_testing_activation(
+            expected=None, replacement=record.model_dump(mode="json")
+        )
+        public.adapter.request = public.request.model_copy(
+            update={"reviewed_plan_sha256": record.plan_sha256}
+        )
+        self.assertEqual(public.run_activation().response_status_code, 202)
+        current = public.adapter.current()
+        public.adapter.require_unchanged(current)
+        public.adapter.verify_provider(current)
+        self.assertTrue(current.published)
 
     def test_configuration_drift_after_effect_keeps_fences_and_never_publishes(self) -> None:
         original = self.inspect
@@ -892,6 +982,25 @@ class ActivationTests(unittest.TestCase):
             "activation_plan_sha256": self.request.reviewed_plan_sha256,
             "mode": "dry-run",
         }
+        refusal = TestingActivationRefusal(
+            "private diagnostic must stay redacted",
+            code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+        )
+        with patch(
+            "control_plane.testing_activation.require_activation_hold_lift", side_effect=refusal
+        ):
+            refused = asyncio.run(
+                request(
+                    app,
+                    "POST",
+                    TESTING_HOLD_APPLY_ROUTE,
+                    headers={"Authorization": "Bearer local-operator-token"},
+                    payload=body,
+                )
+            )
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["error"]["code"], refusal.public_code)
+        self.assertNotIn(str(refusal), refused.text)
 
         async def post(payload: Any, key: str = "") -> Any:
             return await request(
@@ -1030,6 +1139,52 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(repeated.status_code, 202, repeated.text)
         readback = asyncio.run(post({**draft, "mode": "readback"}))
         self.assertEqual(readback.status_code, 409, readback.text)
+
+    def test_route_names_fixed_refusals_without_exposing_untrusted_error_values(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        body = self.request.model_copy(
+            update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+        ).model_dump(mode="json")
+        secret = "provider-error-with-private-credential-value"
+        refusal = TestingActivationRefusal(
+            secret, code=TestingActivationRefusalCode.ROUTES_REQUIRE_CUTOVER
+        )
+        modes = ["dry-run"]
+        if self.store.database_dialect_name == "postgresql":
+            modes.append("apply")
+        for mode in modes:
+            for index, error in enumerate((refusal, ValueError(secret))):
+                payload = body if mode == "dry-run" else self.request.model_dump(mode="json")
+                with patch.object(TestingActivationAdapter, "current", side_effect=error):
+                    response = asyncio.run(
+                        request(
+                            app,
+                            "POST",
+                            ROUTE.format(product=self.product),
+                            headers={
+                                "Authorization": "Bearer local-operator-token",
+                                "Idempotency-Key": f"refusal-{mode}-{index}",
+                            },
+                            payload=payload,
+                        )
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertNotIn(secret, response.text)
+                if error is refusal:
+                    self.assertEqual(response.json()["error"]["code"], refusal.public_code)
+        self.assertEqual(self.writes, [])
 
 
 class ActivationPortProgramTests(unittest.TestCase):
