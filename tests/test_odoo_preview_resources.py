@@ -64,6 +64,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
                     "Mountpoint": item["Mountpoint"],
                     "HasOptions": bool(item.get("Options")),
                     "Device": (item.get("Options") or {}).get("device"),
+                    "Anonymous": item.get("Anonymous", False),
                 }
             )
         elif args[0] == "inspect":
@@ -159,6 +160,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         anonymous = "a" * 64
         self.volumes[anonymous] = {
             "Name": anonymous,
+            "Anonymous": True,
             "Driver": "local",
             "Options": {},
             "Mountpoint": f"/var/lib/docker/volumes/{anonymous}/_data",
@@ -181,7 +183,10 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         self.containers["preview"]["HostConfig"]["Mounts"] = [
             {"Target": "/var/lib/odoo", "Source": anonymous}
         ]
+        self.assertEqual(self.run_program()[0], 0)
+        self.volumes[anonymous]["Anonymous"] = False
         self.assertNotEqual(self.run_program()[0], 0)
+        self.volumes[anonymous]["Anonymous"] = True
         self.containers["preview"]["HostConfig"]["Mounts"] = []
         self.containers["unrelated-stopped"]["Mounts"] = [
             {
@@ -215,6 +220,45 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         }
         self.assertNotEqual(self.run_program()[0], 0)
         self.volumes[alias]["Options"]["device"] = str(self.root)
+        self.assertNotEqual(self.run_program()[0], 0)
+
+    def test_indirect_bind_alias_uses_unmounted_daemon_records(self) -> None:
+        _, backing = next(iter(self.volumes.items()))
+        first = "intermediate-alias"
+        second = "mounted-alias"
+        root = Path(backing["Mountpoint"]).parent.parent
+        self.volumes[first] = {
+            "Name": first,
+            "Driver": "local",
+            "Mountpoint": str(root / first / "_data"),
+            "Options": {"o": "bind", "device": backing["Mountpoint"]},
+        }
+        self.volumes[second] = {
+            "Name": second,
+            "Driver": "local",
+            "Mountpoint": str(root / second / "_data"),
+            "Options": {"o": "bind", "device": self.volumes[first]["Mountpoint"]},
+        }
+        self.containers["foreign"] = {
+            "Config": {"Labels": {}},
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Name": second,
+                    "Source": self.volumes[second]["Mountpoint"],
+                    "RW": True,
+                }
+            ],
+        }
+        self.assertNotEqual(self.run_program()[0], 0)
+        # A direct bind can retain the same intermediate backing too.
+        self.containers["foreign"]["Mounts"][0].update(
+            Type="bind", Source=self.volumes[first]["Mountpoint"]
+        )
+        self.assertNotEqual(self.run_program()[0], 0)
+        self.volumes[first]["Options"]["device"] = self.volumes[second]["Mountpoint"]
+        self.assertNotEqual(self.run_program()[0], 0)
+        del self.volumes[first]
         self.assertNotEqual(self.run_program()[0], 0)
 
     def test_disappeared_foreign_container_is_not_an_unknown_consumer(self) -> None:
@@ -292,14 +336,17 @@ class PreviewResourceCollectorTests(unittest.TestCase):
                 require_existing_preview_resources(**kwargs)
             fetch.side_effect = None
             original_app_name = executed[0]["schedule_app_name"]
+            stale = {"deploymentId": "stale-inspection", "status": "running"}
             with patch.object(
                 api,
                 "find_matching_dokploy_schedule",
-                return_value={
-                    "deployments": [{"deploymentId": "stale-inspection", "status": "running"}]
-                },
+                return_value={"deployments": [stale]},
             ):
                 require_existing_preview_resources(**kwargs)
+                alternate = executed[-1]["schedule_app_name"]
+                stale["updatedAt"] = "later-provider-read"
+                require_existing_preview_resources(**kwargs)
+                self.assertEqual(executed[-1]["schedule_app_name"], alternate)
             self.assertNotEqual(executed[-1]["schedule_app_name"], original_app_name)
             self.assertFalse(executed[-1]["schedule_payload"]["enabled"])
 

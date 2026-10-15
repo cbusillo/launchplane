@@ -169,7 +169,9 @@ These paths consume [recorded disposable-lane facts](disposable-lanes.md). They
 are generic source behavior, not a new policy grant, administrator identity,
 credential, promotion right or Client-access expansion. Existing runtime key
 safety, transport isolation, reviewed retirement, provider fences and backup
-protection still apply. Missing facts produce `disposable_lane_safety_unknown`.
+protection still apply. Paths requiring positive recorded facts return
+`disposable_lane_safety_unknown` when those facts are missing. Existing Odoo
+preview refresh instead uses the direct resource inspection described below.
 The assertion API cannot produce positive facts while the authoritative
 collector is unavailable. Fixing that evidence producer is engineering;
 never ask for a grant to bypass it. Bounded empty testing replacement staging
@@ -265,9 +267,11 @@ A refused or expired issued plan requires fresh plan/apply inputs.
 The inspector reads Docker's daemon metadata, not filesystem paths in the schedule's
 mount namespace. Only default local volumes without backing options qualify;
 image-declared anonymous volumes are inspected and checked for foreign consumers
-too. The declaration must also have no explicit bind or mount at that destination;
-a hash-like name alone is not provenance. Foreign volumes' backing device paths
-are inspected for bind aliases, including parent directories. Bulk, filtered
+too. Docker's anonymous-volume marker must identify their provenance, including
+when Compose reuses them during recreation; a hash-like name alone is insufficient.
+Foreign volumes' backing device paths and bind sources are inspected for aliases,
+including parent directories and chains through unmounted local volumes. Missing
+intermediate metadata refuses qualification. Bulk, filtered
 container reads collect no environment values or arbitrary labels. Unrelated
 vanished containers and stale disjoint bind sources are not usage.
 There is no inode or arbitrary host-symlink attestation. Managed resource identities

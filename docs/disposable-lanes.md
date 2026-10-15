@@ -71,6 +71,9 @@ existing qualification paths.
 The fixed inspector checks the daemon's default local-volume backing metadata,
 complete container mounts (including stopped consumers and image-declared anonymous
 volumes), current/proposed storage agreement, and absence of host ports/networking.
+Anonymous image volumes retain Docker's provenance marker during Compose reuse;
+explicitly named hash-like volumes do not qualify as anonymous. Backing aliases
+are followed through daemon records, including unmounted intermediate volumes.
 It runs on the target's placement, with no dependency on the schedule process's
 filesystem namespace. Unsupported backing options, shared consumers, incomplete
 or conflicting inspection and changed target placement/resources refuse. Unrelated
@@ -83,7 +86,8 @@ for each bounded dispatch, with a lock timeout. Deploy/job waits hold no global
 transaction. A pre-effect admission refusal releases its reservation; a late
 refusal preserves the original uncertain key for read-only reconciliation. A new
 apply repeats inspection automatically. The inspection script has its own deadline;
-a stale running inspection uses a fresh separately named disabled read job, without
+a stale running inspection uses a separately named disabled read job, reused for
+that stale deployment identity, without
 cancelling the old job or modifying an application. Original-key retry remains
 available after an inspection-only refusal. See the full
 [authorization and recovery contract](authorization-authority.md#reviewed-never-live-classification-and-preview-execution).
@@ -250,8 +254,8 @@ published port and credential relation. The schema does not pretend to supply
 that inspection. There is no universal producer of positive occupancy/custody facts permitting a
 disposable apply. The bounded existing-preview refresh above uses its own real
 resource inspection and protected-use rule instead. The assertion API cannot create one and a direct DB write is not a
-qualification procedure. Until a server-backed collector is available, the new apply path
-returns `disposable_lane_safety_unknown`; absent observations never mean unused,
+qualification procedure. Until a server-backed collector is available, apply paths
+requiring positive facts return `disposable_lane_safety_unknown`; absent observations never mean unused,
 reproducible or isolated. Operational qualification records the missing sources
 on the owning item. The producer is tracked in
 [#3611](https://github.com/cbusillo/launchplane/issues/3611).

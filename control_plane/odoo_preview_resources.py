@@ -5,7 +5,6 @@ import hashlib
 import json
 import re
 from collections.abc import Callable, Mapping
-from uuid import uuid4
 
 import click
 
@@ -68,7 +67,16 @@ def require_existing_preview_resources(
         # Inspection has no application effects. A stale provider job cannot
         # forbid a fresh read; preserve that job and use a separate disabled
         # schedule rather than cancelling it or clearing an effect fence.
-        app_name += "-" + uuid4().hex[:12]
+        # Reuse one alternate for this exact stale job rather than accumulating
+        # a new provider record on every retry. Concurrent read-only inspection
+        # of the same immutable spec has no application effect.
+        stale_jobs = sorted(
+            api.deployment_key(job)
+            for job in post_deploy._schedule_deployments(existing)
+            if api._deployment_status(job) in post_deploy.DOKPLOY_RUNNING_DEPLOYMENT_STATUSES
+        )
+        stale_binding = json.dumps(stale_jobs, sort_keys=True, separators=(",", ":"))
+        app_name += "-" + hashlib.sha256(stale_binding.encode()).hexdigest()[:12]
     checkpoint()
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
@@ -153,13 +161,15 @@ def docker(*arguments):
 
 # Query only needed metadata. Do not collect container environment values,
 # arbitrary labels, or driver options that may hold credentials.
-VOLUME_FORMAT = '{"Name":{{json .Name}},"Driver":{{json .Driver}},"HasOptions":{{if (index . "Options")}}true{{else}}false{{end}},"Device":{{if (index . "Options")}}{{json (index (index . "Options") "device")}}{{else}}null{{end}},"Mountpoint":{{json .Mountpoint}}}'
-CONTAINER_FORMAT = '{"Id":{{json .Id}},"Config":{"Labels":{"com.docker.compose.project":{{if (index .Config "Labels")}}{{json (index (index .Config "Labels") "com.docker.compose.project")}}{{else}}null{{end}}},"Volumes":{{json (index .Config "Volumes")}}},"HostConfig":{"PortBindings":{{json .HostConfig.PortBindings}},"NetworkMode":{{json .HostConfig.NetworkMode}},"Binds":{{json (index .HostConfig "Binds")}},"MountTargets":[{{range $i,$m := (index .HostConfig "Mounts")}}{{if $i}},{{end}}{{json $m.Target}}{{end}}]},"Mounts":{{json .Mounts}}}'
+VOLUME_FORMAT = '{"Name":{{json .Name}},"Driver":{{json .Driver}},"HasOptions":{{if .Options}}true{{else}}false{{end}},"Device":{{if .Options}}{{json (index .Options "device")}}{{else}}null{{end}},"Anonymous":{{$anon := false}}{{range $key,$value := .Labels}}{{if eq $key "com.docker.volume.anonymous"}}{{$anon = true}}{{end}}{{end}}{{$anon}},"Mountpoint":{{json .Mountpoint}}}'
+CONTAINER_FORMAT = '{"Id":{{json .Id}},"Config":{"Labels":{"com.docker.compose.project":{{if (index .Config "Labels")}}{{json (index (index .Config "Labels") "com.docker.compose.project")}}{{else}}null{{end}}},"Volumes":{{json (index .Config "Volumes")}}},"HostConfig":{"PortBindings":{{json .HostConfig.PortBindings}},"NetworkMode":{{json .HostConfig.NetworkMode}}},"Mounts":{{json .Mounts}}}'
 
 
 volumes = {}
 
 def volume(name):
+    if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", name):
+        raise RuntimeError("Volume identity unavailable")
     if name not in volumes:
         item = json.loads(docker("volume", "inspect", "--format", VOLUME_FORMAT, name))
         if not isinstance(item, dict) or item.get("Name") != name:
@@ -213,11 +223,30 @@ def main():
 
     for name in names:
         add_volume(name)
+    def resolved_backing(path, seen=frozenset()):
+        # A bind-backed volume can outlive an intermediate container/unmount.
+        # Follow daemon-owned device records, including unmounted volumes.
+        for root in {item.parent.parent for item in paths.values()}:
+            if root not in path.parents:
+                continue
+            relative = path.relative_to(root)
+            name = relative.parts[0]
+            item = volume(name)
+            mountpoint = backing_path(item.get("Mountpoint"))
+            if item.get("Driver") != "local" or mountpoint.parent.parent != root:
+                raise RuntimeError("Indirect backing identity unavailable")
+            if item.get("HasOptions"):
+                if name in seen:
+                    raise RuntimeError("Cyclic backing identity")
+                device = backing_path(item.get("Device"))
+                tail = path.relative_to(mountpoint) if path == mountpoint or mountpoint in path.parents else PurePosixPath()
+                return resolved_backing(device / tail, seen | {name})
+        return path
+
     # Re-read complete inventory to include new consumers. An unrelated helper
     # disappearing is gone, not evidence of a hidden writable consumer.
     for _ in range(2):
         containers = []
-        own = 0
         for item in container_inventory():
             config = item.get("Config")
             labels = config.get("Labels") if isinstance(config, dict) else None
@@ -228,7 +257,6 @@ def main():
             if not isinstance(mounts, list):
                 raise RuntimeError("Mount inventory unavailable")
             if ours:
-                own += 1
                 host = item.get("HostConfig")
                 if not isinstance(host, dict) or host.get("PortBindings") not in (None, {}) or host.get("NetworkMode") == "host":
                     raise RuntimeError("Preview has shared host networking")
@@ -239,15 +267,11 @@ def main():
                     name = mount.get("Name", "")
                     if mount.get("Type") == "volume" and name not in names:
                         destination = mount.get("Destination")
-                        binds = host.get("Binds") or []
-                        targets = host.get("MountTargets")
-                        if not isinstance(binds, list) or not isinstance(targets, list) or not isinstance(destination, str):
-                            raise RuntimeError("Image volume provenance unavailable")
-                        explicit = destination in targets or any(
-                            isinstance(bind, str) and (bind.endswith(":" + destination) or ":" + destination + ":" in bind)
-                            for bind in binds
-                        )
-                        if not re.fullmatch(r"[a-f0-9]{64}", name) or destination not in declared or explicit:
+                        # Compose carries image-created anonymous volumes into
+                        # HostConfig.Mounts during recreation. Docker's own
+                        # anonymous-volume marker survives that reuse; a hash
+                        # name or mount syntax alone is not provenance.
+                        if not re.fullmatch(r"[a-f0-9]{64}", name) or destination not in declared or volume(name).get("Anonymous") is not True:
                             raise RuntimeError("Unexpected preview volume")
                         add_volume(name)
             containers.append((ours, mounts))
@@ -256,6 +280,8 @@ def main():
                 if mount.get("Type") == "tmpfs":
                     continue
                 path = backing_path(mount.get("Source"))
+                if not ours and mount.get("Type") == "bind":
+                    path = resolved_backing(path)
                 overlap = any(path == candidate or path in candidate.parents or candidate in path.parents for candidate in paths.values())
                 if ours:
                     if mount.get("RW") is not False and (mount.get("Type") != "volume" or paths.get(mount.get("Name")) != path):
@@ -266,7 +292,7 @@ def main():
                         foreign = volume(mount.get("Name"))
                         device = foreign.get("Device")
                         if isinstance(device, str) and device.startswith("/"):
-                            device = backing_path(device)
+                            device = resolved_backing(backing_path(device))
                             device_overlap = any(device == candidate or device in candidate.parents or candidate in device.parents for candidate in paths.values())
                     if device_overlap or overlap or mount.get("Name") in paths:
                         if not device_overlap and mount.get("Type") == "bind" and mount.get("RW") is False and all(path != candidate and candidate not in path.parents for candidate in paths.values()):
