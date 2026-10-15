@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Hashable
-from typing import Annotated, Literal, TypeAlias, TypeGuard
+from typing import Annotated, Literal, TypeAlias
 
 from pydantic import Discriminator, Field, Tag, TypeAdapter, field_validator, model_validator
 
@@ -11,7 +11,6 @@ from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentBudget,
     OrdinaryAgentPullRequest,
     OrdinaryAgentTarget,
-    PrincipalProfile,
     StrictFrozenModel,
 )
 
@@ -313,9 +312,6 @@ OrdinaryAgentFiniteRequest: TypeAlias = Annotated[
     | Annotated[OrdinaryAgentGuardedDeliveryFiniteRequestV2, Tag("v2-guarded-delivery")],
     Discriminator(_finite_request_discriminator),
 ]
-OrdinaryAgentGuardedFiniteRequest: TypeAlias = (
-    OrdinaryAgentFiniteRequestRecord | OrdinaryAgentGuardedDeliveryFiniteRequestV2
-)
 _FINITE_REQUEST_ADAPTER: TypeAdapter[OrdinaryAgentFiniteRequest] = TypeAdapter(
     OrdinaryAgentFiniteRequest
 )
@@ -324,56 +320,3 @@ _FINITE_REQUEST_ADAPTER: TypeAdapter[OrdinaryAgentFiniteRequest] = TypeAdapter(
 def parse_ordinary_agent_finite_request(value: object) -> OrdinaryAgentFiniteRequest:
     """Parse the exact persisted v1/v2 JSON variant without adapting its shape."""
     return _FINITE_REQUEST_ADAPTER.validate_python(value)
-
-
-def is_guarded_ordinary_agent_finite_request(
-    request: OrdinaryAgentFiniteRequest,
-) -> TypeGuard[OrdinaryAgentGuardedFiniteRequest]:
-    return isinstance(
-        request,
-        (OrdinaryAgentFiniteRequestRecord, OrdinaryAgentGuardedDeliveryFiniteRequestV2),
-    )
-
-
-class OrdinaryAgentSessionLeaseSelector(StrictFrozenModel):
-    """Service-issued lease handle; clients must not derive or interpret it."""
-
-    lease_id: str = Field(pattern=r"^[a-z][a-z0-9_-]{2,127}$")
-    action: OrdinaryAgentAction
-    expires_at: int = Field(ge=1, le=2**63 - 1)
-    revoked_at: int | None = Field(default=None, ge=0, le=2**63 - 1)
-
-
-class OrdinaryAgentSessionOperationView(StrictFrozenModel):
-    """Public diagnostic projection, never an admission or execution capability."""
-
-    schema_version: Literal[1] = 1
-    principal_id: str
-    operation_id: str
-    kind: Literal["initial", "existing"]
-    status: Literal["pending", "approved", "expired", "revoked", "blocked", "cancelled"]
-    reason_code: str | None = None
-    current_policy_actions: tuple[OrdinaryAgentAction, ...] = ()
-    current_policy_execution_profile: PrincipalProfile | None = None
-    requester_kind: Literal["terminal_agent", "ordinary_agent"]
-    requester_subject: str
-    requester_token_label: str | None = None
-    credential_expires_at: int
-    delivery_expires_at: int | None = None
-    attenuation: OrdinaryAgentSessionAttenuation | None
-    credential_id: str
-    credential_version: int
-    target: OrdinaryAgentTarget
-    session_id: str | None = None
-    session_expires_at: int | None = None
-    lease_selectors: tuple[OrdinaryAgentSessionLeaseSelector, ...] = ()
-    applied: bool = False
-    can_approve: bool = False
-
-
-class OrdinaryAgentConnectionView(StrictFrozenModel):
-    """Sanitized result of an administrator disconnect, not a credential capability."""
-
-    schema_version: Literal[1] = 1
-    principal_id: str
-    status: Literal["revoked"]
