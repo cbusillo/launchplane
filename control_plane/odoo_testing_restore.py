@@ -36,6 +36,7 @@ class FreshOdooTestingGeneration(BaseModel):
     certificate_type: Literal["none", "letsencrypt"] = "none"
     prepared_at: str
     completed_at: str = ""
+    reconcile_requested_at: str = ""
 
 
 # This wrapper uses the artifact's SQL-only credential boundary before the first
@@ -142,7 +143,9 @@ def encoded_testing_copy_runner() -> str:
 def generation_binding(generation: FreshOdooTestingGeneration) -> str:
     from control_plane.contracts.canonical_json import canonical_json_sha256
 
-    return canonical_json_sha256(generation.model_dump(mode="json", exclude={"completed_at"}))
+    return canonical_json_sha256(
+        generation.model_dump(mode="json", exclude={"completed_at", "reconcile_requested_at"})
+    )
 
 
 def encoded_restore_source(environment: dict[str, str]) -> str:
@@ -275,11 +278,32 @@ def main():
             continue
         if any(mount.get("Name") in volumes for mount in container.get("Mounts", [])):
             raise RuntimeError("Testing storage is shared by another container")
-    # Verify local volume identities after Docker has mounted the qualified set.
+    # Resolve actual backing paths too: a bind alias of a named volume is
+    # storage sharing even when Docker reports different mount names.
+    paths = []
+    identities = set()
     for name in volumes:
         volume = json.loads(docker("volume", "inspect", name))[0]
         if volume.get("Driver") != "local" or volume.get("Options") not in (None, {}) or volume.get("Labels", {}).get("io.launchplane.testing-resources") != gen["resources_binding_sha256"]:
             raise RuntimeError("Testing backing storage changed")
+        backing = Path(volume["Mountpoint"]).resolve(strict=True)
+        identity = (backing.stat().st_dev, backing.stat().st_ino)
+        if identity in identities:
+            raise RuntimeError("Testing backing storage overlaps")
+        identities.add(identity)
+        paths.append(backing)
+    own = {item[0] for item in containers.values()}
+    for container in all_containers:
+        if container.get("Id") in own:
+            continue
+        for mount in container.get("Mounts", []):
+            if mount.get("Type") != "bind":
+                continue
+            source_path = Path(mount["Source"]).resolve(strict=True)
+            if any(source_path == path or source_path.is_relative_to(path)
+                   or (mount.get("RW", True) and path.is_relative_to(source_path))
+                   for path in paths):
+                raise RuntimeError("Testing storage has a bind consumer")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
     docker("stop", web)
@@ -616,7 +640,9 @@ def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGe
     return canonical_json_sha256(
         {
             "profile": profile.model_dump(mode="json"),
-            "generation": generation.model_dump(mode="json", exclude={"completed_at"}),
+            "generation": generation.model_dump(
+                mode="json", exclude={"completed_at", "reconcile_requested_at"}
+            ),
             "target": getattr(store, "read_dokploy_target_record")(
                 context_name=generation.context, instance_name="testing"
             ).model_dump(mode="json"),

@@ -32,6 +32,7 @@ from control_plane.odoo_testing_restore import (
     FRESH_TESTING_OMITTED_SETTINGS,
     narrow_fresh_testing_requirements,
     require_distinct_testing_credentials,
+    read_current_testing_generation,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.provider_operations import (
@@ -90,7 +91,7 @@ def bootstrap_plan(
     store: PostgresRecordStore, product: str, request: TestingReplacementBootstrapRequest
 ) -> TestingReplacementBootstrapPlan:
     profile, operation, allocation, target, target_id, _ = resource_context(
-        store, product=product, request=request
+        store, product=product, request=request, allow_bootstrap_resume=True
     )
     resources = OdooTestingResources(
         product=product,
@@ -126,10 +127,17 @@ def bootstrap_plan(
     old_hosts = {urlsplit(value).hostname for value in (lane.base_url, lane.health_url)}
     old_hosts.update(target.domains)
     # The retained hostname is never moved or independently duplicated.
-    if (generation is None and request.domain_host in old_hosts) or any(
-        request.domain_host in {*other.domains, *other.public_hosts}
-        and (generation is None or (other.context, other.instance) != (request.context, "testing"))
-        for other in store.list_dokploy_target_records()
+    if (
+        request.domain_host in store.retained_disposable_hostnames()
+        or (generation is None and request.domain_host in old_hosts)
+        or any(
+            request.domain_host in {*other.domains, *other.public_hosts}
+            and (
+                generation is None
+                or (other.context, other.instance) != (request.context, "testing")
+            )
+            for other in store.list_dokploy_target_records()
+        )
     ):
         raise ValueError("Fresh testing requires an independent, unbound hostname.")
     bindings = site_delivered_secret_bindings_from_store(
@@ -209,10 +217,23 @@ class TestingReplacementBootstrapAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        # A completed record is adopted only after exact metadata/provider readback.
+        # A retry can only finish the same recorded generation. An unknown
+        # dispatched route must first be found by actual provider readback.
         try:
             result = self.readback()
-        except (ValueError, RuntimeError, OSError):
+        except (ValueError, FileNotFoundError, RuntimeError, OSError):
+            try:
+                bootstrap_plan(self.store, self.product, self.request)
+                generation = self.store.read_fresh_odoo_testing_generation(
+                    self.product, self.request.context
+                )
+                if generation is None:
+                    return ProviderObservation("absent", retry_safe=not provider_effect_phase)
+                domains = self._domains(generation)
+                if domains or not provider_effect_phase:
+                    return ProviderObservation("absent", retry_safe=True)
+            except (ValueError, FileNotFoundError, RuntimeError, OSError):
+                pass
             return ProviderObservation("unknown")
         return ProviderObservation(
             "present",
@@ -222,6 +243,32 @@ class TestingReplacementBootstrapAdapter:
                 result=result,
             ),
         )
+
+    def _domains(self, generation: FreshOdooTestingGeneration) -> tuple[dict[str, object], ...]:
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        domains = fetch_dokploy_compose_domains_for_target_setup(
+            host=host, token=token, compose_id=generation.target_id
+        )
+        if not domains:
+            return ()
+        profile = self.store.read_product_profile_record(self.product)
+        if len(domains) != 1:
+            raise ValueError("Fresh testing has unexpected provider routes.")
+        domain = domains[0]
+        if (
+            domain.get("host") != generation.domain_host
+            or domain.get("composeId") != generation.target_id
+            or domain.get("serviceName") != "web"
+            or domain.get("port") != profile.runtime_port
+            or domain.get("https") is not True
+            or domain.get("certificateType") != generation.certificate_type
+            or domain.get("path") != "/"
+            or domain.get("internalPath") != "/"
+            or domain.get("stripPath") is not False
+            or not domain.get("domainId")
+        ):
+            raise ValueError("The independent testing route differs from its reviewed binding.")
+        return tuple(dict(item) for item in domains)
 
     def readback(self) -> dict[str, object]:
         generation = self.store.read_fresh_odoo_testing_generation(
@@ -247,12 +294,15 @@ class TestingReplacementBootstrapAdapter:
             or urlsplit(lane.base_url).hostname != generation.domain_host
         ):
             raise ValueError("Testing bootstrap authority has changed.")
-        host, token = source.read_dokploy_config(control_plane_root=self.root)
-        domains = fetch_dokploy_compose_domains_for_target_setup(
-            host=host, token=token, compose_id=generation.target_id
+        current = read_current_testing_generation(
+            self.store, product=self.product, context=self.request.context, instance="testing"
         )
-        if {str(item.get("host") or "") for item in domains} != {generation.domain_host}:
-            raise ValueError("The independent testing route is unverified.")
+        if (
+            current != generation
+            or not generation.reconcile_requested_at
+            or not self._domains(generation)
+        ):
+            raise ValueError("The independent testing route or queue is unverified.")
         operation = self.store.read_odoo_stable_target_replacement_operation_record(
             generation.operation_id
         )
@@ -269,6 +319,9 @@ class TestingReplacementBootstrapAdapter:
             domain_host=generation.domain_host,
             plan_sha256=generation.bootstrap_plan_sha256,
             resources_binding_sha256=generation.resources_binding_sha256,
+            omitted_runtime_keys=bootstrap_plan(
+                self.store, self.product, self.request
+            ).omitted_runtime_keys,
             applied=True,
             reconcile_requested=True,
         ).model_dump(mode="json")
@@ -284,7 +337,10 @@ class TestingReplacementBootstrapAdapter:
                 if plan.plan_sha256 != self.request.reviewed_plan_sha256:
                     raise ValueError("The reviewed bootstrap plan changed.")
                 profile, operation, allocation, target, target_id, provider = resource_context(
-                    self.store, product=self.product, request=self.request
+                    self.store,
+                    product=self.product,
+                    request=self.request,
+                    allow_bootstrap_resume=True,
                 )
 
             def check() -> None:
@@ -314,6 +370,21 @@ class TestingReplacementBootstrapAdapter:
                 if existing_generation
                 else (),
             )
+            if (
+                existing_generation is not None
+                and urlsplit(
+                    next(
+                        lane.base_url
+                        for lane in profile.lanes
+                        if (lane.context, lane.instance) == (self.request.context, "testing")
+                    )
+                ).hostname
+                == existing_generation.domain_host
+            ):
+                self._require_domains(existing_generation)
+                check()
+                self._publish_safety(existing_generation, allocation.retained_target_id)
+                return self._finish(existing_generation, operation, plan)
             generation = existing_generation or FreshOdooTestingGeneration(
                 product=self.product,
                 context=self.request.context,
@@ -419,6 +490,12 @@ class TestingReplacementBootstrapAdapter:
             )
 
             def route(checkpoint: Callable[[str, str, int], None]) -> None:
+                existing = self._domains(generation)
+                if existing:
+                    checkpoint(
+                        generation.domain_host, str(existing[0]["domainId"]), profile.runtime_port
+                    )
+                    return
                 lease.checkpoint_effect("bind_independent_testing_route")
                 domain_id = compose.ensure_compose_web_domain_route(
                     host=host,
@@ -452,6 +529,7 @@ class TestingReplacementBootstrapAdapter:
                 expected_target_id=target_id,
                 expected_provider_target=provider,
                 apply_provider=route,
+                verify_provider=lambda: self._require_domains(generation),
                 pending_effects=(
                     PublicHostEffect(
                         host=generation.domain_host,
@@ -461,51 +539,77 @@ class TestingReplacementBootstrapAdapter:
                     ),
                 ),
             )
-            with self.store.serialize_disposable_testing_resources():
-                old_check()
-                current_profile = self.store.read_product_profile_record(self.product)
-                current_target = self.store.read_dokploy_target_record(
-                    context_name=self.request.context, instance_name="testing"
-                )
-                binding = disposable_lane_binding_sha256(
-                    current_profile,
-                    current_target,
-                    target_id,
-                    configuration=disposable_lane_configuration(
-                        self.store, self.request.context, "testing"
-                    ),
-                )
-                now = datetime.now(timezone.utc)
-                reference = "service:fresh-testing-bootstrap:" + generation_binding(generation)
-                self.store.write_disposable_lane_safety(
-                    DisposableLaneSafety(
-                        product=self.product,
-                        context=self.request.context,
-                        instance="testing",
-                        observed_by="service:fresh-testing-bootstrap",
-                        observer_kind="director_agent",
-                        binding_sha256=binding,
-                        usage="unused",
-                        data="reproducible",
-                        production_resources="isolated",
-                        usage_evidence=reference,
-                        data_evidence=reference,
-                        isolation_evidence=reference,
-                        replaces_operation_id=operation.operation_id,
-                        replaced_target_id=allocation.retained_target_id,
-                        observed_at=now,
-                        expires_at=now + timedelta(minutes=5),
-                    )
-                )
-            # The supersession transaction has its own complete metadata/alias
-            # exclusion; the historical operation is retained without safe_to_release.
-        if not self.store.supersede_disposable_testing_replacement(operation):
-            raise ValueError("The retained testing fence could not be superseded.")
-        from control_plane.contracts.product_reconcile import ProductReconcileTarget
+            old_check()
+            lease.assert_current()
+            self._publish_safety(generation, allocation.retained_target_id)
+        return self._finish(generation, operation, plan)
 
-        self.store.request_product_reconcile(
-            ProductReconcileTarget(product=self.product, target_kind="testing"), utc_now_timestamp()
+    def _publish_safety(
+        self, generation: FreshOdooTestingGeneration, retained_target_id: str
+    ) -> None:
+        with self.store.serialize_disposable_testing_resources():
+            read_current_testing_generation(
+                self.store, product=self.product, context=self.request.context, instance="testing"
+            )
+            profile = self.store.read_product_profile_record(self.product)
+            target = self.store.read_dokploy_target_record(
+                context_name=self.request.context, instance_name="testing"
+            )
+            target_id = self.store.read_dokploy_target_id_record(
+                context_name=self.request.context, instance_name="testing"
+            )
+            binding = disposable_lane_binding_sha256(
+                profile,
+                target,
+                target_id,
+                configuration=disposable_lane_configuration(
+                    self.store, self.request.context, "testing"
+                ),
+            )
+            now = datetime.now(timezone.utc)
+            reference = "service:fresh-testing-bootstrap:" + generation_binding(generation)
+            self.store.write_disposable_lane_safety(
+                DisposableLaneSafety(
+                    product=self.product,
+                    context=self.request.context,
+                    instance="testing",
+                    observed_by="service:fresh-testing-bootstrap",
+                    observer_kind="director_agent",
+                    binding_sha256=binding,
+                    usage="unused",
+                    data="reproducible",
+                    production_resources="isolated",
+                    usage_evidence=reference,
+                    data_evidence=reference,
+                    isolation_evidence=reference,
+                    replaces_operation_id=generation.operation_id,
+                    replaced_target_id=retained_target_id,
+                    observed_at=now,
+                    expires_at=now + timedelta(minutes=5),
+                )
+            )
+
+    def _require_domains(self, generation: FreshOdooTestingGeneration) -> None:
+        if not self._domains(generation):
+            raise ValueError("Fresh testing route readback is incomplete.")
+
+    def _finish(
+        self,
+        generation: FreshOdooTestingGeneration,
+        operation: object,
+        plan: TestingReplacementBootstrapPlan,
+    ) -> ProviderMutationOutcome:
+        from control_plane.contracts.odoo_stable_target_replacement_operation import (
+            OdooStableTargetReplacementOperationRecord,
         )
+
+        assert isinstance(operation, OdooStableTargetReplacementOperationRecord)
+        if (
+            operation.status != "superseded"
+            and not self.store.supersede_disposable_testing_replacement(operation)
+        ):
+            raise ValueError("The retained testing fence could not be superseded.")
+        self.store.request_fresh_testing_reconcile(generation)
         return ProviderMutationOutcome(
             202,
             provider_operation_response_payload(

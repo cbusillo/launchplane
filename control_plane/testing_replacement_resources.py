@@ -130,6 +130,7 @@ def resource_context(
     *,
     product: str,
     request: TestingReplacementResourcesRequest,
+    allow_bootstrap_resume: bool = False,
 ) -> tuple[
     LaunchplaneProductProfileRecord,
     OdooStableTargetReplacementOperationRecord,
@@ -158,9 +159,18 @@ def resource_context(
     ):
         raise ValueError("Replacement resources require an exact active owned Odoo testing lane.")
     operation = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
+    generation = (
+        store.read_fresh_odoo_testing_generation(product, request.context)
+        if allow_bootstrap_resume
+        else None
+    )
+    resuming = generation is not None and generation.operation_id == operation.operation_id
     if (
         not service_testing_operation(operation)
-        or operation.status != "reconciliation_required"
+        or operation.status
+        not in (
+            {"reconciliation_required", "superseded"} if resuming else {"reconciliation_required"}
+        )
         or (operation.product, operation.context, operation.instance)
         != (product, request.context, "testing")
     ):
@@ -179,7 +189,14 @@ def resource_context(
         raise ValueError("The tracked testing target does not agree with its provider binding.")
     if target.policies.staff_testing_hold is not None:
         raise ValueError("A staff-testing hold protects this lane.")
-    if target.pending_public_host_effects:
+    if target.pending_public_host_effects and not (
+        resuming
+        and generation is not None
+        and all(
+            effect.host == generation.domain_host and effect.target_id == generation.target_id
+            for effect in target.pending_public_host_effects
+        )
+    ):
         raise ValueError(
             "Pending route effects must remain with their current target until reconciled."
         )

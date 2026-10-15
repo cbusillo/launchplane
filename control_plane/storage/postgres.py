@@ -10613,18 +10613,55 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if row is not None:
                 previous = FreshOdooTestingGeneration.model_validate(row.payload)
-                if previous.model_dump(exclude={"completed_at"}) != record.model_dump(
-                    exclude={"completed_at"}
-                ):
+                if previous.model_dump(
+                    exclude={"completed_at", "reconcile_requested_at"}
+                ) != record.model_dump(exclude={"completed_at", "reconcile_requested_at"}):
                     raise ValueError("Fresh testing generation identities are immutable.")
                 if previous.completed_at and previous.completed_at != record.completed_at:
                     raise ValueError("Fresh testing generation completion is immutable.")
+                if previous.reconcile_requested_at != record.reconcile_requested_at:
+                    raise ValueError("Only the atomic testing queue can record its receipt.")
             session.merge(
                 LaunchplaneFreshOdooTestingGenerationRow(
                     product=record.product,
                     context=record.context,
                     payload=self._payload_dict(record),
                 )
+            )
+            session.commit()
+
+    def request_fresh_testing_reconcile(self, generation: FreshOdooTestingGeneration) -> None:
+        """Record this generation's queue receipt in the same transaction as its request."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (generation.product, generation.context),
+                with_for_update=True,
+            )
+            if row is None:
+                raise ValueError("Fresh testing generation is unavailable.")
+            current = FreshOdooTestingGeneration.model_validate(row.payload)
+            if current != generation:
+                raise ValueError("Fresh testing generation changed before queueing.")
+            operation = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id
+            )
+            if operation is None or operation.payload.get("status") != "superseded":
+                raise ValueError("Fresh testing supersession is incomplete.")
+            if current.reconcile_requested_at:
+                return
+            target = ProductReconcileTarget(product=generation.product, target_kind="testing")
+            self._lock_landing_authority(
+                session, f"launchplane:product-reconcile:{target.target_key}"
+            )
+            now = self._database_mutation_timestamp(session)
+            self._fold_product_reconcile_request(
+                session, target=target, requested_at=now, delivery_id=""
+            )
+            row.payload = self._payload_dict(
+                current.model_copy(update={"reconcile_requested_at": now})
             )
             session.commit()
 
