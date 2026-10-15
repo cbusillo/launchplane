@@ -45,6 +45,26 @@ COMPOSE = {
 }
 
 
+def activation_hold_policy(product: str, context: str) -> Any:
+    from control_plane.service_auth import LaunchplaneAuthzPolicy
+
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "schema_version": 2,
+            "local_operators": [
+                {
+                    "subjects": ["local-owner-agent"],
+                    "token_labels": ["local-owner-write"],
+                    "products": [product],
+                    "contexts": [context],
+                    "instances": ["testing"],
+                    "actions": ["product_config.plan", "product_config.apply"],
+                }
+            ],
+        }
+    )
+
+
 class ComposeQualificationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.values = {
@@ -147,7 +167,7 @@ class ActivationTests(unittest.TestCase):
             fixture.fixture.target.resolved_target.target_id: deepcopy(fixture.fixture.payload)
         }
         self.writes: list[tuple[str, Any]] = []
-        self.inspections = 0
+        self.inspections: list[bool] = []
         self.enterContext(
             patch(
                 "control_plane.testing_activation.read_product_compose",
@@ -220,7 +240,7 @@ class ActivationTests(unittest.TestCase):
 
     def inspect(self, root: Any, resources: Any, ports: Any, before_effect: Any) -> None:
         before_effect("inspect_new_resources")
-        self.inspections += 1
+        self.inspections.append(any(path == "/api/compose.update" for path, _ in self.writes))
 
     def converted(self, **kwargs: Any) -> str:
         payload = self.payloads[kwargs["compose_id"]]
@@ -300,7 +320,10 @@ class ActivationTests(unittest.TestCase):
             old_provider[self.preparation.fixture.target.resolved_target.target_id],
         )
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
-        self.assertEqual(self.inspections, 2)
+        self.assertIn(False, self.inspections)
+        self.assertTrue(
+            self.inspections[-1], "Storage and ports must be checked after configuration"
+        )
         record = activation_record(self.store, self.product, self.context)
         assert record is not None
         self.assertEqual(record.retained_target, self.preparation.retained)
@@ -331,6 +354,46 @@ class ActivationTests(unittest.TestCase):
                 self.run_activation()
         self.assertEqual(self.writes, [])
         self.preparation.assert_retained()
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.assertEqual(self.run_activation().response_status_code, 202)
+
+    def test_interrupted_inspection_retries_without_stranding_or_duplicating_recipient(
+        self,
+    ) -> None:
+        def interrupted(root: Any, resources: Any, ports: Any, checkpoint: Any) -> None:
+            checkpoint("inspect_new_resources")
+            raise OSError("Inspection reply lost")
+
+        with patch(
+            "control_plane.testing_activation.inspect_new_resources", side_effect=interrupted
+        ):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
+        self.assertEqual(self.writes, [])
+        self.preparation.assert_retained()
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(sum(path == "/api/compose.create" for path, _ in self.writes), 1)
+
+    def test_custody_prepared_before_any_creation_can_continue_original_key(self) -> None:
+        self.store.write_testing_activation(
+            expected=None, replacement=self.planned_record.model_dump(mode="json")
+        )
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(sum(path == "/api/compose.create" for path, _ in self.writes), 1)
+
+    def test_existing_domain_refuses_dry_run_without_provider_effects_or_custody(self) -> None:
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        target = target.model_copy(update={"public_hosts": ("testing.example.invalid",)})
+        self.store.write_dokploy_target_record(target)
+        self.adapter.request = self.request.model_copy(
+            update={"interlock_record_sha256": target_record_sha256(target)}
+        )
+        with self.assertRaises(ValueError):
+            self.adapter.current()
+        self.assertEqual(self.writes, [])
+        self.assertIsNone(activation_record(self.store, self.product, self.context))
 
     def test_configuration_drift_after_effect_keeps_fences_and_never_publishes(self) -> None:
         original = self.inspect
@@ -510,6 +573,98 @@ class ActivationTests(unittest.TestCase):
             ).policies.staff_testing_hold,
             current.policies.staff_testing_hold,
         )
+
+    def test_supported_http_lift_replays_and_requests_only_testing_reconcile(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.testing_lane_hold import TESTING_HOLD_APPLY_ROUTE
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+        from control_plane.workflows.public_ingress_monitor import _held_generic_web_deploy_fences
+
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=activation_hold_policy(self.product, self.context),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        body = {
+            "product": self.product,
+            "context": self.context,
+            "instance": "testing",
+            "hold": False,
+            "purpose": "staff_testing",
+            "reason": "Separation proven",
+            "activation_plan_sha256": self.request.reviewed_plan_sha256,
+            "mode": "dry-run",
+        }
+
+        async def post(payload: Any, key: str = "") -> Any:
+            return await request(
+                app,
+                "POST",
+                TESTING_HOLD_APPLY_ROUTE,
+                headers={"Authorization": "Bearer local-operator-token", "Idempotency-Key": key},
+                payload=payload,
+            )
+
+        planned = asyncio.run(post(body))
+        self.assertEqual(planned.status_code, 202, planned.text)
+        applied_body = body | {
+            "mode": "apply",
+            "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
+        }
+        applied = asyncio.run(post(applied_body, "lift-qualified-testing"))
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertTrue(applied.json()["result"]["reconcile_requested"])
+        replayed = asyncio.run(post(applied_body, "lift-qualified-testing"))
+        self.assertEqual(replayed.status_code, 202, replayed.text)
+        self.assertTrue(replayed.json()["replayed"])
+        self.assertEqual(
+            [row.target_key for row in self.store.list_product_reconcile_requests()],
+            [f"{self.product}:testing"],
+        )
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            production,
+        )
+        self.assertEqual(
+            self.store.list_held_provider_target_reservations(), (self.preparation.original,)
+        )
+        self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+        self.assertNotIn(
+            (self.context, "testing"), _held_generic_web_deploy_fences(self.store) or {}
+        )
+        from control_plane.workflows.generic_web_deploy_provider import (
+            build_generic_web_provider_reconciliation_key,
+        )
+
+        target = self.preparation.fixture.target.model_copy(deep=True)
+        record = activation_record(self.store, self.product, self.context)
+        assert record is not None
+        target.resolved_target.target_id = record.target_id
+        current_fence = self.preparation.original.model_copy(
+            update={
+                "idempotency_key": "new-recipient-outcome-unknown",
+                "reconciliation_key": build_generic_web_provider_reconciliation_key(
+                    target, product=self.product
+                ),
+            }
+        )
+        with patch.object(
+            self.store,
+            "list_held_provider_target_reservations",
+            return_value=(self.preparation.original, current_fence),
+        ):
+            self.assertEqual(
+                (_held_generic_web_deploy_fences(self.store) or {})[(self.context, "testing")],
+                current_fence,
+            )
 
     def test_supported_route_rejects_production_and_preserves_original_key_receipt(self) -> None:
         import asyncio

@@ -77765,6 +77765,7 @@
                 "properties": {
                   "activation_plan_sha256": {
                     "default": "",
+                    "pattern": "^(?:[a-f0-9]{64})?$",
                     "title": "Activation Plan Sha256",
                     "type": "string"
                   },

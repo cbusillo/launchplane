@@ -10249,7 +10249,7 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         self.database_url = database.__enter__()
         self.addCleanup(database.__exit__, None, None, None)
         super().setUp()
-        policy = LaunchplaneAuthzPolicy()
+        policy = testing_activation.activation_hold_policy(self.product, self.context)
         self.store.seed_authz_policy_if_absent(
             LaunchplaneAuthzPolicyRecord(
                 record_id=build_authz_policy_record_id(

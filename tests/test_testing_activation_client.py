@@ -36,6 +36,9 @@ class ActivationClientTests(unittest.TestCase):
             context="example",
             plan_sha256="c" * 64,
             source_commit=draft.source_commit,
+            resource_namespace="fixture-new-recipient",
+            image_reference="example@sha256:" + "a" * 64,
+            host_ports=(19212, 19213),
         )
         result = TestingActivationResult(
             **plan.model_dump(exclude={"applied", "separation_verified"}),
@@ -90,7 +93,7 @@ class ActivationClientTests(unittest.TestCase):
                 ):
                     self.assertEqual(client["main"](), 0, output.getvalue())
                 self.assertNotIn("fixture-private-token", output.getvalue())
-            self.assertEqual(evidence.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(evidence.stat().st_mode & 0o077, 0)
             self.assertEqual(
                 json.loads(evidence.read_text())["result"], plan.model_dump(mode="json")
             )

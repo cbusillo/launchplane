@@ -8879,6 +8879,13 @@ def create_launchplane_fastapi_app(
         )
         from control_plane.testing_activation import require_activation_hold_lift
 
+        if hold_request.activation_plan_sha256 and not director_agent_identity(identity):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Activation continuation requires the original Director agent.",
+            )
         activated_interlock = director_agent_identity(identity) and bool(
             hold_request.activation_plan_sha256
         )
@@ -9005,6 +9012,7 @@ def create_launchplane_fastapi_app(
                         hold_request.context,
                         hold_request.instance,
                     ),
+                    activation_verified=activated_interlock,
                 )
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
@@ -9030,6 +9038,13 @@ def create_launchplane_fastapi_app(
         except control_plane_testing_lane_hold.TestingHoldStale as error:
             raise _launchplane_http_error(
                 status_code=409, trace_id=trace_id, code="stale", message=str(error)
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_activation_unverified",
+                message="The original activation interlock is not safe to lift.",
             ) from error
         response = accepted_evidence_response(
             trace_id=trace_id, records=records, result=applied_plan.model_dump(mode="json")

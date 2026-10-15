@@ -9,7 +9,7 @@ starts, updates, stops or deletes the old recipient, changes production, creates
 credentials, settles historical deployment effects or deploys an application.
 
 The authenticated Director agent uses `scripts/activate-generic-web-testing.py`
-with the installed operator helper. Keep its request and evidence files private,
+with the installed `launchplane-write-action.py` helper. Keep its request and evidence files private,
 outside the checkout. The request identifies the existing context, original
 `preparation_key`, exact `source_commit`, volume-role to existing setting-key
 mapping, existing port-setting keys and an administrative reason. It also names
@@ -67,8 +67,10 @@ no-reconcile behavior.
 
 Only the exact retained reservation of a published qualified replacement stops
 blocking the new recipient. The old reservation remains unchanged and continues
-to fence the old target. The lane monitor attributes that old fence to retained
-custody, while continuing to report any fence on its actual new recipient. A
+to fence the old target, with its unresolved outcome visible in the durable
+reservation and activation custody receipt. The lane monitor excludes only
+that proven old-recipient fence from the active lane's deploy-fence check; it
+continues to report any fence on its actual new recipient. A
 plain target repoint has no such effect. Existing incidents resolve through the
 normal monitor when current health and runtime identity pass; they are never
 manually closed or suppressed by activation.

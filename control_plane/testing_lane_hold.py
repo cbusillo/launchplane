@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.storage.product_authority_bundle import LaneProductConfigWriteRequirements
 from control_plane.contracts.durable_operation_authorization import (
@@ -142,7 +142,7 @@ class TestingHoldApplyRequest(BaseModel):
     # The hold's reason when setting it; the audit reason when lifting it.
     reason: str
     reviewed_plan_sha256: str = ""
-    activation_plan_sha256: str = ""
+    activation_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
     @model_validator(mode="after")
     def _validate_request(self) -> TestingHoldApplyRequest:
@@ -325,6 +325,7 @@ def apply_testing_hold_plan(
     actor: str,
     required_context_owner: tuple[str, str] | None = None,
     required_product_config_target: tuple[str, str, str] | None = None,
+    activation_verified: bool = False,
 ) -> TestingHoldPlan:
     """Re-plan against the current record, require the reviewed digest, write, read back.
 
@@ -388,7 +389,7 @@ def apply_testing_hold_plan(
     reconcile_requested = False
     if (
         stored_hold is None
-        and (request.purpose != "isolation_staging" or bool(request.activation_plan_sha256))
+        and (request.purpose != "isolation_staging" or activation_verified)
         and read_back_matches
         and isinstance(record_store, ProductReconcileRequester)
     ):

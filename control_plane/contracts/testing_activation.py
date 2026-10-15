@@ -46,6 +46,7 @@ class TestingActivationRecord(BaseModel):
     configuration_sha256: str
     compose_source: str
     image_reference: str
+    host_ports: tuple[int, ...] = ()
     project_id: str = ""
     environment_id: str = ""
     target_id: str = ""
@@ -64,6 +65,9 @@ class TestingActivationPlan(BaseModel):
     instance: Literal["testing"] = "testing"
     plan_sha256: str
     source_commit: str
+    resource_namespace: str
+    image_reference: str
+    host_ports: tuple[int, ...]
     retained_target_preserved: Literal[True] = True
     hold_preserved: Literal[True] = True
     historical_settlement: Literal["not_evaluated"] = "not_evaluated"

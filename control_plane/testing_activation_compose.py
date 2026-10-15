@@ -154,9 +154,12 @@ def qualify_compose(
                 source, destination = parts[:2]
             elif isinstance(mount, dict) and mount.get("type") == "volume":
                 source, destination = str(mount.get("source", "")), str(mount.get("target", ""))
-                if set(mount) - {"type", "source", "target", "read_only", "volume"} or mount.get(
-                    "volume", {}
-                ).get("subpath"):
+                options = mount.get("volume", {})
+                if (
+                    not isinstance(options, dict)
+                    or set(mount) - {"type", "source", "target", "read_only", "volume"}
+                    or options.get("subpath")
+                ):
                     raise ValueError("Unsupported testing volume mount.")
             else:
                 raise ValueError("Testing cannot mount host paths or anonymous volumes.")

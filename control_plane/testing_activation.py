@@ -191,7 +191,9 @@ def runtime_values(
     )
     shared: set[str] = set()
     for key in environment.secret_keys:
-        binding = bindings[key]
+        binding = bindings.get(key)
+        if binding is None:
+            raise ValueError("A carried secret has no managed binding.")
         secret = store.read_secret_record(binding.secret_id)
         if (secret.scope, secret.context, secret.instance) != (
             "context_instance",
@@ -326,7 +328,7 @@ def require_activation_hold_lift(
         or not request.activation_plan_sha256
         or request.instance != "testing"
     ):
-        return False
+        raise ValueError("Activation continuation requires service-owned testing records.")
     record = activation_record(store, request.product, request.context)
     if (
         record is None
@@ -346,6 +348,9 @@ def require_activation_hold_lift(
         "activation_hold_preflight",
     )
     adapter.require_unchanged(record)
+    protection = store.read_disposable_lane_safety(record.product, record.context, "testing")
+    if protection and protection.usage == "in_use":
+        raise ValueError("Known staff use protects the testing recipient.")
     target = store.read_dokploy_target_record(context_name=record.context, instance_name="testing")
     if target.policies.staff_testing_hold != record.retained_target.policies.staff_testing_hold:
         raise ValueError("A later genuine staff hold remains protected.")
@@ -382,6 +387,8 @@ def build_activation(
     profile, target, target_id, provider = _bind(store, product, request.context, "testing")
     if not profile.is_active or target_record_sha256(target) != request.interlock_record_sha256:
         raise ValueError("Explicit staging-interlock identification no longer matches.")
+    if target.domains or target.public_hosts or target.pending_public_host_effects:
+        raise ValueError("Existing routes require their own accepted cutover.")
     hold = target.policies.staff_testing_hold
     if hold is None or hold.recorded_by != actor:
         raise ValueError("An absent, foreign or unacknowledged staff hold is protected.")
@@ -432,8 +439,10 @@ def build_activation(
         compose_source=document,
         image_reference=image_reference,
     )
+    values = runtime_values(store, root, record, resources)
+    rendered_source(record, values, resources)
+    record.host_ports = tuple(sorted(ports_for(record, values)))
     record.plan_sha256 = canonical_json_sha256(record.model_dump(exclude={"plan_sha256"}))
-    rendered_source(record, runtime_values(store, root, record, resources), resources)
     return record
 
 
@@ -443,6 +452,9 @@ def plan(record: TestingActivationRecord) -> dict[str, Any]:
         context=record.context,
         plan_sha256=record.plan_sha256,
         source_commit=record.request.source_commit,
+        resource_namespace=record.namespace,
+        image_reference=record.image_reference,
+        host_ports=record.host_ports,
     ).model_dump(mode="json")
 
 
@@ -671,6 +683,9 @@ class TestingActivationAdapter:
             context=record.context,
             plan_sha256=record.plan_sha256,
             source_commit=record.request.source_commit,
+            resource_namespace=record.namespace,
+            image_reference=record.image_reference,
+            host_ports=record.host_ports,
             qualified_at=record.qualified_at,
         ).model_dump(mode="json")
 
@@ -749,9 +764,17 @@ class TestingActivationAdapter:
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
         try:
+            if activation_record(self.store, self.product, self.request.context) is None:
+                # Custody is persisted before the first placement creation. Its
+                # absence proves an interrupted inspection created no recipient.
+                return ProviderObservation("absent", retry_safe=True)
             record = self.current()
             if record.plan_sha256 != reconciliation_key:
                 return ProviderObservation("unknown")
+            if record.phase == "prepared" and not (
+                record.project_id or record.environment_id or record.target_id
+            ):
+                return ProviderObservation("absent", retry_safe=True)
             old_key = generic_web_provider_target_key(
                 provider_id="dokploy",
                 context=record.context,
@@ -802,7 +825,11 @@ class TestingActivationAdapter:
             record = self.current()
             if record.plan_sha256 != self.request.reviewed_plan_sha256:
                 raise ValueError("Review the changed activation plan.")
-            if activation_record(self.store, self.product, record.context) is not None:
+            existing = activation_record(self.store, self.product, record.context)
+            if existing is not None and not (
+                existing.phase == "prepared"
+                and not (existing.project_id or existing.environment_id or existing.target_id)
+            ):
                 raise ValueError(
                     "Continue the original activation by readback, never redispatch creation."
                 )
@@ -829,9 +856,6 @@ class TestingActivationAdapter:
                 if excluded.status != "excluded":
                     raise ValueError("The retained recipient is not fully excluded.")
                 self.require_unchanged(record)
-                self.store.write_testing_activation(
-                    expected=None, replacement=record.model_dump(mode="json")
-                )
                 resources, _ = preparation_resources(
                     self.store, self.product, self.request, self.scope
                 )
@@ -863,6 +887,14 @@ class TestingActivationAdapter:
                 ):
                     raise ValueError(
                         "Preserve an existing activation placement for original-key inspection."
+                    )
+                # A refused/transient inspection must not strand a permanent
+                # custody row. Persist immediately before creation, after all
+                # prerequisites; every subsequent uncertain write stays fenced.
+                checkpoint("prepare_new_recipient")
+                if existing is None:
+                    self.store.write_testing_activation(
+                        expected=None, replacement=record.model_dump(mode="json")
                     )
                 for phase, path, body, field in (
                     (
