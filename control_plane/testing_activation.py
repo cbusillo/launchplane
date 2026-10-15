@@ -35,7 +35,10 @@ from control_plane.github_app_identity import (
     mint_source_control_read_installation_token,
 )
 from control_plane.integration_allowances import target_record_sha256
-from control_plane.live_target_runtime import evaluate_runtime_key_safety_for_live_target_sync
+from control_plane.live_target_runtime import (
+    LiveTargetRuntimeError,
+    evaluate_runtime_key_safety_for_live_target_sync,
+)
 from control_plane.odoo_testing_resources import (
     GenericWebTestingResources,
     resource_readback_passes,
@@ -216,11 +219,23 @@ def runtime_values(
         raise TestingActivationRefusal("A resource setting cannot be secret-backed.")
     for role, key in record.request.volume_keys.items():
         values[key] = resources.volumes[role]
-    safety = evaluate_runtime_key_safety_for_live_target_sync(
-        record_store=store, context_name=record.context, instance_name="testing"
-    )
+    try:
+        safety = evaluate_runtime_key_safety_for_live_target_sync(
+            record_store=store,
+            context_name=record.context,
+            instance_name="testing",
+            required_binding_keys=tuple(sorted(environment.secret_keys)),
+        )
+    except LiveTargetRuntimeError as error:
+        raise TestingActivationRefusal(
+            "Carried-key safety remains unproved.",
+            code=TestingActivationRefusalCode.CARRIED_KEYS_UNVERIFIED,
+        ) from error
     if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
-        raise TestingActivationRefusal("Carried-key safety remains unproved.")
+        raise TestingActivationRefusal(
+            "Carried-key safety remains unproved.",
+            code=TestingActivationRefusalCode.CARRIED_KEYS_UNVERIFIED,
+        )
     bindings = runtime_environments.site_delivered_secret_bindings_from_store(
         record_store=store, context_name=record.context, instance_name="testing"
     )

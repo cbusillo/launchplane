@@ -35,6 +35,7 @@ services:
       start_period: 20s
     volumes:
       - launchplane-runtime:/app/runtime
+      - launchplane-odoo-copy:/app/runtime/private-testing-source
     networks:
       - default
       - launchplane-external-network
@@ -95,6 +96,7 @@ services:
       LAUNCHPLANE_BROWSER_WS_ENDPOINT: ws://launchplane-browser:3000/
     volumes:
       - launchplane-runtime:/app/runtime
+      - launchplane-odoo-copy:/app/runtime/private-testing-source
     networks:
       - default
       - launchplane-external-network
@@ -174,3 +176,4 @@ networks:
 
 volumes:
   launchplane-runtime: {}
+  launchplane-odoo-copy: {}
