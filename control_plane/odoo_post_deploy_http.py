@@ -261,7 +261,7 @@ def write_odoo_config_parameter_override_record(
         if existing_record is not None
         else None,
         website_settings=existing_record.website_settings if existing_record is not None else None,
-        last_apply=existing_record.last_apply
+        last_apply=existing_record.last_apply.for_override_edit()
         if existing_record is not None
         else OdooOverrideApplyResult(),
         updated_at=_utc_now_timestamp(),
@@ -299,7 +299,7 @@ def write_odoo_website_bootstrap_override_record(
         addon_settings=existing_record.addon_settings if existing_record is not None else (),
         website_bootstrap=request.website_bootstrap,
         website_settings=existing_record.website_settings if existing_record is not None else None,
-        last_apply=existing_record.last_apply
+        last_apply=existing_record.last_apply.for_override_edit()
         if existing_record is not None
         else OdooOverrideApplyResult(),
         updated_at=_utc_now_timestamp(),

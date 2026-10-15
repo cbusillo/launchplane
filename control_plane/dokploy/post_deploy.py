@@ -2665,11 +2665,7 @@ exit_trap() {{
         echo "odoo_restore_completed=false"
     fi
     if [ "${{web_restart_blocked}}" != "1" ] && [ "${{start_web_after_workflow}}" = "1" ]; then
-        if [ "${{website_settings_instance}}" = "prod" ] || [ "${{website_settings_instance}}" = "production" ]; then
-            if [ "${{website_settings_succeeded}}" != "1" ]; then
-                web_restart_blocked=1
-            fi
-        elif ! enforce_website_settings; then
+        if ! enforce_website_settings; then
             web_restart_blocked=1
         fi
     fi

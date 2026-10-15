@@ -11,6 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
 from control_plane.odoo_post_deploy_http import resolve_odoo_post_deploy_product_route
 from control_plane.storage.product_authority_bundle import LaneProductConfigWriteRequirements
 
@@ -23,14 +27,17 @@ class OdooWebsiteSettingsRequest(BaseModel):
     product: str = Field(min_length=1)
     context: str = Field(min_length=1)
     instance: Literal["prod"] = "prod"
-    website_settings: OdooWebsiteSettingsIntent
+    website_settings: OdooWebsiteSettingsIntent | None
     mode: Literal["dry-run", "apply"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = ""
 
     @model_validator(mode="after")
     def validate_review(self) -> OdooWebsiteSettingsRequest:
-        if self.website_settings.settings.operation != "apply":
+        if (
+            self.website_settings is not None
+            and self.website_settings.settings.operation != "apply"
+        ):
             raise ValueError(
                 "Preparation accepts full website settings; collection-only rollback is driver-owned."
             )
@@ -66,25 +73,13 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
         instance=request.instance,
     )
     production = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
-    if production is None or request.website_settings.settings.public_origin.rstrip(
-        "/"
-    ) != production.base_url.rstrip("/"):
-        raise ValueError(
-            "Website settings origin must match the product's recorded production URL."
-        )
-    testing = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
-    if testing is None:
-        raise ValueError("Website settings require the product's testing candidate.")
-    try:
-        candidate = store.read_release_tuple_record(
-            context_name=testing.context, channel_name="testing"
-        )
-    except FileNotFoundError as error:
-        raise ValueError("Website settings require the current testing release record.") from error
-    if candidate.artifact_id != request.website_settings.artifact_id:
-        raise ValueError("Website settings must name this product's current testing artifact.")
+    if request.website_settings is not None:
+        if production is not None and production.odoo_cutover is not None:
+            raise ValueError("Website settings require the stopped-web maintenance driver.")
+        _validate_candidate(store, request, profile, production)
     existing = _existing(store, request.context, request.instance)
     before = existing.model_dump(mode="json") if existing else None
+    desired = request.website_settings.model_dump(mode="json") if request.website_settings else None
     digest = hashlib.sha256(
         json.dumps(
             {
@@ -92,7 +87,7 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
                 "context": request.context,
                 "instance": request.instance,
                 "before": before,
-                "desired": request.website_settings.model_dump(mode="json"),
+                "desired": desired,
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -110,12 +105,38 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
         "before": existing.website_settings.model_dump(mode="json")
         if existing and existing.website_settings
         else None,
-        "after": request.website_settings.model_dump(mode="json"),
-        "changed": existing is None or existing.website_settings != request.website_settings,
+        "after": desired,
+        "changed": (existing.website_settings if existing else None) != request.website_settings,
         "applied": False,
         "read_back_matches": False,
         "activation": "Client acceptance of the exact release applies these settings; preparation changes no Odoo database.",
     }
+
+
+def _validate_candidate(
+    store: Any,
+    request: OdooWebsiteSettingsRequest,
+    profile: LaunchplaneProductProfileRecord,
+    production: ProductLaneProfile | None,
+) -> None:
+    assert request.website_settings is not None
+    if production is None or request.website_settings.settings.public_origin.rstrip(
+        "/"
+    ) != production.base_url.rstrip("/"):
+        raise ValueError(
+            "Website settings origin must match the product's recorded production URL."
+        )
+    testing = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
+    if testing is None:
+        raise ValueError("Website settings require the product's testing candidate.")
+    try:
+        candidate = store.read_release_tuple_record(
+            context_name=testing.context, channel_name="testing"
+        )
+    except FileNotFoundError as error:
+        raise ValueError("Website settings require the current testing release record.") from error
+    if candidate.artifact_id != request.website_settings.artifact_id:
+        raise ValueError("Website settings must name this product's current testing artifact.")
 
 
 def prepare_website_settings(
@@ -164,6 +185,6 @@ def prepare_website_settings(
             ),
         )
     read_back = _existing(store, request.context, request.instance)
-    if read_back is None or read_back.website_settings != request.website_settings:
+    if (read_back.website_settings if read_back else None) != request.website_settings:
         raise ValueError("Website settings preparation readback failed.")
     return {**plan, "applied": bool(plan["changed"]), "read_back_matches": True}

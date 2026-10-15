@@ -254,7 +254,7 @@ def _build_odoo_instance_override_record_with_config_parameter(
         addon_settings=addon_settings,
         website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
         website_settings=target_record.website_settings if target_record is not None else None,
-        last_apply=target_record.last_apply
+        last_apply=target_record.last_apply.for_override_edit()
         if target_record is not None
         else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),
@@ -307,7 +307,7 @@ def _build_odoo_instance_override_record_with_addon_setting(
         addon_settings=tuple(addon_settings[key] for key in sorted(addon_settings)),
         website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
         website_settings=target_record.website_settings if target_record is not None else None,
-        last_apply=target_record.last_apply
+        last_apply=target_record.last_apply.for_override_edit()
         if target_record is not None
         else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),
@@ -344,7 +344,7 @@ def _build_odoo_instance_override_record_with_website_bootstrap(
         addon_settings=target_record.addon_settings if target_record is not None else (),
         website_bootstrap=website_bootstrap,
         website_settings=target_record.website_settings if target_record is not None else None,
-        last_apply=target_record.last_apply
+        last_apply=target_record.last_apply.for_override_edit()
         if target_record is not None
         else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),

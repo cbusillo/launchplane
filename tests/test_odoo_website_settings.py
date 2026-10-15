@@ -2,14 +2,17 @@ import base64
 from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
 import json
 import unittest
-import click
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from pydantic import ValidationError
 
-from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooOverrideApplyResult,
+    OdooConfigParameterOverride,
+    OdooOverrideValue,
+)
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.odoo_website_settings import (
@@ -114,10 +117,136 @@ class WebsiteSettingsTests(unittest.TestCase):
             record = store.read_odoo_instance_override_record(
                 context_name="example-site", instance_name="prod"
             )
+            record.config_parameters = (
+                OdooConfigParameterOverride(
+                    key=WEBSITE_INDEXING_PARAMETER,
+                    value=OdooOverrideValue(source="literal", value="1"),
+                ),
+            )
             payload = build_post_deploy_environment(record, record_store=store).payload
             self.assertIsNone(payload.website_settings)
             self.assertFalse(
                 any(item.key == WEBSITE_INDEXING_PARAMETER for item in payload.config_parameters)
+            )
+
+    def test_withdrawal_preserves_applied_snapshot_and_works_without_a_candidate(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            prepare(store)
+            record = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            record.last_apply = OdooOverrideApplyResult(
+                attempted=True,
+                status="pass",
+                applied_at=record.updated_at,
+                website_settings=intent().model_copy(update={"artifact_id": "artifact-prod"}),
+            )
+            store.write_odoo_instance_override_record(record)
+            value = request().model_copy(update={"website_settings": None})
+            with patch.object(store, "read_release_tuple_record", side_effect=FileNotFoundError):
+                plan = plan_website_settings(store, value)
+                self.assertIsNotNone(plan["before"])
+                self.assertIsNone(plan["after"])
+                result = prepare_website_settings(
+                    store,
+                    value.model_copy(
+                        update={
+                            "mode": "apply",
+                            "reviewed_plan_sha256": plan["plan_sha256"],
+                        }
+                    ),
+                )
+            self.assertTrue(result["read_back_matches"])
+            withdrawn = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            self.assertIsNone(withdrawn.website_settings)
+            self.assertEqual(withdrawn.last_apply, record.last_apply)
+            review = build_release_review(store=store, profile=profile(), read=github_read)
+            assert review.checklist is not None
+            self.assertEqual(review.checklist.website_settings, intent())
+            no_op = plan_website_settings(store, value)
+            self.assertFalse(no_op["changed"])
+
+    def test_other_override_edit_resets_generic_result_and_preserves_website_verification(
+        self,
+    ) -> None:
+        from control_plane.cli_odoo import (
+            _build_odoo_instance_override_record_with_config_parameter,
+        )
+
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            prepare(store)
+            record = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            record.last_apply = OdooOverrideApplyResult(
+                attempted=True,
+                status="pass",
+                applied_at=record.updated_at,
+                website_settings=intent(),
+                website_settings_verified=False,
+            )
+            changed = _build_odoo_instance_override_record_with_config_parameter(
+                existing_records=(record,),
+                context_name=record.context,
+                instance_name=record.instance,
+                key_name="web.base.url",
+                override_value=OdooOverrideValue(source="literal", value="https://site.example"),
+                source_label="fixture",
+            )
+            self.assertFalse(changed.last_apply.attempted)
+            self.assertEqual(changed.last_apply.status, "skipped")
+            self.assertEqual(
+                changed.last_apply.website_settings, record.last_apply.website_settings
+            )
+            self.assertFalse(changed.last_apply.website_settings_verified)
+
+    def test_two_slot_refuses_preparation_but_allows_withdrawal(self) -> None:
+        from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
+
+        cutover = OdooCutoverLane(
+            route_id="site",
+            host="example",
+            database="site",
+            database_uuid="db-uuid",
+            prepared_origin="https://prepared.example",
+            slots=(
+                OdooSlotCoordinates(
+                    slot_id="a", compose_id="app-a", private_url="https://a.example"
+                ),
+                OdooSlotCoordinates(
+                    slot_id="b", compose_id="app-b", private_url="https://b.example"
+                ),
+            ),
+            writers=(),
+        )
+
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            configured = profile()
+            configured = configured.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(update={"odoo_cutover": cutover})
+                        if lane.instance == "prod"
+                        else lane
+                        for lane in configured.lanes
+                    )
+                }
+            )
+            store.write_product_profile_record(configured)
+            with self.assertRaises(ValueError):
+                plan_website_settings(store, request())
+            self.assertFalse(
+                plan_website_settings(
+                    store, request().model_copy(update={"website_settings": None})
+                )["changed"]
             )
 
     def test_generic_apply_success_cannot_confirm_failed_website_settings(self) -> None:
@@ -379,13 +508,13 @@ class WebsiteSettingsTests(unittest.TestCase):
                     side_effect=apply,
                 ),
             ):
-                with self.assertRaises(click.ClickException):
-                    execute_odoo_post_deploy(
-                        artifact_id="artifact-prod",
-                        control_plane_root=Path(directory),
-                        record_store=store,
-                        request=OdooPostDeployRequest(context="example-site", instance="prod"),
-                    )
+                refused = execute_odoo_post_deploy(
+                    artifact_id="artifact-prod",
+                    control_plane_root=Path(directory),
+                    record_store=store,
+                    request=OdooPostDeployRequest(context="example-site", instance="prod"),
+                )
+                self.assertEqual(refused.post_deploy_status, "fail")
                 recovered = execute_odoo_post_deploy(
                     artifact_id="artifact-testing",
                     control_plane_root=Path(directory),
@@ -532,4 +661,28 @@ class WebsiteSettingsRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(replay.json()["replayed"])
             self.assertFalse(
                 build_release_review(store=store, profile=profile(), read=github_read).approved
+            )
+            withdrawal = (
+                request().model_copy(update={"website_settings": None}).model_dump(mode="json")
+            )
+            dry_clear = await http_request(
+                app, "POST", ODOO_WEBSITE_SETTINGS_ROUTE, headers=headers, payload=withdrawal
+            )
+            self.assertEqual(dry_clear.status_code, 202)
+            withdrawal.update(
+                mode="apply", reviewed_plan_sha256=dry_clear.json()["result"]["plan_sha256"]
+            )
+            cleared = await http_request(
+                app,
+                "POST",
+                ODOO_WEBSITE_SETTINGS_ROUTE,
+                headers={**headers, "Idempotency-Key": "website-withdrawal"},
+                payload=withdrawal,
+            )
+            self.assertEqual(cleared.status_code, 202)
+            self.assertTrue(cleared.json()["result"]["read_back_matches"])
+            self.assertIsNone(
+                store.read_odoo_instance_override_record(
+                    context_name="example-site", instance_name="prod"
+                ).website_settings
             )

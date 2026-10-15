@@ -26,6 +26,14 @@ plan. The apply response's readback is intent readback; it is not Odoo readback
 or live activation. This operation is exposed through the service API; it has
 no protected workflow or installed helper binding.
 
+To withdraw pending intent, send `website_settings: null` through the same
+dry-run/reviewed-apply path. This preserves the applied/attempted snapshot and
+changes no Odoo state. Subsequent release checklists explicitly inherit verified
+applied values for the new candidate, so withdrawal cannot hide an active setting.
+To switch collection off, prepare explicit disabled settings for acceptance.
+Withdrawal remains available without a testing candidate
+and on a two-slot lane; preparing new settings on that unsupported driver is refused.
+
 The Client release checklist shows these exact settings and includes their
 digest in the candidate identity. Changing a setting invalidates that release's
 acceptance even when the artifact is unchanged. Production application selects
@@ -42,8 +50,9 @@ also executes a generated copy of the committed devkit consumer through the
 runtime's native Odoo shell; rollback images need not contain the new consumer.
 The rendered legacy parameter carries the same indexing choice, so an older
 image's startup settings addon cannot re-enable the forward flag.
-A failed consumer, including the recovery path after a failed workflow, keeps
-web stopped. No new credential or provider interface is introduced.
+A failed workflow attempts native verification before restarting web; failed
+verification keeps web stopped. Its workflow result remains failed even when
+verification allows web to restart. No new credential or provider interface is introduced.
 
 A preparation alone never changes unrelated rollback: historical clearing is
 triggered only by a recorded applied/attempted website snapshot. Same-artifact
@@ -74,7 +83,11 @@ Maintain the generated maintenance program from one committed source with
 <checkout> --revision <commit>`. It reads the Git blob at that immutable commit,
 not the working tree. Add `--check` to verify exact agreement with the generated module. Commit the generated module with its source revision;
 include consumer changes, native-shell/transport tests and review in the same
-delivery. Values still come only from the accepted runtime payload.
+delivery. Update `tests/fixtures/website-settings/consumer.txt` and its immutable
+Git-blob metadata in `artifacts.json` with the generated module. Values still
+come only from the accepted runtime payload. The runtime must provide the native
+startup shell/config functions covered by the legacy fixture; qualify the actual
+testing and retained rollback images before live activation.
 
 Native Odoo consent behavior remains Essential only / Accept all. These fields
 are an application contract, not proof of Client consent acceptance, personal-

@@ -223,6 +223,12 @@ class OdooOverrideApplyResult(BaseModel):
         json_schema_extra={"x-launchplane-optional-response": True},
     )
 
+    def for_override_edit(self) -> "OdooOverrideApplyResult":
+        return OdooOverrideApplyResult(
+            website_settings=self.website_settings,
+            website_settings_verified=self.website_settings_verified,
+        )
+
     @model_validator(mode="after")
     def _validate_apply_result(self) -> "OdooOverrideApplyResult":
         self.applied_at = self.applied_at.strip()
@@ -269,13 +275,8 @@ class OdooInstanceOverrideRecord(BaseModel):
             raise ValueError("Odoo instance override record requires instance")
         if not self.updated_at:
             raise ValueError("Odoo instance override record requires updated_at")
-        if (
-            not self.config_parameters
-            and not self.addon_settings
-            and self.website_bootstrap is None
-            and self.website_settings is None
-        ):
-            raise ValueError("Odoo instance override record requires at least one override")
+        # Withdrawing the last pending website intent leaves an inert record;
+        # retain it so applied/attempted readback history survives withdrawal.
         if not self.apply_on:
             raise ValueError("Odoo instance override record requires at least one apply phase")
         if len(self.apply_on) != len(set(self.apply_on)):

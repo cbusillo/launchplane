@@ -1112,6 +1112,13 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 run = self._run(script, web_status="exited", FAKE_WEBSITE_SETTINGS_FAILURE=failed)
                 self.assertEqual(run.returncode == 0, failed == "0", run.stdout + run.stderr)
                 self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
+        for failed in ("0", "1"):
+            with self.subTest(workflow_failure=True, native_failure=failed):
+                run = self._run(
+                    script, FAKE_WORKFLOW_EXIT="7", FAKE_WEBSITE_SETTINGS_FAILURE=failed
+                )
+                self.assertEqual(run.returncode, 7, run.stdout + run.stderr)
+                self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
 
     def test_stopped_web_without_a_readback_still_fails(self) -> None:
         run = self._run(_render_script(instance="prod"), web_status="exited")

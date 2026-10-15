@@ -191,6 +191,17 @@ def release_website_settings(
     if instance == "prod" and not record.last_apply.website_settings_verified:
         return None
     settings = record.last_apply.website_settings if instance == "prod" else record.website_settings
+    if (
+        instance != "prod"
+        and settings is None
+        and record.last_apply.website_settings_verified
+        and record.last_apply.website_settings is not None
+    ):
+        # Withdrawal removes the pending change, not the verified baseline.
+        # Review and re-apply that baseline explicitly for the new artifact.
+        settings = record.last_apply.website_settings.model_copy(
+            update={"artifact_id": artifact_id}
+        )
     return settings if settings is not None and settings.artifact_id == artifact_id else None
 
 

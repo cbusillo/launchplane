@@ -76734,7 +76734,14 @@
                     "type": "string"
                   },
                   "website_settings": {
-                    "$ref": "#/$defs/OdooWebsiteSettingsIntent"
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/OdooWebsiteSettingsIntent"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [

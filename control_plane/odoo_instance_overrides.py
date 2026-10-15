@@ -293,6 +293,10 @@ def render_post_deploy_payload(
     website_settings = (
         selected_website_settings if odoo_instance_is_production(record.instance) else None
     )
+    if record.website_settings is not None or record.last_apply.website_settings is not None:
+        config_parameters = [
+            item for item in config_parameters if item.key != WEBSITE_INDEXING_PARAMETER
+        ]
     if website_settings is not None:
         # The legacy settings addon runs on every startup, even on rollback images.
         # Keep its parameter path in agreement with the typed native consumer.
