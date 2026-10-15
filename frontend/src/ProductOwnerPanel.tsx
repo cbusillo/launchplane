@@ -405,6 +405,7 @@ interface ProfileFieldPlan {
   changed: boolean;
   digest: string;
   lanes: Array<{ instance: string; artifact: string }>;
+  enablesProductionBootstrap?: boolean;
 }
 
 function profileFieldPlan(response: AcceptedEvidenceResponse, field: ProfileField): ProfileFieldPlan {
@@ -419,6 +420,8 @@ function profileFieldPlan(response: AcceptedEvidenceResponse, field: ProfileFiel
     before: result[`${prefix}_before`] as string,
     after: result[`${prefix}_after`] as string,
     changed: result.changed,
+    enablesProductionBootstrap: result.prelaunch_bootstrap_authorized_before === false &&
+      result.prelaunch_bootstrap_authorized_after === true,
     digest: typeof result.plan_sha256 === "string" ? result.plan_sha256 : "",
     lanes: Array.isArray(result.lanes) ? result.lanes.map((lane) => ({
       instance: String(lane.instance), artifact: String(lane.current_artifact_id || "No recorded artifact"),
@@ -576,7 +579,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
           ? "Change where this product publishes new images. Recorded rollback artifacts remain available."
           : field === "release"
             ? "Held: the Client's acceptance only records a decision. Promote: the Client's acceptance starts the gated production release. With rollback drill (Odoo or generic web): the next accepted release also rolls back to its reviewed production version, takes a second verified backup, and promotes the same version again. After one drill passes, later releases only promote. Director standing acceptance (generic web): use only when the recorded Client is the Director; Launchplane accepts each complete candidate and releases it automatically. Applying this setting enables production releases."
-            : "Prelaunch exempts this product from release review. Unknown and live require review."}</p>
+            : "An explicitly confirmed prelaunch product is exempt from release review. Unknown and live require review."}</p>
       </div></header>
       <p>Current: {current === null ? "Reading profile…" : current || "Not set"}</p>
       <fieldset disabled={locked || current === null} aria-label={`Change ${title.toLowerCase()}`}>
@@ -612,6 +615,9 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
       {notice ? <p role="status">{notice}</p> : null}
       {reviewed && matches ? <div className="product-owner-plan">
         <p>{reviewed.plan.before || "Not set"} → {reviewed.plan.after || "Not set"}{reviewed.plan.changed ? "" : " (no change)"}</p>
+        {reviewed.plan.enablesProductionBootstrap ? <p role="note">
+          This confirms the product has never served a live site and enables its initial production deployment without Client release review.
+        </p> : null}
         {reviewed.plan.lanes.length ? <ul>{reviewed.plan.lanes.map((lane) =>
           <li key={lane.instance}>{lane.instance}: {lane.artifact}</li>)}</ul> : null}
       </div> : null}

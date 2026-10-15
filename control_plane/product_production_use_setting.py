@@ -12,7 +12,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.preview_record import PreviewRecord
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -74,6 +74,12 @@ class ProductProductionUsePlan(BaseModel):
     profile_updated_at_before: str
     profile_updated_at_after: str = ""
     plan_sha256: str
+    prelaunch_bootstrap_authorized_before: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    prelaunch_bootstrap_authorized_after: bool | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
 
 def build_product_production_use_plan(
@@ -108,6 +114,11 @@ def build_product_production_use_plan(
     ).hexdigest()
     if request.mode == "apply" and request.reviewed_plan_sha256 != digest:
         raise ProductProductionUseChangedError("The plan changed; review a new dry run.")
+    bootstrap_reconfirmation = (
+        profile.production_use_authority == "director_agent"
+        and authority == "explicit"
+        and request.production_use == "prelaunch"
+    )
     return ProductProductionUsePlan(
         mode=request.mode,
         product=profile.product,
@@ -122,6 +133,8 @@ def build_product_production_use_plan(
         source_label=source,
         profile_updated_at_before=profile.updated_at,
         plan_sha256=digest,
+        prelaunch_bootstrap_authorized_before=False if bootstrap_reconfirmation else None,
+        prelaunch_bootstrap_authorized_after=True if bootstrap_reconfirmation else None,
     )
 
 

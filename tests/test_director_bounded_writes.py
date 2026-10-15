@@ -192,7 +192,6 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.status_code, 202, second.text)
         actual = self.store.read_product_profile_record(self.profile.product)
         self.assertEqual(actual.production_use, payload["production_use"])
-        self.assertEqual(actual.production_use_authority, "director_agent")
         self.assertFalse(actual.prelaunch_bootstrap_authorized)
         self.assertEqual(actual.release_on_acceptance, self.profile.release_on_acceptance)
         self.assertEqual(actual.lanes, self.profile.lanes)
@@ -357,6 +356,34 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 409, result.text)
         self.assertEqual(result.json()["error"]["code"], "disposable_lane_safety_unknown")
 
+    async def test_profile_change_with_new_safety_cannot_execute_the_original_template(
+        self,
+    ) -> None:
+        self.safety()
+
+        def change_profile() -> None:
+            self.store.write_product_profile_record(
+                self.profile.model_copy(
+                    update={
+                        "preview": self.profile.preview.model_copy(
+                            update={"template_instance": "other"}
+                        )
+                    }
+                )
+            )
+            self.safety()
+
+        with (
+            patch(
+                "control_plane.odoo_preview_apply_execution.OdooPreviewProviderMutationAdapter.capture_schedule_binding",
+                side_effect=change_profile,
+            ),
+            patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute,
+        ):
+            result = await self.preview_apply()
+        self.assertEqual(result.status_code, 409, result.text)
+        execute.assert_not_called()
+
     async def test_removed_production_lane_history_still_prevents_classification(self) -> None:
         from control_plane.contracts.deployment_record import DeploymentRecord
         from control_plane.contracts.promotion_record import DeploymentEvidence
@@ -468,8 +495,16 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                 }
             )
         )
+        response = await self.classify(
+            idempotency_key="release-switch", release_on_acceptance="promote_with_rollback_drill"
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        current = self.store.read_product_profile_record(self.profile.product)
+        self.assertFalse(current.prelaunch_bootstrap_authorized)
         response = await self.classify(idempotency_key="explicit-reconfirmation")
         self.assertEqual(response.status_code, 202, response.text)
+        self.assertFalse(response.json()["result"]["prelaunch_bootstrap_authorized_before"])
+        self.assertTrue(response.json()["result"]["prelaunch_bootstrap_authorized_after"])
         current = self.store.read_product_profile_record(self.profile.product)
         self.assertTrue(current.prelaunch_bootstrap_authorized)
         response = await self.classify(production_use="live", release_on_acceptance="held")

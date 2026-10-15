@@ -7199,6 +7199,8 @@ def create_launchplane_fastapi_app(
             try:
                 lane_store = cast(DisposableLaneStore, record_store)
                 current_profile = lane_store.read_product_profile_record(product_profile.product)
+                if current_profile != product_profile:
+                    raise DisposableLaneSafetyUnknown("The preview profile changed; plan again.")
                 preview = resolve_disposable_preview(
                     lane_store, current_profile, issued_plan.context, issued_plan.preview_slug
                 )
@@ -12863,6 +12865,16 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
+        if existing_profile is not None and (
+            profile.production_use != existing_profile.production_use
+            or profile.production_use_authority != existing_profile.production_use_authority
+        ):
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="production_use_bounded_apply_required",
+                message="Change production classification through the reviewed production-use endpoint.",
+            )
         if profile.release_on_acceptance != (
             existing_profile.release_on_acceptance if existing_profile is not None else "held"
         ) or (
@@ -14278,6 +14290,12 @@ def create_launchplane_fastapi_app(
                 if profile.production_use == "prelaunch"
                 else "director_agent"
             )
+        elif (
+            production_use_request.production_use == profile.production_use
+            and production_use_request.release_on_acceptance is not None
+        ):
+            # Changing the release switch is not a bootstrap attestation.
+            classification_authority = profile.production_use_authority
         try:
             plan = control_plane_product_production_use_setting.build_product_production_use_plan(
                 profile=profile,

@@ -215,6 +215,13 @@ explicitly reconfirm a classification for production bootstrap; this source path
 cannot do so. Prelaunch and held products still cannot start an
 acceptance-triggered release.
 
+Existing full-profile writes cannot change classification or its provenance;
+they point to that reviewed endpoint. Changing only release-acceptance settings
+preserves provenance. Explicit re-confirmation of an agent attestation returns
+the before/after bootstrap-exemption effect in the reviewed plan, and the
+Client-settings panel displays it before Apply. Ordinary bounded agent
+classification keeps its existing response shape and supplies no exemption.
+
 Odoo preview apply uses the same source-owned Director identity boundary as
 [testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
 including preview destruction. It requires the caller's exact service-issued

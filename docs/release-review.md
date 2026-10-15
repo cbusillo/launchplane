@@ -408,6 +408,9 @@ The bounded Director-agent never-live classification persists
 `production_use_authority=director_agent` and supplies no production exemption.
 Existing explicit classifications retain their behavior; a current authorized
 `product_profile.write` dry run and reviewed Apply can reconfirm one explicitly.
+The plan and Client-settings panel show that this reconfirmation enables initial
+production deployment without Client release review. A release-switch change
+does not reconfirm it, and a full-profile write cannot reset its provenance.
 Existing records default to `unknown`, which requires review. No real product
 names or classifications are supplied by code or checked-in configuration.
 The Director must review this distinction before deploying the gate; deployment

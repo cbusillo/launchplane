@@ -67,6 +67,33 @@ def _apply(expected: str) -> dict[str, object]:
 
 
 class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_profile_write_cannot_reset_agent_classification_provenance(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = _store(Path(directory))
+            self.addCleanup(store.close)
+            original = _profile().model_copy(
+                update={"production_use": "prelaunch", "production_use_authority": "director_agent"}
+            )
+            store.write_product_profile_record(original)
+            for change in (
+                {},
+                {"production_use_authority": "explicit"},
+                {"production_use": "live"},
+            ):
+                with self.subTest(change=change):
+                    payload = original.model_dump(mode="json")
+                    payload.pop("production_use_authority")
+                    payload.update(change)
+                    response = await _asgi_request(
+                        _app(store),
+                        "POST",
+                        "/v1/product-profiles",
+                        headers={"Authorization": "Bearer valid-token"},
+                        payload=payload,
+                    )
+                    self.assertEqual(response.status_code, 409, response.text)
+                    self.assertEqual(store.read_product_profile_record(_PRODUCT), original)
+
     async def test_raw_profile_write_cannot_enable_standing_or_replace_its_client(self) -> None:
         with TemporaryDirectory() as directory:
             store = _store(Path(directory))
