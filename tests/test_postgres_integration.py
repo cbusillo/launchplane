@@ -1461,6 +1461,35 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_odoo_copy_connections_are_repaired_with_postgres_sql(self) -> None:
+        import psycopg
+        from control_plane.odoo_connection_isolation import connection_isolation_library
+        from tests.test_odoo_connection_isolation import seed
+
+        namespace: dict[str, Any] = {}
+        exec(connection_isolation_library(), namespace)
+        repair = namespace["connection_isolation"]
+        with _isolated_postgres_database() as url:
+            with psycopg.connect(
+                url.replace("postgresql+psycopg://", "postgresql://")
+            ) as connection:
+                seed(connection)
+                with connection.cursor() as cursor:
+                    before = repair(cursor, apply=False)
+                    self.assertIn("customer_sms/res_company", before)
+                    self.assertIn("iap/iap_account", before)
+                    self.assertIn("carrier/usps_api_secret", before)
+                    self.assertEqual(repair(cursor, apply=True), [])
+                    self.assertEqual(repair(cursor, apply=False), [])
+                    cursor.execute(
+                        "SELECT active FROM delivery_carrier WHERE delivery_type = 'fixed'"
+                    )
+                    self.assertEqual(cursor.fetchone(), (True,))
+                    cursor.execute(
+                        "SELECT value FROM ir_config_parameter WHERE key = 'shopify.api_token'"
+                    )
+                    self.assertEqual(cursor.fetchone(), ("development-store-key",))
+
     def _public_host_bundle(
         self, store: PostgresRecordStore
     ) -> tuple[
