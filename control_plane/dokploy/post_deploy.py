@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import re
 import shlex
@@ -43,6 +44,37 @@ from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MA
 
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
+ODOO_POST_DEPLOY_SCHEDULE_UPSERT = "post_deploy_schedule_upsert"
+ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY = Path("/var/lock")
+
+
+def odoo_testing_schedule_lock_script(compose_app_name: str) -> str:
+    """Hold the host execution lock through SQL, readback and web restart."""
+    digest = hashlib.sha256(compose_app_name.encode()).hexdigest()
+    lock_path = ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY / f"launchplane-odoo-{digest}.lock"
+    return f"""exec 9>{shlex.quote(str(lock_path))}
+if ! flock -n 9; then
+    printf 'integration_readback_refused=testing_resources/workflow_active\\n' >&2
+    exit 1
+fi
+"""
+
+
+def odoo_testing_idle_runner_script(container_variable: str) -> str:
+    if container_variable not in {"runner", "script_runner_container_id"}:
+        raise ValueError("Unknown runner variable")
+    return f"""for runner_probe in 1 2 3; do
+    runner_execs=$(docker inspect -f '{{{{json .ExecIDs}}}}' "${{{container_variable}}}")
+    case "$runner_execs" in null|'[]') break ;; esac
+    if [ "$runner_probe" = 3 ]; then
+        printf 'integration_readback_refused=testing_resources/runner_exec_active\\n' >&2
+        exit 1
+    fi
+    # Let a short native health probe finish without ignoring any active exec.
+    sleep 0.1
+done
+"""
+
 
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME = "platform-odoo-bootstrap"
@@ -143,6 +175,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "connection_isolation_ok",
         "testing_resources_ok",
         TESTING_RESOURCES_INCOMPLETE_MARKER,
+        "connection_isolation_resources_ok",
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
@@ -310,6 +343,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
     if key == "testing_resources_binding_sha256":
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
+    if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
+        return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
     if key == "website_bootstrap_company_email_skip_reason":
         return value == ODOO_COMPANY_EMAIL_SKIP_REASON
     if key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS:
@@ -414,7 +449,7 @@ def run_manual_data_schedule(
     before_provider_mutation: Callable[[str], None] | None = None,
 ) -> dict[str, str]:
     if before_provider_mutation is not None:
-        before_provider_mutation("post_deploy_schedule_upsert")
+        before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
     schedule = api.upsert_dokploy_schedule(
         host=host,
         token=token,
@@ -2512,6 +2547,7 @@ def _build_dokploy_data_workflow_script(
     )
     return f"""#!/usr/bin/env bash
 set -euo pipefail
+{odoo_testing_schedule_lock_script(compose_app_name) if hold_web_until_integration_readback else ""}
 
 compose_project={quoted_compose_app_name}
 database_name={quoted_database_name}
@@ -2671,6 +2707,7 @@ exit_trap() {{
 database_container_id=$(resolve_single_container_any_state "database")
 script_runner_container_id=$(resolve_single_running_container "script-runner")
 web_container_id=$(resolve_single_container_any_state "web")
+{odoo_testing_idle_runner_script("script_runner_container_id") if hold_web_until_integration_readback else ""}
 
 ensure_running "${{database_container_id}}" "database"
 web_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")
