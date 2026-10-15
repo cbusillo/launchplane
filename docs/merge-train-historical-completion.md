@@ -16,7 +16,7 @@ for the same repository and base branch. Repository identity is compared without
 regard to case, including when the historical target preserves mixed-case
 spelling; branch case stays exact. The comparison leaves historical payloads
 and digests unchanged. Terminal effects and effects for other repositories or
-branches do not create this unresolved-effect fence. The historical-completion
+branches do not create this unresolved-effect fence. The native historical-completion
 recovery preflight below has its own stricter exclusion, including terminal
 effects.
 
