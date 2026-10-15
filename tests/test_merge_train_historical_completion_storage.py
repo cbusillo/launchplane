@@ -31,6 +31,8 @@ from control_plane.storage.postgres import (
     PostgresRecordStore,
 )
 from tests.test_merge_train_historical_completion import (
+    BASE_BRANCH,
+    REPOSITORY,
     _HistoricalCompletionFixture,
     _ReadOnlyTransport,
     _assess,
@@ -348,7 +350,7 @@ class PortableHistoricalEffectPreflightTests(unittest.TestCase):
                 self.assertEqual(row.revision, original_revision)
 
     def test_preflight_excludes_unresolved_effect_for_equivalent_repository_case(self) -> None:
-        for repository in ("acme/widget", "ACME/WIDGET", "Acme/Widget"):
+        for repository in (REPOSITORY, REPOSITORY.upper(), REPOSITORY.title()):
             for state in (
                 "reserved",
                 "dispatching",
@@ -358,7 +360,7 @@ class PortableHistoricalEffectPreflightTests(unittest.TestCase):
             ):
                 with self.subTest(repository=repository, state=state):
                     self.assert_preflight(
-                        repository=repository, base_branch="main", state=state, excluded=True
+                        repository=repository, base_branch=BASE_BRANCH, state=state, excluded=True
                     )
 
     def test_portable_preflight_preserves_terminal_history_and_target_isolation(self) -> None:
@@ -372,13 +374,17 @@ class PortableHistoricalEffectPreflightTests(unittest.TestCase):
         ):
             with self.subTest(state=state):
                 self.assert_preflight(
-                    repository="Acme/Widget", base_branch="main", state=state, excluded=False
+                    repository=REPOSITORY.title(),
+                    base_branch=BASE_BRANCH,
+                    state=state,
+                    excluded=False,
                 )
+        owner, name = REPOSITORY.split("/")
         for repository, base_branch in (
-            ("other/widget", "main"),
-            ("acme/other", "main"),
-            ("Acme/Widget", "MAIN"),
-            ("Acme/Widget", "other-branch"),
+            (f"other-{owner}/{name}", BASE_BRANCH),
+            (f"{owner}/other-{name}", BASE_BRANCH),
+            (REPOSITORY.title(), BASE_BRANCH.swapcase()),
+            (REPOSITORY.title(), f"other-{BASE_BRANCH}"),
         ):
             with self.subTest(repository=repository, base_branch=base_branch):
                 self.assert_preflight(
