@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 import type { GovernanceProjectionResponse } from "../../src/generated/openapi.ts";
 
 test("unavailable current evidence preserves stored history without granting authority", async ({ page }, testInfo) => {

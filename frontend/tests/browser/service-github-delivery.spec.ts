@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./state";
 
 const metadata = {
   status: "ok", trace_id: "metadata", app_id: "", integration: "", advisory_app_id: "77",

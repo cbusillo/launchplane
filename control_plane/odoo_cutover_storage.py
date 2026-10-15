@@ -4,10 +4,28 @@ from typing import Protocol
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooOverrideApplyResult,
+)
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 
 
 class DeploymentStore(Protocol):
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+    def update_odoo_instance_override_apply_result(
+        self,
+        *,
+        context_name: str,
+        instance_name: str,
+        last_apply: OdooOverrideApplyResult,
+        updated_at: str,
+        source_label: str,
+        preserve_website_settings: bool = False,
+    ) -> OdooInstanceOverrideRecord: ...
+
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> object: ...
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...

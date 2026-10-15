@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 
 const request = {
   status: "ok", trace_id: "test-read", product: "example-site", display_name: "Example Site", environment: "testing", can_submit: true,

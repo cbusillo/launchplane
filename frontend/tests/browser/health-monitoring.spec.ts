@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "private", "endpoint-changed", "removed-check", "refresh-during-review", "stale", "denied", "readback-failed", "read-only"]) {
   test(`monitoring editor reviews stored policy and handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
@@ -95,10 +95,10 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     await panel.getByLabel("Reason", { exact: true }).fill("Enable the approved testing monitor.");
     await review.click();
     if (outcome === "refresh-during-review") {
-      await expect.poll(() => releaseReview !== null).toBe(true);
+      await waitForState(() => releaseReview !== null).toBe(true);
       const readsBeforeRefresh = profileReads;
       await page.getByRole("button", { name: "Refresh current evidence" }).click();
-      await expect.poll(() => profileReads).toBeGreaterThan(readsBeforeRefresh);
+      await waitForState(() => profileReads).toBeGreaterThan(readsBeforeRefresh);
       await (releaseReview as unknown as () => Promise<void>)();
       await expect(panel).toHaveAttribute("aria-busy", "false");
       await expect(panel.getByRole("button", { name: "Apply reviewed monitoring" })).toHaveCount(0);
@@ -145,7 +145,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
       await page.reload();
       panel = page.getByRole("region", { name: "Health monitoring", exact: true });
       await panel.getByRole("button", { name: "Retry original monitoring request" }).click();
-      await expect.poll(() => applies.length).toBe(2);
+      await waitForState(() => applies.length).toBe(2);
       expect(applies[1]).toEqual(applies[0]);
       if (outcome === "uncertain-stale") {
         await expect(panel.getByRole("button", { name: "Retry original monitoring request" })).toHaveCount(0);
@@ -157,7 +157,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
         await panel.getByRole("button", { name: "Review monitoring change" }).click();
         await panel.getByLabel("I confirm this monitoring change on testing.").check();
         await panel.getByRole("button", { name: "Apply reviewed monitoring" }).click();
-        await expect.poll(() => applies.length).toBe(3);
+        await waitForState(() => applies.length).toBe(3);
         expect(applies[2].key).not.toBe(applies[0].key);
       }
     }

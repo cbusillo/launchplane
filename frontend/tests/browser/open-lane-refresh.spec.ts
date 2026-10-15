@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { setClockTime, waitForState, expect, test } from "./state";
 import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 for (const environmentView of [false, true]) {
@@ -15,8 +15,7 @@ for (const environmentView of [false, true]) {
     });
     const start = Date.parse(fixtures.detail.provenance.stale_after) - 1000;
     // Pause one second before expiry so page load cannot spend the fresh window.
-    await page.clock.install({ time: new Date(start - 1000) });
-    await page.clock.pauseAt(new Date(start));
+    await setClockTime(page, start);
     let responseMode: "old" | "delay" | "fail" | "unverified" | "fresh" = "old";
     let reads = 0;
     let inventoryReads = 0;
@@ -89,7 +88,7 @@ for (const environmentView of [false, true]) {
     const initialReads = reads;
     responseMode = "delay";
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect.poll(() => Boolean(releaseRead)).toBe(true);
+    await waitForState(() => Boolean(releaseRead)).toBe(true);
     expect(reads).toBe(initialReads + 1);
     await page.clock.runFor(2 * READ_REFRESH_INTERVAL_MS);
     expect(reads).toBe(initialReads + 1);
@@ -102,11 +101,11 @@ for (const environmentView of [false, true]) {
     // Immediate failures with the same status must keep retrying even if React
     // batches loading and error into one render.
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect.poll(() => reads).toBe(initialReads + 2);
+    await waitForState(() => reads).toBe(initialReads + 2);
     await expect(signal).toContainText("Stale");
     responseMode = "unverified";
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect.poll(() => reads).toBe(initialReads + 3);
+    await waitForState(() => reads).toBe(initialReads + 3);
     await expect(signal).toHaveAttribute("data-tone", "warning");
     await expect(signal).toContainText("Recorded");
     responseMode = "fresh";
@@ -119,7 +118,7 @@ for (const environmentView of [false, true]) {
       window.dispatchEvent(new Event("focus"));
       window.dispatchEvent(new Event("focus"));
     });
-    await expect.poll(() => reads).toBe(initialReads + 4);
+    await waitForState(() => reads).toBe(initialReads + 4);
     await expect(signal).toHaveAttribute("data-tone", environmentView ? "pass" : "verified");
     await expect(signal).not.toContainText("Stale");
     // Inventory has its own read lifecycle, including the rail's lane evidence.
@@ -128,20 +127,20 @@ for (const environmentView of [false, true]) {
     await page.screenshot({ path: `../tmp/browser-smoke/open-${environmentView ? "environment" : "workspace"}-recovered-${testInfo.project.name}.png`, fullPage: true });
     delayInventory = true;
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect.poll(() => Boolean(releaseInventory)).toBe(true);
+    await waitForState(() => Boolean(releaseInventory)).toBe(true);
     const manualRefresh = page.getByRole("button", { name: "Refresh current evidence" });
     await expect(manualRefresh).toBeEnabled();
     delayInventory = false;
     const delayedInventoryReads = inventoryReads;
     await manualRefresh.click();
-    await expect.poll(() => inventoryReads).toBe(delayedInventoryReads + 1);
+    await waitForState(() => inventoryReads).toBe(delayedInventoryReads + 1);
     releaseInventory!();
     await expect(manualRefresh.locator("svg")).not.toHaveClass(/spin/);
     await expect(page.locator(".rail-products")).not.toContainText("Obsolete delayed inventory");
     responseMode = "delay";
     releaseRead = undefined;
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect.poll(() => Boolean(releaseRead)).toBe(true);
+    await waitForState(() => Boolean(releaseRead)).toBe(true);
     const observedReads = reads;
     await page.getByRole("link", { name: "Engineering Ops" }).click();
     await expect(page.getByRole("heading", { name: "Platform delivery systems", exact: true })).toBeVisible();
@@ -170,7 +169,7 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
       return { products, product, detail, config, identity: module.fixtureIdentity,
         readiness: module.operationalReadinessForFixture("products", detail, action) };
     });
-    await page.clock.install({ time: new Date(fixtures.detail.provenance.refreshed_at) });
+    await setClockTime(page, fixtures.detail.provenance.refreshed_at);
     let detailReads = 0;
     let configReads = 0;
     let readinessReads = 0;
@@ -216,19 +215,19 @@ for (const view of ["actions", "runtime-settings", "managed-secrets"]) {
     // Wall-clock corrections must not stop the monotonic refresh timer.
     await page.clock.setSystemTime(new Date(Date.parse(fixtures.detail.provenance.refreshed_at) - 3600_000));
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect.poll(() => detailReads).toBe(observedDetailReads + 1);
+    await waitForState(() => detailReads).toBe(observedDetailReads + 1);
     await expect(page.getByText("Refreshing evidence", { exact: true })).not.toBeVisible();
     expect(configReads).toBe(observedConfigReads);
     expect(readinessReads).toBe(observedReadinessReads);
     if (view === "actions") {
       await expect(page.getByLabel("Inspect exact action")).toHaveValue(selectedAction);
       await page.getByRole("button", { name: "Refresh current evidence" }).click();
-      await expect.poll(() => readinessReads).toBeGreaterThan(observedReadinessReads);
+      await waitForState(() => readinessReads).toBeGreaterThan(observedReadinessReads);
       await expect(page.getByLabel("Inspect exact action")).toHaveValue(selectedAction);
       const afterManualReadinessReads = readinessReads;
       fixtures.detail.target.expected_runtime_identity.artifact_id = "fixture-next-expected-artifact";
       await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-      await expect.poll(() => readinessReads).toBe(afterManualReadinessReads + 1);
+      await waitForState(() => readinessReads).toBe(afterManualReadinessReads + 1);
       expect(expectedArtifact).toBe("fixture-next-expected-artifact");
     } else {
       await expect(page.locator('.product-config-field').first()

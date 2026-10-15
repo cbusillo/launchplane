@@ -8904,6 +8904,10 @@ def create_launchplane_fastapi_app(
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
         )
         from control_plane.testing_activation import require_activation_hold_lift
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRefusal,
+            TestingActivationRefusalCode,
+        )
 
         if hold_request.activation_plan_sha256 and not director_agent_identity(identity):
             raise _launchplane_http_error(
@@ -8939,7 +8943,11 @@ def create_launchplane_fastapi_app(
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
-                    code="testing_activation_unverified",
+                    code=(
+                        error.public_code
+                        if isinstance(error, TestingActivationRefusal)
+                        else TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value
+                    ),
                     message="The original activation interlock is not safe to lift.",
                 ) from error
 
@@ -9072,7 +9080,11 @@ def create_launchplane_fastapi_app(
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="testing_activation_unverified",
+                code=(
+                    error.public_code
+                    if isinstance(error, TestingActivationRefusal)
+                    else TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value
+                ),
                 message="The original activation interlock is not safe to lift.",
             ) from error
         response = accepted_evidence_response(
@@ -14695,6 +14707,23 @@ def create_launchplane_fastapi_app(
                 lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
             ),
         )
+        if write_result.status == "history_busy":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="production_history_busy",
+                message=(
+                    "Product authority or history is busy. No classification change was applied. "
+                    "Retry the same reviewed request with the same Idempotency-Key."
+                ),
+            )
+        if write_result.status == "history_conflict":
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Recorded production or promotion history prevents agent classification.",
+            )
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
                 raise RuntimeError("Replayed product production use write requires evidence.")
@@ -29303,6 +29332,16 @@ def create_launchplane_fastapi_app(
     from control_plane.http_routes.testing_activation import register_testing_activation_routes
 
     register_testing_activation_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        actor=launchplane_identity_actor,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
+    from control_plane.http_routes.production_recipient import register_production_recipient_routes
+
+    register_production_recipient_routes(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,

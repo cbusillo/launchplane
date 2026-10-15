@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 for (const outcome of ["success", "uncertain", "stale", "busy", "wrong-actor", "missing-receipt", "revoked"]) {
   const invalidHandle = outcome === "wrong-actor" || outcome === "missing-receipt" || outcome === "revoked";
@@ -78,7 +78,7 @@ for (const outcome of ["success", "uncertain", "stale", "busy", "wrong-actor", "
       await panel.getByRole("button", { name: "Recover restart from activity" }).click();
       await expect(panel.getByLabel("Reason", { exact: true })).toBeDisabled();
       await panel.getByRole("button", { name: "Resume existing restart request" }).click();
-      await expect.poll(() => applies.length).toBe(2);
+      await waitForState(() => applies.length).toBe(2);
       if (invalidHandle) {
         await expect(panel.getByRole("button", { name: "Resume existing restart request" })).toHaveCount(0);
         await expect(panel.getByLabel("Reason", { exact: true })).toBeEnabled();
@@ -94,7 +94,7 @@ for (const outcome of ["success", "uncertain", "stale", "busy", "wrong-actor", "
       await panel.getByRole("button", { name: "Resume existing restart request" }).click();
       await expect(panel.getByRole("status")).toContainText("Lane temporarily held");
       await panel.getByRole("button", { name: "Resume existing restart request" }).click();
-      await expect.poll(() => applies.length).toBe(4);
+      await waitForState(() => applies.length).toBe(4);
       for (const resumed of applies.slice(1)) expect(resumed).toEqual({ key: applies[0].key, body: { ...(applies[0].body as object), mode: "reconcile" } });
     } else if (outcome === "stale" || outcome === "busy") {
       await expect(panel.getByRole("status")).toContainText("refused before a service change");

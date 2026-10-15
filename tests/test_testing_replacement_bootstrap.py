@@ -1,6 +1,7 @@
 """Fresh generation continuation against real record transactions and fake provider IO."""
 
 from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Any
 import unittest
 from unittest.mock import Mock, patch
@@ -307,6 +308,130 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
 
 
 class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
+    def native_capture_custody(self) -> None:
+        from control_plane.odoo_testing_native_source import native_testing_source_authority
+        from control_plane.contracts.odoo_testing_source import (
+            NativeOdooTestingSource,
+            NativeTestingCopyCapture,
+            NativeTestingCopyArtifact,
+        )
+        from control_plane.odoo_testing_restore import generation_binding
+
+        self.patches()
+        source_context = next(
+            lane.context for lane in self.profile.lanes if lane.instance == "prod"
+        )
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=source_context,
+                instance="prod",
+                env={
+                    "ODOO_DB_NAME": "source_database",
+                    "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
+                },
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.request = self.request.model_copy(update={"source_mode": "container-export"})
+        self.review()
+        self.apply()
+        generation = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        assert generation is not None
+        authority = native_testing_source_authority(
+            self.store,
+            profile=self.store.read_product_profile_record(self.profile.product),
+            testing_context=self.fixture.context,
+        )
+        self.assertEqual(authority.binding_sha256, generation.source_binding_sha256)
+        # An unrelated production setting or bookkeeping update does not change
+        # the exact database/filestore/target that this read was reviewed for.
+        source_runtime = next(
+            row
+            for row in self.store.list_runtime_environment_records(context_name=source_context)
+            if row.scope == "instance" and row.instance == "prod"
+        )
+        self.store.write_runtime_environment_record(
+            source_runtime.model_copy(
+                update={
+                    "env": {**source_runtime.env, "UNRELATED_SETTING": "fixture-update"},
+                    "updated_at": (
+                        datetime.fromisoformat(source_runtime.updated_at) + timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+        )
+        self.assertEqual(
+            native_testing_source_authority(
+                self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                testing_context=self.fixture.context,
+            ).binding_sha256,
+            authority.binding_sha256,
+        )
+        observed = NativeOdooTestingSource(
+            **authority.model_dump(mode="json"),
+            server_id="source",
+            compose_project="source-project",
+            database_container="a" * 64,
+            web_container="b" * 64,
+            database_image="sha256:" + "c" * 64,
+            web_image="sha256:" + "d" * 64,
+        )
+        capture = NativeTestingCopyCapture(
+            product=generation.product,
+            context=generation.context,
+            generation_binding_sha256=generation_binding(generation),
+            source_binding_sha256=authority.binding_sha256,
+            capture_id="e" * 32,
+            database=NativeTestingCopyArtifact(size=10, sha256="f" * 64),
+            filestore=NativeTestingCopyArtifact(size=20, sha256="a" * 64),
+            captured_at="fixture",
+            source_observation=observed,
+        )
+        self.store.write_native_testing_copy_capture(capture)
+        self.store.write_native_testing_copy_capture(capture)
+        self.assertEqual(
+            self.store.read_native_testing_copy_capture(generation_binding(generation)), capture
+        )
+        with self.assertRaises(ValueError):
+            self.store.write_native_testing_copy_capture(
+                capture.model_copy(update={"capture_id": "d" * 32})
+            )
+        with self.assertRaises(ValueError):
+            self.store.write_native_testing_copy_capture(
+                capture.model_copy(update={"generation_binding_sha256": "b" * 64})
+            )
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=source_context, instance_name="prod"
+            ),
+            self.production_before,
+        )
+
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=source_context,
+                instance="prod",
+                env={"ODOO_DB_NAME": "later_production_database"},
+                updated_at="2026-01-02T00:00:00Z",
+            )
+        )
+        self.assertNotEqual(
+            native_testing_source_authority(
+                self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                testing_context=self.fixture.context,
+            ).binding_sha256,
+            capture.source_binding_sha256,
+        )
+        self.assertEqual(
+            self.adapter().readback()["source_binding_sha256"], capture.source_binding_sha256
+        )
+
     def credential_comparison_failure(self) -> None:
         self.patches()
         for dependency, failure, expected in (

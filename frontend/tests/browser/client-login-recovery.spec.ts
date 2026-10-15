@@ -1,4 +1,4 @@
-import { expect, test, type Page, type Route } from "@playwright/test";
+import { waitForState, expect, test, type Page, type Route } from "./state";
 
 async function mockProduct(page: Page) {
   await page.goto("/ui/products/atlas-commerce?fixture=products");
@@ -111,7 +111,7 @@ for (const interruption of ["lost", "lost-reload", "reload-submitting", "navigat
     await panel.getByLabel("GitHub login").fill("first-client");
     await panel.getByLabel("Change reason").fill("First read-only preview.");
     await panel.getByRole("button", { name: "Preview change", exact: true }).click();
-    if (interruption === "navigation" || interruption === "reload-submitting") await expect.poll(() => requests.length).toBe(1);
+    if (interruption === "navigation" || interruption === "reload-submitting") await waitForState(() => requests.length).toBe(1);
     else await expect(panel.getByRole("status")).toContainText("Failed to fetch");
     if (interruption === "navigation") {
       await page.getByRole("link", { name: "Product Ops", exact: true }).click();
@@ -155,7 +155,7 @@ test(`Client-login uncertain Apply recovers after ${recovery} with the same requ
   await panel.getByLabel("Change reason").fill("Save the reviewed Client.");
   await panel.getByRole("button", { name: recovery === "clear-reload" ? "Clear" : "Preview change", exact: true }).click();
   await panel.getByRole("button", { name: "Save", exact: true }).click();
-  if (recovery === "reload-submitting") await expect.poll(() => applies.length).toBe(1);
+  if (recovery === "reload-submitting") await waitForState(() => applies.length).toBe(1);
   else await expect(panel.getByRole("button", { name: "Retry save", exact: true })).toBeEnabled();
   if (recovery === "legacy-no-draft") {
     // Existing tabs from before reviewed-draft persistence retain only the operation key.
@@ -231,11 +231,11 @@ for (const evidence of ["completed", "unresolved", "denied", "lost", "wrong-key"
       await panel.getByLabel("GitHub login").fill("next-client");
       await panel.getByLabel("Change reason").fill("Review the next request.");
       await panel.getByRole("button", { name: "Preview change", exact: true }).click();
-      await expect.poll(() => writes).toBe(1); // Only the explicitly requested new dry run.
+      await waitForState(() => writes).toBe(1); // Only the explicitly requested new dry run.
     } else {
       await expect(panel.getByRole("button", { name: "Check original operation", exact: true })).toBeEnabled();
       await expect(panel.getByLabel("GitHub login")).toBeDisabled();
-      await expect.poll(() => panel.getByRole("status").count()).toBeGreaterThan(1);
+      await waitForState(() => panel.getByRole("status").count()).toBeGreaterThan(1);
       await page.reload();
       if (evidence === "refresh-failed") {
         await expect(page.getByRole("region", { name: "Client unavailable", exact: true })).toBeVisible();
@@ -291,7 +291,7 @@ test("a late legacy receipt cannot replace another product's Client", async ({ p
   await page.route("**/mutation-receipts/owner?*", route => { held = route; });
   await page.reload();
   await page.getByRole("button", { name: "Check original operation", exact: true }).click();
-  await expect.poll(() => held !== null).toBe(true);
+  await waitForState(() => held !== null).toBe(true);
   const picker = page.getByRole("combobox", { name: "Product", exact: true });
   if (await picker.isVisible()) await picker.selectOption("beacon-docs");
   else await page.getByRole("link", { name: "Beacon Docs", exact: false }).click();
@@ -299,7 +299,7 @@ test("a late legacy receipt cannot replace another product's Client", async ({ p
   await expect(other).toBeVisible();
   await held!.fulfill({ json: { trace_id: "late-read", product: "atlas-commerce", field: "owner",
     idempotency_key: "navigation-original", state: "completed", original_trace_id: "original-save" } }).catch(() => {});
-  await expect.poll(() => held!.request().failure() !== null).toBe(true);
+  await waitForState(() => held!.request().failure() !== null).toBe(true);
   expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey)).toBe("navigation-original");
   await expect(other.getByLabel("GitHub login")).toBeEnabled();
   await expect(page.getByRole("region", { name: "example-owner (id 9001)", exact: true })).toHaveCount(0);
@@ -341,7 +341,7 @@ test("an old receipt check cannot erase a newer uncertain Save after returning t
   await page.reload();
   const panel = page.getByRole("region", { name: "example-owner (id 9001)", exact: true });
   await panel.getByRole("button", { name: "Check original operation", exact: true }).click();
-  await expect.poll(() => oldCheck !== null).toBe(true);
+  await waitForState(() => oldCheck !== null).toBe(true);
   await page.getByRole("link", { name: "Product Ops", exact: true }).click();
   await page.locator(".product-directory-row").filter({ hasText: "Atlas Commerce" }).click();
   await panel.getByRole("button", { name: "Check original operation", exact: true }).click();
@@ -379,9 +379,9 @@ test("leaving during receipt profile refresh preserves the retained key", async 
   let refresh: Route | null = null;
   await page.route("**/v1/product-profiles/atlas-commerce", route => { refresh = route; });
   await page.getByRole("button", { name: "Check original operation", exact: true }).click();
-  await expect.poll(() => refresh !== null).toBe(true);
+  await waitForState(() => refresh !== null).toBe(true);
   await page.getByRole("link", { name: "Product Ops", exact: true }).click();
-  await expect.poll(() => refresh!.request().failure() !== null).toBe(true);
+  await waitForState(() => refresh!.request().failure() !== null).toBe(true);
   expect(await page.evaluate(() => JSON.parse(sessionStorage.getItem("launchplane.browser-operation.atlas-commerce-owner-apply")!).identity.idempotencyKey)).toBe("refresh-key");
   await refresh!.abort().catch(() => {});
 });

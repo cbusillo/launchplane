@@ -49,7 +49,9 @@ from control_plane.runtime_key_safety import runtime_key_safety_environment_clas
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
+    FreshRestoreScriptArguments,
     build_fresh_testing_restore_script,
+    fresh_testing_restore_spec,
 )
 from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MARKER
 
@@ -185,6 +187,8 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
         "testing_resources_ok",
+        "testing_activation_ports_ok",
+        "production_recipient_resources_ok",
         ODOO_PREVIEW_RESOURCES_OK_MARKER,
         TESTING_RESOURCES_INCOMPLETE_MARKER,
         "connection_isolation_resources_ok",
@@ -358,7 +362,11 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
-    if key in {"testing_resources_binding_sha256", ODOO_PREVIEW_RESOURCES_BINDING_MARKER}:
+    if key in {
+        "testing_resources_binding_sha256",
+        "production_recipient_resources_sha256",
+        ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
+    }:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
     if key in {"connection_isolation_resource_sha256", "connection_isolation_operation_sha256"}:
         return len(value) == 64 and all(character in "0123456789abcdef" for character in value)
@@ -563,8 +571,23 @@ def run_compose_post_deploy_update(
     allow_historical_sender_contract: bool = False,
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
     fresh_restore_source_environment: dict[str, str] | None = None,
+    prepare_native_source: Callable[[dict[str, object], str], dict[str, object]] | None = None,
     clear_preview_fishbowl_source: bool = False,
 ) -> dict[str, str]:
+    if fresh_testing_generation is not None:
+        if (
+            not run_destructive_restore
+            or target_definition.instance != "testing"
+            or target_definition.target_id != fresh_testing_generation.target_id
+        ):
+            raise click.ClickException(
+                "Fresh testing transport requires its exact restore generation."
+            )
+        if (
+            fresh_testing_generation.source_mode == "container-export"
+            and prepare_native_source is None
+        ):
+            raise click.ClickException("Native testing copy requires its service capture adapter.")
     if (
         clear_preview_fishbowl_source
         and runtime_key_safety_environment_class(target_definition.instance) != "preview"
@@ -585,6 +608,13 @@ def run_compose_post_deploy_update(
         target_type="compose",
         target_id=compose_id,
     )
+    if (
+        fresh_testing_generation is not None
+        and fresh_testing_generation.source_mode == "container-export"
+    ):
+        from control_plane.dokploy.native_copy_stream import require_registered_remote_server
+
+        require_registered_remote_server(target_payload.get("serverId"))
     current_env_map = api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     desired_env_map = _apply_post_deploy_env_file_overrides(
         current_env_map=current_env_map,
@@ -626,7 +656,10 @@ def run_compose_post_deploy_update(
     for key in ODOO_RUNTIME_OVERRIDE_TARGET_ENV_KEYS:
         desired_env_map.pop(key, None)
     desired_env_map.update(runtime_override_target_environment)
-    if run_destructive_restore:
+    if run_destructive_restore and not (
+        fresh_testing_generation is not None
+        and fresh_testing_generation.source_mode == "container-export"
+    ):
         upstream_restore_environment = resolve_upstream_restore_workflow_environment(
             desired_env_map=fresh_restore_source_environment or {}
             if fresh_testing_generation is not None
@@ -802,7 +835,7 @@ def run_compose_post_deploy_update(
             or target_definition.target_id != fresh_testing_generation.target_id
         ):
             raise ValueError("Fresh testing transport requires its exact restore generation.")
-        schedule_script = build_fresh_testing_restore_script(
+        fresh_arguments = FreshRestoreScriptArguments(
             generation=fresh_testing_generation,
             compose_project=compose_app_name,
             image_reference=desired_env_map["DOCKER_IMAGE_REFERENCE"],
@@ -814,6 +847,16 @@ def run_compose_post_deploy_update(
             runtime_environment=desired_env_map,
             clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
             data_workflow_lock_path=data_workflow_lock_path,
+        )
+        native_capture = None
+        if fresh_testing_generation.source_mode == "container-export":
+            if prepare_native_source is None or schedule_server_id is None:
+                raise ValueError("Native testing copy requires its service capture adapter.")
+            native_capture = prepare_native_source(
+                fresh_testing_restore_spec(**fresh_arguments), schedule_server_id
+            )
+        schedule_script = build_fresh_testing_restore_script(
+            **fresh_arguments, native_capture=native_capture
         )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
