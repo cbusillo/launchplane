@@ -42,6 +42,12 @@ do not authorize an external writable endpoint. Existing external read-only
 integrations need purpose-bound source qualification before this can prepare
 their production recipient; that remaining prerequisite stays on #3699.
 
+For MariaDB command memory bounds, use the image entrypoint and direct command
+options, optionally preceded by `mariadbd` or `mysqld`. The reviewed memory option
+accepts either an equals value or a following value; other options use
+`--name=value`. Custom database entrypoints, shell wrappers and defaults-file
+overrides refuse qualification.
+
 The fixed host program creates only the two new service-namespaced local volumes.
 It requalifies their labels, backing identities and emptiness, inspects every
 container including stopped containers for mount and port references, and checks

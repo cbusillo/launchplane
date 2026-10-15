@@ -236,7 +236,8 @@ class HttpBoundaryTests(unittest.TestCase):
                 "control_plane.http_routes.production_recipient.idempotency_scope",
                 return_value=self.fixture.adapter.scope,
             ),
-            patch("control_plane.production_recipient_resources.inspect_resources") as host_check,
+            patch("control_plane.production_recipient.inspect_resources") as host_check,
+            patch("control_plane.production_recipient_resources.inspect_resources", new=host_check),
         ):
             response = self.post(
                 self.fixture.body.model_copy(update={"mode": "readback"}).model_dump(mode="json")

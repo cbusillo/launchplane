@@ -446,6 +446,30 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertEqual(self.effects.count("/api/compose.create"), 1)
         self.assert_old_preserved()
 
+    def test_transient_read_on_reacquired_attempt_retains_the_original_create_fence(self) -> None:
+        def lose_reply(**kwargs: Any) -> Any:
+            result = self.provider_write(**kwargs)
+            if kwargs["path"] == "/api/compose.create":
+                raise OSError("lost create reply")
+            return result
+
+        with patch(
+            "control_plane.production_recipient.api.dokploy_request", side_effect=lose_reply
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+        with patch.object(self.adapter, "current", side_effect=OSError("transient retry read")):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+        retained = self.store.read_idempotency_record(
+            scope=self.adapter.scope,
+            route_path=ROUTE.format(product=self.product),
+            idempotency_key=self.adapter.original_key,
+        )
+        assert retained is not None
+        self.assertEqual(retained.state, "reconcile_required")
+        self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(self.effects.count("/api/compose.create"), 1)
+        self.assert_old_preserved()
+
     def test_zero_effect_drift_can_replan_with_retained_history_and_a_new_key(self) -> None:
         original = self.adapter.require_unchanged
 
@@ -496,6 +520,12 @@ class ProductionRecipientTests(unittest.TestCase):
             ["--innodb-buffer-pool-size=512M", "--loose-innodb_buffer_pool_size=8G"],
             ["--innodb-buffer-pool-size=512M", "--maximum-innodb_buffer_pool_size=8G"],
             ["--innodb-buffer-pool-size=512M", "--defaults-extra-file=/config/my.cnf"],
+            [
+                "sh",
+                "-c",
+                "exec docker-entrypoint.sh mariadbd --innodb-buffer-pool-size=8G",
+                "--innodb-buffer-pool-size=512M",
+            ],
         ):
             with self.subTest(arguments=arguments):
                 document = deepcopy(self.document)

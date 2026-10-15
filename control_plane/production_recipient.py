@@ -214,6 +214,10 @@ def _qualified_render(record: ProductionRecipientRecord, values: dict[str, str])
 
         command = service.get("command", [])
         arguments = shlex.split(command) if isinstance(command, str) else command
+        if not isinstance(arguments, list) or any(
+            not isinstance(argument, str) for argument in arguments
+        ):
+            raise ValueError("Command arguments must be explicit strings.")
 
         def normalized_option(argument: object) -> str:
             option = str(argument).split("=", 1)[0].replace("_", "-")
@@ -228,6 +232,20 @@ def _qualified_render(record: ProductionRecipientRecord, values: dict[str, str])
             raise ValueError(
                 "The database must use its image entrypoint and explicit reviewed command limits."
             )
+        if name == record.request.database_service and required.command_memory_limits:
+            index = int(bool(arguments and arguments[0] in {"mariadbd", "mysqld"}))
+            while index < len(arguments):
+                argument = arguments[index]
+                if not argument.startswith("--") or argument == "--":
+                    raise ValueError(
+                        "Database memory bounds require direct database options, not a wrapper."
+                    )
+                index += (
+                    2
+                    if "=" not in argument
+                    and normalized_option(argument) in required.command_memory_limits
+                    else 1
+                )
         for argument_name, maximum in required.command_memory_limits.items():
             configured = [
                 (
@@ -675,19 +693,31 @@ class ProductionRecipientAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
-        started = False
+        # A reacquired reservation clears its current-attempt checkpoint. It
+        # does not erase the original attempt's possible provider effects.
+        started = True
         try:
+            existing = custody(self.store, self.product, self.request.context)
+            reservation = self.store.read_idempotency_record(
+                scope=self.scope,
+                route_path=ROUTE.format(product=self.product),
+                idempotency_key=self.original_key,
+            )
+            started = bool(
+                reservation is None
+                or reservation.attempt > 1
+                or reservation.provider_effect_started_at
+                or (
+                    existing
+                    and any((existing.project_id, existing.environment_id, existing.target_id))
+                )
+            )
             record = self.current()
             if record.plan_sha256 != self.request.reviewed_plan_sha256:
                 raise ValueError("Review the current production recipient plan.")
             existing = custody(self.store, self.product, record.context)
             superseding = existing is not None and record.plan_sha256 != existing.plan_sha256
             if existing is not None and not superseding:
-                reservation = self.store.read_idempotency_record(
-                    scope=self.scope,
-                    route_path=ROUTE.format(product=self.product),
-                    idempotency_key=self.original_key,
-                )
                 if (
                     reservation is None
                     or reservation.state != "running"

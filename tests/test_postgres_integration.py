@@ -10601,6 +10601,9 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
     def test_zero_effect_replan_retains_history_on_postgres(self) -> None:
         self.fixture.test_zero_effect_drift_can_replan_with_retained_history_and_a_new_key()
 
+    def test_retry_read_failure_keeps_the_original_create_fence_on_postgres(self) -> None:
+        self.fixture.test_transient_read_on_reacquired_attempt_retains_the_original_create_fence()
+
     def assert_authority_writer_exclusion(self, kind: str) -> None:
         from control_plane.production_recipient import authority_snapshot
         from control_plane.contracts.environment_inventory import EnvironmentInventory
