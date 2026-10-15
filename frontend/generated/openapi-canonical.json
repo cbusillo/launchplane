@@ -13598,6 +13598,183 @@
         "title": "IntegrationKeyReadbackFinding",
         "type": "object"
       },
+      "InventoryEnvironment": {
+        "additionalProperties": false,
+        "properties": {
+          "environment_id": {
+            "title": "Environment Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryTarget"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "environment_id",
+          "name",
+          "targets"
+        ],
+        "title": "InventoryEnvironment",
+        "type": "object"
+      },
+      "InventoryPage": {
+        "additionalProperties": false,
+        "properties": {
+          "inventory_digest": {
+            "title": "Inventory Digest",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "next_offset": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Offset"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryProject"
+            },
+            "title": "Projects",
+            "type": "array"
+          },
+          "provider_pagination": {
+            "const": "unpaginated_project_all",
+            "default": "unpaginated_project_all",
+            "title": "Provider Pagination",
+            "type": "string"
+          },
+          "scope": {
+            "const": "provider_credential_visible",
+            "default": "provider_credential_visible",
+            "title": "Scope",
+            "type": "string"
+          },
+          "total_environments": {
+            "title": "Total Environments",
+            "type": "integer"
+          },
+          "total_projects": {
+            "title": "Total Projects",
+            "type": "integer"
+          },
+          "total_targets": {
+            "title": "Total Targets",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "inventory_digest",
+          "total_projects",
+          "total_environments",
+          "total_targets",
+          "offset",
+          "limit",
+          "next_offset",
+          "projects"
+        ],
+        "title": "InventoryPage",
+        "type": "object"
+      },
+      "InventoryProject": {
+        "additionalProperties": false,
+        "properties": {
+          "environments": {
+            "items": {
+              "$ref": "#/components/schemas/InventoryEnvironment"
+            },
+            "title": "Environments",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project_id",
+          "name",
+          "environments"
+        ],
+        "title": "InventoryProject",
+        "type": "object"
+      },
+      "InventoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "inventory": {
+            "$ref": "#/components/schemas/InventoryPage"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "inventory"
+        ],
+        "title": "InventoryResponse",
+        "type": "object"
+      },
+      "InventoryTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "category": {
+            "title": "Category",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "placement": {
+            "$ref": "#/components/schemas/Placement"
+          },
+          "target_id": {
+            "title": "Target Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "target_id",
+          "category",
+          "name",
+          "placement"
+        ],
+        "title": "InventoryTarget",
+        "type": "object"
+      },
       "JsonValue": {},
       "LaneServiceRestartPlan": {
         "additionalProperties": false,
@@ -25554,6 +25731,48 @@
         "title": "PathCheckStep",
         "type": "object"
       },
+      "Placement": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "server",
+              "dokploy_host"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "server_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Id"
+          },
+          "server_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Name"
+          }
+        },
+        "required": [
+          "kind",
+          "server_id",
+          "server_name"
+        ],
+        "title": "Placement",
+        "type": "object"
+      },
       "PostDeployUpdateEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -31330,6 +31549,15 @@
             ],
             "title": "Current Enabled"
           },
+          "current_expected_dns_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicDnsExpectedTarget"
+            },
+            "title": "Current Expected Dns Targets",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "current_monitoring_intent": {
             "enum": [
               "public",
@@ -31423,6 +31651,15 @@
           "requested_enabled": {
             "title": "Requested Enabled",
             "type": "boolean"
+          },
+          "requested_expected_dns_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicDnsExpectedTarget"
+            },
+            "title": "Requested Expected Dns Targets",
+            "type": "array",
+            "x-launchplane-optional-response": true
           },
           "requested_monitoring_intent": {
             "enum": [
@@ -32460,6 +32697,16 @@
             "title": "Enabled",
             "type": "boolean"
           },
+          "expected_dns_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicDnsExpectedTarget"
+            },
+            "maxItems": 16,
+            "title": "Expected Dns Targets",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "kind": {
             "default": "public_http",
             "enum": [
@@ -33163,6 +33410,15 @@
       "ProductObservedTopology": {
         "additionalProperties": false,
         "properties": {
+          "dns_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicDnsDiagnostic"
+            },
+            "title": "Dns Targets",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "ingress": {
             "$ref": "#/components/schemas/ProductObservedIngress"
           },
@@ -38885,6 +39141,86 @@
           "storage_id"
         ],
         "title": "ProxmoxStorageBackupDestinationReference",
+        "type": "object"
+      },
+      "PublicDnsDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "check_name": {
+            "title": "Check Name",
+            "type": "string"
+          },
+          "expected_addresses": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Expected Addresses",
+            "type": "array"
+          },
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "observed_addresses": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Observed Addresses",
+            "type": "array"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "public_name": {
+            "title": "Public Name",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "match",
+              "mismatch",
+              "unavailable",
+              "missing_expectation",
+              "stale"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "check_name",
+          "public_name",
+          "status",
+          "provenance"
+        ],
+        "title": "PublicDnsDiagnostic",
+        "type": "object"
+      },
+      "PublicDnsExpectedTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "addresses": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Addresses",
+            "type": "array"
+          },
+          "public_name": {
+            "title": "Public Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "public_name",
+          "addresses"
+        ],
+        "title": "PublicDnsExpectedTarget",
         "type": "object"
       },
       "PublicHostEffect": {
@@ -54859,6 +55195,130 @@
           }
         },
         "summary": "Plan or apply Dokploy target setup"
+      }
+    },
+    "/v1/dokploy/inventory": {
+      "get": {
+        "operationId": "read_dokploy_inventory",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 25,
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "inventory_digest",
+            "required": false,
+            "schema": {
+              "default": "",
+              "pattern": "^$|^[a-f0-9]{64}$",
+              "title": "Inventory Digest",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InventoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read value-free Dokploy project, environment and placement inventory"
       }
     },
     "/v1/drivers": {
@@ -77003,6 +77463,16 @@
                         "title": "Enabled",
                         "type": "boolean"
                       },
+                      "expected_dns_targets": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/PublicDnsExpectedTarget"
+                        },
+                        "maxItems": 16,
+                        "title": "Expected Dns Targets",
+                        "type": "array",
+                        "x-launchplane-optional-response": true
+                      },
                       "kind": {
                         "default": "public_http",
                         "enum": [
@@ -77901,6 +78371,30 @@
                     ],
                     "title": "ProductSecretConfigRequirement",
                     "type": "object"
+                  },
+                  "PublicDnsExpectedTarget": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "addresses": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 32,
+                        "minItems": 1,
+                        "title": "Addresses",
+                        "type": "array"
+                      },
+                      "public_name": {
+                        "title": "Public Name",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "public_name",
+                      "addresses"
+                    ],
+                    "title": "PublicDnsExpectedTarget",
+                    "type": "object"
                   }
                 },
                 "additionalProperties": false,
@@ -78562,6 +79056,32 @@
           "content": {
             "application/json": {
               "schema": {
+                "$defs": {
+                  "PublicDnsExpectedTarget": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "addresses": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 32,
+                        "minItems": 1,
+                        "title": "Addresses",
+                        "type": "array"
+                      },
+                      "public_name": {
+                        "title": "Public Name",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "public_name",
+                      "addresses"
+                    ],
+                    "title": "PublicDnsExpectedTarget",
+                    "type": "object"
+                  }
+                },
                 "additionalProperties": false,
                 "properties": {
                   "check_kind": {
@@ -78585,6 +79105,21 @@
                     "default": true,
                     "title": "Enabled",
                     "type": "boolean"
+                  },
+                  "expected_dns_targets": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "$ref": "#/$defs/PublicDnsExpectedTarget"
+                        },
+                        "maxItems": 16,
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Expected Dns Targets"
                   },
                   "instance": {
                     "title": "Instance",

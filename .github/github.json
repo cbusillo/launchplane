@@ -22,6 +22,7 @@
     "disposableLanes": "docs/disposable-lanes.md",
     "serviceBoundary": "docs/service-boundary.md",
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
+    "dokployInventory": "docs/dokploy-inventory.md",
     "driverDescriptors": "docs/driver-descriptors.md",
     "driverDevelopment": "docs/driver-development.md",
     "previewWorkflowContract": "docs/preview-workflow-contract.md",
