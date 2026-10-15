@@ -186,6 +186,10 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.website_settings_call: list[str] | None = None
         self.existing_database = False
         self.resume_verified = False
+        self.previous_drill = ""
+        self.previous_drill_witness = ""
+        self.previous_drill_busy = False
+        self.previous_drill_dropped = False
         self.gate_payload = "payload-fixture"
         self.gate_hash = ""
         for suffix in ("data", "logs", "db"):
@@ -249,7 +253,23 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         elif command[:3] == ["docker", "volume", "inspect"]:
             result = json.dumps([self.volumes[command[-1]]]).encode()
         elif command[:2] == ["docker", "exec"]:
-            if "psql " in " ".join(command):
+            if (
+                self.previous_drill
+                and command[-1] == self.previous_drill
+                and "psql " in " ".join(command)
+            ):
+                query = kwargs.get("input", b"")
+                if query.startswith(b"SELECT count(*)"):
+                    result = b"1"
+                elif query.startswith(b"SELECT value"):
+                    result = self.previous_drill_witness.encode()
+                elif query.startswith(b"DROP DATABASE"):
+                    if self.previous_drill_busy:
+                        return subprocess.CompletedProcess(
+                            command, 1, stdout=b"", stderr=b"database is in use"
+                        )
+                    self.previous_drill_dropped = True
+            elif "psql " in " ".join(command):
                 result = b"1" if self.existing_database else b"0"
             elif command[-2:] in (["id", "-u"], ["id", "-g"]):
                 result = b"1000"
@@ -310,6 +330,40 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             except SystemExit as error:
                 status = int(error.code or 0)
         return status, output.getvalue()
+
+    def test_drill_disposal_requires_exact_old_copy_witness_and_never_forces_connections(
+        self,
+    ) -> None:
+        self.previous_drill = "lp_drill_" + "b" * 32
+        self.spec["generation"].update(
+            discard_drill_database=self.previous_drill, discard_copy_binding="c" * 64
+        )
+        self.previous_drill_witness = "foreign-copy"
+        code, _ = self.run_program()
+        self.assertNotEqual(code, 0)
+        self.assertFalse(self.previous_drill_dropped)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+
+        self.previous_drill_witness = self.spec["generation"]["discard_copy_binding"]
+        self.previous_drill_busy = True
+        code, _ = self.run_program()
+        self.assertNotEqual(code, 0)
+        self.assertFalse(self.previous_drill_dropped)
+        self.previous_drill_busy = False
+        code, _ = self.run_program()
+        self.assertEqual(code, 0)
+        self.assertTrue(self.previous_drill_dropped)
+
+    def test_failed_new_copy_never_disposes_prior_drill(self) -> None:
+        self.previous_drill = "lp_drill_" + "b" * 32
+        self.spec["generation"].update(
+            discard_drill_database=self.previous_drill, discard_copy_binding="c" * 64
+        )
+        self.previous_drill_witness = self.spec["generation"]["discard_copy_binding"]
+        self.sanitized = False
+        code, _ = self.run_program()
+        self.assertNotEqual(code, 0)
+        self.assertFalse(self.previous_drill_dropped)
 
     def test_read_only_capture_never_copies_identity_and_web_starts_after_sanitization(
         self,

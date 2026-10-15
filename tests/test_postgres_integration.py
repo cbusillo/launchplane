@@ -11028,3 +11028,70 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fixture.adapter.require_unchanged(original)
         fixture.assert_old_preserved()
+
+
+class RealPostgresOdooTestingDrillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.test_odoo_testing_drill import TestingDrillScenario
+
+        self.scenario = TestingDrillScenario()
+        self.addCleanup(self.scenario.doCleanups)
+        self.scenario.seed(self.enterContext(_head_postgres_database()))
+
+    def test_replicas_admit_one_fresh_database_and_restore(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        from control_plane.odoo_testing_drill import lane_key, DRILL_INTERVAL_SECONDS
+
+        scenario = self.scenario
+        key = f"{lane_key(scenario.profile.product, scenario.context)}:{int(scenario.now // DRILL_INTERVAL_SECONDS)}"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(
+                    scenario.store.enqueue_odoo_testing_drill,
+                    scenario.profile.product,
+                    scenario.context,
+                    key,
+                    scenario.now,
+                )
+                for _ in range(2)
+            ]
+            for future in futures:
+                future.result(timeout=30)
+        self.assertEqual(scenario.evidence().status, "queued")
+        operations = scenario.store.list_odoo_stable_target_replacement_operation_records(
+            product=scenario.profile.product
+        )
+        self.assertEqual(
+            tuple(item.operation_id for item in operations), (scenario.evidence().operation_id,)
+        )
+
+    def test_lost_admission_transaction_preserves_old_copy_and_runtime(self) -> None:
+        from control_plane.odoo_testing_drill import lane_key
+
+        scenario = self.scenario
+        key = lane_key(scenario.profile.product, scenario.context) + ":fixture-rollback"
+        with patch.object(
+            scenario.store, "_idempotency_row", side_effect=RuntimeError("fixture receipt failure")
+        ):
+            with self.assertRaises(RuntimeError):
+                scenario.store.enqueue_odoo_testing_drill(
+                    scenario.profile.product, scenario.context, key, scenario.now
+                )
+        self.assertEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+        self.assertEqual(
+            scenario.store.list_runtime_environment_records(
+                scope="instance", context_name=scenario.context, instance_name="testing"
+            ),
+            (scenario.runtime,),
+        )
+        self.assertFalse(
+            scenario.store.list_odoo_stable_target_replacement_operation_records(
+                product=scenario.profile.product
+            )
+        )
+        self.assertIsNone(scenario.evidence())

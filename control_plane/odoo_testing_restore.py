@@ -46,11 +46,24 @@ class FreshOdooTestingGeneration(BaseModel):
     reconcile_requested_at: str = ""
     source_mode: Literal["ssh", "container-export"] = "ssh"
     source_binding_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
+    drill_database: str = Field(
+        default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
+    )
+    discard_drill_database: str = Field(
+        default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
+    )
+    discard_copy_binding: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":
         if (self.source_mode == "container-export") != bool(self.source_binding_sha256):
             raise ValueError("A native source needs its exact binding; SSH generations carry none.")
+        if bool(self.discard_drill_database) != bool(self.discard_copy_binding) or (
+            self.discard_drill_database and self.discard_drill_database == self.drill_database
+        ):
+            raise ValueError("Drill disposal requires a different witnessed prior drill database.")
         return self
 
 
@@ -610,6 +623,34 @@ def one_inspection(identifier):
     return values[0]
 
 
+def discard_previous_drill(gen, database_container, runner, database):
+    previous = gen.get('discard_drill_database', '')
+    witness = gen.get('discard_copy_binding', '')
+    if not previous:
+        if witness:
+            raise RuntimeError('Unbound drill disposal witness')
+        return
+    if not re.fullmatch(r'lp_drill_[a-f0-9]{32}', previous) or previous == database or not re.fullmatch(r'[a-f0-9]{64}', witness):
+        raise RuntimeError('Invalid prior drill database')
+    present = docker('exec','-i',database_container,'sh','-c',
+        'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
+        '_', previous, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
+    if present not in {'0','1'}:
+        raise RuntimeError('Ambiguous prior drill database')
+    if present == '1':
+        observed = docker('exec','-i',database_container,'sh','-c',
+            'psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"',
+            '_', previous, stdin=b"SELECT value FROM ir_config_parameter WHERE key='launchplane.testing_copy.restore_complete';\n").decode().strip()
+        if observed != witness:
+            raise RuntimeError('Prior database lacks its committed drill witness')
+        # No FORCE: an unexpected user/connection retains the database and fails the drill.
+        docker('exec','-i',database_container,'sh','-c',
+            'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
+            '_', previous, stdin=b'DROP DATABASE :"database_name";\n')
+    docker('exec',runner,'python3','-c',
+        "from pathlib import Path;import re,shutil,sys;name=sys.argv[1];assert re.fullmatch(r'lp_drill_[a-f0-9]{32}',name);p=Path('/volumes/data/filestore')/name;assert p.resolve()==p.absolute() and not p.is_symlink();shutil.rmtree(p) if p.exists() else None", previous)
+
+
 def restore_main():
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     gen = spec["generation"]
@@ -813,6 +854,7 @@ def restore_main():
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
+        discard_previous_drill(gen, containers['database'][0], runner, database)
         # Emit only the established value-free protocol markers, never runner logs.
         for line in output.splitlines():
             if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
@@ -939,6 +981,7 @@ def read_current_testing_generation(
     if (
         values.get("ODOO_PROJECT_NAME") != generation.namespace
         or values.get("ODOO_STACK_NAME") != generation.namespace
+        or (generation.drill_database and values.get("ODOO_DB_NAME") != generation.drill_database)
     ):
         raise ValueError("Fresh testing project authority changed before deployment.")
     for other in getattr(store, "list_dokploy_target_id_records")():

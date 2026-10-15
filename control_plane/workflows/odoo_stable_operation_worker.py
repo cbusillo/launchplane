@@ -2201,6 +2201,9 @@ def _execute_target_replacement_with_checkpoint(
     )
 
     def checkpoint_provider_effect(phase: str) -> None:
+        from control_plane.odoo_testing_drill import require_drill_checkpoint
+
+        require_drill_checkpoint(record_store, operation)
         if execution_checkpoint is not None:
             execution_checkpoint(phase)
         elif phase in {
@@ -2215,6 +2218,8 @@ def _execute_target_replacement_with_checkpoint(
         authorization_guard.authorize_execution()
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
             raise _StaffTestingHoldError
+        if isinstance(record_store, PostgresRecordStore):
+            record_store.activate_odoo_testing_drill(operation, time.time())
         require_unchanged_production_artifact(
             record_store=record_store,
             product=operation.product,
