@@ -594,14 +594,44 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
             self.store.read_odoo_stable_target_replacement_operation_record(held.operation_id), held
         )
         self.store.write_secret_record(secret)
-        with patch(
-            "control_plane.testing_replacement_recovery.inspect_testing_replacement",
-            return_value={"state": "quiescent_safe_to_retry"},
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import DBAPIError
+        from psycopg.errors import LockNotAvailable
+
+        peer = PostgresRecordStore(
+            database_url=make_url(self.store.database_url)
+            .update_query_dict({"options": "-c lock_timeout=100ms"})
+            .render_as_string(hide_password=False)
+        )
+        self.addCleanup(peer.close)
+        excluded: list[bool] = []
+        fingerprint = current_binding_fingerprint
+
+        def check_writer_exclusion(store: Any, record: Any) -> str:
+            if getattr(store._disposable_authority_context, "session", None) is not None:
+                with self.assertRaises(DBAPIError) as blocked:
+                    peer.write_secret_record(
+                        secret.model_copy(update={"current_version_id": "fixture-v2"})
+                    )
+                self.assertIsInstance(blocked.exception.orig, LockNotAvailable)
+                excluded.append(True)
+            return fingerprint(store, record)
+
+        with (
+            patch(
+                "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+                return_value={"state": "quiescent_safe_to_retry"},
+            ),
+            patch(
+                "control_plane.testing_replacement_recovery.current_binding_fingerprint",
+                side_effect=check_writer_exclusion,
+            ),
         ):
             self.assertEqual(
                 recover_stranded_testing_replacements(self.store, self.fixture.root),
                 (held.operation_id,),
             )
+        self.assertTrue(excluded)
         self.assertEqual(
             self.store.read_odoo_stable_target_replacement_operation_record(
                 held.operation_id
