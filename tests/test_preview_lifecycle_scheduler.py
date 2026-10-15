@@ -37,8 +37,9 @@ def _sweep_result(status: str = "partial") -> dict[str, object]:
                 "product": "example-site",
                 "context": "example-site-preview",
                 "status": "report_only",
-                "orphaned_slugs": ["pr-1", "pr-2"],
-                "failed_slugs": [],
+                # The sweep copies these tuples from the plan and cleanup records.
+                "orphaned_slugs": ("pr-1", "pr-2"),
+                "failed_slugs": ("pr-3",),
                 "held_reservations": [{"classification": "opaque"}],
             }
         ],
@@ -95,7 +96,7 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
                     "context": "example-site-preview",
                     "status": "report_only",
                     "orphaned": 2,
-                    "failed": 0,
+                    "failed": 1,
                     "held_reservations": 1,
                 }
             ],

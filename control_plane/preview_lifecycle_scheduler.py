@@ -52,7 +52,7 @@ def sweep_summary(result: dict[str, object]) -> dict[str, JsonValue]:
 
     def count(entry: dict[str, object], field: str) -> int:
         value = entry.get(field)
-        return len(value) if isinstance(value, list) else 0
+        return len(value) if isinstance(value, (list, tuple)) else 0
 
     return {
         "status": str(result.get("status", "")),
