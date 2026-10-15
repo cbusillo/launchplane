@@ -7,7 +7,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from collections.abc import Callable
 from typing import Any, Literal, cast
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.client_release import (
     advance_client_releases,
@@ -724,6 +724,19 @@ class ClientReleaseTests(unittest.TestCase):
         self.assertIn(failure.code, event.summary)
         ids = {link.record_id for link in event.records}
         self.assertTrue({operation_id, failure.record_id, failure.trace_id} <= ids)
+        from control_plane.production_delivery_monitor import monitor_production_delivery_once
+
+        monitor_production_delivery_once(
+            self.store,
+            transport_factory=lambda _store, _profile: Mock(
+                get_json=Mock(return_value={"sha": HEAD})
+            ),
+        )
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.assertIn(failure.code, incident.summary)
+        self.assertIn(failure.trace_id, incident.summary)
+        self.assertNotIn("do-not-publish", incident.model_dump_json())
+        self.assertNotIn("private.invalid", incident.model_dump_json())
         self.assertEqual(self.advance(), (), "reporting a failure never resumes the release")
 
     def test_rollback_failure_names_failed_deployment_and_legacy_missing_trace(self) -> None:

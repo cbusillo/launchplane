@@ -29531,6 +29531,14 @@ def create_launchplane_fastapi_app(
             records=records if isinstance(records, dict) else None,
             authz=authz if isinstance(authz, dict) else None,
         )
+        from control_plane.production_delivery_monitor import record_rejected_production_request
+
+        try:
+            await record_rejected_production_request(
+                request, get_record_store(), reason=code, trace_id=trace_id
+            )
+        except Exception:
+            logging.exception("Could not persist production delivery alert; trace_id=%s", trace_id)
         response = JSONResponse(
             status_code=http_error.status_code,
             content=payload.model_dump(mode="json", exclude_none=True),

@@ -68,11 +68,13 @@ class HealthMonitorScheduler:
         clock: Callable[[], float] = time.time,
         run_monitor: Callable[[frozenset[LaneKey]], object] | None = None,
         report_cadence: Callable[[bool, str, frozenset[LaneKey]], object] | None = None,
+        run_delivery_monitor: Callable[[], object] | None = None,
     ) -> None:
         self.store = store
         self.clock = clock
         self.run_monitor = run_monitor or self._run_monitor
         self.report_cadence = report_cadence or self._report_cadence
+        self.run_delivery_monitor = run_delivery_monitor or self._run_delivery_monitor
         self._owner = str(uuid.uuid4())
         self._stop = Event()
         self._wake = {instance: Event() for instance in ("prod", "testing")}
@@ -150,6 +152,14 @@ class HealthMonitorScheduler:
                 )
         for thread in self._threads:
             thread.start()
+        delivery_thread = Thread(
+            target=self._loop,
+            args=(self.run_delivery_once,),
+            name="production-delivery-monitor",
+            daemon=True,
+        )
+        self._threads.append(delivery_thread)
+        delivery_thread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -261,6 +271,23 @@ class HealthMonitorScheduler:
                 len(selected),
             )
             return True
+
+    def run_delivery_once(self) -> bool:
+        key = f"delivery:{monitor_slot(self.clock())}"
+        if self._read(key) is not None:
+            return False
+        with self._lease("delivery:active") as heartbeat:
+            if heartbeat is None or self._read(key) is not None:
+                return False
+            self.run_delivery_monitor()
+            heartbeat.assert_current()
+            self._write_completion(key, self.clock())
+        return True
+
+    def _run_delivery_monitor(self) -> None:
+        from control_plane.production_delivery_monitor import monitor_production_delivery_once
+
+        monitor_production_delivery_once(self.store, observed_at=_timestamp(self.clock()))
 
     def watch_once(self, instance: str = "prod") -> bool:
         now = self.clock()

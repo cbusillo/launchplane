@@ -79,6 +79,7 @@ PublicIngressTargetKind = Literal[
     "tls_domain",
 ]
 PublicIngressFailureCode = Literal[
+    "production_delivery_failed",
     "connection_timeout",
     "deploy_fence_held",
     "dns_failure",

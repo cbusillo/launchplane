@@ -454,6 +454,10 @@ class GenericWebHttpTests(unittest.TestCase):
                 if status == 409:
                     self.assertEqual(payload["error"]["code"], "promotion_required")
                     deploy.assert_not_called()
+                    incidents = store.list_public_ingress_incident_records(status="open")
+                    self.assertEqual(len(incidents), 1)
+                    self.assertIn(payload["trace_id"], incidents[0].summary)
+                    self.assertEqual(store.list_deployment_records(), ())
                 else:
                     deploy.assert_called_once()
 

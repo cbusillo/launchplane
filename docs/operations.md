@@ -1899,6 +1899,35 @@ not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced
 by delivery-attempt records. The DB-backed monitor commits enabled destinations'
 material-event deliveries in the same transaction as the observation and incident.
+
+Production delivery has separate `production-delivery-*` provider incidents.
+Rejected production deploy/promotion requests record a bounded reason code and
+the caller's trace even when refusal precedes deployment-record creation.
+The service's independent delivery-monitor thread checks terminal deployment,
+promotion and queued Odoo release failures once per minute, including products
+without HTTP health checks. As with other incidents, existing matching
+notification policies select the Discord destination; no credential or new
+destination is created by monitoring. Check-scoped HTTP-only policies do not
+match provider incidents. Confirm the product's existing owner policy covers
+provider incidents when qualifying notification delivery.
+
+The same monitor compares each active product's recorded default branch with
+production through the existing read-only source adapter. A durable first-pending
+source receipt raises attention after one hour (`PRODUCTION_DELIVERY_LAG_SECONDS`),
+including missing/failed builds, testing qualification, held Client acceptance,
+backup refusals and stalled promotion. New merges and service restarts do not
+reset an outstanding deadline. Source-read failure is unknown and cannot resolve
+an incident. This is notification evidence, never acceptance or a release gate.
+
+Replays of an unresolved candidate retain its original reason and trace and
+reuse the incident/outbox; healthy checks of the old artifact cannot clear it.
+A later successful delivery clears only the matching candidate. Production-lag
+attention clears when production reaches the observed default-branch source.
+Runtime-health observations stay independent. Inspect the product environment's
+incident detail for material events, delivery attempts and outbox state; transport
+recovery does not resolve a delivery failure. Existing outbox retry and
+unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
+durable notification delivery runs through the service's DB-backed outbox.
 The outbox worker sends email and Discord as well as GitHub notifications, so a
 healthy probe after recovery does not need to manufacture another resolution
 for delivery to resume. Each delivery keeps the original event and rendered body;
