@@ -20523,6 +20523,61 @@
         "title": "OdooSlotReadiness",
         "type": "object"
       },
+      "OdooTestingDrillEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "alert_delivered": {
+            "default": false,
+            "title": "Alert Delivered",
+            "type": "boolean"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "operation_id": {
+            "default": "",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step": {
+            "default": "",
+            "title": "Step",
+            "type": "string"
+          },
+          "trace": {
+            "default": "",
+            "title": "Trace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alert_delivered",
+          "deployment_record_id",
+          "observed_at",
+          "operation_id",
+          "status",
+          "step",
+          "trace"
+        ],
+        "title": "OdooTestingDrillEvidence",
+        "type": "object"
+      },
       "OdooWebsiteBootstrapPayload": {
         "additionalProperties": false,
         "properties": {
@@ -26349,6 +26404,17 @@
           "target": {
             "$ref": "#/components/schemas/ProductTargetSummary"
           },
+          "testing_rebuild_drill": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooTestingDrillEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "topology": {
             "$ref": "#/components/schemas/ProductEnvironmentTopology"
           },
@@ -28484,6 +28550,12 @@
           },
           "odoo_stable_bootstrap": {
             "$ref": "#/components/schemas/ProductOdooStableBootstrapPolicy"
+          },
+          "odoo_testing_drill_enabled": {
+            "default": false,
+            "title": "Odoo Testing Drill Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
