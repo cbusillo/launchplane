@@ -235,6 +235,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
                             destination_id="existing-github",
                             kind="github_issue",
                             github_repository="example/alerts",
+                            github_label="production-alert",
                         ),
                     ),
                 }
