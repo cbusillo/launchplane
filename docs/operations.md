@@ -2819,8 +2819,9 @@ Dry-run and readback use the separate instance-scoped
 `odoo_connection_isolation.plan` and `odoo_connection_isolation.read` actions.
 The authenticated Director agent inherits these inert observations without a
 post-deploy write grant. Existing post-deploy callers retain observation access.
-Apply is a separate `odoo_connection_isolation.apply` effect and accepts only
-`testing`. The Director agent can use it without a DB grant only when current,
+Every isolation mode accepts only the exact `testing` lane. Apply is a separate
+`odoo_connection_isolation.apply` effect. The Director agent can use it without
+a DB grant only when current,
 binding-matched disposable-lane evidence proves unused, reproducible data and
 production isolation. Missing, expired or unknown evidence, staff holds, target
 aliases, protected usage and only-copy data refuse with
@@ -2851,8 +2852,10 @@ The service uses its existing disabled manual data-workflow schedule to
 return boolean verdicts and setting names only. Review that receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding
-again before any effect. Retain the evidence and original idempotency key if
-the response is uncertain; do not submit a new repair.
+again before any effect. Its durable provider reservation retains uncertain
+outcomes under the original key and fences a new apply key as well. Retain the
+evidence and original idempotency key if the response is uncertain; do not submit
+a new repair. Independent observations never replay or store keyed apply results.
 
 Dry-run includes the complete integration readback, including settings outside
 this repair's carrier/SMS/IAP scope. Review those findings before apply. A failed

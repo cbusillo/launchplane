@@ -72,8 +72,8 @@ class OdooPostDeployRequest(BaseModel):
         if self.connection_isolation is not None:
             if runtime_key_safety_environment_class(self.instance) == "prod":
                 raise ValueError("Connection isolation refuses production.")
-            if self.connection_isolation == "apply" and self.instance != "testing":
-                raise ValueError("Connection isolation apply requires a testing lane.")
+            if self.instance != "testing":
+                raise ValueError("Connection isolation requires a testing lane.")
             if self.connection_isolation == "apply" and (
                 not self.reviewed_dry_run
                 or len(self.reviewed_plan_sha256) != 64

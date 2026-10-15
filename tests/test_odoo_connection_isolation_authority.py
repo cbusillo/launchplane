@@ -15,7 +15,11 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import scoped_agent_transport
@@ -54,10 +58,14 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
             )
         self.app = self.make_app()
 
-    def make_app(self, config: BearerIdentityConfig | None = None) -> Any:
+    def make_app(
+        self,
+        config: BearerIdentityConfig | None = None,
+        policy: LaunchplaneAuthzPolicy | None = None,
+    ) -> Any:
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=LaunchplaneAuthzPolicy(),
+            authz_policy=policy or LaunchplaneAuthzPolicy(),
             bearer_identity_config=config or _local_operator_bearer_config(),
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
@@ -98,7 +106,6 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
             ):
                 response = await self.call(mode)
                 self.assertEqual(response.status_code, 202, response.text)
-                self.assertIsNone(execute.call_args.kwargs["before_connection_isolation_mutation"])
                 self.assertEqual(
                     execute.call_args.kwargs["request"].post_deploy.connection_isolation, mode
                 )
@@ -172,7 +179,7 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
     async def test_production_unknown_modes_and_maintenance_refuse_before_driver(self) -> None:
         with patch("control_plane.http_app.execute_odoo_post_deploy_result") as execute:
             for mode in ("dry-run", "readback", "apply"):
-                for instance in ("prod", "production", " PROD "):
+                for instance in ("prod", "production", " PROD ", "live", "main"):
                     with self.subTest(mode=mode, instance=instance):
                         self.assertEqual(
                             (await self.call(mode, instance=instance, key="prod")).status_code, 400
@@ -248,3 +255,62 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
             response = await self.call("apply", key="changed-usage")
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(response.json()["error"]["code"], "disposable_lane_safety_unknown")
+
+    async def test_keyed_readback_is_independent_and_never_replays_old_evidence(self) -> None:
+        with patch(
+            "control_plane.http_app.execute_odoo_post_deploy_result",
+            side_effect=[({}, {"observation": "first"}), ({}, {"observation": "changed"})],
+        ):
+            first = await self.call("readback", key="same-read-key")
+            second = await self.call("readback", key="same-read-key")
+        self.assertEqual(first.json()["result"]["observation"], "first")
+        self.assertEqual(second.json()["result"]["observation"], "changed")
+
+    async def test_uncertain_apply_retains_fence_for_same_and_new_keys(self) -> None:
+        from control_plane.dokploy.api import DokployScheduleExecutionFailed
+
+        self.safety()
+
+        def uncertain(**kwargs: Any) -> Any:
+            kwargs["before_connection_isolation_mutation"]()
+            raise DokployScheduleExecutionFailed(
+                schedule_id="fixture",
+                deployment_id="",
+                deployment_status="unknown",
+                cause="trigger_outcome_unknown",
+            )
+
+        with patch(
+            "control_plane.http_app.execute_odoo_post_deploy_result", side_effect=uncertain
+        ) as execute:
+            first = await self.call("apply", key="uncertain-apply")
+            self.assertEqual(first.status_code, 503, first.text)
+            for key in ("uncertain-apply", "different-key"):
+                response = await self.call("apply", key=key)
+                self.assertEqual(response.status_code, 409, response.text)
+            execute.assert_called_once()
+
+    async def test_explicit_isolation_apply_rule_still_protects_lane(self) -> None:
+        self.app = self.make_app(
+            policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-read",),
+                        products=("example-odoo",),
+                        contexts=("cm",),
+                        instances=("testing",),
+                        actions=("odoo_connection_isolation.apply",),
+                    ),
+                ),
+            )
+        )
+        with (
+            scoped_agent_transport(),
+            patch("control_plane.http_app.execute_odoo_post_deploy_result") as execute,
+        ):
+            self.safety(usage="in_use")
+            response = await self.call("apply", key="granted-but-protected")
+            self.assertEqual(response.status_code, 409, response.text)
+            execute.assert_not_called()

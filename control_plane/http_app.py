@@ -544,6 +544,7 @@ from control_plane.odoo_preview_apply_http import (
 )
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_post_deploy_http import (
+    ConnectionIsolationApplyAdapter,
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE as _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
     ODOO_POST_DEPLOY_ROUTE as _ODOO_POST_DEPLOY_ROUTE,
     ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE as _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
@@ -7375,12 +7376,53 @@ def create_launchplane_fastapi_app(
             route_path=_ODOO_POST_DEPLOY_ROUTE,
             idempotency_key=idempotency_key,
             trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
+            check_replay=bool(idempotency_key.strip()) and isolation_mode is None,
         )
         if replay_response is not None:
             return replay_response
 
+        def execute_isolation_apply(
+            before_mutation: Callable[[], None],
+        ) -> tuple[dict[str, object], dict[str, object]]:
+            def checkpoint() -> None:
+                isolation_checkpoint()
+                before_mutation()
+
+            with synchronous_odoo_lane(
+                record_store=record_store,
+                trace_id=trace_id,
+                product=authorization_product,
+                context=post_deploy_request.post_deploy.context,
+                instance=post_deploy_request.post_deploy.instance,
+            ):
+                isolation_checkpoint()
+                return execute_odoo_post_deploy_result(
+                    control_plane_root=resolved_control_plane_root,
+                    record_store=record_store,
+                    request=post_deploy_request,
+                    before_connection_isolation_mutation=checkpoint,
+                )
+
         try:
+            if isolation_mode == "apply":
+                return await run_provider_mutation(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_ODOO_POST_DEPLOY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    trace_id=trace_id,
+                    adapter=ConnectionIsolationApplyAdapter(
+                        product=authorization_product,
+                        context=post_deploy_request.post_deploy.context,
+                        instance=post_deploy_request.post_deploy.instance,
+                        trace_id=trace_id,
+                        reviewed_plan_sha256=post_deploy_request.post_deploy.reviewed_plan_sha256,
+                        execute=execute_isolation_apply,
+                    ),
+                    in_progress_message="This isolation repair is already running. Retain its original key.",
+                    reconcile_message="The original isolation repair needs reconciliation before another apply.",
+                )
             with synchronous_odoo_lane(
                 record_store=record_store,
                 trace_id=trace_id,
@@ -7389,15 +7431,10 @@ def create_launchplane_fastapi_app(
                 instance=post_deploy_request.post_deploy.instance,
                 reserve=True,
             ):
-                if director_isolation_apply:
-                    isolation_checkpoint()
                 records, driver_result = execute_odoo_post_deploy_result(
                     control_plane_root=resolved_control_plane_root,
                     record_store=record_store,
                     request=post_deploy_request,
-                    before_connection_isolation_mutation=(
-                        isolation_checkpoint if director_isolation_apply else None
-                    ),
                 )
         except FileNotFoundError as error:
             raise _launchplane_http_error(
@@ -7433,15 +7470,16 @@ def create_launchplane_fastapi_app(
             records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_ODOO_POST_DEPLOY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
+        if isolation_mode is None:
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_ODOO_POST_DEPLOY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
         return response
 
     async def write_odoo_app_maintenance(
