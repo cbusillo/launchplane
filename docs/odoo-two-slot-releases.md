@@ -195,3 +195,10 @@ keys. A cached forward fence/resume receipt cannot stand in for the rollback's
 fresh drain or old-slot resumption. The maintenance attempt marker is persisted
 before the applied baseline is marked pending, so an interrupted pending write
 still takes the settings recovery path.
+If failed forward maintenance/readiness is recovered by rollback, the original
+forward pause closes at the verified rollback resumption and retains its full
+measured interval and actual old-slot recovery binding. A started maintenance
+whose settings outcome is unproved remains conservative: without a verified
+retained snapshot, rollback disables collection even if the failure occurred
+before a settings receipt was produced. Only a pre-maintenance abort proves
+that the candidate's maintenance never began.

@@ -398,6 +398,14 @@ class CutoverWebsiteTests(unittest.TestCase):
         assert result.pause is not None
         self.assertNotEqual(result.rollback_pause.pause_id, result.pause.pause_id)
         self.assertEqual(result.rollback_pause.state, "complete")
+        self.assertEqual(result.pause.state, "complete")
+        self.assertEqual(result.pause.ended_at, result.rollback_pause.ended_at)
+        self.assertEqual(result.pause.recovery_binding, self.provider.cutover.old.binding)
+        assert result.pause.ended_at is not None
+        self.assertEqual(
+            result.pause.duration_seconds,
+            (result.pause.ended_at - result.pause.began_at).total_seconds(),
+        )
         self.assertEqual(self.provider.target, self.provider.cutover.old)
 
     def test_abort_before_maintenance_resumes_old_without_disabling_collection(self) -> None:

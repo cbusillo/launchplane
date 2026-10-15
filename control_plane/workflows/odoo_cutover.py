@@ -23,6 +23,7 @@ from control_plane.contracts.prepared_public_site import (
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.prepared_public_pause import PreparedPublicPause, PublicPauseProvider
 from control_plane.prepared_public_site import verify_snapshot
+from control_plane.odoo_cutover_plan import rollback_pause_identity
 
 
 class OdooCutoverStore(Protocol):
@@ -334,7 +335,7 @@ def rollback_compatible_cutover(
 ) -> OdooCutoverRecord:
     record = OdooCutoverRecord.model_validate(store.load(record_id).model_dump())
     plan = record.plan
-    rollback_pause_id = record_id + "-rollback"
+    rollback_pause_id = rollback_pause_identity(record_id)
     if plan.compatibility.classification != "compatible":
         raise ValueError("database-changing rollback requires an authorized coherent tuple restore")
     with provider.exclusive(plan):
@@ -422,12 +423,25 @@ def rollback_compatible_cutover(
         _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
         if intent is not None:
             assert record.public_site is not None
-            PreparedPublicPause(
+            recovered = PreparedPublicPause(
                 record.public_site,
                 _PauseStore(store, record_id, rollback=True),
                 provider,
                 clock=clock,
             ).finish(rollback_pause_id, expected=plan.old.binding)
+            if record.pause is not None and record.pause.state != "complete":
+                assert recovered.ended_at is not None
+                pause = record.pause.model_copy(
+                    update={
+                        "state": "complete",
+                        "ended_at": recovered.ended_at,
+                        "duration_seconds": (
+                            recovered.ended_at - record.pause.began_at
+                        ).total_seconds(),
+                        "recovery_binding": plan.old.binding,
+                    }
+                )
+                store.save(store.load(record_id).model_copy(update={"pause": pause}))
         elif (
             record.public_site is not None
             and record.pause is not None

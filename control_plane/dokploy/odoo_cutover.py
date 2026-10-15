@@ -29,6 +29,7 @@ from control_plane.contracts.prepared_public_site import (
 )
 from control_plane.dokploy.traefik_cutover import TraefikFileRoute
 from control_plane.prepared_public_site import verify_snapshot
+from control_plane.odoo_cutover_plan import rollback_pause_identity
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 
 
@@ -134,20 +135,20 @@ class DokployOdooCutoverProvider:
     def publish(self, site: PreparedPublicSite, pause_id: str) -> str:
         verify_snapshot(site)
         if (
-            pause_id not in (self.pause_id, self.pause_id + "-rollback")
+            pause_id not in (self.pause_id, rollback_pause_identity(self.pause_id))
             or site.plan.binding != self.plan.old.binding
         ):
             raise ValueError("prepared publication differs from its persisted pause binding")
         self.prepared_url = self.driver.stage_public(site, pause_id)
         if (
-            pause_id not in (self.pause_id, self.pause_id + "-rollback")
+            pause_id not in (self.pause_id, rollback_pause_identity(self.pause_id))
             or self.prepared_url != self.driver.lane.prepared_origin
         ):
             raise ValueError("prepared endpoint/pause differs from its authoritative binding")
-        self.route.publish(
-            self.prepared_url,
-            expected=(self.plan.old.private_url, self.plan.new.private_url, self.prepared_url),
-        )
+        expected: tuple[str, ...] = (self.plan.old.private_url, self.prepared_url)
+        if pause_id == rollback_pause_identity(self.pause_id):
+            expected += (self.plan.new.private_url,)
+        self.route.publish(self.prepared_url, expected=expected)
         return self.observed_public_copy(pause_id)
 
     def observed_public_copy(self, pause_id: str) -> str:
@@ -155,10 +156,13 @@ class DokployOdooCutoverProvider:
         target = self.route.observed_target()
         if target != self.driver.lane.prepared_origin or pause_id not in (
             self.pause_id,
-            self.pause_id + "-rollback",
+            rollback_pause_identity(self.pause_id),
         ):
             return ""
-        site = self.driver.load_prepared(pause_id)
+        try:
+            site = self.driver.load_prepared(pause_id)
+        except FileNotFoundError:
+            return ""
         verify_snapshot(site)
         if site.plan.binding != self.plan.old.binding:
             raise ValueError("prepared record crosses the release binding")
@@ -206,7 +210,7 @@ class DokployOdooCutoverProvider:
         if observed == self.driver.lane.prepared_origin or observed not in expected:
             if observed != self.driver.lane.prepared_origin or not any(
                 self.observed_public_copy(pause_id)
-                for pause_id in (self.pause_id, self.pause_id + "-rollback")
+                for pause_id in (self.pause_id, rollback_pause_identity(self.pause_id))
             ):
                 raise ValueError("unknown route is not a verified prepared public copy")
             expected += (observed,)

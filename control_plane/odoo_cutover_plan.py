@@ -32,6 +32,10 @@ def cutover_identity(product: str, context: str, instance: str, release_id: str)
     ).hexdigest()[:32]
 
 
+def rollback_pause_identity(record_id: str) -> str:
+    return record_id + "-rollback"
+
+
 def cutover_record_id(plan: OdooCutoverPlan) -> str:
     return cutover_identity(
         plan.new.binding.product_id,
