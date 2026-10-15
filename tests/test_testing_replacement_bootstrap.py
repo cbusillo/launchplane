@@ -11,14 +11,21 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import ProductOdooLaneDataPolicy
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.odoo_testing_resources import OdooTestingResources
+from control_plane.odoo_testing_restore import (
+    TestingCredentialsOverlap,
+    TestingCredentialVersionsMissing,
+)
+from control_plane.live_target_runtime import LiveTargetRuntimeError
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
 )
 from control_plane.testing_replacement_bootstrap import (
+    BootstrapPrerequisiteCode,
     TestingReplacementBootstrapAdapter,
     TestingReplacementBootstrapRequest,
+    TestingBootstrapPrerequisiteError,
     bootstrap_plan,
 )
 from control_plane.testing_replacement_resources import (
@@ -299,6 +306,70 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
         self.assertEqual(self.store.read_product_reconcile_request(queued.target_key), queued)
 
 
+class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
+    def credential_comparison_failure(self) -> None:
+        self.patches()
+        for dependency, failure, expected in (
+            (
+                "evaluate_runtime_key_safety_for_live_target_sync",
+                LiveTargetRuntimeError("private fixture credential"),
+                BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE,
+            ),
+            (
+                "require_distinct_testing_credentials",
+                TestingCredentialVersionsMissing("private fixture credential"),
+                BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING,
+            ),
+            (
+                "require_distinct_testing_credentials",
+                TestingCredentialsOverlap("private fixture credential"),
+                BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP,
+            ),
+            (
+                "require_distinct_testing_credentials",
+                ValueError("private fixture credential"),
+                BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED,
+            ),
+        ):
+            with (
+                self.subTest(prerequisite=expected),
+                patch(
+                    f"control_plane.testing_replacement_bootstrap.{dependency}", side_effect=failure
+                ),
+                patch(
+                    "control_plane.testing_replacement_bootstrap.encoded_restore_source"
+                ) as source,
+                self.assertRaises(TestingBootstrapPrerequisiteError) as caught,
+            ):
+                bootstrap_plan(self.store, self.profile.product, self.request)
+            self.assertEqual(caught.exception.code, expected)
+            self.assertNotIn("private fixture credential", str(caught.exception))
+            source.assert_not_called()
+
+    def missing_source_failure(self) -> None:
+        self.patches()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context=self.fixture.context,
+                env={"FIXTURE_SETTING": "present"},
+                updated_at=self.profile.updated_at,
+            )
+        )
+        with self.assertRaises(TestingBootstrapPrerequisiteError) as caught:
+            bootstrap_plan(self.store, self.profile.product, self.request)
+        self.assertEqual(
+            caught.exception.code,
+            BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED,
+        )
+        self.assertIsNone(
+            self.store.read_fresh_odoo_testing_generation(
+                self.profile.product, self.fixture.context
+            )
+        )
+        self.assertEqual(self.routes, [])
+
+
 class FreshTestingBootstrapObservationTests(unittest.TestCase):
     def test_unknown_dispatched_route_is_never_blindly_repeated(self) -> None:
         store = Mock(spec=PostgresRecordStore)
@@ -387,3 +458,16 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
             result = await self.post()
         self.assertEqual(result.status_code, 409, result.text)
         self.assertNotIn("private-value", result.text)
+        self.assertNotIn(result.json()["error"]["code"], tuple(BootstrapPrerequisiteCode))
+
+    async def test_dry_run_returns_the_prerequisite_classification(self) -> None:
+        prerequisite = TestingBootstrapPrerequisiteError(
+            BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED
+        )
+        with patch(
+            "control_plane.http_routes.testing_replacement_bootstrap.bootstrap_plan",
+            side_effect=prerequisite,
+        ):
+            response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(response.json()["error"]["code"], prerequisite.code)
