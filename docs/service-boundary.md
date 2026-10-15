@@ -1949,6 +1949,7 @@ transport or its managed authority.
 - `POST /v1/product-profiles/expected-config/apply`
 - `POST /v1/product-profiles/health-monitoring/apply`
 - `POST /v1/product-profiles/prelaunch-rebuild/apply`
+- `POST /v1/product-profiles/{product}/testing-restore-policy`
 - `POST /v1/product-profiles/preview-tls/apply`
 - `POST /v1/product-profiles/{product}/display-name`
 - `POST /v1/product-profiles/{product}/owner`
@@ -1961,6 +1962,18 @@ records; product repos do not carry repo-local Launchplane lifecycle manifests.
 Writes require `product_profile.write` for the profile product in the
 Launchplane service context, validate the profile write contract before storage,
 and preserve optional `Idempotency-Key` replay/conflict behavior.
+
+The testing-restore-policy route is a bounded Director-agent exception for
+ordinary testing preparation. It accepts only an owned Odoo testing context,
+mode, reason and reviewed plan digest. It derives the production source from
+that same product's profile and changes only testing's data policy, preserving
+all production, Client, release and operational authority. Dry run writes nothing;
+apply requires the matching full-profile plan digest and idempotency key, with
+atomic profile compare-and-write and replay. It neither starts a restore nor
+produces positive disposable safety facts. Other identities retain their existing
+profile permissions; no Client or workflow permission expands. See
+[disposable lanes](disposable-lanes.md#preparing-a-testing-production-copy-policy)
+for the bounded client and separate isolation/sanitization requirements.
 
 Expected-config apply is a narrower metadata mutation for runtime contract
 requirements already owned by product profiles. It requires
