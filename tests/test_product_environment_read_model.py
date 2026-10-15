@@ -716,8 +716,8 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
 
     def test_action_authz_map_matches_live_service_handlers(self) -> None:
         self.assertEqual(
-            ACTION_AUTHZ_BY_ROUTE["/v1/drivers/odoo/artifact-publish"],
-            "odoo_artifact_publish.write",
+            ACTION_AUTHZ_BY_ROUTE["/v1/drivers/odoo/post-deploy"],
+            "odoo_post_deploy.execute",
         )
 
     def test_product_site_overview_hides_non_operator_driver_actions(self) -> None:

@@ -1539,7 +1539,6 @@ jobs:
               /v1/health \
               /v1/service/runtime \
               /v1/drivers/launchplane/self-deploy \
-              /v1/drivers/odoo/artifact-publish-inputs \
               /v1/drivers/odoo/preview-apply-inputs \
               /v1/drivers/odoo/preview-apply \
               /v1/previews/pr-feedback \

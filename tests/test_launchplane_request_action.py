@@ -1179,7 +1179,7 @@ process.on('beforeExit', () => {{
             result = self.run_action(
                 inputs={
                     "launchplane-url": "https://launchplane.example",
-                    "route-path": "/v1/drivers/odoo/artifact-publish",
+                    "route-path": "/v1/drivers/odoo/post-deploy",
                     "payload": '{"schema_version":1,"product":"odoo","publish":{"schema_version":1,"context":"cm"}}',
                     "payload-fields": "publish.instance=testing",
                     "payload-json-files": f"publish.manifest={manifest_path}",
@@ -1209,7 +1209,7 @@ process.on('beforeExit', () => {{
         result = self.run_action(
             inputs={
                 "launchplane-url": "https://launchplane.example",
-                "route-path": "/v1/drivers/odoo/artifact-publish",
+                "route-path": "/v1/drivers/odoo/post-deploy",
                 "payload-json-files": "publish.manifest=artifact.json",
             },
         )

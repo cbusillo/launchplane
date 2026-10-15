@@ -124,8 +124,6 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "merge_train_policy_operation.read": ActionDeclaration("read"),
         "merge_train_policy_operation.revoke": ActionDeclaration("write"),
         "odoo_app_maintenance.execute": ActionDeclaration("write"),
-        "odoo_artifact_publish.write": ActionDeclaration("write"),
-        "odoo_artifact_publish_inputs.read": ActionDeclaration("read"),
         "odoo_config_parameter_override.write": ActionDeclaration("write"),
         "odoo_post_deploy.execute": ActionDeclaration("write"),
         "odoo_preview_apply.execute": ActionDeclaration("write"),
@@ -234,6 +232,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "tenant_repository_classification.write": ActionDeclaration("write"),
         "trusted_maintenance_policy.read": ActionDeclaration("read"),
         "trusted_maintenance_policy.write": ActionDeclaration("write"),
+        # Historical policy parsing only; the Odoo publish routes are retired.
+        "odoo_artifact_publish_inputs.read": ActionDeclaration("read"),
+        "odoo_artifact_publish.write": ActionDeclaration("write"),
         "verireel_app_maintenance.execute": ActionDeclaration("write"),
         "verireel_preview_destroy.execute": ActionDeclaration("write"),
         "verireel_preview_inventory.read": ActionDeclaration("read"),

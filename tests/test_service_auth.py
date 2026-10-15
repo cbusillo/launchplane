@@ -1296,6 +1296,8 @@ class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
     def test_historical_retired_driver_grants_remain_readable_and_lane_scoped(self) -> None:
         # These immutable legacy actions occur in stored policy history.
         actions = (
+            "odoo_artifact_publish_inputs.read",
+            "odoo_artifact_publish.write",
             "verireel_testing_deploy.execute",
             "verireel_stable_environment.read",
             "verireel_prod_deploy.execute",

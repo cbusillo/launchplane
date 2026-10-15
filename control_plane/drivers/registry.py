@@ -508,13 +508,6 @@ ODOO_DRIVER = DriverDescriptor(
     provider_boundary=PROVIDER_BOUNDARY_NOTE,
     capabilities=(
         DriverCapabilityDescriptor(
-            capability_id="artifact_publish",
-            label="Artifact publish",
-            description="Accept and persist immutable Odoo artifact manifests produced by product CI.",
-            actions=("artifact_publish_inputs", "artifact_publish"),
-            panels=("artifact_evidence",),
-        ),
-        DriverCapabilityDescriptor(
             capability_id="post_deploy_settings",
             label="Post-deploy settings",
             description="Apply typed Odoo instance settings and managed secret bindings after deploy.",
@@ -555,25 +548,6 @@ ODOO_DRIVER = DriverDescriptor(
         ),
     ),
     actions=(
-        _action(
-            "artifact_publish_inputs",
-            "Resolve publish inputs",
-            "Resolve DB-backed publish settings for product CI without exposing provider internals.",
-            safety="read",
-            scope="instance",
-            route_path="/v1/drivers/odoo/artifact-publish-inputs",
-            authz_action="odoo_artifact_publish_inputs.read",
-        ),
-        _action(
-            "artifact_publish",
-            "Record artifact",
-            "Persist a product-built immutable artifact manifest as Launchplane release evidence.",
-            safety="safe_write",
-            scope="instance",
-            route_path="/v1/drivers/odoo/artifact-publish",
-            authz_action="odoo_artifact_publish.write",
-            writes_records=("artifact_manifest",),
-        ),
         _action(
             "app_maintenance",
             "Run app maintenance",

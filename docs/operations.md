@@ -3387,46 +3387,16 @@ workflow grant, after that.
   backup gate for the current prod-named lane. Do not reuse old bootstrap backup
   gates as authorization for a new re-promote.
 
-Artifact handoff example:
+Artifact builds belong to product repositories. Their Build workflow publishes
+the immutable image and manifest; Launchplane verifies repository, commit and
+run provenance before ingestion and event-driven deployment. See
+[artifact provenance](artifact-provenance.md) and
+[event-driven deploys](event-driven-deploys.md). Launchplane supplies no build
+settings and runs no devkit publish subprocess.
 
-```bash
-uv run launchplane odoo-artifacts publish \
-  --context example \
-  --instance testing \
-  --manifest ../product-repo/workspace.toml \
-  --devkit-root ../devkit \
-  --image-repository ghcr.io/example/product \
-  --image-tag example-20260416-deadbeef
-```
-
-The Odoo artifact publish driver is the control-plane-owned handoff. It
-resolves the DB-backed runtime environment and managed secrets in Launchplane,
-derives product-profile publish metadata such as preview slug, image repository,
-image tag, and product source repository. The DB-backed product profile remains
-authoritative for the tenant checkout; an optional caller repository value is
-only an equality assertion and cannot redirect the build. Launchplane passes the
-runtime payload to `odoo-devkit` as a one-shot runtime payload for the publish
-subprocess, validates the returned artifact belongs to the requested context,
-and writes the artifact manifest back to Launchplane records. Schema-v2 evidence
-must also identify the product-profile repository as the tenant uv-lock source.
-Do not point a local devkit checkout directly at the live Launchplane database
-or recreate runtime env files to publish artifacts.
-
-Launchplane accepts historical schema-v1 artifact manifests and strict
-schema-v2 manifests. V2 records carry typed uv-lock, per-platform Python package,
-and exact-source external compatibility evidence. Launchplane validates the
-evidence shape, exact refs, sanitized source identities, and canonical package
-digest before storage, but it does not resolve or install tenant dependencies.
-Dependency resolution, environment inspection, and evidence generation remain
-with the artifact producer and generic image tooling.
-
-The rollout is reader-first. During the coordinated producer migration, v1
-publish requests remain accepted for compatibility but never satisfy a v2
-provenance requirement. A v2 envelope, publish request, and returned manifest
-must all declare version 2; local publish also binds the returned manifest to the
-requested image repository and complete requested platform set. After all
-producers migrate, service ingress can require v2 without rewriting historical
-v1 records.
+Historical schema-v1 manifests remain readable. New build manifests carry the
+producer's dependency and compatibility evidence; Launchplane validates that
+evidence rather than resolving or installing the product's dependencies.
 
 ## Live Sites During A Launchplane Outage
 
