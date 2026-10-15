@@ -1,7 +1,7 @@
 """retain native testing copy artifact receipts
 
 Revision ID: 46acf53ad998
-Revises: fa869a26f006
+Revises: ab970a37f007
 Create Date: 2026-10-15 13:37:47.891414+00:00
 """
 
@@ -15,7 +15,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision: str = "46acf53ad998"
-down_revision: str | None = "fa869a26f006"
+down_revision: str | None = "ab970a37f007"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

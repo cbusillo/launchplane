@@ -385,6 +385,27 @@ class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
             self.production_before,
         )
 
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=source_context,
+                instance="prod",
+                env={"ODOO_DB_NAME": "later_production_database"},
+                updated_at="2026-01-02T00:00:00Z",
+            )
+        )
+        self.assertNotEqual(
+            native_testing_source_authority(
+                self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                testing_context=self.fixture.context,
+            ).binding_sha256,
+            capture.source_binding_sha256,
+        )
+        self.assertEqual(
+            self.adapter().readback()["source_binding_sha256"], capture.source_binding_sha256
+        )
+
     def credential_comparison_failure(self) -> None:
         self.patches()
         for dependency, failure, expected in (

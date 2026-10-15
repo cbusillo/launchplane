@@ -21,6 +21,7 @@ from control_plane.odoo_testing_restore import (
 from control_plane.odoo_testing_native_source import (
     native_testing_source_authority,
     resolve_native_testing_source,
+    recorded_native_testing_capture,
 )
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
@@ -1449,7 +1450,7 @@ def build_odoo_stable_target_replacement_plan(
         destructive_backup_required = False
         if generation is not None and generation.source_mode == "container-export":
             try:
-                if (
+                if recorded_native_testing_capture(record_store, generation) is None and (
                     native_testing_source_authority(
                         cast(PostgresRecordStore, record_store),
                         profile=profile,
@@ -2120,12 +2121,17 @@ def execute_odoo_stable_target_replacement_apply(
             # Source inspection/probe happens outside DB authority locks and before
             # the first testing provider write. It never exports or changes source.
             try:
-                native_source = resolve_native_testing_source(
-                    cast(PostgresRecordStore, record_store),
-                    root=control_plane_root,
-                    profile=profile,
-                    testing_context=plan.context,
-                    probe=True,
+                captured_source = recorded_native_testing_capture(record_store, generation)
+                native_source = (
+                    captured_source.source_observation
+                    if captured_source is not None
+                    else resolve_native_testing_source(
+                        cast(PostgresRecordStore, record_store),
+                        root=control_plane_root,
+                        profile=profile,
+                        testing_context=plan.context,
+                        probe=True,
+                    )
                 )
                 if native_source.binding_sha256 != generation.source_binding_sha256:
                     raise ValueError("The reviewed native copy source changed.")

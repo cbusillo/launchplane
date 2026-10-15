@@ -33,6 +33,7 @@ _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS = 10
 # a provider deployment to the trigger that started it.
 _DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS = 120
 MAX_DOKPLOY_LOG_LINE_COUNT = 1000
+NATIVE_TESTING_CHUNK_UPLOAD_PATH = "/api/docker.uploadFileToContainer"
 _DOKPLOY_SCHEDULE_DIAGNOSTIC_LINE_COUNT = 20
 _MAX_DOKPLOY_ERROR_DETAIL_LENGTH = 2000
 _MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH = 4000
@@ -1911,7 +1912,7 @@ def upload_native_testing_chunk(
         or not 0 < len(content) <= 65536
     ):
         raise ValueError("Native testing upload requires a bounded qualified receiver.")
-    path = "/api/docker.uploadFileToContainer"
+    path = NATIVE_TESTING_CHUNK_UPLOAD_PATH
     metadata: JsonObject = {
         "serverId": server_id,
         "containerId": container_id,

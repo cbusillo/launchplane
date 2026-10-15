@@ -46,6 +46,12 @@ def main() -> int:
     parser.add_argument("--product", required=True)
     parser.add_argument("--context", required=True)
     parser.add_argument("--reason", default="")
+    parser.add_argument("--activation-plan-sha256", default="")
+    parser.add_argument(
+        "--hold-purpose",
+        choices=("staff_testing", "isolation_staging"),
+        default="isolation_staging",
+    )
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--idempotency-key", default="")
@@ -90,7 +96,8 @@ def main() -> int:
             instance="testing",
             mode="dry-run",
             hold=not lifting,
-            purpose="isolation_staging",
+            purpose=args.hold_purpose,
+            activation_plan_sha256=args.activation_plan_sha256,
             reason=args.reason or "Inspect testing interlock.",
         )
         if holding
@@ -164,7 +171,12 @@ def main() -> int:
             raise ValueError("Operation was not accepted.")
         result = response["result"]
         if holding and (
-            result.get("reconcile_requested") is not False
+            result.get("reconcile_requested")
+            is not (
+                applying
+                and lifting
+                and (args.hold_purpose == "staff_testing" or bool(args.activation_plan_sha256))
+            )
             or (applying and not result["read_back_matches"])
         ):
             raise ValueError("Staging interlock readback or no-deploy result did not verify.")

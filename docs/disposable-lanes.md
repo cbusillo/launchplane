@@ -223,6 +223,12 @@ work happened or permit apply while required physical isolation is unknown.
 
 ## Independent storage under a retained generic-web hold and deploy fence
 
+The [complete activation continuation](testing-activation.md) consumes this
+original allocation on a fresh recipient, retaining the old target, unchanged
+hold and historical fence. Its exact-receipt hold continuation is the bounded
+exception to the ordinary Director-agent staging-lift refusal described above.
+It proves separation before requesting normal testing reconciliation.
+
 `POST /v1/products/{product}/testing-separation-resources` provides preparation
 when the old testing recipient cannot be changed. It accepts only the exact
 owned generic-web testing context, a reason, mode and reviewed plan digest.
@@ -570,6 +576,17 @@ readback removes raw receiver chunks and private cached bytes, retaining the
 immutable DB receipt. Failed attempts retain original chunks/cache and keep the
 generation for supported same-key recovery. Never delete retained old storage
 or fabricate a completion witness as cleanup.
+
+Chunk dispatches share one aggregate recovery-journal effect; its acknowledgement
+describes the current synchronous upload. After acknowledged delivery, existing
+terminal-provider/executor exclusion permits reconciliation and reuse of the
+same generation's receipt. An unacknowledged upload reply stays fenced under
+the existing uncertain-dispatch rules; file presence alone never proves the
+remote call ended. Once a capture receipt is recorded, retry/readback uses that
+original source binding rather than probing live production or requiring its
+later runtime settings to remain unchanged. Current testing recipient and
+credential isolation checks still apply. A lost receipt-commit reply retains
+the private bytes because the DB commit may already have succeeded.
 
 For updates, run the schema migration and deploy this image to the API and Odoo
 worker with their existing shared state volume before selecting container export.

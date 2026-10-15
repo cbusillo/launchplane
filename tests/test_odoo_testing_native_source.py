@@ -37,6 +37,8 @@ from control_plane.odoo_testing_restore import generation_binding, NATIVE_TESTIN
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_replacement_bootstrap import (
     TestingReplacementBootstrapRequest,
+    TestingReplacementBootstrapPlan,
+    bootstrap_plan_payload,
     bootstrap_request_sha256,
     bootstrap_wire_payload,
 )
@@ -322,6 +324,23 @@ class NativeCopyCustodyTests(unittest.TestCase):
         self.store.write_native_testing_copy_capture.assert_not_called()
         self.assertFalse(any(path.is_file() for path in self.root.rglob("*")))
 
+    def test_lost_receipt_commit_reply_retains_published_bytes_for_resume(self) -> None:
+        def committed(receipt: NativeTestingCopyCapture) -> None:
+            self.store.read_native_testing_copy_capture.return_value = receipt
+            raise OSError("fixture lost commit reply")
+
+        self.store.write_native_testing_copy_capture.side_effect = committed
+        with patch(
+            "control_plane.odoo_testing_native_source.read_native_source", side_effect=self.stream
+        ):
+            with self.assertRaises(OSError):
+                self.capture()
+        receipt = self.store.read_native_testing_copy_capture.return_value
+        self.assertTrue(all(path.is_file() for path in verify_native_capture_files(receipt)))
+        with patch("control_plane.odoo_testing_native_source.read_native_source") as read:
+            self.assertEqual(self.capture(), receipt)
+            read.assert_not_called()
+
     def test_database_witness_resumes_without_source_read_or_private_cache(self) -> None:
         artifacts = {
             part: NativeTestingCopyArtifact(size=len(data), sha256=hashlib.sha256(data).hexdigest())
@@ -491,6 +510,41 @@ class NativeCopyCustodyTests(unittest.TestCase):
 
 
 class NativeIdentityCompatibilityTests(unittest.TestCase):
+    def test_ssh_response_still_validates_with_the_previous_strict_client_shape(self) -> None:
+        from pydantic import create_model, ConfigDict
+
+        legacy = create_model(
+            "LegacyBootstrapPlan",
+            __config__=ConfigDict(extra="forbid"),
+            **cast(
+                dict[str, Any],
+                {
+                    name: (field.annotation, field)
+                    for name, field in TestingReplacementBootstrapPlan.model_fields.items()
+                    if name not in {"source_mode", "source_binding_sha256"}
+                },
+            ),
+        )
+        plan = TestingReplacementBootstrapPlan(
+            product="example",
+            context="example",
+            operation_id="fixture",
+            domain_host="testing.example.invalid",
+            plan_sha256="a" * 64,
+            resources_binding_sha256="b" * 64,
+        )
+        accepted = legacy.model_validate(bootstrap_plan_payload(plan))
+        self.assertEqual(accepted.model_dump()["plan_sha256"], plan.plan_sha256)
+        native = plan.model_copy(
+            update={
+                "source_mode": "container-export",
+                "source_binding_sha256": descriptor().binding_sha256,
+            }
+        )
+        self.assertEqual(
+            TestingReplacementBootstrapPlan.model_validate(bootstrap_plan_payload(native)), native
+        )
+
     def test_existing_generation_hash_is_unchanged_by_defaulted_new_fields(self) -> None:
         record = generation()
         old_payload = record.model_dump(

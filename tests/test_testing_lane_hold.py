@@ -400,6 +400,29 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(lifted.json()["result"]["reconcile_requested"])
         self.assertEqual([request.target_key for request in requests], [f"{_PRODUCT}:testing"])
 
+    async def test_non_director_cannot_use_an_unverified_activation_to_lift_staging(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = self._store(root)
+            app = self._app(store, root, "product_config.plan", "product_config.apply")
+            hold = DokployTargetStaffTestingHold(
+                purpose="isolation_staging",
+                reason="Isolation interlock",
+                recorded_by="fixture",
+                recorded_at=_TIMESTAMP,
+            )
+            _seed_target(store, hold=hold)
+            for mode in ("dry-run", "apply"):
+                response = await self._post(
+                    app,
+                    _payload(hold=False, mode=mode)
+                    | {"purpose": "isolation_staging", "activation_plan_sha256": "a" * 64},
+                    idempotency_key="unverified-lift",
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(_read_hold(store), hold)
+                self.assertEqual(store.list_product_reconcile_requests(), ())
+
     async def test_director_can_plan_a_hold_lift_but_cannot_apply_it(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

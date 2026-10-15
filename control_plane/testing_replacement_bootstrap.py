@@ -63,7 +63,10 @@ from control_plane.testing_replacement_resources import (
     run_resource_schedule,
 )
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.odoo_testing_native_source import native_testing_source_authority
+from control_plane.odoo_testing_native_source import (
+    native_testing_source_authority,
+    recorded_native_testing_capture,
+)
 
 ROUTE = TESTING_REPLACEMENT_BOOTSTRAP_ROUTE
 
@@ -168,6 +171,14 @@ class TestingReplacementBootstrapPlan(BaseModel):
     runtime_verified: Literal[False] = False
     reconcile_requested: bool = False
     applied: bool = False
+
+
+def bootstrap_plan_payload(plan: TestingReplacementBootstrapPlan) -> dict[str, object]:
+    payload = plan.model_dump(mode="json")
+    if plan.source_mode == "ssh":
+        payload.pop("source_mode")
+        payload.pop("source_binding_sha256")
+    return payload
 
 
 def bootstrap_plan(
@@ -278,9 +289,18 @@ def bootstrap_plan(
     source_binding = ""
     with _bootstrap_prerequisite(BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED):
         if request.source_mode == "container-export":
-            source_binding = native_testing_source_authority(
-                store, profile=profile, testing_context=request.context
-            ).binding_sha256
+            captured = (
+                recorded_native_testing_capture(store, generation)
+                if generation is not None
+                else None
+            )
+            source_binding = (
+                captured.source_binding_sha256
+                if captured is not None
+                else native_testing_source_authority(
+                    store, profile=profile, testing_context=request.context
+                ).binding_sha256
+            )
         else:
             encoded_restore_source(source_values)
     if generation is not None and source_binding != generation.source_binding_sha256:
@@ -424,21 +444,23 @@ class TestingReplacementBootstrapAdapter:
             or operation.disposable_supersession.replacement_target_id != generation.target_id
         ):
             raise ValueError("Testing bootstrap supersession is incomplete.")
-        return TestingReplacementBootstrapPlan(
-            product=self.product,
-            context=self.request.context,
-            operation_id=generation.operation_id,
-            domain_host=generation.domain_host,
-            source_mode=generation.source_mode,
-            source_binding_sha256=generation.source_binding_sha256,
-            plan_sha256=generation.bootstrap_plan_sha256,
-            resources_binding_sha256=generation.resources_binding_sha256,
-            omitted_runtime_keys=bootstrap_plan(
-                self.store, self.product, self.request
-            ).omitted_runtime_keys,
-            applied=True,
-            reconcile_requested=True,
-        ).model_dump(mode="json")
+        return bootstrap_plan_payload(
+            TestingReplacementBootstrapPlan(
+                product=self.product,
+                context=self.request.context,
+                operation_id=generation.operation_id,
+                domain_host=generation.domain_host,
+                source_mode=generation.source_mode,
+                source_binding_sha256=generation.source_binding_sha256,
+                plan_sha256=generation.bootstrap_plan_sha256,
+                resources_binding_sha256=generation.resources_binding_sha256,
+                omitted_runtime_keys=bootstrap_plan(
+                    self.store, self.product, self.request
+                ).omitted_runtime_keys,
+                applied=True,
+                reconcile_requested=True,
+            )
+        )
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -744,8 +766,8 @@ class TestingReplacementBootstrapAdapter:
             provider_operation_response_payload(
                 trace_id=self.trace_id,
                 records={"operation": operation.operation_id},
-                result=plan.model_copy(
-                    update={"applied": True, "reconcile_requested": True}
-                ).model_dump(mode="json"),
+                result=bootstrap_plan_payload(
+                    plan.model_copy(update={"applied": True, "reconcile_requested": True})
+                ),
             ),
         )

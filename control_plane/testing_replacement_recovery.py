@@ -211,7 +211,23 @@ def guard_testing_replacement(
             target_id = str(payload.get("composeId") or payload.get("applicationId") or "")
             if target_id and target_id != journal.target_id:
                 raise RuntimeError("Testing replacement provider target changed.")
-            reference = f"{operation.operation_id}:{operation.attempt}:{len(journal.effects)}"
+            upload_index = (
+                next(
+                    (
+                        index
+                        for index, item in enumerate(journal.effects)
+                        if item.path == api.NATIVE_TESTING_CHUNK_UPLOAD_PATH
+                    ),
+                    None,
+                )
+                if path == api.NATIVE_TESTING_CHUNK_UPLOAD_PATH
+                else None
+            )
+            reference = (
+                journal.effects[upload_index].reference
+                if upload_index is not None
+                else f"{operation.operation_id}:{operation.attempt}:{len(journal.effects)}"
+            )
             title = ""
             if path in {"/api/compose.deploy", "/api/compose.redeploy"}:
                 title = f"launchplane-testing-{hashlib.sha256(reference.encode()).hexdigest()}"
@@ -224,7 +240,17 @@ def guard_testing_replacement(
                 schedule_id=str(payload.get("scheduleId") or ""),
                 deployment_title=title,
             )
-            journal = journal.model_copy(update={"effects": (*journal.effects, effect)})
+            effects = list(journal.effects)
+            if upload_index is not None:
+                effects[upload_index] = effect
+                effect_index = upload_index
+            else:
+                effect_index = len(effects)
+                effects.append(effect)
+            # All chunk writes share one aggregate delivery effect. Its flag
+            # always describes the current synchronous upload, avoiding a growing
+            # journal while retaining uncertain-dispatch fencing.
+            journal = journal.model_copy(update={"effects": tuple(effects)})
             save()
             response = dispatch()
             schedule_id = effect.schedule_id
@@ -233,7 +259,9 @@ def guard_testing_replacement(
             acknowledged = effect.model_copy(
                 update={"acknowledged": True, "schedule_id": schedule_id}
             )
-            journal = journal.model_copy(update={"effects": (*journal.effects[:-1], acknowledged)})
+            effects = list(journal.effects)
+            effects[effect_index] = acknowledged
+            journal = journal.model_copy(update={"effects": tuple(effects)})
             save()
             return response
 
@@ -241,7 +269,7 @@ def guard_testing_replacement(
             yield checkpoint
 
 
-# Only these acknowledged calls are synchronous configuration writes. New provider
+# Only these acknowledged calls are synchronous terminal writes. New provider
 # capabilities must earn a classifier; an unknown endpoint stays fenced.
 _SYNCHRONOUS_PATHS = frozenset(
     {
@@ -252,6 +280,10 @@ _SYNCHRONOUS_PATHS = frozenset(
         "/api/schedule.create",
         "/api/schedule.update",
         "/api/schedule.delete",
+        # The provider awaits upload/cp/cleanup before its reply. This is proof
+        # of quiescence, not file integrity: retry still inspects actual bytes.
+        # An unacknowledged upload remains fenced just like other lost replies.
+        api.NATIVE_TESTING_CHUNK_UPLOAD_PATH,
     }
 )
 _TERMINAL_PROVIDER_STATUSES = frozenset({"done", "error"})

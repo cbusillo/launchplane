@@ -514,6 +514,10 @@ def _held_generic_web_deploy_fences(
         return None
     fences: dict[tuple[str, str], LaunchplaneIdempotencyRecord] = {}
     for reservation in record_store.list_held_provider_target_reservations():
+        from control_plane.testing_activation import retained_fence_is_separated
+
+        if retained_fence_is_separated(record_store, reservation):
+            continue
         try:
             target = decode_generic_web_provider_reconciliation_target(
                 reservation.reconciliation_key

@@ -8877,10 +8877,51 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
         )
+        from control_plane.testing_activation import require_activation_hold_lift
+
+        if hold_request.activation_plan_sha256 and not director_agent_identity(identity):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Activation continuation requires the original Director agent.",
+            )
+        activated_interlock = director_agent_identity(identity) and bool(
+            hold_request.activation_plan_sha256
+        )
+
+        async def verify_activation_interlock() -> None:
+            if not activated_interlock:
+                return
+            try:
+                await run_in_worker_thread(
+                    lambda: require_activation_hold_lift(
+                        record_store,
+                        hold_request,
+                        launchplane_identity_actor(identity),
+                        resolved_control_plane_root,
+                        inspect_provider=hold_request.mode == "apply",
+                    )
+                )
+            except (
+                ValueError,
+                FileNotFoundError,
+                RuntimeError,
+                OSError,
+                click.ClickException,
+            ) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="testing_activation_unverified",
+                    message="The original activation interlock is not safe to lift.",
+                ) from error
+
         if (
             isinstance(identity, LocalOperatorIdentity)
             and not hold_request.hold
             and (hold_request.mode == "apply" or not director_agent_identity(identity))
+            and not activated_interlock
         ):
             # Lifting a hold requests a testing reconcile, which can deploy.
             raise _launchplane_http_error(
@@ -8904,6 +8945,7 @@ def create_launchplane_fastapi_app(
             "instance": hold_request.instance,
         }
         if hold_request.mode == "dry-run":
+            await verify_activation_interlock()
             try:
                 plan, _replacement = control_plane_testing_lane_hold.build_testing_hold_plan(
                     record_store=typed_store, request=hold_request, actor=actor
@@ -8942,22 +8984,37 @@ def create_launchplane_fastapi_app(
         )
         if replay_response is not None:
             return replay_response
+        await verify_activation_interlock()
         try:
-            applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
-                record_store=typed_store,
-                request=hold_request,
-                actor=actor,
-                required_context_owner=(
-                    (hold_request.product, hold_request.context)
-                    if isinstance(identity, LocalOperatorIdentity)
-                    else None
-                ),
-                required_product_config_target=(
-                    hold_request.product,
-                    hold_request.context,
-                    hold_request.instance,
-                ),
-            )
+            with (
+                record_store.serialize_disposable_testing_resources()
+                if activated_interlock and isinstance(record_store, PostgresRecordStore)
+                else nullcontext()
+            ):
+                if activated_interlock:
+                    require_activation_hold_lift(
+                        record_store,
+                        hold_request,
+                        actor,
+                        resolved_control_plane_root,
+                        inspect_provider=False,
+                    )
+                applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
+                    record_store=typed_store,
+                    request=hold_request,
+                    actor=actor,
+                    required_context_owner=(
+                        (hold_request.product, hold_request.context)
+                        if isinstance(identity, LocalOperatorIdentity)
+                        else None
+                    ),
+                    required_product_config_target=(
+                        hold_request.product,
+                        hold_request.context,
+                        hold_request.instance,
+                    ),
+                    activation_verified=activated_interlock,
+                )
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -8982,6 +9039,15 @@ def create_launchplane_fastapi_app(
         except control_plane_testing_lane_hold.TestingHoldStale as error:
             raise _launchplane_http_error(
                 status_code=409, trace_id=trace_id, code="stale", message=str(error)
+            ) from error
+        except ValueError as error:
+            if not activated_interlock:
+                raise
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_activation_unverified",
+                message="The original activation interlock is not safe to lift.",
             ) from error
         response = accepted_evidence_response(
             trace_id=trace_id, records=records, result=applied_plan.model_dump(mode="json")
@@ -29200,6 +29266,16 @@ def create_launchplane_fastapi_app(
     )
 
     register_testing_separation_resource_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        actor=launchplane_identity_actor,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
+    from control_plane.http_routes.testing_activation import register_testing_activation_routes
+
+    register_testing_activation_routes(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,

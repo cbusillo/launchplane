@@ -947,6 +947,64 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                 "reconciliation_required",
             )
 
+    def test_acknowledged_native_delivery_uses_one_aggregate_effect_and_recovers(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                counts = []
+                with patch.object(api, "_dokploy_request", return_value={}):
+                    for _ in range(3):
+                        api.dokploy_request(
+                            host="https://provider.test",
+                            token="fixture-token",
+                            path=api.NATIVE_TESTING_CHUNK_UPLOAD_PATH,
+                            method="POST",
+                            payload={},
+                        )
+                        journal = store.read_odoo_stable_target_replacement_operation_record(
+                            operation.operation_id
+                        ).recovery_journal
+                        assert journal is not None
+                        counts.append(len(journal.effects))
+                        self.assertTrue(all(effect.acknowledged for effect in journal.effects))
+                self.assertTrue(counts)
+                self.assertEqual(min(counts), max(counts))
+            fenced = self.fence(store)
+            with self.provider():
+                view = testing_replacement_recovery_read(store, fenced, root)
+                self.assertEqual(view["status"], "eligible")
+                self.assertEqual(
+                    recover_stranded_testing_replacements(store, root), (operation.operation_id,)
+                )
+
+    def test_lost_native_upload_reply_keeps_aggregate_delivery_unacknowledged(self) -> None:
+        for store, root in self.stores():
+            operation = self.running(store)
+            with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                with patch.object(
+                    api, "_dokploy_request", side_effect=[{}, TimeoutError("fixture lost reply")]
+                ):
+                    api.dokploy_request(
+                        host="https://provider.test",
+                        token="fixture-token",
+                        path=api.NATIVE_TESTING_CHUNK_UPLOAD_PATH,
+                        method="POST",
+                        payload={},
+                    )
+                    with self.assertRaises(TimeoutError):
+                        api.dokploy_request(
+                            host="https://provider.test",
+                            token="fixture-token",
+                            path=api.NATIVE_TESTING_CHUNK_UPLOAD_PATH,
+                            method="POST",
+                            payload={},
+                        )
+            fenced = self.fence(store)
+            with self.provider():
+                view = testing_replacement_recovery_read(store, fenced, root)
+                self.assertEqual(view["reason"], "recovery_dispatch_unacknowledged")
+                self.assertEqual(recover_stranded_testing_replacements(store, root), ())
+
     def test_classifier_requires_exact_terminal_deploy_and_bound_provider(self) -> None:
         for store, root in self.stores():
             operation = self.running(store)

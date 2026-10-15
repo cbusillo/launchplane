@@ -115,6 +115,26 @@ def native_testing_source_authority(
     )
 
 
+def recorded_native_testing_capture(
+    store: object, generation: FreshOdooTestingGeneration
+) -> NativeTestingCopyCapture | None:
+    from control_plane.odoo_testing_restore import generation_binding
+
+    if generation.source_mode != "container-export":
+        return None
+    binding = generation_binding(generation)
+    capture = getattr(store, "read_native_testing_copy_capture")(binding)
+    if capture is not None and (
+        not isinstance(capture, NativeTestingCopyCapture)
+        or capture.generation_binding_sha256 != binding
+        or capture.product != generation.product
+        or capture.context != generation.context
+        or capture.source_binding_sha256 != generation.source_binding_sha256
+    ):
+        raise ValueError("The native copy receipt differs from its generation.")
+    return capture
+
+
 def resolve_native_testing_source(
     store: PostgresRecordStore,
     *,
@@ -325,11 +345,10 @@ def capture_native_testing_source(
                 os.fsync(descriptor_fd)
             finally:
                 os.close(descriptor_fd)
-            try:
-                store.write_native_testing_copy_capture(capture)
-            except BaseException:
-                shutil.rmtree(destination)
-                raise
+            # A failed commit reply may still have committed. Keep private bytes
+            # even on an exception; deleting them can destroy the recorded copy.
+            # Unreferenced private caches have a documented custody cleanup path.
+            store.write_native_testing_copy_capture(capture)
             return capture
         finally:
             for handle in handles.values():
@@ -403,6 +422,7 @@ def prepare_native_testing_delivery(
             raise ValueError("The testing database appeared during source capture.")
     files = verify_native_capture_files(capture)
     expected: dict[tuple[str, int], dict[str, object]] = {}
+    delivery_started = False
     for part, path in zip(("database", "filestore"), files, strict=True):
         with path.open("rb") as handle:
             index = 0
@@ -436,8 +456,9 @@ def prepare_native_testing_delivery(
                         # original immutable chunk. Only that proved partial is
                         # repaired with the same original bytes.
                 if upload_required:
-                    if before_mutation is not None:
+                    if before_mutation is not None and not delivery_started:
                         before_mutation("native_testing_copy_chunk")
+                        delivery_started = True
                     api.upload_native_testing_chunk(
                         host=host,
                         token=token,

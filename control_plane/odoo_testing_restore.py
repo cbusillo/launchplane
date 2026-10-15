@@ -1111,10 +1111,13 @@ def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGe
 
     profile = getattr(store, "read_product_profile_record")(generation.product)
     if generation.source_mode == "container-export":
-        from control_plane.odoo_testing_native_source import native_testing_source_authority
+        from control_plane.odoo_testing_native_source import (
+            native_testing_source_authority,
+            recorded_native_testing_capture,
+        )
         from control_plane.storage.postgres import PostgresRecordStore
 
-        if (
+        if recorded_native_testing_capture(store, generation) is None and (
             native_testing_source_authority(
                 cast(PostgresRecordStore, store),
                 profile=profile,
