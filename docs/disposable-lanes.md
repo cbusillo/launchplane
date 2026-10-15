@@ -674,6 +674,15 @@ ambiguous or failed published captures merely because time has elapsed. Default
 SSH generations retain their previous stored field shape; this does not promise
 that older images can interpret native generations or newer schema migrations.
 
+Replacement planning preflights the fresh generation's effective restore overrides
+against the strict integration policy. Integration or analytics settings, connection
+fence replacements, and Shopify actions other than clear block the plan with a
+fixed, value-free description. Use sanitized overrides to continue. Execution
+rechecks the intent before replacement effects and before post-deploy environment
+or schedule writes; drift records `deploy_blocked.fresh_testing_intent_invalid`
+instead of an unexpected failure. Completed generations and production keep their
+ordinary deployment paths.
+
 The service compares the existing local testing passwords with the supported
 production source's managed versions internally, without returning or retaining
 plaintext or password hashes. Missing versions or overlap refuse preparation;
@@ -760,3 +769,131 @@ continue this route or enforce its guarantees; keep a compatible image or
 forward-fix. There is no production rollback or cleanup step in this testing-only
 procedure. Retained old targets, storage, partial-copy evidence and hostnames stay
 in custody until separately authorized disposition.
+
+## Scheduled Odoo testing rebuild drill
+
+The API service owns a daily drill for each enabled active Odoo testing lane. It queues
+an ordinary durable target-replacement operation; the Odoo worker performs the
+existing upstream restore, module work, integration sanitization, website
+exclusions and health checks. There is no GitHub workflow or product-repository
+call. The drill uses the lane's recorded artifact and same-product production
+source. Platform-input updates remain the separate devkit#131 grouped-update
+workstream; a drill does not rebuild or change the product artifact's inputs.
+
+The invariant is repeatable rebuildability, independently of a currently healthy
+web process: a lane must be restorable from production through sanitization and
+module work before someone needs it. A queue that never starts the work is a
+failure too. A durable daily slot and per-lane observer lease prevent duplicate
+queueing and reporting across API replicas and restarts. A two-hour unfinished
+operation records a failed completion deadline, alerts, and retains its original
+operation rather than recapturing or replacing it. Recurring lane slots are spread
+deterministically across the day. A late success updates the current evidence
+with `late_completion`; the original deadline failure remains alertable.
+
+Admission requires a completed qualified fresh testing generation and current
+unused/reproducible/isolated evidence, with its original expiry and exact binding.
+The same-product restore policy, existing lane-local credential separation,
+exclusive context/target ownership, actual storage/network inspection and
+pre-registry sanitization remain mandatory. A staff hold, recorded use,
+only-copy custody or another lane operation skips that day's drill. Missing,
+expired or conflicting safety facts record a failed prerequisite and alert;
+they never become inferred permission. The general positive-fact producer gap
+on #3611 therefore remains a real activation prerequisite. This feature cannot
+make an unqualified lane rebuild automatically.
+Deployment leaves the per-lane `odoo_testing_drill_enabled` flag false. After
+landing, configure it through the existing authenticated `POST /v1/product-profiles`
+path: read and preserve the current complete profile, change only that testing
+lane's flag, and post the updated profile with its normal idempotency key and
+existing `product_profile.write` authority. No new grant is needed. Refresh the
+actual safety facts against the resulting binding before admission. Production
+lanes cannot enable the flag. An unchanged failed prerequisite produces no
+repeated admission; corrected facts/configuration can retry the same daily slot
+before an operation has been queued.
+
+Queueing archives the prior generation and planned copy in the private slot
+receipt without changing the running lane's settings. After its hold check,
+the worker atomically selects a new service-named testing database and matching
+filestore path and activates that exact generation under its current lease.
+It repeats usage, credential and resource admission; changed source/configuration
+refuses before selection. The original collector row is never rebound or renewed.
+Its accepted snapshot is stored on the active worker attempt; an unchanged snapshot
+does not expire in the middle of that continuously leased restore. A reclaimed
+attempt requires fresh admission against the selected database. Every provider
+checkpoint rechecks the generation, admitted use/custody/isolation facts and
+current hold. Routine renewal of the same facts does not cancel a running copy;
+changed bindings require fresh current proof. A person starting a test session
+or placing a hold therefore protects the lane even after queueing. Protect a
+lane through the existing staff-testing hold before starting a session. Unknown
+or expired observations cannot substitute for that hold.
+
+A drill can stop the testing web service, replace its disposable contents, load
+the production source with the existing bounded read-only export, and consume
+testing storage. It never changes production data, ports, storage, routes,
+credentials or permissions. Its copy has live keys and outbound connections
+removed before the first registry process. After the new copy passes sanitization,
+module and integration readback, the restore guard may dispose of the older
+service-created drill database and its filestore. The immediate completed
+predecessor is retained through final web/health checks, including when those
+checks fail. Only the copy two generations behind can be disposed of, and it must carry
+its exact committed copy witness; DROP uses no FORCE, so an unexpected connection
+refuses disposal. The new copy is distinct and the initial bootstrap database
+is retained. Successful cleanup bounds steady-state drill storage to the initial copy, current
+copy, immediate predecessor and in-progress copy. Cleanup runs after the sanitized
+new web process starts; a cleanup refusal preserves that working copy, emits
+`testing_drill_disposal_deferred=true` in the operation logs, and retains the old
+copy under the slot receipt's custody. Deferred cleanup and failed partial
+captures/copies require explicit disposition and can accumulate; admission does
+not establish available filesystem capacity. Durable deferred-disposal telemetry,
+capacity admission and bounded cleanup reconciliation are tracked in
+[#3729](https://github.com/cbusillo/launchplane/issues/3729).
+A failed copy never deletes its predecessor. Final web and health verification
+still gates a passing operation and generation completion.
+
+`GET /v1/products/{product}/environments/testing` includes value-free
+`testing_rebuild_drill` evidence: queued/pass/fail/skipped, observation time,
+operation/deployment IDs, failing step, trace and alert delivery status. A pass
+requires the worker's health result and this exact generation's committed copy
+completion. It does not replace monitor freshness or prove platform updates.
+Failures use the lane's existing enabled Discord notification destinations and
+managed sender. No destination or unreadable sender leaves `alert_delivered=false`;
+retry occurs at five-minute intervals and remains visible without blocking later
+drill slots. Successful destinations are recorded individually, so another
+destination's outage does not repeat their notices. Webhook delivery is
+at least once: a lost acknowledgement may repeat a notice. Arbitrary provider
+errors, source settings, copy bytes and secrets never enter the notice or lane
+projection.
+Pending notices are coalesced to the latest failure per lane while retaining
+older failure receipts. Alert retries never refresh the drill's observation
+time, and scheduler projection/delivery updates preserve the worker's admission
+fields under a row lock. Retired or removed lanes stop participating.
+
+For updates, deploy the compatible API and Odoo worker together after the PR
+lands; no schema migration or new grant is needed. Before the first live run,
+configure the flag only after initial-copy qualification, source configuration
+and the existing Discord policy are prepared. Then obtain current hold/use/
+custody/isolation facts through the service before admission. A failed
+prerequisite is corrected on its supported service path, then a later slot can
+admit work. The first live run is separate from source/CI qualification and must
+never run against a lane in use. Inspect the lane receipt and its exact operation
+for a failed or overdue drill; preserve original keys, capture receipts and
+partial copies for supported recovery. Do not clear fences, fabricate safety
+facts, delete the initial copy or change the source transport to obtain a pass.
+
+Once a drill generation exists, older images cannot interpret its additional
+identity fields. Retain this image or a compatible successor and forward-fix;
+do not erase generation history or restore an old DB snapshot to clear a failure.
+Staff holds provide the supported per-lane maintenance pause. A held queued
+operation has not selected its new database. A refusal after selection but before
+any provider dispatch can restore the exact previous generation and runtime
+atomically with the terminal operation or its no-effect source-read retry back
+to pending. This is limited to the continuously held
+worker recovery guard, the same live lease/attempt, empty dispatch history and
+unchanged selected settings; it never overwrites intervening settings. An
+abandoned attempt, dispatched effect or later hold/failure retains the exact
+generation for supported recovery rather than reverting possibly used settings.
+A hold arriving after destructive restore starts can therefore leave testing
+unavailable pending recovery; continuing provider writes past that protection
+is not authorized. Private slot receipts retain prior generation identities;
+they are provenance, not a promise that a successfully superseded drill database
+still exists after bounded disposal. Remove failed raw-copy evidence only under
+the existing custody procedure above. No production rollback is part of this drill.

@@ -17,6 +17,7 @@ from control_plane.odoo_testing_restore import (
     read_current_testing_generation,
     fresh_testing_authority_sha256,
     fresh_testing_mode_refusal,
+    preflight_fresh_testing_intent,
     fresh_testing_override_record,
 )
 from control_plane.odoo_testing_native_source import (
@@ -49,6 +50,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     safe_error_detail_keys,
 )
 from control_plane.contracts.odoo_target_replacement_failures import (
+    OdooFreshTestingIntentRefusedError,
     DEPLOY_FAILED_CODE,
     OdooProviderEffectUncertainError,
     OdooProviderSafetyRefusedError,
@@ -1161,6 +1163,31 @@ def _public_restore_website_intent_error(
     return ""
 
 
+def _preflight_fresh_restore_overrides(
+    *,
+    record_store: object,
+    record: OdooInstanceOverrideRecord | None,
+    modules: str,
+    protected_shopify_store_keys: tuple[str, ...],
+) -> None:
+    environment = (
+        control_plane_odoo_instance_overrides.build_post_deploy_environment(
+            record,
+            record_store=record_store,
+            workflow_intent="deploy",
+            protected_shopify_store_keys=protected_shopify_store_keys,
+        ).inline_environment
+        if record is not None and {"deploy", "restore"}.intersection(record.apply_on)
+        else {}
+    )
+    preflight_fresh_testing_intent(
+        modules=modules,
+        encoded_payload=environment.get(
+            control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+        ),
+    )
+
+
 def _write_failed_deployment(
     *,
     record_store: OdooStableTargetReplacementStore,
@@ -1204,7 +1231,9 @@ def _deploy_step_failure(error: BaseException) -> RecordFailure:
         )
     if isinstance(error, LaneMovementRefused):
         return error.record_failure()
-    if isinstance(error, OdooTargetReplacementStageError):
+    if isinstance(error, OdooFreshTestingIntentRefusedError):
+        code = error.code
+    elif isinstance(error, OdooTargetReplacementStageError):
         code, keys = error.code, error.detail_keys
     elif isinstance(error, PlatformCredentialRefusedError):
         # The site resolver's own refusal, raised before anything is rendered.
@@ -1478,10 +1507,10 @@ def build_odoo_stable_target_replacement_plan(
             "allow_empty_data_required",
             "Odoo prelaunch rebuild requests must explicitly set allow_empty_data.",
         )
+    recorded_runtime_values: dict[str, str] = {}
     if isinstance(target_record, DokployTargetRecord) and isinstance(
         target_id_record, DokployTargetIdRecord
     ):
-        recorded_runtime_values: dict[str, str] = {}
         try:
             recorded_runtime_values = _resolve_recorded_runtime_values(
                 record_store=record_store,
@@ -1713,6 +1742,27 @@ def build_odoo_stable_target_replacement_plan(
                     "Odoo target replacement requires artifact odoo_install_modules to declare required module(s): "
                     + ", ".join(missing_required_modules),
                 )
+            if fresh_bootstrap and isinstance(target_record, DokployTargetRecord):
+                try:
+                    _preflight_fresh_restore_overrides(
+                        record_store=record_store,
+                        record=_read_odoo_instance_override_record(
+                            record_store=record_store, context=lane.context, instance=lane.instance
+                        ),
+                        modules=merge_odoo_install_modules(
+                            LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+                            artifact_manifest.odoo_install_modules,
+                            recorded_runtime_values.get(ODOO_INSTALL_MODULES_ENV_KEY, ""),
+                        ),
+                        protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
+                    )
+                except click.ClickException as error:
+                    block(
+                        "compose_or_override_render_failed",
+                        str(error)
+                        if isinstance(error, OdooFreshTestingIntentRefusedError)
+                        else "Launchplane could not render the fresh testing restore overrides.",
+                    )
     if provider_only_keys:
         block(
             "provider_keys_unrecorded",
@@ -2171,6 +2221,17 @@ def execute_odoo_stable_target_replacement_apply(
         # The site's own environment is delivered whole, as live sync does: worker
         # credentials, global values and other sites' values never reach it.
         runtime_environment_values = dict(site_environment.values)
+        if generation is not None and not generation.completed_at:
+            _preflight_fresh_restore_overrides(
+                record_store=record_store,
+                record=normalized_override_record,
+                modules=merge_odoo_install_modules(
+                    LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+                    artifact_manifest.odoo_install_modules,
+                    runtime_environment_values.get(ODOO_INSTALL_MODULES_ENV_KEY, ""),
+                ),
+                protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
+            )
         fresh_restore_source_environment = (
             {
                 key: value
@@ -2816,7 +2877,11 @@ def execute_odoo_stable_target_replacement_apply(
             destination_health=HealthcheckEvidence(status="skipped"),
         )
         raise
-    except (OdooTargetReplacementStageError, DurableOperationAuthorizationDeniedError) as error:
+    except (
+        OdooTargetReplacementStageError,
+        OdooFreshTestingIntentRefusedError,
+        DurableOperationAuthorizationDeniedError,
+    ) as error:
         _write_failed_deployment(
             record_store=record_store,
             ship_request=ship_request,
