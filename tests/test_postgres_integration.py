@@ -4380,6 +4380,41 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_evidence_window_is_reserved_once_across_database_connections(self) -> None:
+        from control_plane.health_alert_drill import DRILL_ROUTE
+
+        with _head_postgres_database() as url:
+            stores = [PostgresRecordStore(database_url=url) for _ in range(3)]
+            for store in stores:
+                self.addCleanup(store.close)
+            barrier = threading.Barrier(len(stores))
+            now = datetime.now(timezone.utc).isoformat()
+
+            def reserve(index: int) -> bool:
+                record = LaunchplaneIdempotencyRecord(
+                    record_id=f"receipt-{index}",
+                    scope="drill-evidence",
+                    route_path=DRILL_ROUTE,
+                    idempotency_key="same-lane-window",
+                    request_fingerprint="fixture",
+                    recorded_at=now,
+                    response_status_code=200,
+                    response_trace_id=f"trace-{index}",
+                    response_payload={"status": "unavailable"},
+                )
+                barrier.wait(timeout=10)
+                return stores[index].write_idempotency_record_once(record)
+
+            with ThreadPoolExecutor(max_workers=len(stores)) as workers:
+                outcomes = list(workers.map(reserve, range(len(stores))))
+            self.assertEqual(sum(outcomes), 1)
+            persisted = stores[0].read_idempotency_record(
+                scope="drill-evidence",
+                route_path=DRILL_ROUTE,
+                idempotency_key="same-lane-window",
+            )
+            self.assertIsNotNone(persisted)
+
     def test_human_refresh_serializes_across_workers_and_preserves_csrf_consumption(self) -> None:
         from control_plane.service_human_auth import (
             GitHubOAuthClient,

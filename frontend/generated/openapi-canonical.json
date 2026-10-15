@@ -12567,6 +12567,225 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthAlertDrillEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled_discord_destinations": {
+            "default": 0,
+            "title": "Enabled Discord Destinations",
+            "type": "integer"
+          },
+          "next_window_at": {
+            "title": "Next Window At",
+            "type": "string"
+          },
+          "rate_limited": {
+            "default": false,
+            "title": "Rate Limited",
+            "type": "boolean"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthAlertDrillReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "routing": {
+            "enum": [
+              "enabled",
+              "missing",
+              "disabled",
+              "unavailable"
+            ],
+            "title": "Routing",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/HealthAlertDrillScope"
+          },
+          "window": {
+            "title": "Window",
+            "type": "integer"
+          },
+          "window_seconds": {
+            "default": 600,
+            "title": "Window Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "routing",
+          "window",
+          "next_window_at"
+        ],
+        "title": "HealthAlertDrillEvidence",
+        "type": "object"
+      },
+      "HealthAlertDrillReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_at": {
+            "title": "Attempted At",
+            "type": "string"
+          },
+          "delivered_count": {
+            "default": 0,
+            "title": "Delivered Count",
+            "type": "integer"
+          },
+          "failed_count": {
+            "default": 0,
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "receipt_id": {
+            "title": "Receipt Id",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/HealthAlertDrillScope"
+          },
+          "status": {
+            "enum": [
+              "delivered",
+              "failed",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "unavailable_count": {
+            "default": 0,
+            "title": "Unavailable Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "scope",
+          "attempted_at",
+          "status"
+        ],
+        "title": "HealthAlertDrillReceipt",
+        "type": "object"
+      },
+      "HealthAlertDrillRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "check_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Check Name",
+            "type": "string"
+          },
+          "context": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "send"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "check_name"
+        ],
+        "title": "HealthAlertDrillRequest",
+        "type": "object"
+      },
+      "HealthAlertDrillResponse": {
+        "properties": {
+          "drill": {
+            "$ref": "#/components/schemas/HealthAlertDrillEvidence"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "drill"
+        ],
+        "title": "HealthAlertDrillResponse",
+        "type": "object"
+      },
+      "HealthAlertDrillScope": {
+        "additionalProperties": false,
+        "properties": {
+          "check_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Check Name",
+            "type": "string"
+          },
+          "context": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "check_name"
+        ],
+        "title": "HealthAlertDrillScope",
+        "type": "object"
+      },
       "HealthMonitorStatus": {
         "properties": {
           "activation": {
@@ -71175,6 +71394,245 @@
           }
         },
         "summary": "Read Launchplane service health"
+      }
+    },
+    "/v1/health-alert-drills": {
+      "get": {
+        "operationId": "read_health_alert_drill",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "check_name",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Check Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Window"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthAlertDrillResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read effective Discord routing and a drill receipt"
+      },
+      "post": {
+        "operationId": "run_health_alert_drill",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HealthAlertDrillRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthAlertDrillResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or send a non-disruptive health alert drill"
       }
     },
     "/v1/ingress/canary-routes/apply": {
