@@ -677,13 +677,19 @@ class TestingActivationAdapter:
                 or record.published_target is None
                 or target_without_hold(target) != target_without_hold(record.published_target)
             ):
-                raise TestingActivationRefusal("Activated testing recipient changed.")
+                raise TestingActivationRefusal(
+                    "Activated testing recipient changed.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                )
         elif (target, target_id, provider) != (
             record.retained_target,
             record.retained_target_id,
             record.retained_provider,
         ):
-            raise TestingActivationRefusal("Retained testing authority changed.")
+            raise TestingActivationRefusal(
+                "Retained testing authority changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
         for original in record.retained_reservations:
             current = self.store.read_idempotency_record(
                 scope=original.scope,
@@ -691,7 +697,10 @@ class TestingActivationAdapter:
                 idempotency_key=original.idempotency_key,
             )
             if not same_reservation_intent(current, original):
-                raise TestingActivationRefusal("The retained original reservation changed.")
+                raise TestingActivationRefusal(
+                    "The retained original reservation changed.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                )
 
     def save(self, record: TestingActivationRecord, **updates: Any) -> TestingActivationRecord:
         replacement = record.model_copy(update=updates)

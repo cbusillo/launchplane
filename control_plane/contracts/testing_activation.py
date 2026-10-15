@@ -13,6 +13,7 @@ from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRec
 
 class TestingActivationRefusalCode(StrEnum):
     QUALIFICATION_UNVERIFIED = "testing_activation_unverified"
+    DEPENDENCY_UNVERIFIED = "testing_activation_dependency_unverified"
     ROUTES_REQUIRE_CUTOVER = "testing_activation_routes_require_cutover"
     AUTHORITY_CHANGED = "testing_activation_authority_changed"
     RECEIPT_UNAVAILABLE = "testing_activation_receipt_unavailable"

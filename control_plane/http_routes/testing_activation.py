@@ -148,7 +148,7 @@ def register_testing_activation_routes(
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace,
-                code="testing_activation_dependency_unverified",
+                code=TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value,
                 message="Testing activation inputs, recipient or isolation proof remain unverified.",
             ) from error
         return accepted_evidence_response(trace_id=trace, records={}, result=result_payload)

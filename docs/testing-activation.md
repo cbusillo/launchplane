@@ -102,6 +102,8 @@ Keep the new volumes and both recipients if qualification or deployment fails.
 Rollback never restores shared production settings or starts the old containers.
 Read back the original operation and fix the supported testing continuation.
 The migration is additive and its downgrade preserves custody for recovery.
+Older service code cannot continue versioned custody created by this build;
+roll forward to a compatible build before resuming instead of editing records.
 Qualification refusals use a closed set of public error categories, including
 route cutover and changed authority; provider or unexpected exception text
 remains private. The testing-hold continuation preserves those same categories.

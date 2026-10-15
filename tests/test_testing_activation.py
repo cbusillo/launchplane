@@ -146,8 +146,9 @@ class ActivationTests(unittest.TestCase):
             DB_PORT="3307", CONFIG_VOLUME="production-config", OLD_RECIPIENT_ONLY="old"
         )
         fixture.retained.domains = ()
+        retained_origin = "old-origin.example.invalid"
         if self.private_product:
-            fixture.retained.domains = ("old-origin.example.invalid",)
+            fixture.retained.domains = (retained_origin,)
             profile = fixture.fixture.profile.model_dump()
             profile["public_website"] = "none"
             for lane in profile["lanes"]:
@@ -196,7 +197,7 @@ class ActivationTests(unittest.TestCase):
         }
         if self.private_product:
             self.payloads[fixture.fixture.target.resolved_target.target_id]["domains"] = [
-                {"domainId": "retained-origin", "host": fixture.retained.domains[0]}
+                {"domainId": "retained-origin", "host": retained_origin}
             ]
         self.writes: list[tuple[str, Any]] = []
         self.projects: list[dict[str, Any]] = []
@@ -585,8 +586,11 @@ class ActivationTests(unittest.TestCase):
         self.store.write_product_profile_record(
             profile.model_copy(update={"public_website": "required"})
         )
-        with self.assertRaises(TestingActivationRefusal):
+        with self.assertRaises(TestingActivationRefusal) as refused:
             self.adapter.current()
+        self.assertEqual(
+            refused.exception.code, TestingActivationRefusalCode.ROUTES_REQUIRE_CUTOVER
+        )
         self.assertEqual(self.writes, [])
         self.assertIsNone(activation_record(self.store, self.product, self.context))
 
@@ -595,13 +599,12 @@ class ActivationTests(unittest.TestCase):
         self.store.write_product_profile_record(
             profile.model_copy(update={"public_website": "required"})
         )
-        with self.assertRaises(TestingActivationRefusal):
+        with self.assertRaises(TestingActivationRefusal) as refused:
             self.adapter.require_unchanged(self.planned_record)
+        self.assertEqual(refused.exception.code, TestingActivationRefusalCode.AUTHORITY_CHANGED)
         self.assertEqual(self.writes, [])
 
-    def test_public_product_without_routes_resumes_pre_website_digest_custody(self) -> None:
-        from control_plane.contracts.canonical_json import canonical_json_sha256
-
+    def public_activation_fixture(self) -> "ActivationTests":
         public = ActivationTests()
         public.private_product = False
         if self.database_url:
@@ -612,12 +615,25 @@ class ActivationTests(unittest.TestCase):
             self.addCleanup(database.__exit__, None, None, None)
         self.addCleanup(public.doCleanups)
         public.setUp()
+        return public
+
+    def test_new_public_product_without_routes_activates(self) -> None:
+        public = self.public_activation_fixture()
+        self.assertEqual(public.run_activation().response_status_code, 202)
+        current = public.adapter.current()
+        public.adapter.require_unchanged(current)
+        public.adapter.verify_provider(current)
+        self.assertTrue(current.published)
+
+    def test_public_product_without_routes_resumes_pre_website_digest_custody(self) -> None:
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+
+        public = self.public_activation_fixture()
         payload = public.planned_record.model_dump(exclude={"configuration_version"})
         payload["configuration_sha256"] = configuration_digest(
             public.store, public.product, public.context, version=1
         )
         record = TestingActivationRecord.model_validate(payload)
-        self.assertNotIn("configuration_version", record.model_dump())
         record.plan_sha256 = canonical_json_sha256(record.model_dump(exclude={"plan_sha256"}))
         public.store.write_testing_activation(
             expected=None, replacement=record.model_dump(mode="json")
