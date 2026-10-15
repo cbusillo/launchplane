@@ -21,6 +21,7 @@ export function checkBrowserTiming(source, filename) {
     problems.push(`${filename}:${line + 1}:${character + 1}: ${message}`);
   }
   function memberName(node) {
+    if (!node) return "";
     if (ts.isIdentifier(node) || ts.isStringLiteral(node)) return node.text;
     if (ts.isPropertyAccessExpression(node)) return node.name.text;
     if (ts.isElementAccessExpression(node) && node.argumentExpression) return memberName(node.argumentExpression);
