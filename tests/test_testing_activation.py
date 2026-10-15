@@ -1297,6 +1297,8 @@ class ActivationTests(unittest.TestCase):
 class ActivationPortProgramTests(unittest.TestCase):
     def test_port_proof_survives_the_real_schedule_log_transport(self) -> None:
         from pathlib import Path
+        from control_plane.dokploy import api as dokploy_api
+        from control_plane.dokploy.post_deploy import OdooPostDeployReadbackFailure
         from control_plane.odoo_testing_resources import GenericWebTestingResources
         from control_plane.testing_activation import inspect_new_resources
 
@@ -1308,15 +1310,46 @@ class ActivationPortProgramTests(unittest.TestCase):
             namespace="lp-testing-" + "a" * 32,
         )
         port = 19212
-        _, successful_output = self.run_program([port], [])
-        _, refused_output = self.run_program([port], [], occupied=True)
+        success_status, successful_output = self.run_program([port], [])
+        refused_status, refused_output = self.run_program([port], [], occupied=True)
+        binding_proof = "testing_resources_binding_sha256=" + resources.binding_sha256
+        storage_proof = ["testing_resources_ok=true", binding_proof]
         cases = (
-            ("available", successful_output, True),
-            ("occupied", refused_output, False),
-            ("missing", "", False),
-            ("malformed", successful_output.replace("=true", "=unproved"), False),
+            ("available-inline", success_status, successful_output, storage_proof, True, True),
+            ("available-fetched", success_status, successful_output, storage_proof, False, True),
+            ("occupied", refused_status, refused_output, storage_proof, False, False),
+            ("missing-port", success_status, "", storage_proof, False, False),
+            (
+                "malformed-port",
+                success_status,
+                successful_output.replace("=true", "=unproved"),
+                storage_proof,
+                False,
+                False,
+            ),
+            ("missing-storage", success_status, successful_output, [], False, False),
+            (
+                "false-storage",
+                success_status,
+                successful_output,
+                ["testing_resources_ok=false", binding_proof],
+                False,
+                False,
+            ),
         )
-        for name, port_output, accepted in cases:
+        for name, program_status, port_output, storage_output, inline, accepted in cases:
+            log_lines = [*storage_output, *port_output.splitlines()]
+
+            def run_schedule(**_kwargs: Any) -> str:
+                if program_status:
+                    raise dokploy_api.DokployScheduleExecutionFailed(
+                        schedule_id="fixture-schedule",
+                        deployment_id="fixture-deployment",
+                        deployment_status="error",
+                        cause="remote_command_exit",
+                    )
+                return "deployment=fixture-deployment status=done"
+
             with (
                 self.subTest(name=name),
                 patch(
@@ -1342,18 +1375,18 @@ class ActivationPortProgramTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.dokploy.api.run_dokploy_schedule",
-                    return_value="deployment=fixture-deployment status=done",
+                    side_effect=run_schedule,
                 ),
                 patch(
                     "control_plane.dokploy.api.latest_deployment_for_schedule",
                     return_value={
                         "deploymentId": "fixture-deployment",
-                        "logs": [
-                            "testing_resources_ok=true",
-                            "testing_resources_binding_sha256=" + resources.binding_sha256,
-                            *port_output.splitlines(),
-                        ],
+                        "logs": log_lines if inline else [],
                     },
+                ),
+                patch(
+                    "control_plane.dokploy.api.fetch_dokploy_deployment_logs",
+                    return_value=tuple(log_lines),
                 ),
                 patch(
                     "control_plane.dokploy.api.dokploy_request",
@@ -1363,7 +1396,9 @@ class ActivationPortProgramTests(unittest.TestCase):
                 if accepted:
                     inspect_new_resources(Path("."), resources, {port}, lambda _phase: None)
                 else:
-                    with self.assertRaises(TestingActivationRefusal):
+                    with self.assertRaises(
+                        (TestingActivationRefusal, OdooPostDeployReadbackFailure)
+                    ):
                         inspect_new_resources(Path("."), resources, {port}, lambda _phase: None)
 
     def run_program(
