@@ -99,8 +99,12 @@ def register_testing_restore_policy_routes(
             refusal(404, "not_found", "Product profile was not found.")
         try:
             plan, replacement = build_testing_restore_policy_plan(profile, body)
-        except ValueError as error:
-            refusal(400, "testing_restore_policy_refused", str(error))
+        except ValueError:
+            refusal(
+                400,
+                "testing_restore_policy_refused",
+                "This product profile cannot prepare the requested testing restore policy.",
+            )
         if body.mode == "dry-run":
             return accepted_evidence_response(
                 trace_id=trace,

@@ -27,6 +27,36 @@ def profile() -> LaunchplaneProductProfileRecord:
 
 
 class TestingRestorePolicyTests(unittest.TestCase):
+    def test_existing_authority_and_its_backup_or_empty_rebuild_eligibility_are_preserved(
+        self,
+    ) -> None:
+        for authority in ("resettable", "restorable", "authoritative"):
+            with self.subTest(authority=authority):
+                before = profile()
+                testing = next(lane for lane in before.lanes if lane.instance == "testing")
+                policy = testing.odoo_data_policy.model_copy(update={"data_authority": authority})
+                before = before.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"odoo_data_policy": policy})
+                            if lane == testing
+                            else lane
+                            for lane in before.lanes
+                        )
+                    }
+                )
+                plan, _ = build_testing_restore_policy_plan(
+                    before, TestingRestorePolicyRequest(context=testing.context, reason="Restore")
+                )
+                self.assertEqual(plan.policy_after.data_authority, policy.data_authority)
+                self.assertEqual(
+                    plan.policy_after.destructive_replacement_proof_required,
+                    policy.destructive_replacement_proof_required,
+                )
+                for source in policy.allowed_rebuild_sources:
+                    self.assertTrue(plan.policy_after.allows_rebuild_source(source))
+                self.assertTrue(plan.policy_after.allows_rebuild_source("upstream_restore"))
+
     def test_plan_changes_only_testing_data_policy_and_binds_the_source_profile(self) -> None:
         before = profile()
         testing = next(lane for lane in before.lanes if lane.instance == "testing")

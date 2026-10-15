@@ -51,12 +51,16 @@ restore checks remain in their existing drivers.
 The Director agent can prepare an existing Odoo testing lane for a sanitized
 production copy through
 `POST /v1/product-profiles/{product}/testing-restore-policy`. This changes only
-testing's `odoo_data_policy`: it records `restorable` authority, adds
+testing's `odoo_data_policy`: it adds
 `upstream_restore` to the existing permitted sources, requires runtime identity,
 and derives an upstream source reference from the same product's single recorded
 production lane. It accepts no different product, source host, production
 destination, credentials, runtime values, prelaunch approval, or full profile.
 The production lane and all other profile authority remain unchanged.
+Existing testing data authority is preserved, including an authoritative lane's
+backup requirement and a resettable lane's empty-rebuild eligibility. Only
+unknown data authority becomes `restorable`; that metadata change does not
+qualify unknown custody or isolation facts for execution.
 
 Use the bounded repo client with the installed authenticated agent transport. Save its
 review evidence outside the checkout:

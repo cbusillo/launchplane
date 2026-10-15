@@ -68,7 +68,11 @@ def build_testing_restore_policy_plan(
     # This is a source reference, not an SSH host, credential, or a restore request.
     # Operational source settings remain in the lane's managed runtime records.
     policy = ProductOdooLaneDataPolicy(
-        data_authority="restorable",
+        data_authority=(
+            "restorable"
+            if lane.odoo_data_policy.data_authority == "unknown"
+            else lane.odoo_data_policy.data_authority
+        ),
         allowed_rebuild_sources=tuple(
             dict.fromkeys((*lane.odoo_data_policy.allowed_rebuild_sources, "upstream_restore"))
         ),
