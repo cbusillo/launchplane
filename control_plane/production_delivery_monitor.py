@@ -294,23 +294,27 @@ def monitor_production_delivery_once(
                 return
             if lane.instance != "prod":
                 continue
-            for incident in store.list_public_ingress_incident_records(
-                product=profile.product,
-                context_name=lane.context,
-                instance_name="prod",
-                check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
-                status="open",
-            ):
-                _observe(
-                    store,
-                    profile,
-                    lane,
-                    check_name=incident.check_name,
-                    failed=False,
-                    summary="Merged source waiting for release is not a production failure.",
-                    observed_at=now,
-                    retired=True,
-                )
+            try:
+                for incident in store.list_public_ingress_incident_records(
+                    product=profile.product,
+                    context_name=lane.context,
+                    instance_name="prod",
+                    check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
+                    status="open",
+                ):
+                    _observe(
+                        store,
+                        profile,
+                        lane,
+                        check_name=incident.check_name,
+                        failed=False,
+                        summary="Merged source waiting for release is not a production failure.",
+                        observed_at=now,
+                        retired=True,
+                    )
+            except Exception:
+                # Retirement is maintenance; it must not interrupt real failure scanning.
+                _LOGGER.exception("Could not retire source-age attention for %s", profile.product)
             if not profile.is_active or profile.production_use != "live":
                 for incident in store.list_public_ingress_incident_records(
                     product=profile.product,

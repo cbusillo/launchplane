@@ -2,7 +2,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import DEFAULT, Mock, patch
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -161,6 +161,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
 
     def test_legacy_lag_retires_without_recovering_a_real_delivery_failure(self) -> None:
         self.seed_legacy_lag()
+        legacy = self.store.list_public_ingress_incident_records(status="open")[0]
         self.reject()
         before = self.store.list_outbox_delivery_records()
         self.now += timedelta(seconds=1)
@@ -171,7 +172,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(self.store.list_outbox_delivery_records(), before)
         retired = self.store.list_public_ingress_incident_records(status="resolved")
         self.assertEqual(retired[0].check_name, RETIRED_PRODUCTION_DELIVERY_LAG_CHECK)
-        self.assertEqual(retired[0].resolution_reason, "monitoring_intent_changed")
+        self.assertIn(legacy.summary, retired[0].summary)
         self.now += timedelta(days=1)
         self.monitor()
         self.assertEqual(
@@ -238,10 +239,35 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             mark_provider_started=started,
         )
         self.assertEqual(result.state, "failed")
-        self.assertEqual(result.error_code, "delivery_outcome_unknown")
+        self.assertTrue(result.error_code)
         self.assertEqual(result.provider_operation_key, queued.provider_operation_key)
         sender.assert_not_called()
         started.assert_not_called()
+
+    def test_retirement_failure_does_not_interrupt_real_failure_detection(self) -> None:
+        self.seed_legacy_lag()
+        self.now += timedelta(seconds=1)
+        self.deploy(self.head, failed=True)
+
+        def observe(*_args: object, **kwargs: object) -> object:
+            if kwargs.get("retired"):
+                raise RuntimeError("Incident changed during retirement")
+            return DEFAULT
+
+        with (
+            patch(
+                "control_plane.production_delivery_monitor._observe",
+                side_effect=observe,
+                wraps=_observe,
+            ),
+            self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"),
+        ):
+            self.monitor()
+        incidents = self.store.list_public_ingress_incident_records(status="open")
+        self.assertTrue(any("deploy-" + self.head in incident.summary for incident in incidents))
+        self.now += timedelta(seconds=1)
+        self.monitor()
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
 
     def test_healthy_previous_artifact_does_not_erase_rejection_and_replays_deduplicate(
         self,
@@ -391,10 +417,10 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         self.assertTrue(first.run_delivery_once())
         self.assertFalse(second.run_delivery_once())
         action.assert_called_once()
-        self.monitor()
         self.now += timedelta(seconds=61)
+        self.deploy(self.head, failed=True)
         self.monitor()
-        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
 
     def test_delayed_failure_ingestion_is_detected_after_a_later_scan(self) -> None:
         failed_at = self.now

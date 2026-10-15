@@ -1937,6 +1937,8 @@ before consulting a destination or sending anything. A provider-start marker
 still retains an unknown delivery outcome; retiring the check does not prove
 whether a previously interrupted send happened. No policy change or manual
 alert clearing is needed. Other delivery failures remain actionable.
+Previously sent external messages remain historical evidence; this reconciliation
+does not retract them or close an external issue.
 Unidentified requests retain their request identity rather than borrowing a
 testing artifact, especially for rollback; they require matching recovery
 evidence and are never cleared by an unrelated promotion. Unexpected Client
