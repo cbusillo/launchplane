@@ -4960,9 +4960,8 @@ def create_launchplane_fastapi_app(
     ) -> AuthLogoutResponse:
         trace_id = next_trace_id()
         if human_session_manager is not None:
-            session_result = read_human_session(cookie_header=cookie, allow_owner=True)
-            if session_result is not None:
-                session, _was_renewed = session_result
+            session = human_session_manager.read_cookie_without_renewal(cookie, allow_owner=True)
+            if session is not None:
                 consume_browser_mutation_request(request=request, session=session)
             human_session_manager.delete_cookie_session(cookie)
             clear_cookie = human_session_manager.clear_cookie_header()

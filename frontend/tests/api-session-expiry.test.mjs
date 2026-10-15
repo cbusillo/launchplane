@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { LaunchplaneApiError, listProducts, logout, subscribeToSessionExpiry } from "../src/api.ts";
+import { LaunchplaneApiError, listProducts, logout, readAuthSession, subscribeToSessionExpiry } from "../src/api.ts";
 
 const originalFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = originalFetch; });
@@ -77,4 +77,52 @@ test("expiry in the CSRF session read shows sign-in without dispatching the muta
   } finally {
     unsubscribe();
   }
+});
+
+const originalSetTimeout = globalThis.setTimeout;
+afterEach(() => { globalThis.setTimeout = originalSetTimeout; });
+
+test("pending verification retries the read before one logout dispatch", async () => {
+  globalThis.setTimeout = callback => { queueMicrotask(callback); return 0; };
+  const methods = [];
+  let reads = 0;
+  globalThis.fetch = async (_path, options) => {
+    methods.push(options.method);
+    if (options.method === "GET") {
+      return ++reads === 1 ? failure(503, "identity_verification_pending")
+        : new Response(JSON.stringify({ csrf_token: "current" }));
+    }
+    return new Response(JSON.stringify({ status: "ok" }));
+  };
+  await logout();
+  assert.equal(reads, 2);
+  assert.equal(methods.filter(method => method === "POST").length, 1);
+});
+
+test("pending verification is bounded and cancellation never dispatches a write", async () => {
+  globalThis.setTimeout = callback => { queueMicrotask(callback); return 0; };
+  let posts = 0;
+  globalThis.fetch = async (_path, options) => {
+    if (options.method === "POST") posts++;
+    return failure(503, "identity_verification_pending");
+  };
+  await assert.rejects(logout(), error => error instanceof LaunchplaneApiError && error.statusCode === 503);
+  const controller = new AbortController();
+  globalThis.fetch = async () => {
+    controller.abort();
+    return failure(503, "identity_verification_pending");
+  };
+  await assert.rejects(readAuthSession(controller.signal));
+  assert.equal(posts, 0);
+});
+
+test("a dispatched pending-verification mutation response is never retried", async () => {
+  let posts = 0;
+  globalThis.fetch = async (_path, options) => {
+    if (options.method === "GET") return new Response(JSON.stringify({ csrf_token: "current" }));
+    posts++;
+    return failure(503, "identity_verification_pending");
+  };
+  await assert.rejects(logout(), LaunchplaneApiError);
+  assert.equal(posts, 1);
 });

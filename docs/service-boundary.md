@@ -730,7 +730,10 @@ organizations, teams and verified emails, binds the result to the original
 immutable GitHub ID, and derives permissions from current DB policy. Public
 profile email alone cannot establish bootstrap-admin identity. Expiring access
 tokens use GitHub's refresh grant and rotated pair; long-lived tokens are
-revalidated directly. No new OAuth scope or provider app setting is required.
+revalidated directly. The implementation requests the existing `read:user`, `read:org` and
+`user:email` OAuth scopes; it adds no scope or app-setting change. Every
+required endpoint must be readable with that authorization; missing membership
+or email access fails closed rather than accepting partial claims.
 Any failed provider request, invalid response, expired/unusable refresh token,
 changed identity or corrupt credential revokes the session and requires sign-in;
 there is no stale-claims fallback or automatic retry of a token exchange.
@@ -748,7 +751,10 @@ until verification finishes, so parallel reads do not falsely sign the browser o
 refresh/renewal is due. Failures log only the exception type, never its value; CSRF consumption preserves current credential
 and claims metadata, and renewal cannot recreate a logged-out session. Provider
 requests have bounded socket timeouts and stop dispatching further requests after
-a 30-second exchange budget; membership pagination fails closed at its bound. Read-only sensitive/preflight paths keep their nonrenewing behavior.
+a 30-second exchange budget; membership pagination fails closed at its bound. Read-only sensitive/preflight paths keep their nonrenewing behavior. Logout
+validates the existing cookie and single-use CSRF token without renewing claims.
+The browser retries only pending-verification GETs for up to 40 one-second waits,
+including CSRF preflight; it never retries a dispatched mutation.
 
 ### Browser Mutation Boundary
 

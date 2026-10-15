@@ -710,8 +710,6 @@ class HumanSessionManager:
         verified_at = session.claims_verified_at or session.created_at
         if now >= verified_at + timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS):
             return True
-        if not session.oauth_credential:
-            return False
         credential = self._credential_cipher.decrypt(
             session.oauth_credential,
             session_id=session.session_id,
@@ -755,8 +753,6 @@ class HumanSessionManager:
             try:
                 if not self._refresh_due(current, now):
                     return current
-                if not current.oauth_credential:
-                    return self._fresh_session(current)
                 if client is None:
                     return None
                 credential = self._credential_cipher.decrypt(

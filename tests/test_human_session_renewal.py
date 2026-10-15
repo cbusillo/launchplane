@@ -215,7 +215,7 @@ class HumanSessionRenewalTests(unittest.TestCase):
     def test_verification_failure_logs_type_without_provider_secret(self) -> None:
         self.advance_to_refresh()
         self.client.revalidate.side_effect = OSError("synthetic-private-token")
-        with self.assertLogs("control_plane.service_human_auth", level="WARNING") as logs:
+        with self.assertLogs(level="WARNING") as logs:
             self.assertIsNone(self.refresh())
         self.assertNotIn("synthetic-private-token", " ".join(logs.output))
 
@@ -327,7 +327,7 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
             if GITHUB_ORGS_URL in url:
                 payload = (
                     [{"login": "other"}] * 100
-                    if url.endswith("page=1")
+                    if parse_qs(urlsplit(url).query).get("page") == ["1"]
                     else [{"login": "allowed-org"}]
                 )
             return Mock(status_code=200, json=lambda: payload)
@@ -468,6 +468,42 @@ class HostedRenewalHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertNotIn("private-provider-value", response.text)
         self.assertNotIn("Set-Cookie", response.headers)
+
+    async def test_logout_never_refreshes_claims_and_keeps_csrf_validation(self) -> None:
+        from tests.http_app_test_support import _browser_mutation_headers
+
+        now = datetime.now(timezone.utc)
+        manager = HumanSessionManager(
+            config=_config(), session_store=InMemoryHumanSessionStore(), now=lambda: now
+        )
+        session = manager.issue(_identity(), GitHubOAuthCredential("access"))
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_policy(),
+            human_session_manager=manager,
+            record_store_factory=lambda: _MissingProductReadStore(),
+        )
+        now += timedelta(days=2)
+        headers = _browser_mutation_headers(manager, session)
+        async with lifespan_client(app) as client:
+            with (
+                patch.object(
+                    manager, "renew_if_needed", side_effect=AssertionError("logout must not renew")
+                ),
+                patch.object(
+                    manager,
+                    "refresh_authorization_claims",
+                    side_effect=AssertionError("logout must not refresh"),
+                ),
+            ):
+                rejected = await client.post(
+                    "/auth/logout", headers={"Cookie": manager.session_cookie_header(session)}
+                )
+                self.assertEqual(rejected.status_code, 403)
+                accepted = await client.post("/auth/logout", headers=headers)
+        self.assertEqual(accepted.status_code, 200)
+        self.assertIn("Max-Age=0", accepted.headers["Set-Cookie"])
+        self.assertIsNone(manager.read_cookie(manager.session_cookie_header(session)))
 
     async def test_renewal_uses_current_db_policy_and_never_exposes_credentials(self) -> None:
         with TemporaryDirectory() as directory:

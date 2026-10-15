@@ -169,6 +169,7 @@ async function performJsonRequest<T>(
   signal?: AbortSignal,
   csrfToken = "",
   idempotencyKey = "",
+  verificationRetries = 0,
 ): Promise<T> {
   const headers: HeadersInit = {
     Accept: "application/json",
@@ -205,6 +206,12 @@ async function performJsonRequest<T>(
       "error" in errorPayload && errorPayload.error
         ? (errorPayload.error.code ?? "")
         : "";
+    if (method === "GET" && response.status === 503 &&
+        errorCode === "identity_verification_pending" && verificationRetries < 40 && !signal?.aborted) {
+      await new Promise<void>(resolve => setTimeout(resolve, 1000));
+      signal?.throwIfAborted();
+      return performJsonRequest<T>(path, method, body, signal, csrfToken, idempotencyKey, verificationRetries + 1);
+    }
     if (method === "GET" && response.status === 401 &&
         errorCode === "authentication_required" && !signal?.aborted) {
       sessionExpiryListeners.forEach(listener => listener());
