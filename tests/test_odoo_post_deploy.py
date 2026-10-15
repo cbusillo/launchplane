@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Literal, cast
 from unittest.mock import Mock, patch
+from urllib.parse import urlsplit
 
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
@@ -793,7 +794,14 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
     def _restore_overrides(self, *, fresh: bool) -> None:
         from tests.test_odoo_testing_restore import generation
 
-        fresh_generation = generation() if fresh else None
+        base_url = "https://opw-testing.example.com"
+        fresh_generation = (
+            generation().model_copy(
+                update={"context": "opw", "domain_host": urlsplit(base_url).hostname}
+            )
+            if fresh
+            else None
+        )
         captured_runs: list[dict[str, object]] = []
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -808,14 +816,14 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                             key="web.base.url",
                             value=OdooOverrideValue(
                                 source="literal",
-                                value="https://opw-testing.example.com",
+                                value=base_url,
                             ),
                         ),
                     ),
                     website_bootstrap=OdooWebsiteBootstrapPayload(
                         tenant="opw",
                         name="OPW Testing",
-                        canonical_url="https://opw-testing.example.com",
+                        canonical_url=base_url,
                         routes=(
                             OdooWebsiteBootstrapRoute(
                                 name="Shop",
@@ -872,7 +880,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                         "key": "web.base.url",
                         "value": {
                             "source": "literal",
-                            "value": "https://opw-testing.example.com",
+                            "value": base_url,
                         },
                     }
                 ],

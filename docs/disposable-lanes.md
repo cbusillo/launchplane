@@ -526,6 +526,30 @@ receipt proves route/metadata/supersession/queue preparation; `runtime_verified`
 remains false. Actual reconciliation, health, runtime identity and incident
 readback must separately prove the restored lane is green.
 
+Readback verifies the committed request, generation, target, independent route,
+supersession and queue receipt. It does not rerun bootstrap planning after that
+queue has started deploying. Omitted delivery keys come from the generation's
+immutable receipt; readback is never permission to replay bootstrap.
+
+New fresh-generation recovery journals bind override intent independently of
+apply status, time, detail, `updated_at` and `source_label`. Website-setting
+history that still affects rendering remains bound. Publishing post-deploy success or
+failure does not change that intent. During the initial copy, deployment and
+post-deploy render the same generation hostname without rewriting the stored
+override intent. Later ordinary deployments retain their canonical-record
+normalization. Product, target,
+resource, configuration, secret-version and source checks remain bound; executor
+exclusion and acknowledged terminal-provider proof still precede recovery.
+The database checks the same fresh/legacy digest under its configuration-writer
+lock before publishing the existing supported recovery transition. An eligible
+read view alone does not release an operation.
+Legacy full-record journal digests retain their original meaning. A legacy
+binding mismatch stays fenced: without its original authority snapshot there is
+no safe automatic conversion to the new digest. Preserve the original operation,
+generation, key and copy custody; do not edit its digest or invent a safe-release
+attestation. A forward fix for new journals does not establish recovery of an
+already stranded legacy operation.
+
 For a containerized production source without host SSH restore coordinates, add
 `--source-mode container-export` to the same client's dry-run/apply/readback
 request. The service derives its single same-product production source from
@@ -551,6 +575,13 @@ of future production work. The bounded dump takes ordinary PostgreSQL read locks
 this flow does not pause production or create a production reservation.
 An authorization refusal stops under the same identity. No new access grant or
 source credential is delivered to the testing containers.
+
+Isolated testing declares Compose's default network as internal for all three
+services; web additionally joins the ingress network. Dokploy's domain conversion
+adds that same default network, so it cannot create a second outbound bridge.
+The receiver still rejects any additional network reach. Existing networks are
+not repaired by readback; any corrective deployment follows the supported
+generation/recovery path and must pass the same receiver inspection.
 
 Before capture or upload, an inspection-only execution of the same restore
 guard qualifies the actual testing artifact, containers, private data network,

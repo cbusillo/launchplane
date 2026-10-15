@@ -10312,6 +10312,7 @@ class PostgresRecordStore(HumanSessionStore):
                     context=record.context,
                     instance=record.instance,
                 )
+                self._lock_product_authority_bundle_write(session)
             statement = (
                 select(LaunchplaneOdooStableTargetReplacementOperationRow)
                 .where(
@@ -10331,56 +10332,29 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if expected_record is not None:
                 from control_plane.testing_replacement_recovery import (
-                    recovery_binding_fingerprint,
+                    current_binding_fingerprint,
                     service_testing_operation,
                 )
 
-                bindings = []
-                for model, filters in (
-                    (
-                        LaunchplaneProductProfileRow,
-                        (LaunchplaneProductProfileRow.product == current_record.product,),
-                    ),
-                    (
-                        LaunchplaneDokployTargetRow,
-                        (
-                            LaunchplaneDokployTargetRow.context == current_record.context,
-                            LaunchplaneDokployTargetRow.instance == current_record.instance,
-                        ),
-                    ),
-                    (
-                        LaunchplaneDokployTargetIdRow,
-                        (
-                            LaunchplaneDokployTargetIdRow.context == current_record.context,
-                            LaunchplaneDokployTargetIdRow.instance == current_record.instance,
-                        ),
-                    ),
-                ):
-                    binding_statement = select(model).where(*filters)
-                    if self.database_dialect_name == "postgresql":
-                        binding_statement = binding_statement.with_for_update()
-                    binding_row = session.scalar(binding_statement)
-                    if binding_row is None:
-                        return False
-                    binding_payload = cast(
-                        LaunchplaneProductProfileRow
-                        | LaunchplaneDokployTargetRow
-                        | LaunchplaneDokployTargetIdRow,
-                        binding_row,
-                    ).payload
-                    if isinstance(binding_row, LaunchplaneProductProfileRow):
-                        binding_payload = self._read_product_profile_payload(
-                            binding_payload
-                        ).model_dump(mode="json", exclude_none=True)
-                    bindings.append(binding_payload)
                 if (
                     not service_testing_operation(current_record)
                     or current_record != expected_record
                     or current_record.recovery_journal is None
-                    or recovery_binding_fingerprint(bindings)
-                    != current_record.recovery_journal.target_fingerprint
                 ):
                     return False
+                # The authority-bundle lock excludes every bound configuration
+                # writer through the cancellation commit. Reuse the worker's
+                # fresh/legacy digest selection, including full secret versions.
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    if (
+                        current_binding_fingerprint(self, current_record)
+                        != current_record.recovery_journal.target_fingerprint
+                    ):
+                        return False
+                finally:
+                    self._disposable_authority_context.session = outer
             if not odoo_stable_lane_cancellation_is_allowed(
                 current_status=current_record.status,
                 reconciliation_required_at=current_record.updated_at,
