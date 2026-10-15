@@ -175,6 +175,7 @@ from control_plane.contracts.disposable_lane import (
     DisposableTestingReplacementPreparation,
     DisposableTestingResourcePreparation,
 )
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
@@ -3894,6 +3895,13 @@ class LaunchplaneDisposableTestingResourceAllocationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneFreshOdooTestingGenerationRow(Base):
+    __tablename__ = "launchplane_fresh_odoo_testing_generations"
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneProductProfileRow(Base):
     __tablename__ = "launchplane_product_profiles"
     __table_args__ = (
@@ -6201,7 +6209,8 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneSecretBindingRow
                 | LaunchplaneDisposableLaneSafetyRow
                 | LaunchplaneDisposableReplacementPreparationRow
-                | LaunchplaneDisposableTestingResourceAllocationRow,
+                | LaunchplaneDisposableTestingResourceAllocationRow
+                | LaunchplaneFreshOdooTestingGenerationRow,
             ):
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
@@ -10586,6 +10595,92 @@ class PostgresRecordStore(HumanSessionStore):
                 {**custody.payload, **(allocation.payload if allocation is not None else {})}
             )
 
+    def read_fresh_odoo_testing_generation(
+        self, product: str, context: str
+    ) -> FreshOdooTestingGeneration | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
+            return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
+
+    def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (record.product, record.context),
+                with_for_update=True,
+            )
+            if row is not None:
+                previous = FreshOdooTestingGeneration.model_validate(row.payload)
+                if previous.model_dump(
+                    exclude={"completed_at", "reconcile_requested_at"}
+                ) != record.model_dump(exclude={"completed_at", "reconcile_requested_at"}):
+                    raise ValueError("Fresh testing generation identities are immutable.")
+                if previous.completed_at and previous.completed_at != record.completed_at:
+                    raise ValueError("Fresh testing generation completion is immutable.")
+                if previous.reconcile_requested_at != record.reconcile_requested_at:
+                    raise ValueError("Only the atomic testing queue can record its receipt.")
+            elif record.reconcile_requested_at or record.completed_at:
+                raise ValueError("A fresh generation cannot begin with completion receipts.")
+            session.merge(
+                LaunchplaneFreshOdooTestingGenerationRow(
+                    product=record.product,
+                    context=record.context,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+
+    def request_fresh_testing_reconcile(self, generation: FreshOdooTestingGeneration) -> None:
+        """Record this generation's queue receipt in the same transaction as its request."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (generation.product, generation.context),
+                with_for_update=True,
+            )
+            if row is None:
+                raise ValueError("Fresh testing generation is unavailable.")
+            current = FreshOdooTestingGeneration.model_validate(row.payload)
+            if current != generation:
+                raise ValueError("Fresh testing generation changed before queueing.")
+            operation = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id
+            )
+            if operation is None or operation.payload.get("status") != "superseded":
+                raise ValueError("Fresh testing supersession is incomplete.")
+            if current.reconcile_requested_at:
+                return
+            from control_plane.odoo_testing_restore import read_current_testing_generation
+
+            outer = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                read_current_testing_generation(
+                    self,
+                    product=generation.product,
+                    context=generation.context,
+                    instance="testing",
+                    bootstrap_preparation=True,
+                )
+            finally:
+                self._disposable_authority_context.session = outer
+            target = ProductReconcileTarget(product=generation.product, target_kind="testing")
+            self._lock_landing_authority(
+                session, f"launchplane:product-reconcile:{target.target_key}"
+            )
+            now = self._database_mutation_timestamp(session)
+            self._fold_product_reconcile_request(
+                session, target=target, requested_at=now, delivery_id=""
+            )
+            row.payload = self._payload_dict(
+                current.model_copy(update={"reconcile_requested_at": now})
+            )
+            session.commit()
+
     def _retained_disposable_hostnames(self, session: Session) -> frozenset[str]:
         hosts: set[str] = set()
         for payload in session.scalars(
@@ -10771,6 +10866,29 @@ class PostgresRecordStore(HumanSessionStore):
                     instance=expected.instance,
                 )
                 self._lock_product_authority_bundle_write(session)
+                fresh_generation = self.read_fresh_odoo_testing_generation(
+                    expected.product, expected.context
+                )
+                if (
+                    fresh_generation is not None
+                    and fresh_generation.operation_id == expected.operation_id
+                ):
+                    from control_plane.odoo_testing_restore import read_current_testing_generation
+
+                    outer = getattr(self._disposable_authority_context, "session", None)
+                    self._disposable_authority_context.session = session
+                    try:
+                        read_current_testing_generation(
+                            self,
+                            product=expected.product,
+                            context=expected.context,
+                            instance="testing",
+                            bootstrap_preparation=True,
+                        )
+                    except (ValueError, FileNotFoundError):
+                        return False
+                    finally:
+                        self._disposable_authority_context.session = outer
                 statement = (
                     select(LaunchplaneOdooStableTargetReplacementOperationRow)
                     .where(

@@ -161,6 +161,23 @@ def connection_isolation(cursor, *, apply):
             )
             if cursor.fetchone()[0]:
                 refused.append("carrier/" + column)
+    website_columns = isolation_columns(cursor, "website")
+    for column in (
+        "google_analytics_key", "google_analytics_client_id", "google_analytics_client_secret",
+        "google_tag_manager_key", "plausible_shared_key", "plausible_site",
+    ):
+        if column not in website_columns:
+            continue
+        if apply:
+            cursor.execute('UPDATE website SET "' + column + '" = NULL')
+        cursor.execute('SELECT EXISTS (SELECT 1 FROM website WHERE coalesce("' + column + '", \'\') <> \'\')')
+        if cursor.fetchone()[0]:
+            refused.append("analytics/" + column)
+    if apply:
+        cursor.execute("DELETE FROM ir_config_parameter WHERE key LIKE 'google_analytics.%%' OR key LIKE 'plausible.%%' OR key LIKE 'google_tag_manager.%%'")
+    cursor.execute("SELECT EXISTS (SELECT 1 FROM ir_config_parameter WHERE (key LIKE 'google_analytics.%%' OR key LIKE 'plausible.%%' OR key LIKE 'google_tag_manager.%%') AND coalesce(value, '') <> '')")
+    if cursor.fetchone()[0]:
+        refused.append("analytics/ir_config_parameter")
     return refused
 """
 

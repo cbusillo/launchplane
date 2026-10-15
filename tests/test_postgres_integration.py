@@ -96,6 +96,7 @@ from tests.test_every_code_feedback_resume_storage import (
     T0 as FEEDBACK_T0,
     T1 as FEEDBACK_T1,
 )
+from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenario
 from tests.test_ordinary_agent_qualification_storage import QualificationStorageScenario
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
@@ -10832,3 +10833,95 @@ class RealPostgresPreviewReservationRecoveryTests(
 
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
+    def setUp(self) -> None:
+        self.seed(self.enterContext(_head_postgres_database()))
+
+    def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
+        self.scenario("normal")
+
+    def test_lost_route_receipt_adopts_actual_route_without_another_write(self) -> None:
+        self.scenario("route-receipt")
+
+    def test_crash_after_supersession_resumes_only_original_generation_queue(self) -> None:
+        self.scenario("queue")
+
+    def test_lost_queue_reply_is_observed_without_requeue(self) -> None:
+        self.scenario("queue-commit")
+
+    def test_crash_after_route_metadata_resumes_supersession_without_nested_lock(self) -> None:
+        self.scenario("fence")
+
+    def test_http_lost_bootstrap_receipt_recovers_original_key_without_second_route(self) -> None:
+        from control_plane.testing_replacement_bootstrap import (
+            ROUTE,
+            TestingReplacementBootstrapAdapter,
+        )
+        from tests.support.http import request
+
+        self.patches()
+        self.review()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:bootstrap",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
+        apply = TestingReplacementBootstrapAdapter.apply
+
+        def lost(adapter: Any, *args: Any) -> Any:
+            apply(adapter, *args)
+            raise RuntimeError("private lost HTTP reply")
+
+        async def post() -> Any:
+            return await request(
+                self.fixture.app,
+                "POST",
+                ROUTE.format(product=self.profile.product),
+                headers={
+                    "Authorization": "Bearer local-operator-token",
+                    "Idempotency-Key": "original-key",
+                },
+                payload=self.request.model_dump(mode="json"),
+            )
+
+        with patch.object(TestingReplacementBootstrapAdapter, "apply", lost):
+            first = asyncio.run(post())
+        self.assertEqual(first.status_code, 409, first.text)
+        self.assertNotIn("private lost HTTP reply", first.text)
+        recovered = asyncio.run(post())
+        self.assertEqual(recovered.status_code, 202, recovered.text)
+        replay = asyncio.run(post())
+        self.assertEqual(replay.status_code, 202, replay.text)
+        self.assertTrue(replay.json()["replayed"])
+        self.assertEqual(self.route_writes, 1)
+
+    def test_bootstrap_refuses_production_profile_hostname_even_without_target_domains(
+        self,
+    ) -> None:
+        from urllib.parse import urlsplit
+        from control_plane.testing_replacement_bootstrap import bootstrap_plan
+
+        production = next(lane for lane in self.profile.lanes if lane.instance == "prod")
+        hostname = urlsplit(production.base_url).hostname
+        assert hostname is not None
+        self.assertFalse(self.production_before.domains)
+        with patch(
+            "control_plane.testing_replacement_bootstrap.require_distinct_testing_credentials"
+        ) as credentials:
+            with self.assertRaises(ValueError):
+                bootstrap_plan(
+                    self.store,
+                    self.profile.product,
+                    self.request.model_copy(update={"domain_host": hostname}),
+                )
+            credentials.assert_not_called()
