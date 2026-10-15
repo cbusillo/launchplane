@@ -1031,6 +1031,43 @@ class ActivationTests(unittest.TestCase):
         readback = asyncio.run(post({**draft, "mode": "readback"}))
         self.assertEqual(readback.status_code, 409, readback.text)
 
+    def test_route_names_fixed_refusals_without_exposing_untrusted_error_values(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        body = self.request.model_copy(
+            update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+        ).model_dump(mode="json")
+        secret = "provider-error-with-private-credential-value"
+        refusal = TestingActivationRefusal("Fixture qualification remains unproved.")
+        for error in (refusal, ValueError(secret)):
+            with patch.object(TestingActivationAdapter, "current", side_effect=error):
+                response = asyncio.run(
+                    request(
+                        app,
+                        "POST",
+                        ROUTE.format(product=self.product),
+                        headers={"Authorization": "Bearer local-operator-token"},
+                        payload=body,
+                    )
+                )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertNotIn(secret, response.text)
+            if error is refusal:
+                self.assertEqual(response.json()["error"]["code"], refusal.public_code)
+        self.assertEqual(self.writes, [])
+
 
 class ActivationPortProgramTests(unittest.TestCase):
     def run_program(

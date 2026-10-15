@@ -1,6 +1,7 @@
 """Immutable custody of a new generic-web testing recipient and its old fence."""
 
 from typing import Literal
+import re
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -8,6 +9,14 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+
+
+class TestingActivationRefusal(ValueError):
+    """Only fixed qualification messages belong here, never provider or value errors."""
+
+    @property
+    def public_code(self) -> str:
+        return "testing_activation_" + re.sub(r"[^a-z0-9]+", "_", str(self).lower()).strip("_")[:96]
 
 
 class TestingActivationRequest(BaseModel):

@@ -10,6 +10,7 @@ from fastapi import Depends, Header, Path as PathParameter
 from control_plane.contracts.testing_activation import (
     TestingActivationRequest,
     TestingActivationResult,
+    TestingActivationRefusal,
 )
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -120,6 +121,13 @@ def register_testing_activation_routes(
                     in_progress_message="Testing activation is running under its original key.",
                     reconcile_message="Testing activation outcome is unknown; preserve original placement, holds and fences.",
                 )
+        except TestingActivationRefusal as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code=error.public_code,
+                message="Testing activation qualification refused; preserve the original resources and interlock.",
+            ) from error
         except (
             ValueError,
             FileNotFoundError,
@@ -130,7 +138,7 @@ def register_testing_activation_routes(
             raise dependencies.http_error(
                 status_code=409,
                 trace_id=trace,
-                code="testing_activation_unverified",
+                code="testing_activation_dependency_unverified_" + type(error).__name__.lower(),
                 message="Testing activation inputs, recipient or isolation proof remain unverified.",
             ) from error
         return accepted_evidence_response(trace_id=trace, records={}, result=result_payload)

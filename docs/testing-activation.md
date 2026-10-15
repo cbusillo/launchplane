@@ -94,6 +94,9 @@ Keep the new volumes and both recipients if qualification or deployment fails.
 Rollback never restores shared production settings or starts the old containers.
 Read back the original operation and fix the supported testing continuation.
 The migration is additive and its downgrade preserves custody for recovery.
+Qualification refusals name the fixed failing check in their public error code;
+provider or unexpected exception text remains private. Keep the request trace
+and original allocation/key while addressing that check, then plan again.
 Actual testing acceptance still requires passing health, matching expected and
 observed runtime identity and no open incident. Source tests and activation's
 no-deploy receipt alone do not establish that acceptance.
