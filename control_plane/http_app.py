@@ -14707,6 +14707,23 @@ def create_launchplane_fastapi_app(
                 lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
             ),
         )
+        if write_result.status == "history_busy":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="production_history_busy",
+                message=(
+                    "Product authority or history is busy. No classification change was applied. "
+                    "Retry the same reviewed request with the same Idempotency-Key."
+                ),
+            )
+        if write_result.status == "history_conflict":
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Recorded production or promotion history prevents agent classification.",
+            )
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
                 raise RuntimeError("Replayed product production use write requires evidence.")
