@@ -14,10 +14,12 @@ from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
+from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 
 
 ProductLifecycleState = Literal["active", "retiring", "retired"]
 ProductPublicWebsite = Literal["required", "none"]
+ProductionUseAuthority = Literal["explicit", "director_agent"]
 OdooDataAuthority = Literal["unknown", "resettable", "restorable", "authoritative"]
 OdooRebuildSourceMode = Literal["empty", "upstream_restore"]
 BumpLevel = Literal["patch", "minor", "major"]
@@ -188,6 +190,12 @@ class ProductLaneHealthCheck(BaseModel):
     enabled: bool = True
     url: str = ""
     private_endpoint_key: str = ""
+    expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = Field(
+        default=(),
+        max_length=16,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     require_runtime_identity: bool = False
     recovery_observation_threshold: int = Field(default=1, ge=1, le=10)
     provider: str = ""
@@ -202,6 +210,11 @@ class ProductLaneHealthCheck(BaseModel):
         if not self.name:
             raise ValueError("product lane health check requires name")
         self.private_endpoint_key = self.private_endpoint_key.strip()
+        if self.expected_dns_targets and self.kind != "public_http":
+            raise ValueError("DNS expectations are only supported on public HTTP checks")
+        names = [target.public_name for target in self.expected_dns_targets]
+        if len(names) != len(set(names)):
+            raise ValueError("DNS expectation names must be unique")
         if self.kind == "private_http" and self.url:
             raise ValueError("private HTTP health checks must use private_endpoint_key")
         if not health_check_record_token(self.name):
@@ -627,6 +640,13 @@ class LaunchplaneProductProfileRecord(BaseModel):
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
+    # A bounded agent attestation records a fact, never a production bootstrap exemption.
+    # Older classifications came through the explicit write path and serialize unchanged.
+    production_use_authority: ProductionUseAuthority = Field(
+        default="explicit",
+        exclude_if=lambda value: value == "explicit",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     odoo_business_hours: OdooBusinessHoursPolicy | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
@@ -750,6 +770,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
                 normalized_historical_contexts.append(context)
         self.historical_contexts = tuple(normalized_historical_contexts)
         return self
+
+    @property
+    def prelaunch_bootstrap_authorized(self) -> bool:
+        return self.production_use == "prelaunch" and self.production_use_authority == "explicit"
 
     @property
     def is_active(self) -> bool:

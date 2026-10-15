@@ -23,6 +23,7 @@ from control_plane.odoo_preview_apply_execution import (
 )
 from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope, ODOO_PREVIEW_APPLY_ROUTE
 from control_plane.preview_reservation_recovery import (
+    classify_preview_reservation,
     held_preview_reservations,
     original_preview_intent,
     recover_held_preview,
@@ -457,6 +458,75 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         self.assertFalse(result["original_binding_available"])
         observer.assert_not_called()
         quiescence.assert_not_called()
+
+    def test_missing_original_with_exact_current_target_binding_fences_before_fresh_planning(
+        self,
+    ) -> None:
+        self.remove_original_intent()
+        transport, observer, planner = Mock(), Mock(), Mock(side_effect=ValueError("fresh plan"))
+        result = reconcile_preview_target(
+            record_store=self.store,
+            profile=self.profile,
+            repository_id="repo",
+            transport=transport,
+            pull_request_number=self.issued.plan_request.pr_number,
+            control_plane_root=self.root,
+            preview_hooks=PreviewProviderHooks(build_inputs=planner, observe_apply=observer),
+        )
+        self.assertEqual(result.plan["reason"], "held_preview_recovery_required")
+        held = cast(list[dict[str, object]], result.plan["held_reservations"])[0]
+        self.assertFalse(held["original_action_available"])
+        self.assertFalse(held["original_plan_available"])
+        self.assertEqual(held["target_pull_request_number"], self.issued.plan_request.pr_number)
+        self.assertEqual(held["action"], "unavailable")
+        self.assertEqual(held["pull_request_number"], 0)
+        planner.assert_not_called()
+        observer.assert_not_called()
+        transport.get_json.assert_not_called()
+        self.assertEqual(
+            held_preview_reservations(self.store, product=self.profile.product), (self.reservation,)
+        )
+
+    def test_legacy_target_attribution_requires_exact_current_context_name_and_hash(self) -> None:
+        self.remove_original_intent()
+        for candidate in (
+            self.reservation.model_copy(update={"provider_target_key": "different"}),
+            self.reservation.model_copy(update={"reconciliation_key": "different"}),
+        ):
+            with self.subTest(candidate=candidate):
+                classified = classify_preview_reservation(
+                    candidate, profile=self.profile, store=self.store
+                )
+                self.assertEqual(classified["target_pull_request_number"], 0)
+                self.assertFalse(classified["original_action_available"])
+        changed = self.profile.model_copy(
+            update={"preview": self.profile.preview.model_copy(update={"context": "different"})}
+        )
+        self.assertEqual(
+            classify_preview_reservation(self.reservation, profile=changed, store=self.store)[
+                "target_pull_request_number"
+            ],
+            0,
+        )
+
+    def test_legacy_missing_original_does_not_fence_an_unrelated_preview(self) -> None:
+        self.remove_original_intent()
+        transport = Mock()
+        transport.get_json.return_value = {"state": "closed", "head": {"sha": "a" * 40}}
+        result = reconcile_preview_target(
+            record_store=self.store,
+            profile=self.profile,
+            repository_id="repo",
+            transport=transport,
+            pull_request_number=self.issued.plan_request.pr_number + 1,
+            control_plane_root=self.root,
+            preview_hooks=PreviewProviderHooks(),
+        )
+        self.assertFalse(result.plan["held"])
+        self.assertFalse(result.error)
+        self.assertEqual(
+            held_preview_reservations(self.store, product=self.profile.product), (self.reservation,)
+        )
 
     def test_moved_binding_and_issued_plan_refuse(self) -> None:
         for field in ("reconciliation_key", "provider_target_key", "idempotency_key"):

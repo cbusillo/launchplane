@@ -59,48 +59,31 @@ Four DB-backed tables hold the authoritative ordinary-agent lifecycle boundary:
   outcome per privileged operation, including its own version-neutral current
   administrator-policy provenance.
 
-Enroll and rotation append the principal, authentication credential, custody,
-and audit records in the same transaction as a completed inner idempotency
-receipt. Rotation advances exactly one credential version. Revocation appends a
-revoked principal revision and marks the current authentication credential
-revoked without reading custody or calling a provider. The store derives the
-receipt after DB time and server-allocated revisions are known; callers cannot
-supply response content or run callbacks while locks are held.
+Enrollment, authentication/credential claim, session admission, finite-job
+execution, provider inspection, and joined ordinary-controller writes have been
+removed from storage. No enrollment or delegated execution is enabled. Historical
+tables and schema-3 policy parsing remain until their separate retirement.
 
-Enrollment recovery has been removed. Retained delivery ciphertext still
-participates in managed-secret key retirement, so the privileged-operation
-worker keeps its bounded expiry maintenance until storage deletion under #2437.
-History remains readable; no enrollment or delegated execution is enabled.
-The retired delivery controller, provider transports, token minting, custody
-orchestration, qualification executor, and readiness orchestration are removed.
-Their storage contracts and methods remain for the next retirement layer;
-native merge-train records retain their historical finite-job bindings.
+Retained delivery ciphertext still participates in managed-secret key retirement,
+so the privileged-operation worker keeps its bounded expiry maintenance. That
+maintenance preserves unclaimed-credential revocation and session/effect
+cancellation. Historical activation reads, policy maintenance and its activation
+lock remain supported. Native merge-train records retain their finite-job
+bindings and refuse to overwrite a bound controller/progress record or bypass
+an unresolved ordinary effect. These fences are not removed with the retired
+execution methods. Remaining storage-bound contracts/domain helpers and table
+retirement continue under #2437; no data migration has run.
 
 ### Provider Delivery Inspection
 
 Status: retired with ordinary-agent delegated delivery; deletion is tracked in
 cbusillo/launchplane#2437. Do not extend it.
 
-`launchplane_provider_delivery_inspections` stores private demand generations,
-bounded provider attempts, independent token custody and terminal observations.
-Its logical repository flight remains occupied until terminal history and
-release commit together; closed token custody alone does not release it.
-Database uniqueness and state constraints fence concurrent generations,
-repository custody and completion sequence. The migration creates empty
-storage, not an inspection profile, credential, expectation or activation.
-
-The payload retains normalized provider facts and immutable provenance, never a
-private key, token or raw provider response. A ready receipt binds current
-target and selected semantics; containing-policy history and producing-caller
-identity remain provenance. The latest conclusive protection observation
-governs within its original freshness window. Capability failures provide
-pacing without replacing an unexpired conclusive ready observation.
-
-Recovery uses expected state/revision and current database time, preserves
-unknown custody until its conservative expiry, and cannot let a stale finisher
-overwrite a newer result. The store retains terminal audit history and adds no
-automatic deletion. Provider inspection orchestration and token minting are
-removed; these storage records remain only until the next retirement layer.
+The inspection reservation, token-custody transition, completion, and recovery
+methods are removed. `launchplane_provider_delivery_inspections` remains as
+historical storage with its uniqueness and state constraints until the later
+table migration under #2437. No inspection profile, credential, expectation, or
+activation is created by a migration.
 
 ## Schema Migrations
 
@@ -1005,6 +988,9 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 `GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
+An existing full-profile write preserves classification provenance when an
+older payload omits it, and refuses explicit classification or provenance
+changes. Use the reviewed production-use endpoint for those changes.
 
 The profile `owner` names the Client who may accept or request changes on
 previews and can never merge or deploy. Set or clear it with
@@ -1028,7 +1014,12 @@ and promotion evidence still work. Promotion refuses a testing lane that runs an
 image outside the current repository.
 
 `POST /v1/product-profiles/{product}/production-use` changes only the production-use
-classification and profile metadata under `product_profile.write`. Dry run returns a
+classification and profile metadata under `product_profile.write`. The source-owned
+Director-agent path also permits a reviewed never-live fact for an active
+testing-only product, subject to the contradictory-history checks in
+[authorization authority](authorization-authority.md#reviewed-never-live-classification-and-preview-execution).
+It persists bounded agent provenance and supplies no production-bootstrap exemption.
+Dry run returns a
 digest of the full starting profile, requested value, and reason; Apply must match it.
 Atomic compare-and-write and idempotency evidence record the caller, before/after,
 reason and timestamps. The Client panel reads the resulting profile back.
@@ -1096,6 +1087,26 @@ surface for both modes and supplies the target product and requested `none` or
 from service-backed or admin-supplied authz input rather than a checked-in
 product catalog.
 
+Public HTTP checks may also declare `expected_dns_targets`, a bounded list of
+`{public_name, addresses}` entries. Each entry names an existing probed host and
+an explicit public unicast A/AAAA answer set. These expectations belong to the
+service-owned health check, never to route attestations, provider guesses or a
+checked-in product/IP catalog. The existing natural monitor cycle compares the
+complete validated resolver answer set with that expectation; extra, missing or
+wrong addresses produce `mismatch`, and failed or private-address resolution
+produces `unavailable`. This verifies terminal addresses, not a CNAME chain or an
+authoritative DNS zone. HTTP reachability, TLS and runtime identity remain
+independent observations.
+
+The persisted public target's optional `dns` evidence is projected separately in
+`topology.observed.dns_targets`. Missing expectations read `missing_expectation`;
+an absent comparison reads `unavailable`. Existing records without DNS evidence
+remain readable and unproved. A result expires at the lane monitor's existing
+cadence, with no grace period; changing expectations invalidates the old
+comparison immediately. DNS diagnostic failures do not change HTTP health,
+operational green, route authority or incident ownership. They remain visible in
+the topology API even when HTTP and runtime identity pass.
+
 Stable-lane health policy and monitoring-intent changes use
 `POST /v1/product-profiles/health-monitoring/apply`. The request identifies one
 exact product/context/instance lane and one health-check name, then supplies the
@@ -1105,8 +1116,15 @@ Launchplane preserves any existing public-check URL or derives it from lane-owne
 `health_url`/`base_url`. Private checks carry only a registered
 `private_endpoint_key`; apply validates that the record is active and belongs to
 the exact product/context/instance without returning or logging its internal URL.
-The request cannot carry a domain, provider target, proxy record, certificate
-reference, or replacement product profile. Enabling strict public runtime
+Public requests can supply `expected_dns_targets` for hosts already probed by
+the selected check; omission preserves them and an empty list clears them.
+Dry-run shows the current/requested expectations and binds the exact candidate
+to its reviewed digest. Legacy callers omitting the field retain their existing
+response shape. Deploy compatible readers before enrolling expectations, and
+retain a reader-capable rollback while records contain the added evidence; this
+source change does not enroll real products or authorize production writes.
+The request cannot carry a replacement domain, provider target, proxy record,
+certificate reference, or replacement product profile. Enabling strict public runtime
 identity requires an HTTPS host already owned by that lane. Dry-run returns a
 canonical plan bound to the complete current profile; apply requires the reviewed
 digest and an idempotency key, then compare-and-writes only the selected check,

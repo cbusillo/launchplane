@@ -252,6 +252,9 @@ remaining domain and storage removal is tracked in #2437.
     provider-domain count without disclosing sibling domain names or granting
     route authority over them.
 - native FastAPI Dokploy target inspect read:
+  - `GET /v1/dokploy/inventory`, requiring the global `dokploy_target.inspect`
+    action for the Launchplane service context; see [inventory coverage and
+    pagination](dokploy-inventory.md). Scoped `driver.read` is insufficient.
   - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` for
     the Launchplane service context or `local_operator` `driver.read` for the
     requested tracked context/instance, and returning redacted provider
@@ -1471,6 +1474,19 @@ Hosted requests reload the current DB policy before authorization and re-evaluat
 the session role. OAuth organization/team claims expire for authorization after
 24 hours; the session is revoked and the user must sign in again to refresh
 those mutable GitHub claims.
+
+The cookie's `Max-Age` and stored session expiry are 14 days (1,209,600 seconds),
+with renewal eligible after 24 hours (86,400 seconds) since issue or last renewal.
+This is separate from the production admin/read-only authorization-claims
+limit: those claims expire absolutely 24 hours after sign-in, and the service
+revokes the session before attempting cookie renewal. Background reads enter
+the same check but do not refresh GitHub claims or the sign-in time; there is no
+separate short idle timeout. Confined Client sessions follow their current
+product-ownership checks instead of this admin/read-only claims branch.
+The OAuth callback uses the GitHub token to read identity and membership, then
+retains only the Launchplane identity/session; it does not store the token or
+its expiry/refresh metadata. Later Launchplane session reads do not use that
+token. OAuth login state lasts 10 minutes (600 seconds).
 
 Every non-health `/v1` operation documents the refresh boundary: `503` means the
 active DB policy could not be loaded, and `409` means a fenced schema exposed an
@@ -3007,6 +3023,8 @@ For reviewed reconciliation of provider-absent legacy preview history, see
 - `GET /v1/ingress/route-audits/records/{record_id}` (native FastAPI for
   bearer-token and human-session callers)
 - `GET /v1/dokploy-targets/inspect` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/dokploy/inventory` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
   human-session, and Every Code worker-token callers)
