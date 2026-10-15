@@ -1,7 +1,11 @@
 from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
-from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
+from control_plane.odoo_connection_isolation import (
+    ConnectionIsolationOutcomeUnknown,
+    ConnectionIsolationPreconditionFailed,
+)
 from control_plane.action_effects import (
+    ODOO_CONNECTION_ISOLATION_ACTIONS,
     AGENT_READ_ROLE_ACTION,
     agent_read_role_covers,
     action_requires_product_coverage,
@@ -543,6 +547,7 @@ from control_plane.odoo_preview_apply_http import (
 )
 from control_plane.odoo_preview_apply_execution import prepare_odoo_preview_apply_operation
 from control_plane.odoo_post_deploy_http import (
+    ConnectionIsolationApplyAdapter,
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE as _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
     ODOO_POST_DEPLOY_ROUTE as _ODOO_POST_DEPLOY_ROUTE,
     ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE as _ODOO_WEBSITE_BOOTSTRAP_OVERRIDE_ROUTE,
@@ -7296,7 +7301,7 @@ def create_launchplane_fastapi_app(
 
     async def write_odoo_post_deploy(
         request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        identity: Annotated[LaunchplaneIdentity, Depends(read_disposable_runtime_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
         idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
     ) -> AcceptedEvidenceResponse | JSONResponse:
@@ -7354,14 +7359,38 @@ def create_launchplane_fastapi_app(
             ) from error
 
         authorization_product = product_profile.product
-        if not native_routes.native_driver_route_authorization_allows(
-            endpoint=write_odoo_post_deploy,
-            authorization_allows=resolved_authz_policy_runtime.allows,
-            identity=identity,
-            product=authorization_product,
-            context=post_deploy_request.post_deploy.context,
-            instances=(post_deploy_request.post_deploy.instance,),
-        ):
+        isolation_mode = post_deploy_request.post_deploy.connection_isolation
+        director_isolation_apply = director_agent_identity(identity) and isolation_mode == "apply"
+
+        def maintenance_authorized() -> bool:
+            return not isinstance(
+                identity, TerminalAgentIdentity
+            ) and native_routes.native_driver_route_authorization_allows(
+                endpoint=write_odoo_post_deploy,
+                authorization_allows=resolved_authz_policy_runtime.allows,
+                identity=identity,
+                product=authorization_product,
+                context=post_deploy_request.post_deploy.context,
+                instances=(post_deploy_request.post_deploy.instance,),
+            )
+
+        if isolation_mode is None:
+            authorized = maintenance_authorized()
+        else:
+            authorized = director_isolation_apply or resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action=ODOO_CONNECTION_ISOLATION_ACTIONS[isolation_mode],
+                product=authorization_product,
+                context=post_deploy_request.post_deploy.context,
+                target=AuthorizationTarget(
+                    scope="instance", instances=(post_deploy_request.post_deploy.instance,)
+                ),
+                inherit_agent_read_role=director_agent_identity(identity),
+            )
+            # Existing maintenance callers keep observation, never a new repair write.
+            if not authorized and isolation_mode in {"dry-run", "readback"}:
+                authorized = maintenance_authorized()
+        if not authorized:
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
@@ -7371,6 +7400,38 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
+
+        if isolation_mode == "apply" and not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Connection isolation apply requires a stable Idempotency-Key.",
+            )
+
+        isolation_binding = ""
+
+        def isolation_checkpoint() -> None:
+            nonlocal isolation_binding
+            try:
+                binding = require_disposable_lane(
+                    cast(DisposableLaneStore, record_store),
+                    product=authorization_product,
+                    context=post_deploy_request.post_deploy.context,
+                    instance=post_deploy_request.post_deploy.instance,
+                )
+                if isolation_binding and binding != isolation_binding:
+                    raise DisposableLaneSafetyUnknown(
+                        "The isolation lane binding changed; plan again."
+                    )
+                isolation_binding = binding
+            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="disposable_lane_safety_unknown",
+                    message=str(error),
+                ) from error
 
         (
             normalized_idempotency_key,
@@ -7383,12 +7444,53 @@ def create_launchplane_fastapi_app(
             route_path=_ODOO_POST_DEPLOY_ROUTE,
             idempotency_key=idempotency_key,
             trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
+            check_replay=bool(idempotency_key.strip()) and isolation_mode is None,
         )
         if replay_response is not None:
             return replay_response
 
+        def execute_isolation_apply(
+            before_mutation: Callable[[], None],
+        ) -> tuple[dict[str, object], dict[str, object]]:
+            def checkpoint() -> None:
+                isolation_checkpoint()
+                before_mutation()
+
+            with synchronous_odoo_lane(
+                record_store=record_store,
+                trace_id=trace_id,
+                product=authorization_product,
+                context=post_deploy_request.post_deploy.context,
+                instance=post_deploy_request.post_deploy.instance,
+            ):
+                isolation_checkpoint()
+                return execute_odoo_post_deploy_result(
+                    control_plane_root=resolved_control_plane_root,
+                    record_store=record_store,
+                    request=post_deploy_request,
+                    before_connection_isolation_mutation=checkpoint,
+                )
+
         try:
+            if isolation_mode == "apply":
+                return await run_provider_mutation(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_ODOO_POST_DEPLOY_ROUTE,
+                    idempotency_key=normalized_idempotency_key,
+                    request_fingerprint=payload_fingerprint,
+                    trace_id=trace_id,
+                    adapter=ConnectionIsolationApplyAdapter(
+                        product=authorization_product,
+                        context=post_deploy_request.post_deploy.context,
+                        instance=post_deploy_request.post_deploy.instance,
+                        trace_id=trace_id,
+                        reviewed_plan_sha256=post_deploy_request.post_deploy.reviewed_plan_sha256,
+                        execute=execute_isolation_apply,
+                    ),
+                    in_progress_message="This isolation repair is already running. Retain its original key.",
+                    reconcile_message="The original isolation repair is fenced. Keep its key and read back independently. Supported recovery is pending launchplane#3632; do not retry under another key.",
+                )
             with synchronous_odoo_lane(
                 record_store=record_store,
                 trace_id=trace_id,
@@ -7409,7 +7511,7 @@ def create_launchplane_fastapi_app(
                 code="not_found",
                 message=f"No Launchplane route for {_ODOO_POST_DEPLOY_ROUTE}.",
             ) from error
-        except DokployScheduleExecutionFailed as error:
+        except (DokployScheduleExecutionFailed, ConnectionIsolationOutcomeUnknown) as error:
             raise _launchplane_http_error(
                 status_code=503,
                 trace_id=trace_id,
@@ -7436,15 +7538,16 @@ def create_launchplane_fastapi_app(
             records={key: string_value(value) for key, value in records.items()},
             result=driver_result,
         )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_ODOO_POST_DEPLOY_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
+        if isolation_mode is None:
+            store_apply_idempotency(
+                record_store=record_store,
+                identity=identity,
+                route_path=_ODOO_POST_DEPLOY_ROUTE,
+                idempotency_key=normalized_idempotency_key,
+                request_fingerprint_value=payload_fingerprint,
+                trace_id=trace_id,
+                response=response,
+            )
         return response
 
     async def write_odoo_app_maintenance(

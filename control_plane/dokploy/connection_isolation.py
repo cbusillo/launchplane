@@ -2,6 +2,7 @@
 
 import shlex
 import hashlib
+from collections.abc import Callable
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 
@@ -78,6 +79,7 @@ def run_connection_isolation(
     target_definition: DokployTargetDefinition,
     mode: OdooConnectionIsolationMode,
     reviewed_plan_sha256: str = "",
+    before_mutation: Callable[[], None] | None = None,
 ) -> dict[str, str]:
     if not web_held_until_integration_readback(target_definition.instance):
         raise ValueError("Connection isolation refuses production.")
@@ -154,6 +156,8 @@ def run_connection_isolation(
         "enabled": False,
         "timezone": "UTC",
     }
+    if mode == "apply" and before_mutation is not None:
+        before_mutation()
     evidence = post_deploy.run_manual_data_schedule(
         host=host,
         token=token,
