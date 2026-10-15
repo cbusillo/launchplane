@@ -7,7 +7,7 @@ import hmac
 import json
 from pathlib import Path
 import re
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -19,6 +19,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
     TestingActivationRefusal,
+    TestingActivationRefusalCode,
     TestingActivationRecord,
     TestingActivationRequest,
     TestingActivationResult,
@@ -116,7 +117,9 @@ def activation_record(
     return TestingActivationRecord.model_validate(payload) if payload is not None else None
 
 
-def configuration_digest(store: PostgresRecordStore, product: str, context: str) -> str:
+def configuration_digest(
+    store: PostgresRecordStore, product: str, context: str, *, version: Literal[1, 2] = 2
+) -> str:
     profile = store.read_product_profile_record(product)
     lane = next(
         item for item in profile.lanes if (item.context, item.instance) == (context, "testing")
@@ -129,7 +132,7 @@ def configuration_digest(store: PostgresRecordStore, product: str, context: str)
                 "product": profile.product,
                 "repository": profile.repository,
                 "driver_id": profile.driver_id,
-                "public_website": profile.public_website,
+                **({"public_website": profile.public_website} if version == 2 else {}),
                 "is_active": profile.is_active,
                 "image": profile.image.model_dump(mode="json"),
                 "lane": lane.model_dump(mode="json"),
@@ -464,7 +467,10 @@ def build_activation(
         or target.pending_public_host_effects
         or (target.domains and profile.public_website != "none")
     ):
-        raise TestingActivationRefusal("Existing routes require their own accepted cutover.")
+        raise TestingActivationRefusal(
+            "Existing routes require their own accepted cutover.",
+            code=TestingActivationRefusalCode.ROUTES_REQUIRE_CUTOVER,
+        )
     hold = target.policies.staff_testing_hold
     if hold is None or hold.recorded_by != actor:
         raise TestingActivationRefusal(
@@ -514,6 +520,7 @@ def build_activation(
             target_id=target_id.target_id,
         ),
         configuration_sha256=digest,
+        configuration_version=2,
         compose_source=document,
         image_reference=image_reference,
     )
@@ -653,10 +660,15 @@ class TestingActivationAdapter:
 
     def require_unchanged(self, record: TestingActivationRecord) -> None:
         if (
-            configuration_digest(self.store, self.product, record.context)
+            configuration_digest(
+                self.store, self.product, record.context, version=record.configuration_version
+            )
             != record.configuration_sha256
         ):
-            raise TestingActivationRefusal("Testing configuration or key policy changed.")
+            raise TestingActivationRefusal(
+                "Testing configuration or key policy changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
         _, target, target_id, provider = _bind(self.store, self.product, record.context, "testing")
         if record.published:
             if (

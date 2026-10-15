@@ -8878,6 +8878,7 @@ def create_launchplane_fastapi_app(
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
         )
         from control_plane.testing_activation import require_activation_hold_lift
+        from control_plane.contracts.testing_activation import TestingActivationRefusal
 
         if hold_request.activation_plan_sha256 and not director_agent_identity(identity):
             raise _launchplane_http_error(
@@ -8913,7 +8914,11 @@ def create_launchplane_fastapi_app(
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
-                    code="testing_activation_unverified",
+                    code=(
+                        error.public_code
+                        if isinstance(error, TestingActivationRefusal)
+                        else "testing_activation_unverified"
+                    ),
                     message="The original activation interlock is not safe to lift.",
                 ) from error
 
@@ -9046,7 +9051,11 @@ def create_launchplane_fastapi_app(
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="testing_activation_unverified",
+                code=(
+                    error.public_code
+                    if isinstance(error, TestingActivationRefusal)
+                    else "testing_activation_unverified"
+                ),
                 message="The original activation interlock is not safe to lift.",
             ) from error
         response = accepted_evidence_response(
