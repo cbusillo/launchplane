@@ -173,6 +173,7 @@ from control_plane.contracts.dokploy_target_record import (
 from control_plane.contracts.disposable_lane import (
     DisposableLaneSafety,
     DisposableTestingReplacementPreparation,
+    DisposableTestingResourcePreparation,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
@@ -3887,6 +3888,12 @@ class LaunchplaneDisposableReplacementPreparationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneDisposableTestingResourceAllocationRow(Base):
+    __tablename__ = "launchplane_disposable_testing_resource_allocations"
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneProductProfileRow(Base):
     __tablename__ = "launchplane_product_profiles"
     __table_args__ = (
@@ -5884,6 +5891,7 @@ class PostgresRecordStore(HumanSessionStore):
         self._release_review_publication_context = local()
         self._merge_train_feedback_context = local()
         self._preview_execution_context = local()
+        self._disposable_authority_context = local()
 
     @property
     def backend_name(self) -> str:
@@ -6181,6 +6189,26 @@ class PostgresRecordStore(HumanSessionStore):
 
     def _write_row(self, row: Base) -> None:
         with self._session_factory() as session:
+            if isinstance(
+                row,
+                LaunchplaneProductProfileRow
+                | LaunchplaneDokployTargetRow
+                | LaunchplaneDokployTargetIdRow
+                | LaunchplaneProviderTargetRow
+                | LaunchplaneRuntimeEnvironmentRow
+                | LaunchplaneSecretRow
+                | LaunchplaneSecretVersionRow
+                | LaunchplaneSecretBindingRow
+                | LaunchplaneDisposableLaneSafetyRow
+                | LaunchplaneDisposableReplacementPreparationRow
+                | LaunchplaneDisposableTestingResourceAllocationRow,
+            ):
+                self._begin_serialized_write(session)
+                self._lock_product_authority_bundle_write(session)
+                if isinstance(row, LaunchplaneDokployTargetRow):
+                    self._assert_unreserved_disposable_hosts(
+                        session, DokployTargetRecord.model_validate(row.payload)
+                    )
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -6613,6 +6641,18 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            adoption_checkpoint = getattr(
+                self._disposable_authority_context, "adoption_checkpoint", None
+            )
+            for target in bundle.dokploy_targets:
+                self._assert_unreserved_disposable_hosts(session, target)
+            if adoption_checkpoint is not None:
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    adoption_checkpoint()
+                finally:
+                    self._disposable_authority_context.session = outer
             self._lock_landing_authority(
                 session,
                 *(
@@ -6817,12 +6857,67 @@ class PostgresRecordStore(HumanSessionStore):
                     step_name="write_product_profile",
                 )
             for target_record in bundle.dokploy_targets:
+                adoption = getattr(self._disposable_authority_context, "adoption", None)
+                if adoption is not None:
+                    allocation = session.get(
+                        LaunchplaneDisposableTestingResourceAllocationRow,
+                        adoption.operation_id,
+                        with_for_update=True,
+                    )
+                    previous = session.get(
+                        LaunchplaneDokployTargetRow,
+                        (adoption.context, "testing"),
+                        with_for_update=True,
+                    )
+                    if allocation is None or previous is None:
+                        raise ValueError("Retained target custody is unavailable during adoption.")
+                    snapshot = allocation.payload.get("retained_target_record") or previous.payload
+                    retained = DokployTargetRecord.model_validate(snapshot)
+                    allocation.payload = {**allocation.payload, "retained_target_record": snapshot}
+                    target_record = target_record.model_copy(
+                        update={
+                            "policies": retained.policies.model_copy(
+                                update={"integration_allowances": ()}
+                            ),
+                            "require_test_gate": retained.require_test_gate,
+                        }
+                    )
                 self._merge_authority_row(
                     session,
                     self._dokploy_target_row(target_record),
                     step_name="write_dokploy_target",
                 )
             for target_id_record in bundle.dokploy_target_ids:
+                adoption = getattr(self._disposable_authority_context, "adoption", None)
+                if adoption is not None:
+                    if (target_id_record.context, target_id_record.instance) != (
+                        adoption.context,
+                        "testing",
+                    ) or target_id_record.target_id == adoption.retained_target_id:
+                        raise ValueError("Resource adoption must capture its fresh testing target.")
+                    custody = session.get(
+                        LaunchplaneDisposableReplacementPreparationRow, adoption.operation_id
+                    )
+                    allocation = session.get(
+                        LaunchplaneDisposableTestingResourceAllocationRow,
+                        adoption.operation_id,
+                        with_for_update=True,
+                    )
+                    if (
+                        custody is None
+                        or allocation is None
+                        or (
+                            DisposableTestingResourcePreparation.model_validate(
+                                {**custody.payload, **allocation.payload}
+                            ).model_dump(exclude={"retained_target_record"})
+                            != adoption.model_dump(exclude={"retained_target_record"})
+                        )
+                    ):
+                        raise ValueError("Resource allocation changed before adoption.")
+                    allocation.payload = {
+                        **allocation.payload,
+                        "replacement_target_id": target_id_record.target_id,
+                    }
                 self._merge_authority_row(
                     session,
                     self._dokploy_target_id_row(target_id_record),
@@ -7698,6 +7793,10 @@ class PostgresRecordStore(HumanSessionStore):
         session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
 
     def _lock_product_authority_bundle_write(self, session: Any) -> None:
+        held = getattr(self._disposable_authority_context, "session", None)
+        if held is not None:
+            held.execute(text("SELECT 1"))
+            return
         if self.database_url.startswith("sqlite"):
             return
         session.execute(
@@ -7752,6 +7851,11 @@ class PostgresRecordStore(HumanSessionStore):
 
     @contextmanager
     def _product_authority_bundle_read_guard(self) -> Iterator[None]:
+        held = getattr(self._disposable_authority_context, "session", None)
+        if held is not None:
+            held.execute(text("SELECT 1"))
+            yield
+            return
         with self._session_factory() as session:
             if self.database_url.startswith("sqlite"):
                 session.execute(text("BEGIN IMMEDIATE"))
@@ -7764,6 +7868,46 @@ class PostgresRecordStore(HumanSessionStore):
                 yield
             finally:
                 session.rollback()
+
+    @contextmanager
+    def serialize_disposable_testing_resources(self) -> Iterator[Callable[[], None]]:
+        """Fence inserts and updates as well as existing rows during preparation.
+
+        This guard never waits for a lane/executor lock: acquire that lock first.
+        It is PostgreSQL-only; SQLite cannot prove cross-connection exclusion
+        while nested store writes use their own transactions.
+        """
+        if self.database_dialect_name != "postgresql":
+            raise ValueError("Replacement resource qualification requires PostgreSQL.")
+        held = getattr(self._disposable_authority_context, "session", None)
+        if held is not None:
+            yield lambda: held.execute(text("SELECT 1"))
+            return
+        with self._session_factory() as session:
+            self._lock_product_authority_bundle_write(session)
+            self._disposable_authority_context.session = session
+
+            def checkpoint() -> None:
+                session.execute(text("SELECT 1"))
+
+            try:
+                yield checkpoint
+            finally:
+                self._disposable_authority_context.session = None
+                session.rollback()
+
+    @contextmanager
+    def capture_disposable_resource_adoption(
+        self, expected: DisposableTestingResourcePreparation, *, checkpoint: Callable[[], None]
+    ) -> Iterator[None]:
+        """Attach new target custody to the same transaction as target adoption."""
+        self._disposable_authority_context.adoption = expected
+        self._disposable_authority_context.adoption_checkpoint = checkpoint
+        try:
+            yield
+        finally:
+            self._disposable_authority_context.adoption = None
+            self._disposable_authority_context.adoption_checkpoint = None
 
     def _database_mutation_timestamp(self, session: Any) -> str:
         if self.database_url.startswith("sqlite"):
@@ -10404,6 +10548,8 @@ class PostgresRecordStore(HumanSessionStore):
 
     def clear_disposable_lane_safety(self, product: str, context: str, instance: str) -> None:
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             row = session.get(
                 LaunchplaneDisposableLaneSafetyRow,
                 (product, context, instance),
@@ -10425,6 +10571,103 @@ class PostgresRecordStore(HumanSessionStore):
                 if row is not None
                 else None
             )
+
+    def read_disposable_resource_preparation(
+        self, operation_id: str
+    ) -> DisposableTestingResourcePreparation | None:
+        with self._session_factory() as session:
+            custody = session.get(LaunchplaneDisposableReplacementPreparationRow, operation_id)
+            if custody is None:
+                return None
+            allocation = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow, operation_id
+            )
+            return DisposableTestingResourcePreparation.model_validate(
+                {**custody.payload, **(allocation.payload if allocation is not None else {})}
+            )
+
+    def _retained_disposable_hostnames(self, session: Session) -> frozenset[str]:
+        hosts: set[str] = set()
+        for payload in session.scalars(
+            select(LaunchplaneDisposableTestingResourceAllocationRow.payload)
+        ):
+            snapshot = payload.get("retained_target_record")
+            if snapshot is not None:
+                retained = DokployTargetRecord.model_validate(snapshot)
+                hosts.update(
+                    (
+                        *retained.domains,
+                        *retained.public_hosts,
+                        *(effect.host for effect in retained.pending_public_host_effects),
+                    )
+                )
+        return frozenset(hosts)
+
+    def retained_disposable_hostnames(self) -> frozenset[str]:
+        with self._session_factory() as session:
+            return self._retained_disposable_hostnames(session)
+
+    def _assert_unreserved_disposable_hosts(
+        self, session: Session, target: DokployTargetRecord
+    ) -> None:
+        requested = {
+            *target.domains,
+            *target.public_hosts,
+            *(effect.host for effect in target.pending_public_host_effects),
+        }
+        if requested.intersection(self._retained_disposable_hostnames(session)):
+            raise DokployTargetRecordChanged(
+                "A hostname remains reserved by retained testing custody."
+            )
+
+    def compare_and_write_disposable_resource_preparation(
+        self,
+        *,
+        expected: DisposableTestingResourcePreparation,
+        replacement: DisposableTestingResourcePreparation,
+    ) -> None:
+        mutable = {
+            "resource_namespace",
+            "replacement_target_id",
+            "resources_binding_sha256",
+            "reviewed_plan_sha256",
+        }
+        if expected.model_dump(exclude=mutable) != replacement.model_dump(exclude=mutable):
+            raise ValueError("Resource preparation cannot alter retained target custody.")
+        for field in mutable:
+            if getattr(expected, field) and getattr(expected, field) != getattr(replacement, field):
+                raise ValueError("Recorded replacement resource identities are immutable.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneDisposableReplacementPreparationRow,
+                expected.operation_id,
+                with_for_update=True,
+            )
+            allocation = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                expected.operation_id,
+                with_for_update=True,
+            )
+            if (
+                row is None
+                or DisposableTestingResourcePreparation.model_validate(
+                    {**row.payload, **(allocation.payload if allocation is not None else {})}
+                )
+                != expected
+            ):
+                raise ValueError("Replacement preparation changed during qualification.")
+            session.merge(
+                LaunchplaneDisposableTestingResourceAllocationRow(
+                    operation_id=expected.operation_id,
+                    payload={
+                        **(allocation.payload if allocation else {}),
+                        **replacement.model_dump(mode="json", include=mutable),
+                    },
+                )
+            )
+            session.commit()
 
     def prepare_disposable_testing_replacement(
         self, expected: OdooStableTargetReplacementOperationRecord, prepared_by: str
@@ -10527,6 +10770,7 @@ class PostgresRecordStore(HumanSessionStore):
                     context=expected.context,
                     instance=expected.instance,
                 )
+                self._lock_product_authority_bundle_write(session)
                 statement = (
                     select(LaunchplaneOdooStableTargetReplacementOperationRow)
                     .where(
@@ -10594,7 +10838,12 @@ class PostgresRecordStore(HumanSessionStore):
                     tuple(
                         self._read_payload(model_type=DokployTargetIdRecord, payload=item.payload)
                         for item in session.scalars(
-                            select(LaunchplaneDokployTargetIdRow).with_for_update()
+                            select(LaunchplaneDokployTargetIdRow)
+                            .order_by(
+                                LaunchplaneDokployTargetIdRow.context,
+                                LaunchplaneDokployTargetIdRow.instance,
+                            )
+                            .with_for_update()
                         )
                     ),
                     tuple(
@@ -10614,7 +10863,6 @@ class PostgresRecordStore(HumanSessionStore):
                         for item in session.scalars(
                             select(LaunchplaneSecretRow)
                             .where(
-                                LaunchplaneSecretRow.context.in_(("", expected.context)),
                                 LaunchplaneSecretRow.integration == "runtime_environment",
                             )
                             .with_for_update()
@@ -38526,6 +38774,8 @@ class PostgresRecordStore(HumanSessionStore):
             .with_for_update()
         )
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             row = session.scalar(statement)
             if row is None:
                 return "missing"
@@ -38924,6 +39174,8 @@ class PostgresRecordStore(HumanSessionStore):
             .with_for_update()
         )
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             row = session.scalar(statement)
             if row is None:
                 return "missing"
@@ -38952,6 +39204,8 @@ class PostgresRecordStore(HumanSessionStore):
             .with_for_update()
         )
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             row = session.scalar(statement)
             if row is None:
                 return "missing"
@@ -38985,6 +39239,8 @@ class PostgresRecordStore(HumanSessionStore):
             .with_for_update()
         )
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             row = session.scalar(statement)
             if row is None:
                 return "missing"
@@ -39366,6 +39622,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> bool:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             row = session.scalar(
                 select(LaunchplaneSecretRow)
                 .where(LaunchplaneSecretRow.secret_id == expected_record.secret_id)

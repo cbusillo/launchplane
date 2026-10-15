@@ -928,6 +928,9 @@ from control_plane.http_routes.product_display_name import register_product_disp
 from control_plane.http_routes.product_testing_restore_policy import (
     register_testing_restore_policy_routes,
 )
+from control_plane.http_routes.testing_replacement_resources import (
+    register_testing_replacement_resource_routes,
+)
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
 )
@@ -28668,6 +28671,13 @@ def create_launchplane_fastapi_app(
     )
     register_testing_restore_policy_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+    register_testing_replacement_resource_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
     )
 
     register_product_website_cleanup_routes(
