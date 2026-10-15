@@ -18,6 +18,7 @@ from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_testing_runtime_separation as testing_separation
+from tests import test_testing_separation_resources as independent_storage
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -9950,6 +9951,52 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
                     self.request.model_copy(update={"domain_host": hostname}),
                 )
             credentials.assert_not_called()
+
+
+class RealPostgresIndependentStorageTests(independent_storage.SeparationResourceTests):
+    def setUp(self) -> None:
+        database = _head_postgres_database()
+        self.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:independent-storage",
+                updated_at=self.fixture.now(),
+                policy=policy,
+            )
+        )
+
+    def test_active_preparation_excludes_other_keys_and_the_old_executor(self) -> None:
+        from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+
+        second = PostgresRecordStore(database_url=self.database_url)
+        self.addCleanup(second.close)
+        outcomes = []
+
+        def prepare(**kwargs: object) -> dict[str, str]:
+            with second.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(self.fixture.target_key)
+            ) as old_check:
+                self.assertIsNone(old_check)
+            outcomes.append(self.run_preparation("competing-key").status)
+            return self.prepare(**kwargs)
+
+        with patch(
+            "control_plane.testing_separation_resources.run_preparation_schedule",
+            side_effect=prepare,
+        ):
+            result = self.run_preparation()
+        self.assertEqual(result.response_status_code, 202)
+        self.assertEqual(outcomes, ["target_busy"])
+        self.assertEqual(self.effects, ["new empty storage"])
+        self.assert_retained()
 
 
 class RealPostgresTestingSeparationTests(testing_separation.TestingRuntimeSeparationTests):
