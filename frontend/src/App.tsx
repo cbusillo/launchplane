@@ -20,6 +20,7 @@ import {
   listProducts,
   logout,
   readAuthSession,
+  subscribeToSessionExpiry,
 } from "./api";
 import {
   ProductIndexRoute,
@@ -45,7 +46,7 @@ import type {
 import type { Theme } from "./theme";
 type AuthState =
   | { status: "checking"; identity: null; error: ""; traceId: "" }
-  | { status: "signed_out"; identity: null; error: ""; traceId: "" }
+  | { status: "signed_out"; identity: null; error: ""; traceId: ""; expired?: boolean }
   | {
       status: "signed_in";
       identity: GitHubHumanIdentityResponse;
@@ -82,6 +83,11 @@ export function App() {
     wallTime: number; monotonicTime: number;
   } | null>(null);
   const [sessionNotice, setSessionNotice] = useState("");
+  useEffect(() => subscribeToSessionExpiry(() => {
+    setAuthState(current => current.status === "signed_in" ? {
+      status: "signed_out", identity: null, error: "", traceId: "", expired: true,
+    } : current);
+  }), []);
   useEvidenceRefresh(route.kind,
     !fixtureMode && authState.status === "signed_in" && authState.identity.role !== "owner" &&
       (route.kind === "product-index" || route.kind === "product-workspace" || route.kind === "product-environment" || route.kind === "product-activity"),
@@ -401,6 +407,7 @@ function SessionGate({
   const loginHref = `/auth/github/login?return_to=${encodeURIComponent(safeReturnTo)}`;
   const checking = state.status === "checking";
   const failed = state.status === "error";
+  const expired = state.status === "signed_out" && state.expired;
 
   useEffect(() => {
     if (state.status === "checking") {
@@ -436,6 +443,8 @@ function SessionGate({
             ? "Verifying your session"
             : failed
               ? "Session verification failed"
+              : expired
+                ? "Your session expired"
               : ownerSecrets
                 ? "Sign in to provide a credential"
                 : ownerReview
@@ -447,6 +456,8 @@ function SessionGate({
             ? "Launchplane is checking the browser session before loading operational evidence."
             : failed
               ? state.error
+              : expired
+                ? "Sign in again to load current evidence. You will return to this page."
               : ownerSecrets
                 ? "Sign in as the product's Client to provide the requested credential."
                 : ownerReview

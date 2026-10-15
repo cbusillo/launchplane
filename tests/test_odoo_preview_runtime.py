@@ -1821,6 +1821,16 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
         )
         request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
+        unrelated = [
+            {
+                "environments": [
+                    {
+                        "environmentId": "other-env",
+                        "composes": [{"composeId": "other-compose", "name": "other-preview"}],
+                    }
+                ]
+            }
+        ]
         with (
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
@@ -1828,8 +1838,14 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
-                side_effect=click.ClickException(
-                    "Dokploy API GET /api/compose.one failed (404): Not Found"
+                side_effect=dokploy_api.DokployRequestFailed(
+                    method="GET", path="/api/compose.one", detail="Not found", status_code=404
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                side_effect=lambda **kwargs: (
+                    unrelated if kwargs["path"] == "/api/project.all" else []
                 ),
             ),
         ):
@@ -1845,6 +1861,158 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(observation.outcome, "present")
         assert observation.result is not None
         self.assertEqual(observation.result.status, "pass")
+
+    def test_observe_destroy_handles_deleted_parent_domain_lookup(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
+        for status, expected in ((404, "present"), (403, "unknown"), (503, "unknown")):
+
+            def provider_read(*, path: str, **_: object) -> object:
+                if path == "/api/project.all":
+                    return []
+                raise dokploy_api.DokployRequestFailed(
+                    method="GET", path=path, detail="Unavailable parent", status_code=status
+                )
+
+            with (
+                self.subTest(status=status),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                    side_effect=dokploy_api.DokployRequestFailed(
+                        method="GET",
+                        path="/api/compose.one",
+                        detail="Missing parent",
+                        status_code=404,
+                    ),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                    side_effect=provider_read,
+                ),
+            ):
+                result = observe_odoo_preview_dokploy_apply(
+                    control_plane_root=Path("."),
+                    context_name="cm-preview",
+                    request=request,
+                    database_url=None,
+                    provider_operation_title="original destroy",
+                )
+                self.assertEqual(result.outcome, expected)
+                self.assertFalse(result.retry_safe)
+
+    def test_observe_destroy_requires_complete_independent_absence(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target()),
+                endpoint_spec=_endpoint_spec(),
+            )
+        )
+        request = OdooPreviewDokployApplyRequest(dry_run_plan=dry_run)
+
+        def inventory(compose_id: str, name: str) -> list[object]:
+            return [
+                {
+                    "environments": [
+                        {
+                            "environmentId": "preview-env",
+                            "composes": [{"composeId": compose_id, "name": name}],
+                        }
+                    ]
+                }
+            ]
+
+        duplicate = inventory("unrelated", "unrelated")
+        cases: tuple[tuple[tuple[object, ...], object, object], ...] = (
+            ((inventory(dry_run.compose_ref, "renamed"),), [], []),
+            ((inventory("replacement", dry_run.compose_name),), [], []),
+            (({"items": []},), [], []),
+            (([None],), [], []),
+            (([{"environments": [{"environmentId": "preview-env"}]}],), [], []),
+            (([{"environments": [{"environmentId": "preview-env", "composes": [{}]}]}],), [], []),
+            ((duplicate + duplicate,), [], []),
+            (([],), [{"domainId": "residue"}], []),
+            (([],), None, []),
+            (([], inventory(dry_run.compose_ref, dry_run.compose_name)), [], []),
+            (([], {"items": []}), [], []),
+            ((inventory("other", "other"),), [], [{"host": dry_run.domain_host}]),
+            ((inventory("other", "other"),), [], [{}]),
+            ((click.ClickException("Provider inventory unavailable"),), [], []),
+            (
+                ([],),
+                dokploy_api.DokployRequestFailed(
+                    method="GET",
+                    path="/api/domain.byComposeId",
+                    detail="Unavailable",
+                    status_code=503,
+                ),
+                [],
+            ),
+        )
+        for snapshots, original_domains, other_domains in cases:
+            reads = 0
+
+            def provider_read(
+                *, path: str, query: dict[str, str] | None = None, **_: object
+            ) -> object:
+                nonlocal reads
+                if path == "/api/project.all":
+                    result = snapshots[min(reads, len(snapshots) - 1)]
+                    reads += 1
+                elif path == "/api/domain.byComposeId":
+                    result = (
+                        original_domains
+                        if query == {"composeId": dry_run.compose_ref}
+                        else other_domains
+                    )
+                else:
+                    raise AssertionError(path)
+                if isinstance(result, Exception):
+                    raise result
+                return result
+
+            with (
+                self.subTest(
+                    snapshots=snapshots,
+                    original_domains=original_domains,
+                    other_domains=other_domains,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                    return_value=("https://dokploy.example", "token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.fetch_dokploy_target_payload",
+                    side_effect=dokploy_api.DokployRequestFailed(
+                        method="GET", path="/api/compose.one", detail="Not found", status_code=404
+                    ),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                    side_effect=provider_read,
+                ) as provider,
+            ):
+                observation = observe_odoo_preview_dokploy_apply(
+                    control_plane_root=Path("."),
+                    context_name="cm-preview",
+                    request=request,
+                    database_url=None,
+                    provider_operation_title="original destroy",
+                    provider_effect_phase="compose_destroy",
+                )
+                self.assertEqual(observation.outcome, "unknown")
+                self.assertIsNone(observation.result)
+                self.assertFalse(observation.retry_safe)
+                for call in provider.call_args_list:
+                    self.assertEqual(call.kwargs.get("method", "GET"), "GET")
 
     def test_preview_supersession_requires_quiescent_compose_deployment(self) -> None:
         operations: tuple[Literal["refresh", "destroy"], ...] = ("refresh", "destroy")

@@ -46,6 +46,7 @@ from control_plane.lane_runtime_verification import (
     LaneRuntimeVerification,
     lane_expected_runtime_identity,
 )
+from control_plane.public_dns_diagnostics import PublicDnsDiagnostic, build_public_dns_diagnostics
 
 
 ProductTopologyAuthorityStatus = Literal["active", "disabled", "missing"]
@@ -284,6 +285,11 @@ class ProductObservedTopology(BaseModel):
     placement: ProductObservedPlacement = Field(default_factory=ProductObservedPlacement)
     ingress: ProductObservedIngress = Field(default_factory=ProductObservedIngress)
     tls_domains: tuple[ProductObservedTlsDomain, ...] = ()
+    dns_targets: tuple[PublicDnsDiagnostic, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     trust_state: FreshnessStatus = "missing"
 
 
@@ -355,6 +361,16 @@ def build_product_environment_topology(
         provider_recorded=provider_recorded,
         now=evaluated_at,
         runtime_verification=runtime_verification,
+    )
+    observed = observed.model_copy(
+        update={
+            "dns_targets": build_public_dns_diagnostics(
+                record_store=record_store,
+                product=profile.product,
+                lane=lane,
+                now=evaluated_at,
+            )
+        }
     )
     warnings = _topology_warnings(
         lane=lane,
