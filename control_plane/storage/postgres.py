@@ -6214,6 +6214,10 @@ class PostgresRecordStore(HumanSessionStore):
             ):
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
+                if isinstance(row, LaunchplaneDokployTargetRow):
+                    self._assert_unreserved_disposable_hosts(
+                        session, DokployTargetRecord.model_validate(row.payload)
+                    )
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -6649,6 +6653,8 @@ class PostgresRecordStore(HumanSessionStore):
             adoption_checkpoint = getattr(
                 self._disposable_authority_context, "adoption_checkpoint", None
             )
+            for target in bundle.dokploy_targets:
+                self._assert_unreserved_disposable_hosts(session, target)
             if adoption_checkpoint is not None:
                 outer = getattr(self._disposable_authority_context, "session", None)
                 self._disposable_authority_context.session = session
@@ -6879,7 +6885,9 @@ class PostgresRecordStore(HumanSessionStore):
                     allocation.payload = {**allocation.payload, "retained_target_record": snapshot}
                     target_record = target_record.model_copy(
                         update={
-                            "policies": retained.policies,
+                            "policies": retained.policies.model_copy(
+                                update={"integration_allowances": ()}
+                            ),
                             "require_test_gate": retained.require_test_gate,
                         }
                     )
@@ -10619,6 +10627,40 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             session.commit()
+
+    def _retained_disposable_hostnames(self, session: Session) -> frozenset[str]:
+        hosts: set[str] = set()
+        for payload in session.scalars(
+            select(LaunchplaneDisposableTestingResourceAllocationRow.payload)
+        ):
+            snapshot = payload.get("retained_target_record")
+            if snapshot is not None:
+                retained = DokployTargetRecord.model_validate(snapshot)
+                hosts.update(
+                    (
+                        *retained.domains,
+                        *retained.public_hosts,
+                        *(effect.host for effect in retained.pending_public_host_effects),
+                    )
+                )
+        return frozenset(hosts)
+
+    def retained_disposable_hostnames(self) -> frozenset[str]:
+        with self._session_factory() as session:
+            return self._retained_disposable_hostnames(session)
+
+    def _assert_unreserved_disposable_hosts(
+        self, session: Session, target: DokployTargetRecord
+    ) -> None:
+        requested = {
+            *target.domains,
+            *target.public_hosts,
+            *(effect.host for effect in target.pending_public_host_effects),
+        }
+        if requested.intersection(self._retained_disposable_hostnames(session)):
+            raise DokployTargetRecordChanged(
+                "A hostname remains reserved by retained testing custody."
+            )
 
     def compare_and_write_disposable_resource_preparation(
         self,

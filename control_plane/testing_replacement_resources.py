@@ -179,6 +179,10 @@ def resource_context(
         raise ValueError("The tracked testing target does not agree with its provider binding.")
     if target.policies.staff_testing_hold is not None:
         raise ValueError("A staff-testing hold protects this lane.")
+    if target.pending_public_host_effects:
+        raise ValueError(
+            "Pending route effects must remain with their current target until reconciled."
+        )
     expected_target_id = preparation.replacement_target_id or preparation.retained_target_id
     if (
         target_id.target_id != expected_target_id

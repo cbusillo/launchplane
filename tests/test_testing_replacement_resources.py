@@ -92,6 +92,34 @@ class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_pending_route_effects_keep_the_retained_target_attached(self) -> None:
+        from control_plane.contracts.dokploy_target_record import PublicHostEffect
+
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        held = target.model_copy(
+            update={
+                "pending_public_host_effects": (
+                    PublicHostEffect(
+                        host="retained-route.example.invalid",
+                        provider_host="https://provider.invalid",
+                        target_id="compose-testing",
+                        runtime_port=8069,
+                    ),
+                )
+            }
+        )
+        self.store.write_dokploy_target_record(held)
+        response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            held,
+        )
+
     async def test_plan_preserves_every_original_record_and_makes_no_provider_call(self) -> None:
         before = self.store.read_product_profile_record(self.profile.product)
         target = self.store.read_dokploy_target_id_record(
