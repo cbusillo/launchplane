@@ -7293,8 +7293,9 @@ def create_launchplane_fastapi_app(
         authorization_product = product_profile.product
         isolation_mode = post_deploy_request.post_deploy.connection_isolation
         director_isolation_apply = director_agent_identity(identity) and isolation_mode == "apply"
-        if isolation_mode is None:
-            authorized = not isinstance(
+
+        def maintenance_authorized() -> bool:
+            return not isinstance(
                 identity, TerminalAgentIdentity
             ) and native_routes.native_driver_route_authorization_allows(
                 endpoint=write_odoo_post_deploy,
@@ -7304,6 +7305,9 @@ def create_launchplane_fastapi_app(
                 context=post_deploy_request.post_deploy.context,
                 instances=(post_deploy_request.post_deploy.instance,),
             )
+
+        if isolation_mode is None:
+            authorized = maintenance_authorized()
         else:
             authorized = director_isolation_apply or resolved_authz_policy_runtime.allows(
                 identity=identity,
@@ -7316,14 +7320,7 @@ def create_launchplane_fastapi_app(
             )
             # Existing maintenance callers keep observation, never a new repair write.
             if not authorized and isolation_mode in {"dry-run", "readback"}:
-                authorized = native_routes.native_driver_route_authorization_allows(
-                    endpoint=write_odoo_post_deploy,
-                    authorization_allows=resolved_authz_policy_runtime.allows,
-                    identity=identity,
-                    product=authorization_product,
-                    context=post_deploy_request.post_deploy.context,
-                    instances=(post_deploy_request.post_deploy.instance,),
-                )
+                authorized = maintenance_authorized()
         if not authorized:
             raise _launchplane_http_error(
                 status_code=403,
