@@ -19,6 +19,7 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.odoo_preview_import_source import (
     PreviewImportSourceStore,
     resolve_fishbowl_preview_source,
+    cleared_fishbowl_parameters,
 )
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
@@ -185,6 +186,14 @@ def _build_odoo_preview_apply_inputs(
     )
     if result.status != "ready" or result.operation != "refresh":
         return result
+    if request.fishbowl_source is not None:
+        source = resolve_fishbowl_preview_source(
+            store=cast(PreviewImportSourceStore, record_store),
+            profile=profile,
+            preview_slug=result.preview_slug,
+            copy_from=request.fishbowl_source,
+        )
+        return result.model_copy(update={"fishbowl_source_sha256": source.authority_sha256})
     try:
         environment = _odoo_preview_service_environment(
             control_plane_root_path=control_plane_root,
@@ -365,7 +374,7 @@ def refresh_odoo_preview_issued_plan(
             request=issued_plan.plan_request,
             database_url=database_url,
         )
-    except (FileNotFoundError, click.ClickException) as error:
+    except (FileNotFoundError, ValueError, click.ClickException) as error:
         raise OdooPreviewPlanProvenanceError(
             code="odoo_preview_plan_stale",
             message="Odoo preview plan authority could not be revalidated.",
@@ -1105,24 +1114,29 @@ def _odoo_preview_service_environment(
             profile=profile,
             preview_slug=plan.preview_slug,
             copy_from=fishbowl_source,
+            include_secret_value=True,
         )
-        bootstrap_record = OdooInstanceOverrideRecord(
-            context=preview_profile.context,
-            instance=plan.preview_slug,
-            config_parameters=import_source.parameters,
-            website_bootstrap=(
-                preview_bootstrap_environment.payload.website_bootstrap
-                if preview_bootstrap_environment is not None
-                else None
-            ),
-            updated_at=profile.updated_at,
-        )
-        environment_values.update(
-            control_plane_odoo_instance_overrides.build_post_deploy_environment(
-                bootstrap_record, clear_undeclared_shopify=False
-            ).inline_environment
-        )
+    bootstrap_record = OdooInstanceOverrideRecord(
+        context=preview_profile.context,
+        instance=plan.preview_slug,
+        config_parameters=import_source.parameters
+        if import_source
+        else cleared_fishbowl_parameters(),
+        website_bootstrap=(
+            preview_bootstrap_environment.payload.website_bootstrap
+            if preview_bootstrap_environment is not None
+            else None
+        ),
+        updated_at=profile.updated_at,
+    )
+    environment_values.update(
+        control_plane_odoo_instance_overrides.build_post_deploy_environment(
+            bootstrap_record, clear_undeclared_shopify=False
+        ).inline_environment
+    )
+    if import_source is not None:
         environment_values.update(import_source.environment)
+        omitted_keys = tuple(key for key in omitted_keys if key not in import_source.environment)
     return _OdooPreviewServiceEnvironment(
         values=environment_values,
         omitted_integration_credential_keys=omitted_keys,

@@ -9,6 +9,9 @@ import hashlib
 import json
 from typing import Protocol
 
+from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.provider_key_adoption import looks_like_credential
+from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetRecord,
@@ -20,6 +23,7 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord, ScalarValue
 from control_plane.product_secret_copy import (
+    ProductSecretCopyError,
     ProductSecretCopyFrom,
     ProductSecretCopyStore,
     copy_source_value,
@@ -27,6 +31,24 @@ from control_plane.product_secret_copy import (
 )
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+
+
+FISHBOWL_CONNECTION_PARAMETERS = ("host", "user", "db", "port", "ssl_verify", "password")
+
+
+class PreviewImportSourceError(ValueError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def cleared_fishbowl_parameters() -> tuple[OdooConfigParameterOverride, ...]:
+    return tuple(
+        OdooConfigParameterOverride(
+            key=f"fishbowl.{name}", value=OdooOverrideValue(source="literal", value="")
+        )
+        for name in FISHBOWL_CONNECTION_PARAMETERS
+    )
 
 
 class PreviewImportSourceStore(ProductSecretCopyStore, Protocol):
@@ -53,25 +75,31 @@ def resolve_fishbowl_preview_source(
     profile: LaunchplaneProductProfileRecord,
     preview_slug: str,
     copy_from: ProductSecretCopyFrom,
+    include_secret_value: bool = False,
 ) -> FishbowlPreviewSource:
     if (
         copy_from.instance != "testing"
         or copy_from.context != profile.preview.context
         or runtime_key_safety_environment_class(preview_slug) != "preview"
     ):
-        raise ValueError("Preview import source requires the product's testing lane.")
+        raise PreviewImportSourceError(
+            "source_lane", "Preview import source requires the product's testing lane."
+        )
     # Reuse the managed copy resolver's ownership, precedence and version fences.
     # Its target is the source stable lane; the stricter preview sharing check below
     # permits reuse only of an already classified read-only source.
     key = config_parameter_secret_env_key("fishbowl.password")
-    _profile, binding, record, version = resolve_copy_source(
-        store,
-        product=profile.product,
-        target_context=copy_from.context,
-        target_instance=copy_from.instance,
-        binding_key=key,
-        reference=copy_from,
-    )
+    try:
+        _profile, binding, record, version = resolve_copy_source(
+            store,
+            product=profile.product,
+            target_context=copy_from.context,
+            target_instance=copy_from.instance,
+            binding_key=key,
+            reference=copy_from,
+        )
+    except ProductSecretCopyError as error:
+        raise PreviewImportSourceError(error.code, str(error)) from error
     sharing = binding.sharing_reason
     if (
         record.scope != "context_instance"
@@ -80,7 +108,10 @@ def resolve_fishbowl_preview_source(
         or sharing.kind != "read_only_source"
         or not sharing.evidence.strip()
     ):
-        raise ValueError("Preview import source requires an exact read-only shared-safe binding.")
+        raise PreviewImportSourceError(
+            "unsafe_binding",
+            "Preview import source requires an exact read-only shared-safe binding.",
+        )
     target = store.read_dokploy_target_record(
         context_name=copy_from.context, instance_name=copy_from.instance
     )
@@ -90,34 +121,58 @@ def resolve_fishbowl_preview_source(
         if item.integration == "fishbowl" and item.kind == "read_only_source"
     ]
     if len(allowances) != 1:
-        raise ValueError("Preview import source requires an existing read-only allowance.")
+        raise PreviewImportSourceError(
+            "allowance_required", "Preview import source requires an existing read-only allowance."
+        )
     values: dict[str, ScalarValue] = {}
     retired_keys: set[str] = set()
     for scope in ("context", "instance"):
         records = [
             item
-            for item in store.list_runtime_environment_records(
-                context_name=copy_from.context, instance_name=copy_from.instance
-            )
+            for item in store.list_runtime_environment_records(context_name=copy_from.context)
             if item.scope == scope
             and item.context == copy_from.context
             and item.instance == (copy_from.instance if scope == "instance" else "")
         ]
         if len(records) > 1:
-            raise ValueError("Preview import source runtime authority is ambiguous.")
+            raise PreviewImportSourceError(
+                "ambiguous_settings", "Preview import source runtime authority is ambiguous."
+            )
         for item in records:
             values.update(item.env)
             retired_keys.update(item.retired_provider_keys)
     values.update(target.env)
     values = {key: value for key, value in values.items() if key not in retired_keys}
+    bound_keys = {
+        binding.binding_key
+        for binding in store.list_secret_bindings(
+            integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=copy_from.context,
+            limit=None,
+        )
+        if binding.status == "configured"
+        and binding.context == copy_from.context
+        and binding.instance in {"", copy_from.instance}
+    }
     parameters: list[OdooConfigParameterOverride] = []
     selected_values: dict[str, str] = {}
-    for name in ("host", "user", "db", "port", "ssl_verify"):
+    for name in FISHBOWL_CONNECTION_PARAMETERS:
+        if name == "password":
+            continue
         parameter_key = f"fishbowl.{name}"
-        value = values.get("ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__" + name.upper())
+        runtime_key = config_parameter_runtime_key(parameter_key)
+        value = values.get(runtime_key)
+        if runtime_key in bound_keys or (
+            value is not None and looks_like_credential(runtime_key, str(value))
+        ):
+            raise PreviewImportSourceError(
+                "secret_setting", "Preview import source requires non-secret connection settings."
+            )
         if value is None or not str(value).strip():
             if name in {"host", "user", "db"}:
-                raise ValueError("Preview import source runtime settings are incomplete.")
+                raise PreviewImportSourceError(
+                    "settings_incomplete", "Preview import source runtime settings are incomplete."
+                )
             continue
         selected_values[parameter_key] = str(value)
         parameters.append(
@@ -142,7 +197,7 @@ def resolve_fishbowl_preview_source(
     ).hexdigest()
     return FishbowlPreviewSource(
         parameters=tuple(parameters),
-        environment={key: copy_source_value(version)},
+        environment={key: copy_source_value(version)} if include_secret_value else {},
         allowance=allowances[0],
         authority_sha256=digest,
     )

@@ -8,6 +8,7 @@ from unittest.mock import ANY, Mock, patch
 from urllib.error import HTTPError, URLError
 
 import click
+from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
 
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.dokploy import api as dokploy_api
@@ -1426,6 +1427,23 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 )
 
     def test_apply_refresh_creates_updates_deploys_and_smokes_compose(self) -> None:
+        self._assert_refresh_readback_allowances(())
+
+    def test_explicit_read_only_source_allowance_reaches_post_deploy_readback(self) -> None:
+        self._assert_refresh_readback_allowances(
+            (
+                DokployTargetIntegrationAllowance(
+                    integration="fishbowl",
+                    kind="read_only_source",
+                    reason="Isolated import proof",
+                    evidence="Fixture SELECT-only account",
+                ),
+            )
+        )
+
+    def _assert_refresh_readback_allowances(
+        self, allowances: tuple[DokployTargetIntegrationAllowance, ...]
+    ) -> None:
         manifest = artifact_manifest_v2(odoo_install_modules=("cm_website",))
         dry_run = build_odoo_preview_dokploy_dry_run(
             request=OdooPreviewDokployDryRunRequest(
@@ -1501,6 +1519,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         ):
             result = execute_odoo_preview_dokploy_apply(
                 control_plane_root=ANY,
+                integration_allowances=allowances,
                 request=OdooPreviewDokployApplyRequest(
                     dry_run_plan=dry_run,
                     manifest=manifest,
@@ -1567,10 +1586,10 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         )
         wait_deploy.assert_called_once()
         module_update.assert_called_once()
-        # The read-back runs as a preview lane with no allowances of its own.
+        # Only an explicitly selected read-only source can reach this readback.
         preview_target = module_update.call_args.kwargs["target_definition"]
         self.assertEqual(preview_target.instance, "pr-45")
-        self.assertEqual(preview_target.policies.integration_allowances, ())
+        self.assertEqual(preview_target.policies.integration_allowances, allowances)
         self.assertEqual(
             module_update.call_args.kwargs["workflow_environment_overrides"],
             {

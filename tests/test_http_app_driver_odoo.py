@@ -1278,7 +1278,12 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
                 applied_request.environment_values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
             ).decode("utf-8")
         )
-        self.assertEqual(decoded_override_payload["config_parameters"], [])
+        self.assertFalse(
+            any(
+                parameter["value"].get("value")
+                for parameter in decoded_override_payload["config_parameters"]
+            )
+        )
         self.assertEqual(decoded_override_payload["addon_settings"], [])
         self.assertEqual(
             decoded_override_payload["website_bootstrap"]["name"],
@@ -1292,9 +1297,9 @@ class FastApiOdooPreviewApplyTests(unittest.IsolatedAsyncioTestCase):
             applied_request.environment_values[LAUNCHPLANE_WEBSITE_BOOTSTRAP_REQUIRED_ENV_KEY],
             "true",
         )
-        self.assertNotIn(
-            LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY,
-            applied_request.environment_values,
+        self.assertEqual(
+            applied_request.environment_values[LAUNCHPLANE_INSTANCE_OVERRIDES_REQUIRED_ENV_KEY],
+            "true",
         )
         stored_override_record = store.read_odoo_instance_override_record(
             context_name="cm",

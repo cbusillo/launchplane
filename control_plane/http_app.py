@@ -559,6 +559,7 @@ from control_plane.odoo_post_deploy_http import (
 )
 from control_plane import odoo_addon_settings_override as control_plane_odoo_addon_settings
 from control_plane import integration_allowances as control_plane_integration_allowances
+from control_plane.odoo_preview_import_source import PreviewImportSourceError
 from control_plane import testing_lane_hold as control_plane_testing_lane_hold
 from control_plane.odoo_app_maintenance_http import (
     ODOO_APP_MAINTENANCE_ROUTE as _ODOO_APP_MAINTENANCE_ROUTE,
@@ -6992,6 +6993,13 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="not_found",
                 message=f"No Launchplane route for {_ODOO_PREVIEW_APPLY_INPUTS_ROUTE}.",
+            ) from error
+        except PreviewImportSourceError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="odoo_preview_source_" + error.code,
+                message=str(error),
             ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(

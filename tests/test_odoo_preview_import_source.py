@@ -24,8 +24,18 @@ from control_plane.contracts.dokploy_target_record import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
-from control_plane.odoo_preview_apply_http import _odoo_preview_service_environment
+from control_plane.odoo_instance_overrides import (
+    ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+    config_parameter_secret_env_key,
+)
+from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
+from control_plane.odoo_preview_apply_http import (
+    _odoo_preview_service_environment,
+    _build_odoo_preview_apply_inputs,
+    refresh_odoo_preview_issued_plan,
+    OdooPreviewPlanProvenanceError,
+    issue_odoo_preview_apply_plan,
+)
 from control_plane.odoo_preview_import_source import (
     FishbowlPreviewSource,
     resolve_fishbowl_preview_source,
@@ -95,7 +105,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 "instance": "testing",
                 "secrets": [
                     {
-                        "binding_key": "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__FISHBOWL__PASSWORD",
+                        "binding_key": config_parameter_secret_env_key("fishbowl.password"),
                         "value": "private-fixture-source-password",
                         "secret_class": "shared_safe",
                         "sharing_reason": {
@@ -120,11 +130,11 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             instance="testing",
             updated_at=self.profile.updated_at,
             env={
-                "ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__HOST": "source.example.test",
-                "ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__USER": "readonly",
-                "ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__DB": "inventory",
-                "ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__PORT": 3306,
-                "ENV_OVERRIDE_CONFIG_PARAM__REPAIRSHOPR__SYNC_DB__PASSWORD": "must-not-copy",
+                config_parameter_runtime_key("fishbowl.host"): "source.example.test",
+                config_parameter_runtime_key("fishbowl.user"): "readonly",
+                config_parameter_runtime_key("fishbowl.db"): "inventory",
+                config_parameter_runtime_key("fishbowl.port"): 3306,
+                config_parameter_runtime_key("repairshopr.sync_db.password"): "must-not-copy",
             },
         )
         self.store.write_runtime_environment_record(self.runtime)
@@ -169,7 +179,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(key.startswith("repairshopr.") for key in fields))
         self.assertEqual(result.integration_allowances, (self.allowance,))
         self.assertEqual(
-            result.values["ODOO_OVERRIDE_SECRET__CONFIG_PARAM__FISHBOWL__PASSWORD"],
+            result.values[config_parameter_secret_env_key("fishbowl.password")],
             "private-fixture-source-password",
         )
         self.assertEqual(self.store.list_secret_bindings(limit=None), before)
@@ -225,12 +235,24 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
 
     def test_rotated_source_refuses_and_setting_or_allowance_change_invalidates_plan(self) -> None:
         original = self.resolve()
+        changed_allowance = self.allowance.model_copy(
+            update={"evidence": "Fresh SELECT-only proof"}
+        )
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(
+                update={
+                    "policies": DokployTargetPolicies(integration_allowances=(changed_allowance,)),
+                }
+            )
+        )
+        self.assertNotEqual(self.resolve().authority_sha256, original.authority_sha256)
+        self.store.write_dokploy_target_record(self.target)
         self.store.write_runtime_environment_record(
             self.runtime.model_copy(
                 update={
                     "env": {
                         **self.runtime.env,
-                        "ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__USER": "changed",
+                        config_parameter_runtime_key("fishbowl.user"): "changed",
                     },
                 }
             )
@@ -246,7 +268,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_runtime_environment_record(
             self.runtime.model_copy(
                 update={
-                    "env": {"ENV_OVERRIDE_CONFIG_PARAM__FISHBOWL__HOST": "source.example.test"},
+                    "env": {config_parameter_runtime_key("fishbowl.host"): "source.example.test"},
                 }
             )
         )
@@ -257,6 +279,14 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
     async def test_preview_read_and_standing_metadata_read_cannot_move_source_value(self) -> None:
         request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
         issued = _issued_plan(request)
+        issued = issued.model_copy(
+            update={
+                "plan_request": issued.plan_request.model_copy(
+                    update={"fishbowl_source": self.reference}
+                ),
+                "plan_provenance": None,
+            }
+        )
         payload: dict[str, object] = {
             "product": self.profile.product,
             "inputs": {
@@ -265,7 +295,7 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         for explicit_read in (False, True):
-            actions = ("odoo_preview_apply_inputs.read",)
+            actions = ("odoo_preview_apply_inputs.read", "odoo_preview_apply.execute")
             app = create_launchplane_fastapi_app(
                 verifier=_RejectingVerifier(),
                 authz_policy=LaunchplaneAuthzPolicy(
@@ -303,6 +333,8 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                     local_operator_token_label="local-owner-write",
                 ),
             )
+            if not explicit_read:
+                denied_app = app
             with patch(
                 "control_plane.http_app.build_odoo_preview_apply_inputs_result",
                 return_value=issued.model_dump(mode="json"),
@@ -319,3 +351,142 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 )
             self.assertEqual(response.status_code, 202 if explicit_read else 403, response.text)
             self.assertEqual(build.call_count, int(explicit_read))
+
+        plan_id = response.json()["result"]["plan_provenance"]["plan_id"]
+        with patch("control_plane.http_app.prepare_odoo_preview_apply_operation") as prepare:
+            refused = await _asgi_request(
+                denied_app,
+                "POST",
+                "/v1/drivers/odoo/preview-apply",
+                payload=_refresh_payload(),
+                headers={"Authorization": "Bearer test-operator-token", "Idempotency-Key": plan_id},
+            )
+        self.assertEqual(refused.status_code, 403, refused.text)
+        self.assertIn("source-value read authority", refused.json()["error"]["message"])
+        prepare.assert_not_called()
+
+    def test_context_values_instance_override_and_target_delivery_precedence(self) -> None:
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context="cm",
+                updated_at=self.profile.updated_at,
+                env=self.runtime.env,
+            )
+        )
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(
+                update={
+                    "env": {config_parameter_runtime_key("fishbowl.user"): "lane-reader"},
+                }
+            )
+        )
+        self.store.write_dokploy_target_record(
+            self.target.model_copy(
+                update={
+                    "env": {
+                        config_parameter_runtime_key("fishbowl.host"): "delivered.example.test"
+                    },
+                }
+            )
+        )
+        parameters = {item.key: item.value.value for item in self.resolve().parameters}
+        self.assertEqual(parameters["fishbowl.host"], "delivered.example.test")
+        self.assertEqual(parameters["fishbowl.db"], "inventory")
+        self.assertEqual(parameters["fishbowl.user"], "lane-reader")
+
+    def test_secret_owned_non_secret_parameter_refuses_stale_plain_value(self) -> None:
+        self.store.write_secret_binding(
+            self.binding.model_copy(
+                update={
+                    "binding_id": "source-host-binding",
+                    "binding_key": config_parameter_runtime_key("fishbowl.host"),
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.resolve()
+
+    def test_source_free_refresh_clears_previous_connection_and_keeps_other_integrations_fenced(
+        self,
+    ) -> None:
+        _write_odoo_preview_template_runtime_environment(store=self.store)
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        result = _odoo_preview_service_environment(
+            control_plane_root_path=self.root,
+            record_store=self.store,
+            profile=self.profile,
+            plan=request.apply.dry_run_plan,
+            manifest=request.apply.manifest,
+            database_url=self.store.database_url,
+        )
+        payload = json.loads(
+            base64.b64decode(result.values[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY])
+        )
+        parameters = {item["key"]: item["value"]["value"] for item in payload["config_parameters"]}
+        previous = {"fishbowl.host": "source.example.test", "fishbowl.password": "stored-old-value"}
+        previous.update(parameters)
+        self.assertFalse(previous["fishbowl.host"])
+        self.assertFalse(previous["fishbowl.password"])
+        self.assertEqual(result.integration_allowances, ())
+
+    def test_plan_never_decrypts_and_rotated_source_becomes_stale_before_apply(self) -> None:
+        request = OdooPreviewApplyEnvelope.model_validate(_refresh_payload())
+        planned = _issued_plan(request)
+        inputs = planned.plan_request.model_copy(update={"fishbowl_source": self.reference})
+        planned = planned.model_copy(update={"plan_request": inputs, "plan_provenance": None})
+        with (
+            patch(
+                "control_plane.odoo_preview_apply_http.build_odoo_preview_apply_inputs",
+                return_value=planned,
+            ),
+            patch(
+                "control_plane.secrets._decrypt_secret_value",
+                side_effect=AssertionError("planning must not decrypt"),
+            ),
+        ):
+            result = _build_odoo_preview_apply_inputs(
+                control_plane_root=self.root,
+                record_store=self.store,
+                profile=self.profile,
+                request=inputs,
+                database_url=self.store.database_url,
+            )
+        self.assertTrue(result.fishbowl_source_sha256)
+        self.assertNotIn("private-fixture-source-password", result.model_dump_json())
+        issued = issue_odoo_preview_apply_plan(result=result, plan_id="source-plan")
+        self.store.write_secret_record(
+            self.record.model_copy(update={"current_version_id": "rotated"})
+        )
+        with (
+            patch(
+                "control_plane.odoo_preview_apply_http.build_odoo_preview_apply_inputs",
+                return_value=planned,
+            ),
+            self.assertRaises(OdooPreviewPlanProvenanceError) as refused,
+        ):
+            refresh_odoo_preview_issued_plan(
+                control_plane_root=self.root,
+                record_store=self.store,
+                profile=self.profile,
+                request=request,
+                issued_plan=issued,
+                database_url=self.store.database_url,
+            )
+        self.assertEqual(refused.exception.code, "odoo_preview_plan_stale")
+
+    def test_credential_shaped_non_secret_settings_are_refused(self) -> None:
+        self.store.write_runtime_environment_record(
+            self.runtime.model_copy(
+                update={
+                    "env": {
+                        **self.runtime.env,
+                        config_parameter_runtime_key(
+                            "fishbowl.host"
+                        ): "https://user:private@source.example.test",
+                    },
+                }
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.resolve()

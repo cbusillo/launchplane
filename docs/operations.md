@@ -4455,7 +4455,9 @@ and passwords are never accepted as caller input or returned in the plan.
 The preview receives only Fishbowl's connection settings through the normal
 instance-overrides payload and the existing managed-secret transport. Its
 post-deploy readback allows only this selected source before web starts;
-other integrations remain fenced. Normal previews inherit no allowances.
+other integrations remain fenced. Normal previews inherit no allowances; a later
+refresh without `fishbowl_source` clears the prior Fishbowl connection
+parameters before its readback, so ordinary event-driven refresh remains usable.
 
 Once deployed, verify the serving generation's artifact, source commit and image
 digest against the PR head. Activate the artifact's importer through Apps if
@@ -4467,5 +4469,7 @@ stay read-only; writes belong only to the disposable Odoo database. Do not
 substitute fixtures, set connection parameters by hand or enable a recurring
 import. Preserve the preview through Client review. When it is no longer
 needed, the ordinary preview lifecycle removes its isolated resources; a fresh
-preview without `fishbowl_source` is again source-free. There is no production
+preview without `fishbowl_source` is again source-free, including on a new PR
+head. Reselect the source explicitly when new-head import proof is needed.
+There is no production
 or stable-lane rollback because neither was changed.
