@@ -3401,7 +3401,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                         apply()
                 record = captured[0].deployment_records[-1]
                 self.assertEqual(
-                    record.post_deploy_update.attempted, not isinstance(error, SystemExit)
+                    record.deploy.status, "pending" if isinstance(error, SystemExit) else "fail"
                 )
                 store = PostgresRecordStore(
                     database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
