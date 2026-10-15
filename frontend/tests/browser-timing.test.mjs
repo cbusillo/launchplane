@@ -51,6 +51,8 @@ test("browser timing gate accepts rendered state, request gates and controlled t
     const profile = await launchControlledProfile(path);
     await profile.newPage();
     await page.context().newPage();
+    test("renamed fixture", async ({ context: ctx }) => { await ctx.newPage(); });
+    async function openTab(ctx: BrowserContext) { return ctx.newPage(); }
     // setTimeout and { timeout: 500 } in comments or strings are not calls.
     const label = "sleep(500)";
   `), []);

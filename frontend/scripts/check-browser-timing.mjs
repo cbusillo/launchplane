@@ -59,6 +59,8 @@ export function checkBrowserTiming(source, filename) {
         }
       }
     }
+    if (ts.isBindingElement(node) && memberName(node.propertyName) === "context" && ts.isIdentifier(node.name)) contexts.add(node.name.text);
+    if (ts.isParameter(node) && ts.isIdentifier(node.name) && node.type && ts.isTypeReferenceNode(node.type) && memberName(node.type.typeName) === "BrowserContext") contexts.add(node.name.text);
     if (ts.isCallExpression(node)) {
       const name = memberName(node.expression);
       const receiver = (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) ? node.expression.expression : undefined;
