@@ -7,7 +7,7 @@ import hmac
 import json
 from pathlib import Path
 import re
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import yaml
 
@@ -18,6 +18,8 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.testing_activation import (
     TestingActivationPlan,
+    TestingActivationRefusal,
+    TestingActivationRefusalCode,
     TestingActivationRecord,
     TestingActivationRequest,
     TestingActivationResult,
@@ -115,7 +117,9 @@ def activation_record(
     return TestingActivationRecord.model_validate(payload) if payload is not None else None
 
 
-def configuration_digest(store: PostgresRecordStore, product: str, context: str) -> str:
+def configuration_digest(
+    store: PostgresRecordStore, product: str, context: str, *, version: Literal[1, 2] = 2
+) -> str:
     profile = store.read_product_profile_record(product)
     lane = next(
         item for item in profile.lanes if (item.context, item.instance) == (context, "testing")
@@ -128,6 +132,7 @@ def configuration_digest(store: PostgresRecordStore, product: str, context: str)
                 "product": profile.product,
                 "repository": profile.repository,
                 "driver_id": profile.driver_id,
+                **({"public_website": profile.public_website} if version == 2 else {}),
                 "is_active": profile.is_active,
                 "image": profile.image.model_dump(mode="json"),
                 "lane": lane.model_dump(mode="json"),
@@ -161,10 +166,10 @@ def preparation_resources(
         idempotency_key=request.preparation_key,
     )
     if row is None or row.state != "completed":
-        raise ValueError("Use the original caller's completed allocation key.")
+        raise TestingActivationRefusal("Use the original caller's completed allocation key.")
     receipt = SeparationResourcesResult.model_validate(row.response_payload.get("result"))
     if (receipt.product, receipt.context) != (product, request.context):
-        raise ValueError("Allocation belongs to another testing lane.")
+        raise TestingActivationRefusal("Allocation belongs to another testing lane.")
     old_id = store.read_dokploy_target_id_record(
         context_name=request.context, instance_name="testing"
     )
@@ -180,7 +185,9 @@ def preparation_resources(
         receipt.volumes != resources.volumes
         or receipt.resources_binding_sha256 != resources.binding_sha256
     ):
-        raise ValueError("Allocation provenance does not agree with its original placement.")
+        raise TestingActivationRefusal(
+            "Allocation provenance does not agree with its original placement."
+        )
     return resources, row.record_id
 
 
@@ -199,19 +206,21 @@ def runtime_values(
     )
     values = dict(environment.values)
     if set(record.request.volume_keys.values()) & environment.retired_keys:
-        raise ValueError("Choose non-retired lane settings for the allocated volumes.")
+        raise TestingActivationRefusal(
+            "Choose non-retired lane settings for the allocated volumes."
+        )
     if (
         set((*record.request.volume_keys.values(), *record.request.port_keys))
         & environment.secret_keys
     ):
-        raise ValueError("A resource setting cannot be secret-backed.")
+        raise TestingActivationRefusal("A resource setting cannot be secret-backed.")
     for role, key in record.request.volume_keys.items():
         values[key] = resources.volumes[role]
     safety = evaluate_runtime_key_safety_for_live_target_sync(
         record_store=store, context_name=record.context, instance_name="testing"
     )
     if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
-        raise ValueError("Carried-key safety remains unproved.")
+        raise TestingActivationRefusal("Carried-key safety remains unproved.")
     bindings = runtime_environments.site_delivered_secret_bindings_from_store(
         record_store=store, context_name=record.context, instance_name="testing"
     )
@@ -219,14 +228,14 @@ def runtime_values(
     for key in environment.secret_keys:
         binding = bindings.get(key)
         if binding is None:
-            raise ValueError("A carried secret has no managed binding.")
+            raise TestingActivationRefusal("A carried secret has no managed binding.")
         secret = store.read_secret_record(binding.secret_id)
         if (secret.scope, secret.context, secret.instance) != (
             "context_instance",
             record.context,
             "testing",
         ):
-            raise ValueError("Testing credentials must have lane-specific bindings.")
+            raise TestingActivationRefusal("Testing credentials must have lane-specific bindings.")
         if (
             binding.declared_secret_class == "shared_safe"
             and binding.sharing_reason
@@ -234,12 +243,12 @@ def runtime_values(
         ):
             shared.add(key)
         elif binding.declared_secret_class not in {"testing", "non_prod"}:
-            raise ValueError("A carried key can reach a live writable system.")
+            raise TestingActivationRefusal("A carried key can reach a live writable system.")
     if any(
         looks_like_credential(key, value) and key not in environment.secret_keys
         for key, value in values.items()
     ):
-        raise ValueError("Application credentials require safe managed bindings.")
+        raise TestingActivationRefusal("Application credentials require safe managed bindings.")
     # Existing production env is read only inside the service. Names and classes
     # alone cannot prove that two credentials have different values.
     host, token = source.read_dokploy_config(control_plane_root=root)
@@ -258,13 +267,15 @@ def runtime_values(
         )
         production = api.parse_dokploy_env_text(str(payload.get("env") or ""))
         if not production:
-            raise ValueError("Opaque production credential comparison is unavailable.")
+            raise TestingActivationRefusal(
+                "Opaque production credential comparison is unavailable."
+            )
         for key in environment.secret_keys - shared:
             if any(
                 value and hmac.compare_digest(values[key].encode(), value.encode())
                 for value in production.values()
             ):
-                raise ValueError("A testing credential overlaps production.")
+                raise TestingActivationRefusal("A testing credential overlaps production.")
     values["DOCKER_IMAGE_REFERENCE"] = record.image_reference
     return values
 
@@ -276,7 +287,9 @@ def ports_for(record: TestingActivationRecord, values: dict[str, str]) -> set[in
         or any(not value.isdecimal() or not 1024 <= int(value) <= 65535 for value in raw)
         or len(set(raw)) != len(raw)
     ):
-        raise ValueError("Independent testing ports require distinct existing lane settings.")
+        raise TestingActivationRefusal(
+            "Independent testing ports require distinct existing lane settings."
+        )
     return {int(value) for value in raw}
 
 
@@ -296,7 +309,9 @@ def rendered_source(
     if not any(
         service.get("image") == record.image_reference for service in rendered["services"].values()
     ):
-        raise ValueError("The reviewed source must consume the verified product image.")
+        raise TestingActivationRefusal(
+            "The reviewed source must consume the verified product image."
+        )
     return cast(dict[str, Any], rendered)
 
 
@@ -377,7 +392,9 @@ def require_activation_hold_lift(
         or not request.activation_plan_sha256
         or request.instance != "testing"
     ):
-        raise ValueError("Activation continuation requires service-owned testing records.")
+        raise TestingActivationRefusal(
+            "Activation continuation requires service-owned testing records."
+        )
     record = activation_record(store, request.product, request.context)
     if (
         record is None
@@ -386,7 +403,9 @@ def require_activation_hold_lift(
         or record.plan_sha256 != request.activation_plan_sha256
         or request.hold
     ):
-        raise ValueError("The activation does not authorize this interlock continuation.")
+        raise TestingActivationRefusal(
+            "The activation does not authorize this interlock continuation."
+        )
     adapter = TestingActivationAdapter(
         root,
         store,
@@ -399,13 +418,13 @@ def require_activation_hold_lift(
     adapter.require_unchanged(record)
     protection = store.read_disposable_lane_safety(record.product, record.context, "testing")
     if protection and protection.usage == "in_use":
-        raise ValueError("Known staff use protects the testing recipient.")
+        raise TestingActivationRefusal("Known staff use protects the testing recipient.")
     target = store.read_dokploy_target_record(context_name=record.context, instance_name="testing")
     if target.policies.staff_testing_hold not in (
         None,
         record.retained_target.policies.staff_testing_hold,
     ):
-        raise ValueError("A later genuine staff hold remains protected.")
+        raise TestingActivationRefusal("A later genuine staff hold remains protected.")
     if not inspect_provider or target.policies.staff_testing_hold is None:
         # A lost post-clear receipt must still reach the writer's no-op/reconcile
         # recovery; the now-running recipient need not remain empty.
@@ -436,19 +455,30 @@ def build_activation(
             existing.scope,
             existing.request.model_dump(exclude={"mode", "reviewed_plan_sha256"}),
         ) != (actor, scope, request.model_dump(exclude={"mode", "reviewed_plan_sha256"})):
-            raise ValueError("Retain the original activation request and caller.")
+            raise TestingActivationRefusal("Retain the original activation request and caller.")
         return existing
     profile, target, target_id, provider = _bind(store, product, request.context, "testing")
     if not profile.is_active or target_record_sha256(target) != request.interlock_record_sha256:
-        raise ValueError("Explicit staging-interlock identification no longer matches.")
-    if target.domains or target.public_hosts or target.pending_public_host_effects:
-        raise ValueError("Existing routes require their own accepted cutover.")
+        raise TestingActivationRefusal(
+            "Explicit staging-interlock identification no longer matches."
+        )
+    if (
+        target.public_hosts
+        or target.pending_public_host_effects
+        or (target.domains and profile.public_website != "none")
+    ):
+        raise TestingActivationRefusal(
+            "Existing routes require their own accepted cutover.",
+            code=TestingActivationRefusalCode.ROUTES_REQUIRE_CUTOVER,
+        )
     hold = target.policies.staff_testing_hold
     if hold is None or hold.recorded_by != actor:
-        raise ValueError("An absent, foreign or unacknowledged staff hold is protected.")
+        raise TestingActivationRefusal(
+            "An absent, foreign or unacknowledged staff hold is protected."
+        )
     protection = store.read_disposable_lane_safety(product, request.context, "testing")
     if protection and protection.usage == "in_use":
-        raise ValueError("Known staff use protects the old testing recipient.")
+        raise TestingActivationRefusal("Known staff use protects the old testing recipient.")
     resources, receipt_id = preparation_resources(store, product, request, scope)
     binding, old_key = preparation_binding(store, product, request.context, actor, root)
     if (
@@ -456,12 +486,12 @@ def build_activation(
         or set(request.volume_keys) != set(resources.volumes)
         or len(set(request.volume_keys.values())) != len(resources.volumes)
     ):
-        raise ValueError("Original allocation or its role mapping changed.")
+        raise TestingActivationRefusal("Original allocation or its role mapping changed.")
     if any(
         not re.fullmatch(r"[A-Z][A-Z0-9_]*", key)
         for key in (*request.volume_keys.values(), *request.port_keys)
     ) or set(request.volume_keys.values()).intersection(request.port_keys):
-        raise ValueError("Resource settings require distinct explicit key names.")
+        raise TestingActivationRefusal("Resource settings require distinct explicit key names.")
     host, token = source.read_dokploy_config(control_plane_root=root)
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=target_id.target_id
@@ -490,6 +520,7 @@ def build_activation(
             target_id=target_id.target_id,
         ),
         configuration_sha256=digest,
+        configuration_version=2,
         compose_source=document,
         image_reference=image_reference,
     )
@@ -569,7 +600,7 @@ def inspect_new_resources(
         not resource_readback_passes(evidence, resources)
         or evidence.get("testing_activation_ports_ok") != "true"
     ):
-        raise ValueError("Actual empty storage or independent ports are unproved.")
+        raise TestingActivationRefusal("Actual empty storage or independent ports are unproved.")
 
 
 PORT_INSPECTION_PROGRAM = r"""
@@ -629,10 +660,15 @@ class TestingActivationAdapter:
 
     def require_unchanged(self, record: TestingActivationRecord) -> None:
         if (
-            configuration_digest(self.store, self.product, record.context)
+            configuration_digest(
+                self.store, self.product, record.context, version=record.configuration_version
+            )
             != record.configuration_sha256
         ):
-            raise ValueError("Testing configuration or key policy changed.")
+            raise TestingActivationRefusal(
+                "Testing configuration or key policy changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
         _, target, target_id, provider = _bind(self.store, self.product, record.context, "testing")
         if record.published:
             if (
@@ -641,13 +677,19 @@ class TestingActivationAdapter:
                 or record.published_target is None
                 or target_without_hold(target) != target_without_hold(record.published_target)
             ):
-                raise ValueError("Activated testing recipient changed.")
+                raise TestingActivationRefusal(
+                    "Activated testing recipient changed.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                )
         elif (target, target_id, provider) != (
             record.retained_target,
             record.retained_target_id,
             record.retained_provider,
         ):
-            raise ValueError("Retained testing authority changed.")
+            raise TestingActivationRefusal(
+                "Retained testing authority changed.",
+                code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+            )
         for original in record.retained_reservations:
             current = self.store.read_idempotency_record(
                 scope=original.scope,
@@ -655,7 +697,10 @@ class TestingActivationAdapter:
                 idempotency_key=original.idempotency_key,
             )
             if not same_reservation_intent(current, original):
-                raise ValueError("The retained original reservation changed.")
+                raise TestingActivationRefusal(
+                    "The retained original reservation changed.",
+                    code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
+                )
 
     def save(self, record: TestingActivationRecord, **updates: Any) -> TestingActivationRecord:
         replacement = record.model_copy(update=updates)
@@ -685,9 +730,11 @@ class TestingActivationAdapter:
             or payload.get("isolatedDeployment")
             or json.loads(str(payload.get("composeFile") or "null")) != expected
         ):
-            raise ValueError("Fresh provider source or recipient identity changed.")
+            raise TestingActivationRefusal("Fresh provider source or recipient identity changed.")
         if api.parse_dokploy_env_text(str(payload.get("env") or "")) != values:
-            raise ValueError("Fresh provider environment differs from safe managed inputs.")
+            raise TestingActivationRefusal(
+                "Fresh provider environment differs from safe managed inputs."
+            )
         actual = yaml.safe_load(
             compose.fetch_dokploy_converted_compose_file(
                 host=host, token=token, compose_id=record.target_id
@@ -708,12 +755,16 @@ class TestingActivationAdapter:
                     "dokploy.application",
                     "dokploy.service",
                 }:
-                    raise ValueError("The provider added an unqualified routing label.")
+                    raise TestingActivationRefusal(
+                        "The provider added an unqualified routing label."
+                    )
                 if labels and (
                     labels.get("dokploy.application.id") != record.target_id
                     or labels.get("dokploy.service") != service_name
                 ):
-                    raise ValueError("Provider metadata labels identify another recipient.")
+                    raise TestingActivationRefusal(
+                        "Provider metadata labels identify another recipient."
+                    )
         actual = interpolate(actual, values)
         qualify_compose(
             actual,
@@ -729,7 +780,9 @@ class TestingActivationAdapter:
         if isinstance(actual, dict):
             actual.pop("name", None)
         if actual != expected_render:
-            raise ValueError("Actual provider render differs from the reviewed source and values.")
+            raise TestingActivationRefusal(
+                "Actual provider render differs from the reviewed source and values."
+            )
 
     def unused_recipient(self, record: TestingActivationRecord) -> dict[str, Any]:
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -755,7 +808,7 @@ class TestingActivationAdapter:
             or payload.get("mounts")
             or payload.get("serviceNetworks")
         ):
-            raise ValueError("The original fresh recipient is not provably unused.")
+            raise TestingActivationRefusal("The original fresh recipient is not provably unused.")
         return cast(dict[str, Any], payload)
 
     @staticmethod
@@ -793,7 +846,9 @@ class TestingActivationAdapter:
             if item.get("name") == record.namespace
         ]
         if len(matches) != 1:
-            raise ValueError("Original placement is absent or ambiguous; retain its original key.")
+            raise TestingActivationRefusal(
+                "Original placement is absent or ambiguous; retain its original key."
+            )
         project = cast(dict[str, Any], matches[0])
         project_id = project.get("projectId")
         if (
@@ -801,21 +856,21 @@ class TestingActivationAdapter:
             or not project_id
             or (record.project_id and record.project_id != project_id)
         ):
-            raise ValueError("Original project identity changed.")
+            raise TestingActivationRefusal("Original project identity changed.")
         if not record.project_id:
             if record.phase != "create_project":
-                raise ValueError("Unrequested project placement.")
+                raise TestingActivationRefusal("Unrequested project placement.")
             record = self.save(record, project_id=project_id, phase="project_ready")
         environments = project.get("environments")
         if not isinstance(environments, list) or not all(
             isinstance(item, dict) for item in environments
         ):
-            raise ValueError("Original environment inventory is incomplete.")
+            raise TestingActivationRefusal("Original environment inventory is incomplete.")
         candidates = [item for item in environments if item.get("name") == record.namespace]
         if not candidates and record.phase == "project_ready":
             return record
         if len(candidates) != 1:
-            raise ValueError("Original environment is absent or ambiguous.")
+            raise TestingActivationRefusal("Original environment is absent or ambiguous.")
         environment = candidates[0]
         environment_id = environment.get("environmentId")
         if (
@@ -823,31 +878,31 @@ class TestingActivationAdapter:
             or not environment_id
             or (record.environment_id and record.environment_id != environment_id)
         ):
-            raise ValueError("Original environment identity changed.")
+            raise TestingActivationRefusal("Original environment identity changed.")
         if not record.environment_id:
             if record.phase != "create_environment":
-                raise ValueError("Unrequested environment placement.")
+                raise TestingActivationRefusal("Unrequested environment placement.")
             record = self.save(record, environment_id=environment_id, phase="environment_ready")
         recipients = environment.get("compose")
         if not isinstance(recipients, list) or not all(
             isinstance(item, dict) for item in recipients
         ):
-            raise ValueError("Original recipient inventory is incomplete.")
+            raise TestingActivationRefusal("Original recipient inventory is incomplete.")
         candidates = [item for item in recipients if item.get("name") == record.namespace]
         if not candidates and record.phase == "environment_ready":
             return record
         if len(candidates) != 1:
-            raise ValueError("Original recipient is absent or ambiguous.")
+            raise TestingActivationRefusal("Original recipient is absent or ambiguous.")
         target_id = candidates[0].get("composeId")
         if (
             not isinstance(target_id, str)
             or not target_id
             or (record.target_id and record.target_id != target_id)
         ):
-            raise ValueError("Original recipient identity changed.")
+            raise TestingActivationRefusal("Original recipient identity changed.")
         if not record.target_id:
             if record.phase != "create_compose":
-                raise ValueError("Unrequested recipient placement.")
+                raise TestingActivationRefusal("Unrequested recipient placement.")
             record = self.save(record, target_id=target_id, phase="recipient_ready")
         self.unused_recipient(record)
         return record
@@ -882,6 +937,11 @@ class TestingActivationAdapter:
                     "compose_path": "docker-compose.yml",
                     "custom_git_url": "",
                     "custom_git_branch": "",
+                    # A private product may retain origin domains on its old
+                    # recipient. They stay in custody, never on the replacement.
+                    "domains": (),
+                    "public_hosts": (),
+                    "pending_public_host_effects": (),
                     "env": {
                         **{
                             key: resources.volumes[role]
@@ -893,12 +953,6 @@ class TestingActivationAdapter:
                     "source_label": "service:testing-activation",
                 }
             )
-            if (
-                new_target.domains
-                or new_target.public_hosts
-                or new_target.pending_public_host_effects
-            ):
-                raise ValueError("Existing routes require their own accepted cutover.")
             new_id = DokployTargetIdRecord(
                 context=record.context,
                 instance="testing",
@@ -1012,7 +1066,7 @@ class TestingActivationAdapter:
         try:
             record = self.current()
             if record.plan_sha256 != self.request.reviewed_plan_sha256:
-                raise ValueError("Review the changed activation plan.")
+                raise TestingActivationRefusal("Review the changed activation plan.")
             existing = activation_record(self.store, self.product, record.context)
             if existing is not None and existing.phase not in {
                 "prepared",
@@ -1021,7 +1075,7 @@ class TestingActivationAdapter:
                 "recipient_ready",
                 "configure_new_recipient",
             }:
-                raise ValueError(
+                raise TestingActivationRefusal(
                     "Continue the original activation by readback, never redispatch creation."
                 )
             old_key = generic_web_provider_target_key(
@@ -1035,7 +1089,7 @@ class TestingActivationAdapter:
                 testing_event_execution_lock_name(old_key)
             ) as old_check:
                 if old_check is None:
-                    raise ValueError("The retained executor is active.")
+                    raise TestingActivationRefusal("The retained executor is active.")
                 excluded = inspect_generic_web_testing_exclusion(
                     store=self.store,
                     root=self.root,
@@ -1046,7 +1100,7 @@ class TestingActivationAdapter:
                     held_execution_check=old_check,
                 )
                 if excluded.status != "excluded":
-                    raise ValueError("The retained recipient is not fully excluded.")
+                    raise TestingActivationRefusal("The retained recipient is not fully excluded.")
                 self.require_unchanged(record)
                 resources, _ = preparation_resources(
                     self.store, self.product, self.request, self.scope
@@ -1078,7 +1132,7 @@ class TestingActivationAdapter:
                     and item.get("projectId") != record.project_id
                     for item in api.fetch_dokploy_projects(host=host, token=token)
                 ):
-                    raise ValueError(
+                    raise TestingActivationRefusal(
                         "Preserve an existing activation placement for original-key inspection."
                     )
                 # A refused/transient inspection must not strand a permanent
@@ -1139,7 +1193,9 @@ class TestingActivationAdapter:
                         or not isinstance(response.get(field), str)
                         or not response[field]
                     ):
-                        raise ValueError("Creation outcome is unknown; retain its original key.")
+                        raise TestingActivationRefusal(
+                            "Creation outcome is unknown; retain its original key."
+                        )
                     record = self.save(
                         record,
                         **{
@@ -1160,16 +1216,22 @@ class TestingActivationAdapter:
                     )
                     or fresh.get("environmentId") != record.environment_id
                 ):
-                    raise ValueError("Fresh recipient has unexpected identity or environment.")
+                    raise TestingActivationRefusal(
+                        "Fresh recipient has unexpected identity or environment."
+                    )
                 if record.phase == "configure_new_recipient":
                     if (
                         self.recipient_configuration_sha256(fresh)
                         != record.before_configuration_sha256
                     ):
-                        raise ValueError("Uncertain recipient configuration changed; preserve it.")
+                        raise TestingActivationRefusal(
+                            "Uncertain recipient configuration changed; preserve it."
+                        )
                 else:
                     if fresh.get("env") not in {None, ""}:
-                        raise ValueError("Fresh recipient has an unexpected environment.")
+                        raise TestingActivationRefusal(
+                            "Fresh recipient has an unexpected environment."
+                        )
                     record = self.save(
                         record,
                         app_name=app_name,
@@ -1210,7 +1272,9 @@ class TestingActivationAdapter:
         except Exception as error:
             if not started:
                 raise ProviderMutationRejectedError(
-                    ValueError("Activation refused before provider effects.")
+                    error
+                    if isinstance(error, TestingActivationRefusal)
+                    else ValueError("Activation refused before provider effects.")
                 ) from error
             raise ProviderMutationUnknownError(
                 "Activation outcome is unknown; retain the original key, placement, old hold and fences."
