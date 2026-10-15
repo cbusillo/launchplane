@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
@@ -9,13 +9,18 @@ from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRec
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app, idempotency_scope
-from control_plane.odoo_preview_apply_http import OdooPreviewApplyEnvelope
+from control_plane.odoo_preview_apply_http import (
+    OdooPreviewApplyEnvelope,
+    issue_odoo_preview_apply_plan,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
+    LocalOperatorPolicyRule,
     configured_local_operator_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.launchplane import generate_preview_id
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import scoped_agent_transport
 from tests.support.disposable_lanes import record_safety
@@ -40,11 +45,15 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_product_profile_record(self.profile)
         self.config = _local_operator_bearer_config()
         self.app = self.make_app()
-        stamp = datetime.now(timezone.utc).isoformat()
+        stamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         self.preview = PreviewRecord(
-            preview_id="fixture-preview",
+            preview_id=generate_preview_id(
+                context_name=self.profile.preview.context,
+                anchor_repo=self.profile.repository.partition("/")[2],
+                anchor_pr_number=42,
+            ),
             context=self.profile.preview.context,
-            anchor_repo=self.profile.repository,
+            anchor_repo=self.profile.repository.partition("/")[2],
             anchor_pr_number=42,
             anchor_pr_url=f"https://github.com/{self.profile.repository}/pull/42",
             preview_label="preview",
@@ -54,14 +63,58 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             updated_at=stamp,
             eligible_at=stamp,
         )
+        from control_plane.contracts.preview_generation_record import (
+            PreviewGenerationRecord,
+            PreviewPullRequestSummary,
+        )
+
+        generation_stamp = (datetime.fromisoformat(stamp) - timedelta(seconds=1)).isoformat()
+        generation = PreviewGenerationRecord(
+            generation_id="fixture-serving",
+            preview_id=self.preview.preview_id,
+            sequence=1,
+            state="ready",
+            requested_reason="Existing preview fixture",
+            requested_at=generation_stamp,
+            resolved_manifest_fingerprint="fixture-manifest",
+            anchor_summary=PreviewPullRequestSummary(
+                repo=self.preview.anchor_repo,
+                pr_number=self.preview.anchor_pr_number,
+                head_sha="fixture-head",
+                pr_url=self.preview.anchor_pr_url,
+            ),
+        )
+        self.store.write_preview_generation_record(generation)
+        self.preview = self.preview.model_copy(
+            update={
+                "serving_generation_id": generation.generation_id,
+                "latest_generation_id": generation.generation_id,
+            }
+        )
         self.store.write_preview_record(self.preview)
-        self.payload: dict[str, Any] = _refresh_payload()
+        self.payload = cast(dict[str, Any], _refresh_payload())
+        self.payload["apply"]["dry_run_plan"]["compose_ref"] = "fixture-preview-target"
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=self.preview.context,
+                instance="pr-42",
+                target_id="fixture-preview-target",
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.plan_id = _PLAN_ID
         self.issue_preview()
 
-    def make_app(self, config: BearerIdentityConfig | None = None) -> Any:
+    def make_app(
+        self,
+        config: BearerIdentityConfig | None = None,
+        policy: LaunchplaneAuthzPolicy | None = None,
+    ) -> Any:
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=LaunchplaneAuthzPolicy(),
+            authz_policy=policy or LaunchplaneAuthzPolicy(),
             bearer_identity_config=config or self.config,
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
@@ -70,13 +123,16 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
     def issue_preview(self) -> None:
         identity = configured_local_operator_identity(self.config)
         assert identity is not None
-        issued = _issued_plan(OdooPreviewApplyEnvelope.model_validate(self.payload))
+        issued = issue_odoo_preview_apply_plan(
+            result=_issued_plan(OdooPreviewApplyEnvelope.model_validate(self.payload)),
+            plan_id=self.plan_id,
+        )
         self.store.write_idempotency_record(
             LaunchplaneIdempotencyRecord(
-                record_id="fixture-issued",
+                record_id=f"fixture-issued-{self.plan_id}",
                 scope=idempotency_scope(identity),
                 route_path="/v1/drivers/odoo/preview-apply-inputs",
-                idempotency_key=_PLAN_ID,
+                idempotency_key=self.plan_id,
                 request_fingerprint="fixture-plan",
                 response_status_code=202,
                 response_trace_id="fixture-plan",
@@ -113,7 +169,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                 "mode": "apply",
                 "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
             },
-            "classification",
+            f"classification-{payload['production_use']}",
         )
 
     def safety(self, **changes: Any) -> None:
@@ -127,7 +183,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def preview_apply(self) -> Any:
-        return await self.post("/v1/drivers/odoo/preview-apply", self.payload, _PLAN_ID)
+        return await self.post("/v1/drivers/odoo/preview-apply", self.payload, self.plan_id)
 
     async def test_reviewed_never_live_correction_is_atomic_replayed_and_bounded(self) -> None:
         route = f"/v1/product-profiles/{self.profile.product}/production-use"
@@ -250,20 +306,21 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(result.status_code, 409, result.text)
             execute.assert_not_called()
 
-    async def test_stable_lane_cannot_be_used_as_a_preview(self) -> None:
-        from copy import deepcopy
-
-        for instance in ("testing", "prod", "production", "live"):
-            with (
-                self.subTest(instance=instance),
-                patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute,
-            ):
-                self.payload = deepcopy(_refresh_payload())
-                self.payload["apply"]["dry_run_plan"]["preview_slug"] = instance
-                self.issue_preview()
-                result = await self.preview_apply()
-                self.assertEqual(result.status_code, 409, result.text)
-                execute.assert_not_called()
+    async def test_recorded_stable_lane_collision_cannot_be_used_as_a_preview(self) -> None:
+        collided = self.profile.model_copy(
+            update={
+                "lanes": (
+                    *self.profile.lanes,
+                    self.profile.lanes[0].model_copy(update={"instance": "pr-42"}),
+                )
+            }
+        )
+        self.store.write_product_profile_record(collided)
+        self.safety()
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            result = await self.preview_apply()
+        self.assertEqual(result.status_code, 409, result.text)
+        execute.assert_not_called()
 
     async def test_usage_change_after_provider_preparation_stops_before_effect(self) -> None:
         self.safety()
@@ -326,6 +383,8 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                     updated_at=live.updated_at,
                 )
             )
+        self.payload["apply"]["dry_run_plan"]["compose_ref"] = "shared-target"
+        self.issue_preview()
         self.safety()
         with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
             response = await self.preview_apply()
@@ -354,8 +413,135 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                     }
                 )
             )
+            self.payload["apply"]["dry_run_plan"]["compose_ref"] = "isolated-target"
+            self.issue_preview()
             self.safety()
             response = await self.preview_apply()
             self.assertEqual(response.status_code, 409, response.text)
             execute.assert_not_called()
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), live)
+
+    async def test_explicit_profile_authority_keeps_live_classification_and_release_settings(
+        self,
+    ) -> None:
+        self.app = self.make_app(
+            policy=LaunchplaneAuthzPolicy(
+                schema_version=2,
+                local_operators=(
+                    LocalOperatorPolicyRule(
+                        subjects=(self.config.local_operator_subject,),
+                        token_labels=(self.config.local_operator_token_label,),
+                        products=(self.profile.product,),
+                        contexts=("launchplane",),
+                        actions=("product_profile.write",),
+                    ),
+                ),
+            )
+        )
+        response = await self.classify(production_use="live", release_on_acceptance="held")
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product).production_use, "live"
+        )
+        response = await self.classify()
+        self.assertEqual(response.status_code, 403, response.text)
+
+    async def test_preview_replay_survives_lifecycle_change_and_expired_safety(self) -> None:
+        for operation in ("refresh", "destroy"):
+            with self.subTest(operation=operation):
+                self.store.write_preview_record(self.preview)
+                self.payload["apply"]["dry_run_plan"]["operation"] = operation
+                self.plan_id = f"replay-{operation}"
+                self.issue_preview()
+                self.safety()
+                result_payload = {
+                    "status": "pass",
+                    "operation": operation,
+                    "product": self.profile.product,
+                    "repository": self.profile.repository,
+                    "preview_slug": "pr-42",
+                    "preview_url": self.payload["apply"]["dry_run_plan"]["preview_url"],
+                    "domain_host": self.payload["apply"]["dry_run_plan"]["domain_host"],
+                    "compose_name": "cm-odoo-preview-pr-42",
+                }
+                with patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result",
+                    return_value=result_payload,
+                ) as execute:
+                    first = await self.preview_apply()
+                    self.assertEqual(first.status_code, 202, first.text)
+                    self.safety(
+                        observed_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+                        expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+                    )
+                    second = await self.preview_apply()
+                    self.assertEqual(second.status_code, 202, second.text)
+                    execute.assert_called_once()
+
+    async def test_plan_target_must_match_the_exact_qualified_target(self) -> None:
+        self.payload["apply"]["dry_run_plan"]["compose_ref"] = "different-target"
+        self.issue_preview()
+        self.safety()
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            result = await self.preview_apply()
+        self.assertEqual(result.status_code, 409, result.text)
+        execute.assert_not_called()
+
+    async def test_history_inserted_after_review_is_refused_by_atomic_write(self) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.promotion_record import DeploymentEvidence
+
+        original = self.store.compare_and_write_product_profile_record
+
+        def insert_then_compare(**kwargs: Any) -> Any:
+            self.store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="race-production",
+                    context=self.profile.lanes[0].context,
+                    instance="prod",
+                    source_git_ref="history",
+                    deploy=DeploymentEvidence(
+                        status="pass",
+                        deploy_mode="compose",
+                        target_type="compose",
+                        target_name="production",
+                    ),
+                )
+            )
+            return original(**kwargs)
+
+        with patch.object(
+            self.store, "compare_and_write_product_profile_record", side_effect=insert_then_compare
+        ):
+            result = await self.classify()
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_uncertain_preview_can_reconcile_after_safety_expires(self) -> None:
+        self.safety()
+
+        def uncertain(**kwargs: Any) -> Any:
+            kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+            return {
+                "status": "fail",
+                "provider_effect_attempted": True,
+                "error_message": "No acknowledgement",
+            }
+
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=uncertain
+        ) as execute:
+            first = await self.preview_apply()
+            self.assertEqual(first.status_code, 409, first.text)
+            self.safety(
+                observed_at=datetime.now(timezone.utc) - timedelta(minutes=10),
+                expires_at=datetime.now(timezone.utc) - timedelta(minutes=5),
+            )
+            with patch(
+                "control_plane.http_app.observe_odoo_preview_apply_result",
+                return_value=("unknown", None, False),
+            ) as observe:
+                second = await self.preview_apply()
+            self.assertEqual(second.status_code, 409, second.text)
+            observe.assert_called_once()
+            execute.assert_called_once()

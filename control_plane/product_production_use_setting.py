@@ -140,8 +140,8 @@ def require_never_live_classification(
     """Bound the Director agent's metadata correction, never a live downgrade.
 
     A product with production or historical lane ownership needs the existing
-    administrator path. Changing this fact grants no operational permission:
-    retirement and disposable writes still check actual resources and usage.
+    administrator path. The recorded fact is a retirement prerequisite;
+    retirement still checks actual resources and recorded protected use.
     """
     if (
         request.production_use != "prelaunch"

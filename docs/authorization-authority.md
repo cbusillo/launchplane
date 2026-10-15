@@ -201,15 +201,19 @@ refuses this path. The full reviewed profile digest, atomic profile comparison,
 idempotency and audit receipt remain. Release-acceptance settings cannot change
 through this path. The request's reason records the reviewed product facts; it
 cannot assert resource isolation or remove a usage hold. The metadata correction
-never creates provider, backup, release or promotion authority.
+satisfies retirement's never-live prerequisite; retirement still performs its
+resource, ownership and protected-use checks. It creates no general provider,
+backup, release or promotion authority.
 
 Odoo preview apply uses the same source-owned Director identity boundary as
 [testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
 including preview destruction. It requires the caller's exact service-issued
 plan, an existing uniquely owned preview, and current disposable-lane facts.
 Stable lanes cannot be substituted for a preview. The route checks the binding
-before preparing the durable operation, under its reservation, and immediately
-before the first provider effect. Expired or changed safety, actual use,
+under the durable reservation and immediately before the first provider
+effect. The frozen plan must name the qualified target ID. Completed same-key
+replays and outcome reconciliation remain available after safety expires or
+lifecycle evidence changes; only a new effect needs fresh safety. Expired or changed safety, actual use,
 only-copy data, shared production resources and unknown isolation stop execution.
 Existing scoped callers retain their explicit policy rules; they inherit no
 Director authority. Source-read permission for an import credential is still

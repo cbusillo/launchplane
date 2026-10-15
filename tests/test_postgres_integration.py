@@ -4325,6 +4325,74 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_never_live_classification_waits_for_concurrent_production_history(self) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.promotion_record import DeploymentEvidence
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            store.write_product_profile_record(profile)
+            replacement = profile.model_copy(update={"production_use": "prelaunch"})
+            history = DeploymentRecord(
+                record_id="concurrent-production",
+                context=profile.lanes[0].context,
+                instance="prod",
+                source_git_ref="history",
+                deploy=DeploymentEvidence(
+                    status="pass", deploy_mode="compose", target_name="prod", target_type="compose"
+                ),
+            )
+            with store._engine.connect() as writer, ThreadPoolExecutor(max_workers=1) as workers:
+                transaction = writer.begin()
+                writer.execute(
+                    insert(LaunchplaneDeploymentRow).values(
+                        record_id=history.record_id,
+                        context=history.context,
+                        instance=history.instance,
+                        artifact_id="",
+                        source_git_ref=history.source_git_ref,
+                        deploy_started_at="",
+                        deploy_finished_at="",
+                        payload=history.model_dump(mode="json"),
+                    )
+                )
+                classify = workers.submit(
+                    store.compare_and_write_product_profile_record,
+                    expected_record=profile,
+                    replacement_record=replacement,
+                    require_never_live_history=True,
+                )
+                try:
+                    blocked = False
+                    deadline = time.monotonic() + 5
+                    while time.monotonic() < deadline:
+                        with store._engine.connect() as observer:
+                            blocked = bool(
+                                observer.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_locks WHERE NOT granted "
+                                        "AND relation = to_regclass(:table_name)"
+                                    ),
+                                    {"table_name": LaunchplaneDeploymentRow.__tablename__},
+                                )
+                            )
+                        if blocked:
+                            break
+                        time.sleep(0.01)
+                    self.assertTrue(blocked, "Classification must wait for concurrent history")
+                finally:
+                    transaction.commit()
+                result = classify.result(timeout=5)
+            self.assertEqual(result.status, "changed")
+            self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            self.assertEqual(store.read_deployment_record(history.record_id), history)
+
     def test_expired_event_hold_blocks_only_while_its_execution_owner_is_present(self) -> None:
         from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
         from control_plane.product_reconcile import reconcile_reservation_scope
