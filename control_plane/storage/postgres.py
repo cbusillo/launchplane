@@ -5991,7 +5991,11 @@ class PostgresRecordStore(HumanSessionStore):
 
     @staticmethod
     def _payload_dict(model: BaseModel) -> PayloadDict:
-        return model.model_dump(mode="json", exclude_none=True)
+        payload = model.model_dump(mode="json", exclude_none=True)
+        if isinstance(model, FreshOdooTestingGeneration) and model.source_mode == "ssh":
+            payload.pop("source_mode", None)
+            payload.pop("source_binding_sha256", None)
+        return payload
 
     @staticmethod
     def _read_payload(*, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:

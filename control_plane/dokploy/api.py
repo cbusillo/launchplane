@@ -19,6 +19,7 @@ import uuid
 from urllib.request import HTTPRedirectHandler, build_opener
 
 from control_plane import runtime_platform_credentials
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 
 
 DEFAULT_DOKPLOY_LOG_LINE_COUNT = 200
@@ -33,7 +34,7 @@ _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS = 10
 # a provider deployment to the trigger that started it.
 _DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS = 120
 MAX_DOKPLOY_LOG_LINE_COUNT = 1000
-NATIVE_TESTING_CHUNK_UPLOAD_PATH = "/api/docker.uploadFileToContainer"
+NATIVE_TESTING_CHUNK_UPLOAD_PATH = "/api/trpc/docker.uploadFileToContainer"
 _DOKPLOY_SCHEDULE_DIAGNOSTIC_LINE_COUNT = 20
 _MAX_DOKPLOY_ERROR_DETAIL_LENGTH = 2000
 _MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH = 4000
@@ -1902,6 +1903,7 @@ def upload_native_testing_chunk(
     from control_plane.dokploy.native_copy_stream import (
         NativeSourceAuthorizationDenied,
         NativeSourceUnavailable,
+        NativeUploadRejected,
     )
 
     if (
@@ -1909,7 +1911,7 @@ def upload_native_testing_chunk(
         or not re.fullmatch(r"[a-zA-Z0-9_-]+", server_id)
         or server_id == "local"
         or not re.fullmatch(r"lp-native-[a-f0-9]{32}-(database|filestore)-[0-9]+", filename)
-        or not 0 < len(content) <= 65536
+        or not 0 < len(content) <= NATIVE_TESTING_COPY_CHUNK_BYTES
     ):
         raise ValueError("Native testing upload requires a bounded qualified receiver.")
     path = NATIVE_TESTING_CHUNK_UPLOAD_PATH
@@ -1917,7 +1919,7 @@ def upload_native_testing_chunk(
         "serverId": server_id,
         "containerId": container_id,
         "filename": filename,
-        "destinationPath": "/tmp",
+        "destinationPath": "/tmp/" + filename,
         "size": len(content),
         "sha256": hashlib.sha256(content).hexdigest(),
     }
@@ -1934,7 +1936,7 @@ def upload_native_testing_chunk(
         for key, value in (
             ("serverId", server_id),
             ("containerId", container_id),
-            ("destinationPath", "/tmp"),
+            ("destinationPath", "/tmp/" + filename),
         ):
             parts.append(
                 (
@@ -1967,10 +1969,40 @@ def upload_native_testing_chunk(
                 response.read(4096)
         except HTTPError as error:
             status = error.code
-            error.close()
             if status in {401, 403}:
+                error.close()
                 raise NativeSourceAuthorizationDenied(
-                    "The provider refused the testing upload."
+                    "The provider refused the testing upload.",
+                    provider_effect_terminal=True,
+                ) from None
+            if status in {400, 404}:
+                error.close()
+                raise NativeUploadRejected() from None
+            try:
+                body = json.loads(error.read(4096))
+                message = body.get("message") if isinstance(body, dict) else None
+                if message is None and isinstance(body, dict):
+                    detail = body.get("error")
+                    if isinstance(detail, dict):
+                        detail = detail.get("json", detail)
+                        if isinstance(detail, dict):
+                            message = detail.get("message")
+            except (OSError, ValueError):
+                message = None
+            finally:
+                error.close()
+            # Installed remote execution distinguishes an actual channel exit
+            # from a connection error. HTTP 5xx alone supplies no terminal proof.
+            if isinstance(message, str) and re.fullmatch(
+                r"Failed to upload file to container: Remote command failed with exit code [1-9][0-9]*",
+                message,
+            ):
+                raise NativeUploadRejected(retryable=True) from None
+            if isinstance(message, str) and message.startswith(
+                "Failed to upload file to container: Authentication failed:"
+            ):
+                raise NativeSourceAuthorizationDenied(
+                    "The registered upload identity was refused.", provider_effect_terminal=True
                 ) from None
             raise NativeSourceUnavailable("The native testing upload did not pass.") from None
         except (OSError, URLError, TimeoutError):

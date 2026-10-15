@@ -7,7 +7,7 @@ import json
 from tempfile import TemporaryDirectory
 from time import monotonic
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, Mock
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -1003,6 +1003,47 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             with self.provider():
                 view = testing_replacement_recovery_read(store, fenced, root)
                 self.assertEqual(view["reason"], "recovery_dispatch_unacknowledged")
+                self.assertEqual(recover_stranded_testing_replacements(store, root), ())
+
+    def test_native_upload_http_status_does_not_replace_remote_exit_evidence(self) -> None:
+        import io
+        from email.message import Message
+        from urllib.error import HTTPError
+        from control_plane.dokploy.native_copy_stream import NativeSourceUnavailable
+
+        for store, root in self.stores():
+            operation = self.running(store)
+            opener = Mock()
+            messages = [
+                "Failed to upload file to container: Remote command failed with exit code 1",
+                "Failed to upload file to container: SSH connection error: fixture transport lost",
+            ]
+            with guard_testing_replacement(store, operation, "worker", lambda _: None):
+                for message in messages:
+                    body = json.dumps({"error": {"json": {"message": message}}}).encode()
+                    opener.open.side_effect = HTTPError(
+                        "https://provider.test", 500, "fixture", Message(), io.BytesIO(body)
+                    )
+                    with patch.object(api, "build_opener", return_value=opener):
+                        with self.assertRaises(NativeSourceUnavailable):
+                            api.upload_native_testing_chunk(
+                                host="https://provider.test",
+                                token="fixture",
+                                server_id="fixture-server",
+                                container_id="e" * 64,
+                                filename="lp-native-" + "f" * 32 + "-database-0",
+                                content=b"fixture bytes",
+                            )
+                    journal = store.read_odoo_stable_target_replacement_operation_record(
+                        operation.operation_id
+                    ).recovery_journal
+                    assert journal is not None
+                    self.assertEqual(journal.effects[0].acknowledged, message == messages[0])
+            fenced = self.fence(store)
+            with self.provider():
+                self.assertFalse(
+                    testing_replacement_recovery_read(store, fenced, root)["effects_acknowledged"]
+                )
                 self.assertEqual(recover_stranded_testing_replacements(store, root), ())
 
     def test_classifier_requires_exact_terminal_deploy_and_bound_provider(self) -> None:

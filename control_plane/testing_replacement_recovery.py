@@ -252,7 +252,17 @@ def guard_testing_replacement(
             # journal while retaining uncertain-dispatch fencing.
             journal = journal.model_copy(update={"effects": tuple(effects)})
             save()
-            response = dispatch()
+            try:
+                response = dispatch()
+            except Exception as error:
+                if path == api.NATIVE_TESTING_CHUNK_UPLOAD_PATH and getattr(
+                    error, "provider_effect_terminal", False
+                ):
+                    effects = list(journal.effects)
+                    effects[effect_index] = effect.model_copy(update={"acknowledged": True})
+                    journal = journal.model_copy(update={"effects": tuple(effects)})
+                    save()
+                raise
             schedule_id = effect.schedule_id
             if path == "/api/schedule.create" and isinstance(response, dict):
                 schedule_id = api.schedule_key(response)

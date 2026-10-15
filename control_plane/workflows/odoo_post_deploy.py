@@ -257,6 +257,12 @@ def execute_odoo_post_deploy(
     release_operation: bool = False,
     rollback: bool = False,
 ) -> OdooPostDeployResult:
+    if (
+        fresh_testing_generation is not None
+        and fresh_testing_generation.source_mode == "container-export"
+        and fresh_native_source is None
+    ):
+        raise click.ClickException("Native testing copy has no verified source descriptor.")
     if request.connection_isolation is not None:
         target = _resolve_compose_target_definition(
             control_plane_root=control_plane_root,

@@ -401,7 +401,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         }
         status, output = self.run_program()
         self.assertNotEqual(status, 0, output)
-        self.assertNotIn('"type": "complete"', output)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertFalse(any(frame.get("type") == "complete" for frame in frames))
 
     def test_native_receiver_refuses_existing_database_without_generation_witness(self) -> None:
         self.spec["inspection_only"] = True

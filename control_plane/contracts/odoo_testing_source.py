@@ -6,6 +6,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 
+NATIVE_TESTING_COPY_CHUNK_BYTES = 64 * 1024
+NATIVE_TESTING_COPY_CACHE_DIRECTORY = "private-testing-source"
+
 
 class NativeOdooSourceAuthority(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)

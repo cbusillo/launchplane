@@ -17,6 +17,7 @@ from urllib.parse import urlencode, urlsplit, urlunsplit
 import uuid
 import click
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
+from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 
 from websockets.exceptions import ConnectionClosed, InvalidHandshake, InvalidStatus
 from websockets.sync.client import connect
@@ -25,12 +26,23 @@ from websockets.sync.client import connect
 class NativeSourceAuthorizationDenied(DurableOperationAuthorizationDeniedError):
     """The existing source transport explicitly refused this identity."""
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, *, provider_effect_terminal: bool = False):
+        self.provider_effect_terminal = provider_effect_terminal
         super().__init__(code="authorization_denied", message=message)
 
 
 class NativeSourceUnavailable(click.ClickException, ValueError):
     """The bounded source read did not produce complete evidence."""
+
+
+class NativeUploadRejected(NativeSourceUnavailable):
+    """A provider validation refusal or explicit remote exit, never a timeout."""
+
+    provider_effect_terminal = True
+
+    def __init__(self, *, retryable: bool = False):
+        self.retryable = retryable
+        super().__init__("The provider rejected the native upload with terminal evidence.")
 
 
 class ReadConnection(Protocol):
@@ -39,7 +51,18 @@ class ReadConnection(Protocol):
     def recv(self, timeout: float | None = None) -> str | bytes: ...
 
 
+def require_registered_remote_server(server_id: object) -> str:
+    if (
+        not isinstance(server_id, str)
+        or server_id == "local"
+        or not re.fullmatch(r"[a-zA-Z0-9_-]+", server_id)
+    ):
+        raise NativeSourceUnavailable("Native testing copy requires a registered remote server.")
+    return server_id
+
+
 def _terminal_uri(host: str, server_id: str) -> str:
+    require_registered_remote_server(server_id)
     parsed = urlsplit(host)
     if (
         parsed.scheme not in {"http", "https"}
@@ -105,7 +128,9 @@ def _read_program(
     while "\x1bc" not in initial:
         message = connection.recv(timeout=_remaining(deadline))
         initial += message.decode() if isinstance(message, bytes) else message
-        if "Authentication failed" in initial or "Unauthorized" in initial:
+        if "\x1bc" not in initial and any(
+            line.startswith("Authentication failed:") for line in initial.splitlines()
+        ):
             raise NativeSourceAuthorizationDenied("The registered source refused authentication.")
         if len(initial) > 16384 or "SSH connection error" in initial:
             raise NativeSourceUnavailable("The registered source terminal is unavailable.")
@@ -115,8 +140,6 @@ def _read_program(
     if not prompt_text:
         prompt = connection.recv(timeout=_remaining(deadline))
         prompt_text = prompt.decode() if isinstance(prompt, bytes) else prompt
-    if "Authentication failed" in prompt_text or "Unauthorized" in prompt_text:
-        raise NativeSourceAuthorizationDenied("The registered source refused authentication.")
     loader = (
         "import base64,json,sys,termios; a=termios.tcgetattr(0);"
         "a[3]&=~(termios.ECHO|termios.ICANON|termios.IEXTEN);"
@@ -270,7 +293,7 @@ class ReadDenied(Exception):
 
 def denied(error):
     text=error.lower()
-    return any(word in text for word in (b'permission denied',b'password authentication failed',b'unauthorized',b'no password supplied'))
+    return any(word in text for word in (b'password authentication failed',b'no password supplied'))
 
 def checked(arguments):
     result=subprocess.run(arguments,capture_output=True,check=False)
@@ -300,6 +323,11 @@ def validate():
             environment=dict(v.split('=',1) for v in row['Config'].get('Env',[]) if '=' in v)
             if environment.get('ODOO_DB_NAME')!=source['database_name'] or environment.get('PLATFORM_INSTANCE')!='prod' or environment.get('ODOO_DB_HOST')!='database':
                 raise RuntimeError('Source no longer names production')
+            identity=json.loads(environment.get('__RUNTIME_IDENTITY_ENV_KEY__','null'))
+            if (not isinstance(identity,dict)
+                or any(identity.get(key)!=source[key] for key in ('product','context','instance'))
+                or identity.get('environment_kind')!='stable'):
+                raise RuntimeError('Source runtime does not belong to the registered production lane')
     if (source['instance']!='prod'
         or not re.fullmatch(r'[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}',source['database_name'])
         or not re.fullmatch(r'/[a-zA-Z0-9_./-]+',source['filestore_path'])
@@ -368,10 +396,10 @@ try:
         emit({'type':'complete','database':database_receipt,'filestore':filestore_receipt})
     else:
         raise RuntimeError('Invalid source read mode')
-except (ReadDenied,PermissionError):
+except ReadDenied:
     emit({'type':'denied'})
     raise SystemExit(1)
 except BaseException:
     emit({'type':'failed'})
     raise SystemExit(1)
-"""
+""".replace("__RUNTIME_IDENTITY_ENV_KEY__", RUNTIME_IDENTITY_ENV_KEY)

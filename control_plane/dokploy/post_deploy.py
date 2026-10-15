@@ -568,6 +568,20 @@ def run_compose_post_deploy_update(
     prepare_native_source: Callable[[dict[str, object], str], dict[str, object]] | None = None,
     clear_preview_fishbowl_source: bool = False,
 ) -> dict[str, str]:
+    if fresh_testing_generation is not None:
+        if (
+            not run_destructive_restore
+            or target_definition.instance != "testing"
+            or target_definition.target_id != fresh_testing_generation.target_id
+        ):
+            raise click.ClickException(
+                "Fresh testing transport requires its exact restore generation."
+            )
+        if (
+            fresh_testing_generation.source_mode == "container-export"
+            and prepare_native_source is None
+        ):
+            raise click.ClickException("Native testing copy requires its service capture adapter.")
     if (
         clear_preview_fishbowl_source
         and runtime_key_safety_environment_class(target_definition.instance) != "preview"
@@ -588,6 +602,13 @@ def run_compose_post_deploy_update(
         target_type="compose",
         target_id=compose_id,
     )
+    if (
+        fresh_testing_generation is not None
+        and fresh_testing_generation.source_mode == "container-export"
+    ):
+        from control_plane.dokploy.native_copy_stream import require_registered_remote_server
+
+        require_registered_remote_server(target_payload.get("serverId"))
     current_env_map = api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     desired_env_map = _apply_post_deploy_env_file_overrides(
         current_env_map=current_env_map,

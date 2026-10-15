@@ -4,6 +4,7 @@ import base64
 import json
 from typing import Literal, TypeVar, TypedDict
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductRuntimeConfigRequirement,
@@ -176,23 +177,6 @@ try:
     else:
         raise RuntimeError("Unknown fresh testing restore phase")
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
-    if os.environ.get("LAUNCHPLANE_NATIVE_COPY") == "true":
-        import hashlib
-        import re
-        root = Path('/volumes/data/filestore') / runner.local.db_name
-        with runner.local.db_conn.cursor() as cursor:
-            cursor.execute("SELECT store_fname, checksum, file_size FROM ir_attachment WHERE store_fname IS NOT NULL")
-            while rows := cursor.fetchmany(100):
-                for name, checksum, size in rows:
-                    if not re.fullmatch(r'[a-f0-9]{2}/[a-f0-9]{40}', name):
-                        raise RuntimeError('Restored attachment has an unsafe path')
-                    path = root / name
-                    if path.is_symlink() or path.resolve() != path.absolute() or not path.is_file():
-                        raise RuntimeError('Restored attachment is missing')
-                    with path.open('rb') as handle:
-                        digest = hashlib.file_digest(handle, 'sha1').hexdigest()
-                    if digest != name.split('/')[1] or (checksum and digest != checksum) or (size is not None and path.stat().st_size != size):
-                        raise RuntimeError('Restored attachment failed integrity readback')
     modules = [name.strip() for name in (os.environ.get("ODOO_UPDATE_MODULES") or "").split(",") if name.strip()]
     if not modules or "AUTO" in modules:
         raise RuntimeError("Fresh copy needs exact declared module intent")
@@ -442,7 +426,7 @@ identity=capture['capture_id']
 if not re.fullmatch(r'[a-f0-9]{32}',identity):
     raise RuntimeError('Invalid capture identity')
 mode=spec['mode']
-chunk_size=65536
+chunk_size=__LP_NATIVE_CHUNK_BYTES__
 def path_for(part,index):
     return Path('/tmp')/('lp-native-'+identity+'-'+part+'-'+str(index))
 def chunks(part):
@@ -451,7 +435,9 @@ def chunks(part):
         raise RuntimeError('Invalid artifact receipt')
     return range((record['size']+chunk_size-1)//chunk_size)
 observed=[]
+whole={}
 for part in ('database','filestore'):
+    complete=True;whole_digest=hashlib.sha256();whole_size=0
     for index in chunks(part):
         path=path_for(part,index)
         if path.is_symlink() or (path.exists() and not path.is_file()):
@@ -459,12 +445,21 @@ for part in ('database','filestore'):
         if mode=='inspect':
             if path.exists():
                 with path.open('rb') as handle:
-                    digest=hashlib.file_digest(handle,'sha256').hexdigest()
-                observed.append({'part':part,'index':index,'size':path.stat().st_size,'sha256':digest})
+                    data=handle.read(chunk_size+1)
+                if len(data)>chunk_size:
+                    raise RuntimeError('Artifact staging exceeds its chunk bound')
+                observed.append({'part':part,'index':index,'size':len(data),'sha256':hashlib.sha256(data).hexdigest()})
+                expected=min(chunk_size,capture[part]['size']-index*chunk_size)
+                complete=complete and len(data)==expected
+                whole_digest.update(data);whole_size+=len(data)
+            else:
+                complete=False
         elif mode=='cleanup':
             path.unlink(missing_ok=True)
+    if mode=='inspect' and complete:
+        whole[part]={'sha256':whole_digest.hexdigest(),'size':whole_size}
 if mode=='inspect':
-    print(json.dumps(observed));sys.exit(0)
+    print(json.dumps({'chunks':observed,'artifacts':whole}));sys.exit(0)
 if mode=='cleanup':
     sys.exit(0)
 if mode!='prepare':
@@ -531,8 +526,8 @@ try:
             path.parent.mkdir(exist_ok=True)
             with archive.extractfile(member) as handle:
                 data=handle.read(member.size+1)
-            if len(data)!=member.size or hashlib.sha1(data).hexdigest()!=relative.name:
-                raise RuntimeError('Source attachment content differs from its name')
+            if len(data)!=member.size:
+                raise RuntimeError('Source attachment is truncated')
             if path.exists():
                 if not path.is_file() or path.read_bytes()!=data:
                     raise RuntimeError('An existing testing attachment differs')
@@ -565,7 +560,7 @@ try:
 finally:
     for path in artifacts.values():
         path.unlink(missing_ok=True)
-"""
+""".replace("__LP_NATIVE_CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES))
 
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = r"""
@@ -716,11 +711,13 @@ def restore_main():
                 raise RuntimeError('Existing testing database lacks its generation witness')
         prefix=sys.argv[2]
         capture=spec.get('native_capture')
+        artifacts={}
         if capture is not None and present=='0':
             files=json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
-            for item in files:
+            for item in files['chunks']:
                 print(prefix+json.dumps({'type':'chunk',**item}),flush=True)
-        print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1'}),flush=True)
+            artifacts=files['artifacts']
+        print(prefix+json.dumps({'type':'complete','runner':containers['script-runner'][1]['Id'],'resume':present=='1','artifacts':artifacts}),flush=True)
         return
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -789,7 +786,7 @@ def restore_main():
         if not resume:
             docker("exec", "-u", "root", runner, "chown", uid + ":" + gid, dump_path)
         workflow = spec["workflow_environment"]
-        environment = {**{key: value for key, value in workflow.items() if not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))}, "ODOO_FILESTORE_PATH": "/volumes/data/filestore", "ODOO_FILESTORE_OWNER": uid + ":" + gid, "ENV_OVERRIDE_DISABLE_CRON": "true", "ODOO_RESTORE_KEPT_INTEGRATIONS": "", "LAUNCHPLANE_NATIVE_COPY":str(gen.get('source_mode')=='container-export').lower()}
+        environment = {**{key: value for key, value in workflow.items() if not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))}, "ODOO_FILESTORE_PATH": "/volumes/data/filestore", "ODOO_FILESTORE_OWNER": uid + ":" + gid, "ENV_OVERRIDE_DISABLE_CRON": "true", "ODOO_RESTORE_KEPT_INTEGRATIONS": ""}
         arguments = ["exec", "-i"]
         for key, value in environment.items():
             if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
@@ -848,7 +845,7 @@ try:
     main()
 except PermissionError:
     if len(sys.argv)>2:
-        print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
+        print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
         sys.exit(1)
     print('odoo_restore_completed=false')
     print('testing_copy_sanitized=false')

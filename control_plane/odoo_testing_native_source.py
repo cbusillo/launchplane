@@ -8,11 +8,14 @@ import os
 from pathlib import Path
 import re
 import shutil
+import time
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, cast, TypeVar
 import uuid
 
 from control_plane.contracts.odoo_testing_source import (
+    NATIVE_TESTING_COPY_CHUNK_BYTES,
+    NATIVE_TESTING_COPY_CACHE_DIRECTORY,
     NativeOdooSourceAuthority,
     NativeOdooTestingSource,
     NativeTestingCopyArtifact,
@@ -27,6 +30,7 @@ from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import read_native_source, NativeSourceUnavailable
 from control_plane.dokploy.native_copy_stream import inspect_native_testing_receiver
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+from control_plane.dokploy.native_copy_stream import NativeUploadRejected
 from collections.abc import Callable
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -227,7 +231,7 @@ def _cache_directory(generation_binding: str) -> Path:
     state = os.environ.get("LAUNCHPLANE_STATE_DIR", "")
     if not state or not re.fullmatch(r"[a-f0-9]{64}", generation_binding):
         raise ValueError("Native copy needs the service's explicit artifact state directory.")
-    root = Path(state) / "private-testing-source" / generation_binding
+    root = Path(state) / NATIVE_TESTING_COPY_CACHE_DIRECTORY / generation_binding
     if not root.is_absolute() or root.resolve() != root.absolute():
         raise ValueError("Native copy cache cannot traverse symlinks.")
     root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -376,7 +380,7 @@ def prepare_native_testing_delivery(
 
     def inspect(
         current: NativeTestingCopyCapture | None,
-    ) -> tuple[str, bool, dict[tuple[str, int], dict[str, object]]]:
+    ) -> tuple[str, bool, dict[tuple[str, int], dict[str, object]], dict[str, object]]:
         frames: list[dict[str, object]] = []
         inspect_native_testing_receiver(
             host=host,
@@ -406,18 +410,25 @@ def prepare_native_testing_delivery(
             if key in chunks:
                 raise ValueError("The testing artifact readback is ambiguous.")
             chunks[key] = item
-        return str(complete[0]["runner"]), bool(complete[0]["resume"]), chunks
+        artifacts = complete[0].get("artifacts", {})
+        if not isinstance(artifacts, dict):
+            raise ValueError("The native artifact readback is invalid.")
+        return str(complete[0]["runner"]), bool(complete[0]["resume"]), chunks, artifacts
 
-    runner, resume, observed = inspect(capture)
+    runner, resume, observed, artifacts = inspect(capture)
     if resume:
         if capture is None:
             raise ValueError("The restored database has no immutable source capture receipt.")
+        return capture
+    if capture is not None and artifacts == {
+        part: getattr(capture, part).model_dump() for part in ("database", "filestore")
+    }:
         return capture
     if capture is None:
         capture = capture_native_testing_source(
             store, root=root, generation=generation, descriptor=descriptor
         )
-        runner, resume, observed = inspect(capture)
+        runner, resume, observed, _ = inspect(capture)
         if resume:
             raise ValueError("The testing database appeared during source capture.")
     files = verify_native_capture_files(capture)
@@ -426,7 +437,7 @@ def prepare_native_testing_delivery(
     for part, path in zip(("database", "filestore"), files, strict=True):
         with path.open("rb") as handle:
             index = 0
-            while content := handle.read(65536):
+            while content := handle.read(NATIVE_TESTING_COPY_CHUNK_BYTES):
                 key = (part, index)
                 value = {
                     "type": "chunk",
@@ -459,16 +470,23 @@ def prepare_native_testing_delivery(
                     if before_mutation is not None and not delivery_started:
                         before_mutation("native_testing_copy_chunk")
                         delivery_started = True
-                    api.upload_native_testing_chunk(
-                        host=host,
-                        token=token,
-                        server_id=server_id,
-                        container_id=runner,
-                        filename=f"lp-native-{capture.capture_id}-{part}-{index}",
-                        content=content,
-                    )
+                    for attempt in range(3):
+                        try:
+                            api.upload_native_testing_chunk(
+                                host=host,
+                                token=token,
+                                server_id=server_id,
+                                container_id=runner,
+                                filename=f"lp-native-{capture.capture_id}-{part}-{index}",
+                                content=content,
+                            )
+                            break
+                        except NativeUploadRejected as error:
+                            if not error.retryable or attempt == 2:
+                                raise
+                            time.sleep(attempt + 1)
                 index += 1
-    final_runner, resume, readback = inspect(capture)
+    final_runner, resume, readback, _ = inspect(capture)
     if final_runner != runner or resume or readback != expected:
         raise ValueError("The testing artifact bytes failed actual receiver readback.")
     return capture

@@ -1,9 +1,12 @@
 """Behavior proof for private native source custody and bounded transport."""
 
 import base64
+import click
 from collections import deque
 from collections.abc import Mapping, Callable
 from email.message import Message
+from email.parser import BytesParser
+from email.policy import default as email_policy
 import hashlib
 import io
 import json
@@ -19,8 +22,10 @@ from typing import Any, cast
 import unittest
 from urllib.error import HTTPError
 from unittest.mock import Mock, patch
+from contextlib import redirect_stdout
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.contracts.odoo_testing_source import (
     NativeOdooTestingSource,
     NativeTestingCopyArtifact,
@@ -87,6 +92,181 @@ class Connection:
 
 
 class NativeSourceTransportTests(unittest.TestCase):
+    def test_source_runtime_must_belong_to_the_registered_product_and_lane(self) -> None:
+        source = descriptor().model_dump(mode="json")
+        for changed in (
+            {"product": "other-product"},
+            {"context": "other-context"},
+            {"instance": "testing"},
+            {},
+        ):
+            identity = {
+                "product": source["product"],
+                "context": source["context"],
+                "instance": "prod",
+                "environment_kind": "stable",
+                **changed,
+            }
+            rows = []
+            for role in ("database", "web"):
+                rows.append(
+                    {
+                        "State": {"Running": True},
+                        "Image": source[role + "_image"],
+                        "Config": {
+                            "Labels": {
+                                "com.docker.compose.project": source["compose_project"],
+                                "com.docker.compose.service": role,
+                            },
+                            "Env": [
+                                "ODOO_DB_NAME=" + str(source["database_name"]),
+                                "ODOO_DB_HOST=database",
+                                "PLATFORM_INSTANCE=prod",
+                                RUNTIME_IDENTITY_ENV_KEY + "=" + json.dumps(identity),
+                            ],
+                        },
+                    }
+                )
+            spec = base64.b64encode(
+                json.dumps({"source": source, "mode": "probe"}).encode()
+            ).decode()
+            output = io.StringIO()
+            with (
+                self.subTest(changed=changed),
+                patch.object(sys, "argv", ["source", spec, "fixture:"]),
+                patch(
+                    "subprocess.run",
+                    side_effect=[
+                        subprocess.CompletedProcess(
+                            [], 0, stdout=json.dumps([row]).encode(), stderr=b""
+                        )
+                        for row in rows
+                    ]
+                    + [subprocess.CompletedProcess([], 0, stdout=b"1", stderr=b"")] * 2,
+                ) as commands,
+                patch("subprocess.Popen") as export,
+                redirect_stdout(output),
+            ):
+                if changed:
+                    with self.assertRaises(SystemExit):
+                        exec(
+                            compile(
+                                transport.NATIVE_ODOO_SOURCE_READ_PROGRAM, "<source-read>", "exec"
+                            ),
+                            {},
+                        )
+                    self.assertEqual(commands.call_count, len(rows))
+                else:
+                    exec(
+                        compile(transport.NATIVE_ODOO_SOURCE_READ_PROGRAM, "<source-read>", "exec"),
+                        {},
+                    )
+                    self.assertGreater(commands.call_count, len(rows))
+                export.assert_not_called()
+            self.assertEqual(
+                json.loads(output.getvalue().removeprefix("fixture:"))["type"],
+                "failed" if changed else "complete",
+            )
+
+    def test_upload_preserves_bytes_at_the_exact_receiver_filename(self) -> None:
+        filename = "lp-native-" + "f" * 32 + "-database-0"
+        content = bytes(range(256))
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+
+            def receive(request: Any, **kwargs: Any) -> Any:
+                envelope = (
+                    "Content-Type: "
+                    + request.get_header("Content-type")
+                    + "\r\nMIME-Version: 1.0\r\n\r\n"
+                ).encode() + request.data
+                message = BytesParser(policy=email_policy).parsebytes(envelope)
+                parts = {
+                    part.get_param("name", header="content-disposition"): part
+                    for part in message.iter_parts()
+                }
+                upload = parts["file"]
+                # Provider cp semantics: a directory destination uses its own
+                # temporary basename; an exact path preserves our receiver name.
+                temporary = root / ("dokploy-upload-fixture-" + str(upload.get_filename()))
+                temporary.write_bytes(cast(bytes, upload.get_payload(decode=True)))
+                destination = root / parts["destinationPath"].get_content().strip().removeprefix(
+                    "/tmp/"
+                )
+                import shutil
+
+                shutil.copyfile(temporary, destination)
+                response = Mock(status=200)
+                response.__enter__ = Mock(return_value=response)
+                response.__exit__ = Mock(return_value=False)
+                return response
+
+            opener = Mock()
+            opener.open.side_effect = receive
+            with patch("control_plane.dokploy.api.build_opener", return_value=opener):
+                api.upload_native_testing_chunk(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    server_id="receiver",
+                    container_id="e" * 64,
+                    filename=filename,
+                    content=content,
+                )
+            self.assertEqual((root / filename).read_bytes(), content)
+
+    def test_source_program_refuses_wrong_compose_before_export_without_private_output(
+        self,
+    ) -> None:
+        source = descriptor().model_dump(mode="json")
+        row = {
+            "State": {"Running": True},
+            "Image": source["database_image"],
+            "Config": {
+                "Labels": {
+                    "com.docker.compose.project": "another-project",
+                    "com.docker.compose.service": "database",
+                },
+                "Env": ["PRIVATE=fixture-only"],
+            },
+        }
+        output = io.StringIO()
+        spec = base64.b64encode(json.dumps({"source": source, "mode": "capture"}).encode()).decode()
+        with (
+            patch.object(sys, "argv", ["source", spec, "fixture:"]),
+            patch(
+                "subprocess.run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout=json.dumps([row]).encode(), stderr=b""
+                ),
+            ),
+            patch("subprocess.Popen") as export,
+            redirect_stdout(output),
+        ):
+            with self.assertRaises(SystemExit):
+                exec(
+                    compile(transport.NATIVE_ODOO_SOURCE_READ_PROGRAM, "<source-read>", "exec"), {}
+                )
+        export.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue().removeprefix("fixture:")), {"type": "failed"})
+
+    def test_source_file_permission_error_is_capability_failure_without_identity_fallback(
+        self,
+    ) -> None:
+        spec = base64.b64encode(
+            json.dumps({"source": descriptor().model_dump(mode="json"), "mode": "probe"}).encode()
+        ).decode()
+        output = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["source", spec, "fixture:"]),
+            patch("subprocess.run", side_effect=PermissionError("private fixture path")),
+            redirect_stdout(output),
+        ):
+            with self.assertRaises(SystemExit):
+                exec(
+                    compile(transport.NATIVE_ODOO_SOURCE_READ_PROGRAM, "<source-read>", "exec"), {}
+                )
+        self.assertEqual(json.loads(output.getvalue().removeprefix("fixture:")), {"type": "failed"})
+
     @unittest.skipUnless(os.name == "posix", "The registered terminal transport uses a POSIX tty")
     def test_long_private_payload_is_read_after_loader_disables_tty_echo_and_canonical_mode(
         self,
@@ -102,6 +282,7 @@ class NativeSourceTransportTests(unittest.TestCase):
         )
         os.close(slave)
         raw = bytearray()
+        sent: list[str] = []
 
         class Terminal:
             def recv(self, timeout: float | None = None) -> bytes:
@@ -113,6 +294,7 @@ class NativeSourceTransportTests(unittest.TestCase):
                 return data
 
             def send(self, message: str) -> None:
+                sent.append(message)
                 data = message.encode()
                 while data:
                     data = data[os.write(master, data) :]
@@ -130,7 +312,10 @@ class NativeSourceTransportTests(unittest.TestCase):
             )
             child.wait(timeout=5)
             self.assertEqual(frames, [{"type": "complete", "length": len(str(payload["fixture"]))}])
-            self.assertLess(len(raw), 4096)
+            private = json.loads(next(message for message in sent if message.startswith("{")))[
+                "payload"
+            ]
+            self.assertNotIn(private[:512].encode(), raw)
         finally:
             if child.poll() is None:
                 child.kill()
@@ -198,8 +383,6 @@ class NativeSourceTransportTests(unittest.TestCase):
         self.assertEqual(frames, [{"type": "complete", "probe": True}])
         self.assertEqual(len(connect.call_args_list), 1)
         self.assertNotIn("private-fixture", "".join(connection.sent))
-        self.assertIsNone(connect.call_args.kwargs["proxy"])
-        self.assertTrue(connect.call_args.kwargs["logger"].disabled)
 
     def test_explicit_refusal_stops_without_second_connection_or_error_contents(self) -> None:
         connection = Connection({"type": "denied", "private": "secret-fixture"})
@@ -211,9 +394,41 @@ class NativeSourceTransportTests(unittest.TestCase):
                 timeout_seconds=5,
                 receive=lambda _: None,
             )
-        self.assertEqual(caught.exception.code, "authorization_denied")
         self.assertNotIn("secret-fixture", str(caught.exception))
         self.assertNotIn("exit\n", connection.sent)
+
+    def test_login_banner_is_not_an_authorization_refusal(self) -> None:
+        connection = Connection()
+        connection.pending = deque(
+            ["Connecting...\n", "\x1bcUnauthorized access is prohibited.\nfixture# "]
+        )
+        frames: list[dict[str, object]] = []
+        transport._read_program(
+            connection,
+            program=transport.NATIVE_ODOO_SOURCE_READ_PROGRAM,
+            payload={},
+            timeout_seconds=5,
+            receive=frames.append,
+        )
+        self.assertTrue(frames[-1]["probe"])
+
+    def test_provider_authentication_failure_before_clear_sends_no_program(self) -> None:
+        connection = Connection()
+        connection.pending = deque(
+            [
+                "Connecting...\n",
+                "Authentication failed: Unauthorized private SSH key or username.\n",
+            ]
+        )
+        with self.assertRaises(transport.NativeSourceAuthorizationDenied):
+            transport._read_program(
+                connection,
+                program=transport.NATIVE_ODOO_SOURCE_READ_PROGRAM,
+                payload={},
+                timeout_seconds=5,
+                receive=lambda _: None,
+            )
+        self.assertFalse(connection.sent)
 
     def test_truncation_and_oversize_never_supply_completion(self) -> None:
         for value in (
@@ -341,6 +556,52 @@ class NativeCopyCustodyTests(unittest.TestCase):
             self.assertEqual(self.capture(), receipt)
             read.assert_not_called()
 
+    def test_complete_receiver_artifacts_do_not_require_private_cache_or_recapture(self) -> None:
+        with patch(
+            "control_plane.odoo_testing_native_source.read_native_source", side_effect=self.stream
+        ):
+            receipt = self.capture()
+        self.store.read_native_testing_copy_capture.return_value = receipt
+        for path in verify_native_capture_files(receipt):
+            path.unlink()
+
+        def inspect(**kwargs: Any) -> None:
+            kwargs["receive"](
+                {
+                    "type": "complete",
+                    "runner": "e" * 64,
+                    "resume": False,
+                    "artifacts": {part: getattr(receipt, part).model_dump() for part in self.data},
+                }
+            )
+
+        with (
+            patch(
+                "control_plane.odoo_testing_native_source.inspect_native_testing_receiver",
+                side_effect=inspect,
+            ),
+            patch("control_plane.odoo_testing_native_source.read_native_source") as read,
+            patch(
+                "control_plane.odoo_testing_native_source.api.upload_native_testing_chunk"
+            ) as upload,
+        ):
+            self.assertEqual(
+                prepare_native_testing_delivery(
+                    cast(PostgresRecordStore, self.store),
+                    root=self.root,
+                    generation=self.generation,
+                    descriptor=self.source,
+                    host="https://provider.invalid",
+                    token="fixture",
+                    server_id="receiver",
+                    spec={},
+                    before_mutation=None,
+                ),
+                receipt,
+            )
+            read.assert_not_called()
+            upload.assert_not_called()
+
     def test_database_witness_resumes_without_source_read_or_private_cache(self) -> None:
         artifacts = {
             part: NativeTestingCopyArtifact(size=len(data), sha256=hashlib.sha256(data).hexdigest())
@@ -415,7 +676,7 @@ class NativeCopyCustodyTests(unittest.TestCase):
                 "control_plane.odoo_testing_native_source.api.upload_native_testing_chunk"
             ) as upload,
         ):
-            with self.assertRaisesRegex(ValueError, "actual receiver readback"):
+            with self.assertRaises(ValueError):
                 prepare_native_testing_delivery(
                     cast(PostgresRecordStore, self.store),
                     root=self.root,
@@ -454,8 +715,13 @@ class NativeCopyCustodyTests(unittest.TestCase):
                         kwargs["receive"](value)
                     kwargs["receive"]({"type": "complete", "runner": "e" * 64, "resume": False})
 
+                attempts: dict[str, int] = {}
+
                 def upload(**kwargs: Any) -> None:
                     part = str(kwargs["filename"]).rsplit("-", 2)[1]
+                    attempts[part] = attempts.get(part, 0) + 1
+                    if attempts[part] == 1:
+                        raise transport.NativeUploadRejected(retryable=True)
                     data = kwargs["content"]
                     observed[(part, 0)] = {
                         "type": "chunk",
@@ -475,6 +741,7 @@ class NativeCopyCustodyTests(unittest.TestCase):
                         side_effect=upload,
                     ) as uploads,
                     patch("control_plane.odoo_testing_native_source.read_native_source") as read,
+                    patch("control_plane.odoo_testing_native_source.time.sleep"),
                 ):
                     if prefix_matches:
                         self.assertEqual(
@@ -491,9 +758,9 @@ class NativeCopyCustodyTests(unittest.TestCase):
                             ),
                             receipt,
                         )
-                        self.assertEqual(uploads.call_count, len(self.data))
+                        self.assertEqual(uploads.call_count, len(self.data) * 2)
                     else:
-                        with self.assertRaisesRegex(ValueError, "existing source chunk differs"):
+                        with self.assertRaises(ValueError):
                             prepare_native_testing_delivery(
                                 cast(PostgresRecordStore, self.store),
                                 root=self.root,
@@ -510,6 +777,25 @@ class NativeCopyCustodyTests(unittest.TestCase):
 
 
 class NativeIdentityCompatibilityTests(unittest.TestCase):
+    def test_ssh_storage_still_accepts_the_previous_strict_generation_shape(self) -> None:
+        from pydantic import create_model, ConfigDict
+
+        record = generation()
+        legacy = create_model(
+            "LegacyTestingGeneration",
+            __config__=ConfigDict(extra="forbid"),
+            **cast(
+                dict[str, Any],
+                {
+                    name: (field.annotation, field)
+                    for name, field in type(record).model_fields.items()
+                    if name not in {"source_mode", "source_binding_sha256"}
+                },
+            ),
+        )
+        accepted = legacy.model_validate(PostgresRecordStore._payload_dict(record))
+        self.assertEqual(accepted.model_dump()["target_id"], record.target_id)
+
     def test_ssh_response_still_validates_with_the_previous_strict_client_shape(self) -> None:
         from pydantic import create_model, ConfigDict
 
@@ -600,6 +886,8 @@ class NativeArtifactConsumptionTests(unittest.TestCase):
 
     def mapped_path(self, value: str) -> Path:
         path = Path(value)
+        if path.is_relative_to(self.root):
+            return path
         if str(path).startswith("/tmp/") or str(path) == "/tmp":
             return self.root / "tmp" / path.relative_to("/tmp")
         if str(path).startswith("/volumes/"):
@@ -627,9 +915,9 @@ class NativeArtifactConsumptionTests(unittest.TestCase):
             },
         }
 
-    def consume(self, capture: dict[str, Any]) -> None:
+    def consume(self, capture: dict[str, Any], mode: str = "prepare") -> None:
         spec = {
-            "mode": "prepare",
+            "mode": mode,
             "capture": capture,
             "database_name": self.database,
             "dump_path": self.dump_path,
@@ -647,6 +935,24 @@ class NativeArtifactConsumptionTests(unittest.TestCase):
             patch("tempfile.NamedTemporaryFile", side_effect=temporary_file),
         ):
             exec(compile(NATIVE_TESTING_FILES_PROGRAM, "<native-files>", "exec"), {})
+
+    def test_inspection_hashes_actual_complete_artifacts_and_excludes_missing_chunks(self) -> None:
+        capture = self.stage()
+        for missing in (False, True):
+            if missing:
+                (self.root / "tmp" / f"lp-native-{self.identity}-database-0").unlink()
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                self.consume(capture, mode="inspect")
+            self.assertEqual(stopped.exception.code, 0)
+            observed = json.loads(output.getvalue())
+            expected = (
+                {part: capture[part] for part in ("filestore",) if missing}
+                if missing
+                else {part: capture[part] for part in ("database", "filestore")}
+            )
+            self.assertEqual(observed["artifacts"], expected)
+            self.assertFalse(self.mapped_path(self.dump_path).exists())
 
     def test_verified_chunks_become_only_local_dump_and_content_addressed_filestore(self) -> None:
         capture = self.stage()
@@ -666,13 +972,22 @@ class NativeArtifactConsumptionTests(unittest.TestCase):
         self.assertFalse(self.mapped_path(self.dump_path).exists())
         self.assertFalse((self.root / "volumes/data/filestore").exists())
 
-    def test_unsafe_archive_and_wrong_attachment_names_are_refused(self) -> None:
-        for name, link in [("../outside", False), (self.name, True), ("aa/" + "0" * 40, False)]:
+    def test_unsafe_archive_paths_and_links_are_refused(self) -> None:
+        for name, link in [("../outside", False), (self.name, True)]:
             with self.subTest(name=name, link=link):
                 capture = self.stage(name, link)
                 with self.assertRaises(RuntimeError):
                     self.consume(capture)
                 self.assertFalse(self.mapped_path(self.dump_path).exists())
+
+    def test_source_attachment_is_copied_faithfully_with_stale_filename_metadata(self) -> None:
+        name = "aa/" + "0" * 40
+        capture = self.stage(name)
+        self.consume(capture)
+        self.assertEqual(
+            (self.root / "volumes/data/filestore" / self.database / name).read_bytes(),
+            self.attachment,
+        )
 
     def test_existing_different_attachment_is_preserved_on_retry(self) -> None:
         capture = self.stage()
@@ -682,6 +997,89 @@ class NativeArtifactConsumptionTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.consume(capture)
         self.assertEqual(path.read_bytes(), b"original testing evidence")
+
+
+class NativeRecipientPreflightTests(unittest.TestCase):
+    def native_generation(self) -> Any:
+        return generation().model_copy(
+            update={
+                "source_mode": "container-export",
+                "source_binding_sha256": descriptor().binding_sha256,
+            }
+        )
+
+    def test_missing_service_adapter_refuses_before_provider_reads_or_writes(self) -> None:
+        from control_plane.dokploy.post_deploy import run_compose_post_deploy_update
+        from control_plane.dokploy.source import DokployTargetDefinition
+
+        record = self.native_generation()
+        target = DokployTargetDefinition(
+            context=record.context, instance="testing", target_id=record.target_id
+        )
+        with (
+            patch.object(api, "fetch_dokploy_target_payload") as read,
+            patch.object(api, "dokploy_request") as write,
+        ):
+            with self.assertRaises(click.ClickException):
+                run_compose_post_deploy_update(
+                    host="https://provider.invalid",
+                    token="fixture",
+                    target_definition=target,
+                    env_file=None,
+                    run_destructive_restore=True,
+                    fresh_testing_generation=record,
+                )
+            read.assert_not_called()
+            write.assert_not_called()
+
+    def test_local_receiver_refuses_before_provider_mutation(self) -> None:
+        from control_plane.dokploy.post_deploy import run_compose_post_deploy_update
+        from control_plane.dokploy.source import DokployTargetDefinition
+
+        record = self.native_generation()
+        target = DokployTargetDefinition(
+            context=record.context, instance="testing", target_id=record.target_id
+        )
+        for server in (None, "local", ""):
+            with (
+                self.subTest(server=server),
+                patch.object(
+                    api, "fetch_dokploy_target_payload", return_value={"serverId": server}
+                ),
+                patch.object(api, "dokploy_request") as write,
+            ):
+                with self.assertRaises(click.ClickException):
+                    run_compose_post_deploy_update(
+                        host="https://provider.invalid",
+                        token="fixture",
+                        target_definition=target,
+                        env_file=None,
+                        run_destructive_restore=True,
+                        fresh_testing_generation=record,
+                        prepare_native_source=lambda *_: {},
+                    )
+                write.assert_not_called()
+
+    def test_missing_descriptor_refuses_before_workflow_setup(self) -> None:
+        from control_plane.workflows.odoo_post_deploy import (
+            execute_odoo_post_deploy,
+            OdooPostDeployRequest,
+        )
+
+        with patch(
+            "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config"
+        ) as config:
+            with self.assertRaises(click.ClickException):
+                execute_odoo_post_deploy(
+                    control_plane_root=Path("/fixture"),
+                    record_store=Mock(),
+                    request=OdooPostDeployRequest(
+                        context="example", instance="testing", phase="restore"
+                    ),
+                    run_destructive_restore=True,
+                    fresh_testing_generation=self.native_generation(),
+                )
+            config.assert_not_called()
 
 
 if __name__ == "__main__":

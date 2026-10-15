@@ -2149,6 +2149,12 @@ def execute_odoo_stable_target_replacement_apply(
                 target_id=target_id_record.target_id,
             )
         with _failure_stage(deploy_blocked_code("site_environment_unresolved")):
+            if generation is not None and generation.source_mode == "container-export":
+                from control_plane.dokploy.native_copy_stream import (
+                    require_registered_remote_server,
+                )
+
+                require_registered_remote_server(target_payload.get("serverId"))
             site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
                 control_plane_root=control_plane_root,
                 context_name=plan.context,

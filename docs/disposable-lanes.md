@@ -535,11 +535,19 @@ fingerprints and generation identities retain their previous meaning. Source
 mode is explicit; a failed SSH restore never selects another transport.
 
 Container export uses the provider's existing registered remote server terminal
-and identity. It refuses the provider's local key-generating terminal. Fixed
+and identity. Both source and recipient must use registered remote servers;
+preflight refuses local or missing recipients before testing writes. It refuses
+the provider's local key-generating terminal. Fixed
 commands read `pg_dump` output inside the recorded database container and stream
 the recorded web container's filestore; they create no production dump/archive,
 schedule, attachment pin, password or other persistent source file. A read-only
 probe and source identity checks precede the first testing provider write.
+The source web container's injected runtime identity must match the registered
+product, context and stable production instance. Before a live capture, read
+production's current operation and provider deployment state and wait for active
+maintenance to finish. This is an operational precaution, not an atomic exclusion
+of future production work. The bounded dump takes ordinary PostgreSQL read locks;
+this flow does not pause production or create a production reservation.
 An authorization refusal stops under the same identity. No new access grant or
 source credential is delivered to the testing containers.
 
@@ -550,9 +558,13 @@ source bytes only in its private `LAUNCHPLANE_STATE_DIR/private-testing-source/`
 cache, with directories and files readable only by the service user. Each artifact is bounded to 128 MiB;
 expanded attachments are bounded to 512 MiB. An immutable PostgreSQL receipt
 binds the generation, source observation, byte lengths and SHA256 digests before
-delivery. This cache uses the documented shared service state volume and is not
-a public asset store or runtime-configuration authority.
+delivery. A dedicated persistent `launchplane-odoo-copy` volume overlays this
+directory only in the API and Odoo worker. Other workers do not receive it. This
+is private copy custody, not a public asset store or runtime-configuration authority.
 
+Delivery uses the provider's native multipart tRPC upload route under the same
+existing identity, with no alternate-route fallback. Each upload names its exact
+destination file rather than relying on the provider's temporary filename.
 Delivery uses at most 64 KiB per provider upload into the qualified runner's
 writable temporary layer, with metadata-only effect journaling. Provider upload
 success is provisional: actual receiver sizes and hashes must agree before the
@@ -562,15 +574,19 @@ are proven to be an exact prefix of the same immutable original; other differing
 chunks remain held. Attachment publication is atomic, so an interrupted write
 does not publish a partial content-addressed file. An existing
 database must hold the exact generation's committed copy witness; that resume
-does not recapture or require the raw cache. A receipt whose raw files are
-missing without that database witness is held for recovery, never silently
-replaced with a newer production snapshot.
+does not recapture or require the raw cache. Complete receiver artifacts whose
+actual whole-file sizes and hashes match the immutable receipt also permit
+recovery without the private cache. Missing original bytes in both places,
+without a database witness, are held for recovery, never silently replaced with
+a newer production snapshot.
 
 The receiver verifies whole artifacts and rejects archive traversal, symlinks,
 hardlinks and special files. Only content-addressed Odoo attachment files enter
 the testing filestore. The custom database dump goes through the existing
 SQL-only credential and connection sanitization boundary before a registry
-process runs; every stored attachment reference must match the local bytes.
+process runs. Whole-artifact hashes verify copy fidelity. The copy preserves
+pre-existing attachment data and missing-file references as the source export
+contains them; it does not introduce an attachment-repair or completeness policy.
 Module, integration and website readback still precede the web gate. Successful
 readback removes raw receiver chunks and private cached bytes, retaining the
 immutable DB receipt. Failed attempts retain original chunks/cache and keep the
@@ -580,7 +596,12 @@ or fabricate a completion witness as cleanup.
 Chunk dispatches share one aggregate recovery-journal effect; its acknowledgement
 describes the current synchronous upload. After acknowledged delivery, existing
 terminal-provider/executor exclusion permits reconciliation and reuse of the
-same generation's receipt. An unacknowledged upload reply stays fenced under
+same generation's receipt. A provider validation refusal or explicit remote exit
+acknowledges a terminated upload. Only explicit failed remote exits are retried
+in process, at most three times with the same bytes. Authorization refusals stop.
+Unknown server errors and transport timeouts retain the uncertain effect fence;
+an HTTP error alone does not prove that its remote command ended.
+An unacknowledged upload reply stays fenced under
 the existing uncertain-dispatch rules; file presence alone never proves the
 remote call ended. Once a capture receipt is recorded, retry/readback uses that
 original source binding rather than probing live production or requiring its
@@ -589,8 +610,10 @@ credential isolation checks still apply. A lost receipt-commit reply retains
 the private bytes because the DB commit may already have succeeded.
 
 For updates, run the schema migration and deploy this image to the API and Odoo
-worker with their existing shared state volume before selecting container export.
-Verify their running revision and the bootstrap dry-run. After a completed copy,
+worker with the dedicated copy volume before selecting container export.
+Verify their running revision, actual volume mounts and the bootstrap dry-run.
+The Compose qualification fixture proves API/Odoo custody across recreation and
+that an unrelated worker cannot read the copy. After a completed copy,
 ordinary deployments use existing data; another production refresh needs a
 separately qualified generation. On a failed or interrupted copy, preserve the
 original request/key, generation, immutable capture receipt and private cache;
@@ -600,7 +623,10 @@ records: retain this image or a compatible successor and forward-fix instead of
 rolling records back or deleting evidence. Unreferenced pre-receipt cache
 directories may be removed only after the owning executor is stopped and their
 absence from retained capture receipts is verified; published failed captures
-remain recovery evidence.
+remain recovery evidence. There is no automatic raw-copy expiry: do not remove
+ambiguous or failed published captures merely because time has elapsed. Default
+SSH generations retain their previous stored field shape; this does not promise
+that older images can interpret native generations or newer schema migrations.
 
 The service compares the existing local testing passwords with the supported
 production source's managed versions internally, without returning or retaining
