@@ -28,6 +28,7 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.connection_isolation import run_connection_isolation
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
@@ -199,6 +200,7 @@ def execute_odoo_post_deploy(
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
+    fresh_testing_generation: FreshOdooTestingGeneration | None = None,
 ) -> OdooPostDeployResult:
     if request.connection_isolation is not None:
         target = _resolve_compose_target_definition(
@@ -335,6 +337,7 @@ def execute_odoo_post_deploy(
                 deployment_title=provider_operation_title,
                 schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
                 allow_historical_sender_contract=allow_historical_sender_contract,
+                fresh_testing_generation=fresh_testing_generation,
             )
             or {}
         )

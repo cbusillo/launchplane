@@ -12,6 +12,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.integration_readback import web_held_until_integration_readback
+from control_plane.odoo_testing_restore import read_current_testing_generation
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
@@ -1404,6 +1405,24 @@ def build_odoo_stable_target_replacement_plan(
         block("target_not_compose", "Odoo stable replacement currently requires a compose target.")
     approval_issue_url = ""
     destructive_backup_required = _replacement_backup_required(profile, lane, request)
+    generation = read_current_testing_generation(
+        record_store, product=profile.product, context=lane.context, instance=lane.instance
+    )
+    fresh_bootstrap = bool(
+        generation
+        and not generation.completed_at
+        and request.data_source_mode == "upstream_restore"
+    )
+    if fresh_bootstrap:
+        # The old target and its data remain in immutable custody. This generation
+        # owns only newly qualified storage, so there is no old data to back up.
+        # Normal replacements, including every production request, keep their gate.
+        if not lane.odoo_data_policy.allows_rebuild_source("upstream_restore"):
+            block(
+                "prelaunch_rebuild_policy_refused",
+                "Fresh testing requires its recorded upstream restore policy.",
+            )
+        destructive_backup_required = False
     if destructive_backup_required:
         try:
             odoo_backup_paths_from_runtime(
@@ -1446,11 +1465,15 @@ def build_odoo_stable_target_replacement_plan(
             request=resolved_dokploy_request,
         )
         try:
-            approval_issue_url = _assert_prelaunch_rebuild_policy_allows_request(
-                request=request,
-                lane=lane,
-                target_name=current_target.target_name,
-                domain_hosts=current_target.domain_hosts,
+            approval_issue_url = (
+                ""
+                if fresh_bootstrap
+                else _assert_prelaunch_rebuild_policy_allows_request(
+                    request=request,
+                    lane=lane,
+                    target_name=current_target.target_name,
+                    domain_hosts=current_target.domain_hosts,
+                )
             )
         except click.ClickException as error:
             block("prelaunch_rebuild_policy_refused", str(error))
@@ -1781,6 +1804,9 @@ def execute_odoo_stable_target_replacement_apply(
     target_id_record = record_store.read_dokploy_target_id_record(
         context_name=plan.context, instance_name=plan.instance
     )
+    generation = read_current_testing_generation(
+        record_store, product=profile.product, context=plan.context, instance=plan.instance
+    )
     if target_record.target_type != "compose":
         raise OdooTargetReplacementStageError(
             "target_not_compose", "Odoo target replacement apply requires a compose target."
@@ -1912,6 +1938,17 @@ def execute_odoo_stable_target_replacement_apply(
     captured_proof: dict[str, str] = {}
 
     def check_backup_proof() -> None:
+        if (
+            generation is not None
+            and not generation.completed_at
+            and request.data_source_mode == "upstream_restore"
+        ):
+            current = read_current_testing_generation(
+                record_store, product=profile.product, context=plan.context, instance=plan.instance
+            )
+            if current != generation:
+                raise click.ClickException("Fresh testing generation changed after planning.")
+            return
         with _failure_stage(deploy_blocked_code("backup_restore_proof_required")):
             try:
                 current_profile = record_store.read_product_profile_record(request.product)
@@ -2121,6 +2158,9 @@ def execute_odoo_stable_target_replacement_apply(
             hold_web_until_integration_readback=web_held_until_integration_readback(plan.instance),
             domain_hosts=plan.expected_domain_hosts,
             runtime_port=profile.runtime_port,
+            publish_host_ports=generation is None,
+            mount_workflow_ssh=generation is None,
+            isolated_testing=generation is not None,
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         current_identity = _runtime_identity_map(current_env_map)
@@ -2630,6 +2670,7 @@ def execute_odoo_stable_target_replacement_apply(
                 schedule_execution_timeout_seconds=(
                     request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
                 ),
+                fresh_testing_generation=generation if post_deploy_phase == "restore" else None,
             )
     except OdooProviderEffectUncertainError:
         runtime_source["provider_outcome"] = "uncertain"
@@ -2870,6 +2911,9 @@ def execute_odoo_stable_target_replacement_apply(
     record_store.write_environment_inventory(
         build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
     )
+    if generation is not None and not generation.completed_at:
+        writer = getattr(record_store, "write_fresh_odoo_testing_generation")
+        writer(generation.model_copy(update={"completed_at": finished_at}))
     with _failure_stage("release_tuple_mint_failed"):
         release_tuple_id = _write_release_tuple_from_deployment(
             record_store=record_store,

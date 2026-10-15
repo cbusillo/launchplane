@@ -109,7 +109,7 @@ def service_testing_operation(operation: OdooStableTargetReplacementOperationRec
         and authorization.grant == "launchplane_reconcile"
         and not authorization.release_decision_record_id
         and operation.request.strategy == "recreate-in-place"
-        and operation.request.data_source_mode == "existing"
+        and operation.request.data_source_mode in {"existing", "upstream_restore"}
     )
 
 

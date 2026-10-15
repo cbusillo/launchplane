@@ -175,6 +175,7 @@ from control_plane.contracts.disposable_lane import (
     DisposableTestingReplacementPreparation,
     DisposableTestingResourcePreparation,
 )
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
@@ -3894,6 +3895,13 @@ class LaunchplaneDisposableTestingResourceAllocationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneFreshOdooTestingGenerationRow(Base):
+    __tablename__ = "launchplane_fresh_odoo_testing_generations"
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneProductProfileRow(Base):
     __tablename__ = "launchplane_product_profiles"
     __table_args__ = (
@@ -6201,7 +6209,8 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneSecretBindingRow
                 | LaunchplaneDisposableLaneSafetyRow
                 | LaunchplaneDisposableReplacementPreparationRow
-                | LaunchplaneDisposableTestingResourceAllocationRow,
+                | LaunchplaneDisposableTestingResourceAllocationRow
+                | LaunchplaneFreshOdooTestingGenerationRow,
             ):
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
@@ -10554,6 +10563,39 @@ class PostgresRecordStore(HumanSessionStore):
             return DisposableTestingResourcePreparation.model_validate(
                 {**custody.payload, **(allocation.payload if allocation is not None else {})}
             )
+
+    def read_fresh_odoo_testing_generation(
+        self, product: str, context: str
+    ) -> FreshOdooTestingGeneration | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
+            return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
+
+    def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (record.product, record.context),
+                with_for_update=True,
+            )
+            if row is not None:
+                previous = FreshOdooTestingGeneration.model_validate(row.payload)
+                if previous.model_dump(exclude={"completed_at"}) != record.model_dump(
+                    exclude={"completed_at"}
+                ):
+                    raise ValueError("Fresh testing generation identities are immutable.")
+                if previous.completed_at and previous.completed_at != record.completed_at:
+                    raise ValueError("Fresh testing generation completion is immutable.")
+            session.merge(
+                LaunchplaneFreshOdooTestingGenerationRow(
+                    product=record.product,
+                    context=record.context,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
 
     def compare_and_write_disposable_resource_preparation(
         self,

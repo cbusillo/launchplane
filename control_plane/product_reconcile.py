@@ -552,6 +552,11 @@ def reconcile_testing_target(
         record_store=cast(VerifiedArtifactStore, record_store), verified=desired
     )
     # The request the product's testing-deploy workflow sent before Launchplane took over.
+    from control_plane.odoo_testing_restore import read_current_testing_generation
+
+    generation = read_current_testing_generation(
+        record_store, product=profile.product, context=lane.context, instance="testing"
+    )
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
         replacement=OdooStableTargetReplacementApplyRequest(
@@ -559,7 +564,9 @@ def reconcile_testing_target(
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
             allow_empty_data=True,
-            data_source_mode="existing",
+            data_source_mode="upstream_restore"
+            if generation and not generation.completed_at
+            else "existing",
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
         ),
