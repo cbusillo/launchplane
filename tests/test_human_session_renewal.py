@@ -152,7 +152,8 @@ class HumanSessionRenewalTests(unittest.TestCase):
                     )
                 self.assertIsNone(self.refresh())
                 self.assertIsNone(self.store.read_session(self.session.session_id))
-                self.assertIsNone(self.manager.renew_if_needed(self.session))
+                self.manager.renew_if_needed(self.session)
+                self.assertIsNone(self.store.read_session(self.session.session_id))
 
     def test_missing_credentials_never_extend_stale_claims(self) -> None:
         self.session = self.manager.issue(_identity())
@@ -186,6 +187,33 @@ class HumanSessionRenewalTests(unittest.TestCase):
         self.assertEqual(stored.claims_verified_at, refreshed.claims_verified_at)
         self.assertIsNone(self.manager.consume_csrf_token(self.session, token))
         self.assertEqual(self.refresh().csrf_generation, stored.csrf_generation)
+
+    def test_new_sign_in_collects_abandoned_expired_credential(self) -> None:
+        expired = replace(self.session, expires_at=self.now - timedelta(seconds=1))
+        self.store.write_session(expired)
+        self.manager.issue(_identity(), self.credential)
+        self.assertIsNone(self.store.read_session_without_cleanup(expired.session_id))
+
+    def test_busy_refresh_never_accepts_stale_claims_or_extends_cookie(self) -> None:
+        from control_plane.service_human_auth import HumanSessionUpdateBusy
+
+        self.advance_to_refresh()
+        with patch.object(self.store, "update_session", side_effect=HumanSessionUpdateBusy):
+            self.assertEqual(self.refresh(), self.session)
+            self.now = self.session.created_at + timedelta(
+                seconds=SESSION_AUTHORIZATION_CLAIMS_TTL_SECONDS
+            )
+            self.assertIsNone(self.refresh())
+        self.assertEqual(self.store.read_session(self.session.session_id), self.session)
+        self.client.revalidate.assert_not_called()
+
+    def test_verification_failure_logs_type_without_provider_secret(self) -> None:
+        self.advance_to_refresh()
+        self.client.revalidate.side_effect = OSError("synthetic-private-token")
+        with self.assertLogs("control_plane.service_human_auth", level="WARNING") as logs:
+            self.assertIsNone(self.refresh())
+        self.assertIn("OSError", " ".join(logs.output))
+        self.assertNotIn("synthetic-private-token", " ".join(logs.output))
 
     def test_client_session_stores_no_credential_and_never_refreshes_identity(self) -> None:
         owner = self.manager.issue(replace(_identity(), role="owner"), self.credential)
@@ -246,7 +274,7 @@ class GitHubCredentialRefreshTests(unittest.TestCase):
         credential = GitHubOAuthCredential("long-lived-access")
         self.assertEqual(self.revalidate(credential).credential, credential)
         self.http.refresh_token.assert_not_called()
-        self.assertEqual(self.http.get.call_count, len(self.payloads))
+        self.assertEqual(self.http.token["access_token"], credential.access_token)
 
     def test_expired_refresh_or_refresh_error_refuses_identity(self) -> None:
         for refresh_token, refresh_deadline in (("", None), ("expired-refresh", self.now)):

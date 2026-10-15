@@ -2060,8 +2060,10 @@ Never copy credentials into existing session rows. Expiring and long-lived
 GitHub tokens are both supported without changing the app's expiration setting.
 
 OAuth ciphertext and verification time live in the existing DB session payload;
-there is no schema migration. Logout, revocation and expired-session cleanup
-remove the row and its credential. Database backups may retain ciphertext under
+there is no schema migration. Logout and revocation remove the row and its credential. New sign-ins and
+provider-refresh attempts opportunistically purge expired rows, skipping locked
+rows until the next pass. An unused service performs no sweep; its encrypted
+expired rows remain until the next sign-in or refresh. Database backups may retain ciphertext under
 their existing retention policy; keep the bootstrap secret out of those exports.
 The scrubbed stored-record export excludes the session table entirely. A normal
 bootstrap-secret rotation invalidates both old cookies and credential custody,

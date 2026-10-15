@@ -546,7 +546,11 @@ from control_plane.service_auth import (
     effective_administrator_quorum,
     strict_immutable_github_human_administrator_ids,
 )
-from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
+from control_plane.service_human_auth import (
+    HumanSessionStore,
+    HumanSessionUpdateBusy,
+    LaunchplaneHumanSession,
+)
 from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
@@ -13412,21 +13416,52 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
         return tuple(affected_operation_ids)
 
+    def delete_expired_sessions(self, now: datetime) -> None:
+        with self._session_factory() as session:
+            # Issuance stores UTC ISO timestamps. Skip any expired row whose
+            # worker still owns it; a later login/refresh will collect it.
+            expired = (
+                select(LaunchplaneHumanSessionRow.session_id)
+                .where(
+                    LaunchplaneHumanSessionRow.expires_at
+                    <= now.astimezone(timezone.utc).isoformat()
+                )
+                .with_for_update(skip_locked=True)
+            )
+            session.execute(
+                delete(LaunchplaneHumanSessionRow).where(
+                    LaunchplaneHumanSessionRow.session_id.in_(expired)
+                )
+            )
+            session.commit()
+
     def update_session(
         self,
         session_id: str,
         update: Callable[[LaunchplaneHumanSession], LaunchplaneHumanSession | None],
+        *,
+        skip_locked: bool = False,
     ) -> LaunchplaneHumanSession | None:
         # A refresh token is single-use. Serialize the provider exchange and
         # durable replacement across workers; never upsert a deleted session.
         statement = (
             select(LaunchplaneHumanSessionRow)
             .where(LaunchplaneHumanSessionRow.session_id == session_id)
-            .with_for_update()
+            .with_for_update(skip_locked=skip_locked)
         )
         with self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
+                if (
+                    skip_locked
+                    and session.scalar(
+                        select(LaunchplaneHumanSessionRow.session_id).where(
+                            LaunchplaneHumanSessionRow.session_id == session_id
+                        )
+                    )
+                    is not None
+                ):
+                    raise HumanSessionUpdateBusy()
                 return None
             current = _human_session_from_payload(row.payload)
             updated = update(current) if current.expires_at > datetime.now(timezone.utc) else None

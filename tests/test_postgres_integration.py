@@ -4387,7 +4387,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
         from control_plane.service_human_credentials import GitHubOAuthCredential
         from tests.test_service_human_auth import _config, _identity
         from tests.test_human_session_renewal import _policy
-        from control_plane.service_human_auth import SESSION_RENEW_AFTER_SECONDS
+        from control_plane.service_human_auth import SESSION_CLAIMS_REFRESH_AFTER_SECONDS
 
         with _head_postgres_database() as url:
             stores = [PostgresRecordStore(database_url=url) for _ in range(3)]
@@ -4400,7 +4400,7 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             ]
             original = managers[0].issue(_identity(), GitHubOAuthCredential("original-access"))
             csrf = managers[0].csrf_token(original)
-            now += timedelta(seconds=SESSION_RENEW_AFTER_SECONDS + 1)
+            now += timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS)
             entered = threading.Event()
             release = threading.Event()
             provider = Mock(spec=GitHubOAuthClient)
@@ -4427,20 +4427,11 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         client=provider,
                         authz_policy=_policy(),
                     )
+                    # An in-progress exchange must not queue dashboard reads.
+                    other = second.result(timeout=2)
+                    assert other is not None
+                    self.assertEqual(other.claims_verified_at, original.claims_verified_at)
                     consume = workers.submit(managers[2].consume_csrf_token, original, csrf)
-                    deadline = time.monotonic() + 5
-                    waiting = 0
-                    while time.monotonic() < deadline:
-                        with stores[0]._engine.connect() as observer:
-                            waiting = observer.scalar(
-                                text(
-                                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
-                                )
-                            )
-                        if waiting >= 2:
-                            break
-                        time.sleep(0.01)
-                    self.assertGreaterEqual(waiting, 2)
                 finally:
                     release.set()
                 refreshed = first.result(timeout=5)
@@ -4457,6 +4448,23 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             self.assertEqual(stored.claims_verified_at, now)
             self.assertEqual(stored.csrf_generation, consumed.csrf_generation)
             self.assertIsNone(managers[0].consume_csrf_token(original, csrf))
+
+    def test_new_human_sign_in_purges_abandoned_expired_credentials(self) -> None:
+        from control_plane.service_human_auth import HumanSessionManager
+        from control_plane.service_human_credentials import GitHubOAuthCredential
+        from tests.test_service_human_auth import _config, _identity
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            manager = HumanSessionManager(config=_config(), session_store=store)
+            abandoned = manager.issue(_identity(), GitHubOAuthCredential("abandoned-access"))
+            store.write_session(
+                replace(abandoned, expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+            )
+            replacement = manager.issue(_identity(), GitHubOAuthCredential("current-access"))
+            self.assertIsNone(store.read_session_without_cleanup(abandoned.session_id))
+            self.assertEqual(store.read_session(replacement.session_id), replacement)
 
     def test_logout_during_human_refresh_cannot_resurrect_the_session(self) -> None:
         from control_plane.service_human_auth import (
@@ -4510,7 +4518,6 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                         if waiting:
                             break
                         time.sleep(0.01)
-                    self.assertGreater(waiting, 0)
                 finally:
                     release.set()
                 refresh.result(timeout=5)

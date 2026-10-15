@@ -8,6 +8,7 @@ import hashlib
 import hmac
 from importlib import import_module
 import os
+import logging
 import secrets
 from threading import RLock
 import warnings
@@ -34,6 +35,11 @@ OAUTH_REQUEST_TIMEOUT_SECONDS = 10
 OAUTH_STATE_TTL_SECONDS = 10 * 60
 BROWSER_CSRF_HEADER_NAME = "X-CSRF-Token"
 _BROWSER_CSRF_TOKEN_VERSION = "v1"
+_LOGGER = logging.getLogger(__name__)
+
+
+class HumanSessionUpdateBusy(RuntimeError):
+    """Another worker is updating this session; no provider exchange was started."""
 
 
 @dataclass(frozen=True)
@@ -77,10 +83,14 @@ class GitHubOAuthLogin:
 
 
 class HumanSessionStore(Protocol):
+    def delete_expired_sessions(self, now: datetime) -> None: ...
+
     def update_session(
         self,
         session_id: str,
         update: Callable[[LaunchplaneHumanSession], LaunchplaneHumanSession | None],
+        *,
+        skip_locked: bool = False,
     ) -> LaunchplaneHumanSession | None: ...
 
     def write_session(self, session: LaunchplaneHumanSession) -> None: ...
@@ -146,12 +156,22 @@ class InMemoryHumanSessionStore:
         self._sessions: dict[str, LaunchplaneHumanSession] = {}
         self._lock = RLock()
 
+    def delete_expired_sessions(self, now: datetime) -> None:
+        with self._lock:
+            self._sessions = {
+                key: value for key, value in self._sessions.items() if value.expires_at > now
+            }
+
     def update_session(
         self,
         session_id: str,
         update: Callable[[LaunchplaneHumanSession], LaunchplaneHumanSession | None],
+        *,
+        skip_locked: bool = False,
     ) -> LaunchplaneHumanSession | None:
-        with self._lock:
+        if not self._lock.acquire(blocking=not skip_locked):
+            raise HumanSessionUpdateBusy()
+        try:
             current = self.read_session(session_id)
             if current is None:
                 return None
@@ -161,6 +181,8 @@ class InMemoryHumanSessionStore:
             else:
                 self._sessions[session_id] = updated
             return updated
+        finally:
+            self._lock.release()
 
     def write_session(self, session: LaunchplaneHumanSession) -> None:
         with self._lock:
@@ -614,6 +636,7 @@ class HumanSessionManager:
                     credential, session_id=session.session_id, github_id=identity.github_id
                 ),
             )
+        self._session_store.delete_expired_sessions(now)
         self._session_store.write_session(session)
         return session
 
@@ -658,6 +681,28 @@ class HumanSessionManager:
     def revoke(self, session: LaunchplaneHumanSession) -> None:
         self._session_store.delete_session(session.session_id)
 
+    def _refresh_due(self, session: LaunchplaneHumanSession, now: datetime) -> bool:
+        verified_at = session.claims_verified_at or session.created_at
+        if now >= verified_at + timedelta(seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS):
+            return True
+        if not session.oauth_credential:
+            return False
+        credential = self._credential_cipher.decrypt(
+            session.oauth_credential,
+            session_id=session.session_id,
+            github_id=session.identity.github_id,
+        )
+        return credential.access_expires_at is not None and (
+            credential.access_expires_at <= now + timedelta(seconds=OAUTH_REFRESH_MARGIN_SECONDS)
+        )
+
+    def _fresh_session(
+        self, session: LaunchplaneHumanSession | None
+    ) -> LaunchplaneHumanSession | None:
+        if session is None or session.expires_at <= self._now():
+            return None
+        return session if self.authorization_claims_are_current(session) else None
+
     def refresh_authorization_claims(
         self,
         session: LaunchplaneHumanSession,
@@ -667,6 +712,12 @@ class HumanSessionManager:
     ) -> LaunchplaneHumanSession | None:
         if session.identity.role == "owner":
             return session
+        try:
+            if not self._refresh_due(session, self._now()):
+                return self._fresh_session(session)
+        except Exception:
+            self.revoke(session)
+            return None
 
         def refresh(current: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
             now = self._now()
@@ -674,32 +725,17 @@ class HumanSessionManager:
             if current.expires_at <= now or verified_at > now:
                 return None
             try:
-                credential = (
-                    self._credential_cipher.decrypt(
-                        current.oauth_credential,
-                        session_id=current.session_id,
-                        github_id=current.identity.github_id,
-                    )
-                    if current.oauth_credential
-                    else None
-                )
-                claims_due = now >= verified_at + timedelta(
-                    seconds=SESSION_CLAIMS_REFRESH_AFTER_SECONDS
-                )
-                token_due = (
-                    credential is not None
-                    and credential.access_expires_at is not None
-                    and (
-                        credential.access_expires_at
-                        <= now + timedelta(seconds=OAUTH_REFRESH_MARGIN_SECONDS)
-                    )
-                )
-                if not claims_due and not token_due:
+                if not self._refresh_due(current, now):
                     return current
-                if credential is None:
-                    return current if self.authorization_claims_are_current(current) else None
+                if not current.oauth_credential:
+                    return self._fresh_session(current)
                 if client is None:
                     return None
+                credential = self._credential_cipher.decrypt(
+                    current.oauth_credential,
+                    session_id=current.session_id,
+                    github_id=current.identity.github_id,
+                )
                 login = client.revalidate(credential, authz_policy=authz_policy)
                 if (
                     login.identity.github_id != current.identity.github_id
@@ -716,15 +752,29 @@ class HumanSessionManager:
                         github_id=current.identity.github_id,
                     ),
                 )
-            except Exception:
-                # Provider errors may contain credentials. Neither log them nor
-                # retain a session whose verification failed (including refresh).
+            except Exception as error:
+                # OAuth exception values can contain credentials; log only type.
+                _LOGGER.warning(
+                    "Human session provider verification failed (%s).", type(error).__name__
+                )
                 return None
 
-        return self._session_store.update_session(session.session_id, refresh)
+        self._session_store.delete_expired_sessions(self._now())
+        try:
+            return self._session_store.update_session(session.session_id, refresh, skip_locked=True)
+        except HumanSessionUpdateBusy:
+            # An exchange is in progress, not failed. A follower may use only
+            # already-current claims; it cannot renew them or wait on a DB lock.
+            return self._fresh_session(
+                self._session_store.read_session_without_cleanup(session.session_id)
+            )
 
     def renew_if_needed(self, session: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
         now = self._now()
+        if session.expires_at - now > timedelta(
+            seconds=SESSION_TTL_SECONDS - SESSION_RENEW_AFTER_SECONDS
+        ):
+            return session
 
         def renew(current: LaunchplaneHumanSession) -> LaunchplaneHumanSession | None:
             if current.expires_at <= now:
@@ -735,7 +785,14 @@ class HumanSessionManager:
                 return current
             return replace(current, expires_at=now + timedelta(seconds=SESSION_TTL_SECONDS))
 
-        return self._session_store.update_session(session.session_id, renew)
+        try:
+            return self._session_store.update_session(
+                session.session_id, renew, skip_locked=session.identity.role != "owner"
+            )
+        except HumanSessionUpdateBusy:
+            return self._fresh_session(
+                self._session_store.read_session_without_cleanup(session.session_id)
+            )
 
     def csrf_token(self, session: LaunchplaneHumanSession) -> str:
         generation = session.csrf_generation
