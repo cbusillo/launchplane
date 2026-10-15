@@ -10779,3 +10779,252 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         self.assertEqual(
             self.store.list_held_provider_target_reservations(), (self.preparation.original,)
         )
+
+
+class RealPostgresProductionRecipientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests import test_production_recipient as recipients
+
+        self.fixture = recipients.ProductionRecipientTests()
+        database = _head_postgres_database()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_preparation_replay_and_uncertain_configuration_keep_old_production(self) -> None:
+        self.fixture.test_preparation_replay_readback_preserve_old_and_never_deploy_or_delete()
+
+    def test_lost_create_keeps_original_custody_and_excludes_a_new_key(self) -> None:
+        self.fixture.test_unknown_create_retains_custody_and_refuses_new_keys_without_redispatch()
+
+    def test_competing_preparation_cannot_dispatch_a_second_recipient(self) -> None:
+        from control_plane.production_recipient import ROUTE
+
+        fixture = self.fixture
+        second = PostgresRecordStore(database_url=fixture.database_url)
+        self.addCleanup(second.close)
+        other = replace(fixture.adapter, store=second, original_key="competing-key")
+        original = fixture.provider_write
+        outcomes = []
+
+        def write(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.create":
+                outcomes.append(
+                    run_durable_provider_operation(
+                        store=second,
+                        scope=fixture.adapter.scope,
+                        route_path=ROUTE.format(product=fixture.product),
+                        idempotency_key="competing-key",
+                        request_fingerprint="c" * 64,
+                        lease_owner="second-worker",
+                        response_trace_id="launchplane_req_competing",
+                        adapter=other,
+                    )
+                )
+            return original(**kwargs)
+
+        with patch("control_plane.production_recipient.api.dokploy_request", side_effect=write):
+            self.assertEqual(fixture.run_operation().response_status_code, 202)
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].response_status_code, 409)
+        self.assertEqual(fixture.effects.count("/api/compose.create"), 1)
+        fixture.assert_old_preserved()
+
+    def test_custody_snapshot_is_guarded_until_its_transaction_commits(self) -> None:
+        self.assert_authority_writer_exclusion("profile")
+
+    def test_promotion_inventory_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("promotion")
+
+    def test_promotion_recovery_inventory_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("recovery")
+
+    def test_secret_rotation_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("rotation")
+
+    def test_zero_effect_replan_retains_history_on_postgres(self) -> None:
+        self.fixture.test_zero_effect_drift_can_replan_with_retained_history_and_a_new_key()
+
+    def test_retry_read_failure_keeps_the_original_create_fence_on_postgres(self) -> None:
+        self.fixture.test_transient_read_on_reacquired_attempt_retains_the_original_create_fence()
+
+    def assert_authority_writer_exclusion(self, kind: str) -> None:
+        from control_plane.production_recipient import authority_snapshot
+        from control_plane.contracts.environment_inventory import EnvironmentInventory
+        from control_plane.contracts.promotion_record import PromotionRecord
+        from control_plane.contracts.secret_record import (
+            SecretRecord,
+            SecretBinding,
+            SecretVersion,
+            SecretAuditEvent,
+            SecretRotationWrite,
+        )
+
+        fixture = self.fixture
+        rotation = None
+        if kind == "rotation":
+            secret = SecretRecord(
+                secret_id="recipient-fixture-secret",
+                scope="context_instance",
+                integration="runtime_environment",
+                name="DB_PASSWORD",
+                context=fixture.context,
+                instance="prod",
+                current_version_id="old-fixture-version",
+                created_at=fixture.old.updated_at,
+                updated_at=fixture.old.updated_at,
+            )
+            fixture.store.write_secret_record(secret)
+            fixture.store.write_secret_binding(
+                SecretBinding(
+                    binding_id="recipient-fixture-binding",
+                    secret_id=secret.secret_id,
+                    integration=secret.integration,
+                    binding_key=secret.name,
+                    context=fixture.context,
+                    instance="prod",
+                    created_at=secret.created_at,
+                    updated_at=secret.updated_at,
+                )
+            )
+            rotated = secret.model_copy(update={"current_version_id": "new-fixture-version"})
+            rotation = SecretRotationWrite(
+                expected_current_version_id=secret.current_version_id,
+                record=rotated,
+                version=SecretVersion(
+                    version_id=rotated.current_version_id,
+                    secret_id=secret.secret_id,
+                    created_at=secret.created_at,
+                    ciphertext="fixture-ciphertext",
+                ),
+                audit_event=SecretAuditEvent(
+                    event_id="recipient-fixture-rotation",
+                    secret_id=secret.secret_id,
+                    event_type="rotated",
+                    recorded_at=secret.updated_at,
+                ),
+            )
+        inventory = EnvironmentInventory.model_validate(
+            {
+                "context": fixture.context,
+                "instance": "prod",
+                "source_git_ref": "old-ref",
+                "deploy": {
+                    "target_name": fixture.old.target_name,
+                    "target_type": "compose",
+                    "deploy_mode": "compose",
+                },
+                "updated_at": fixture.old.updated_at,
+                "deployment_record_id": "original-deploy",
+            }
+        )
+        if kind in {"promotion", "recovery"}:
+            fixture.store.write_environment_inventory(inventory)
+        original = fixture.adapter.current()
+        entered, release = threading.Event(), threading.Event()
+        url = make_url(fixture.database_url)
+        second = PostgresRecordStore(
+            database_url=url.set(
+                query={**url.query, "application_name": "lp3699-competing-writer"}
+            ).render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+
+        def read_snapshot(store: Any, product: str, context: str) -> Any:
+            snapshot = authority_snapshot(store, product, context)
+            if store is fixture.store:
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError("test snapshot barrier timed out")
+            return snapshot
+
+        changed = fixture.profile.model_copy(
+            update={"updated_at": fixture.profile.updated_at + "-changed"}
+        )
+        write: Callable[[], Any] = partial(second.write_product_profile_record, changed)
+        changed_inventory = inventory.model_copy(
+            update={"updated_at": inventory.updated_at + "-changed"}
+        )
+        if kind == "rotation":
+            assert rotation is not None
+            write = partial(second.write_secret_rotations, (rotation,))
+        elif kind == "promotion":
+            promotion = PromotionRecord.model_validate(
+                {
+                    "record_id": "fixture-promotion",
+                    "artifact_identity": {"artifact_id": "fixture-artifact"},
+                    "context": fixture.context,
+                    "from_instance": "stable",
+                    "to_instance": "prod",
+                    "deploy": inventory.deploy.model_dump(mode="json"),
+                }
+            )
+            write = partial(
+                second.write_promotion_evidence_records,
+                promotion_record=promotion,
+                inventory=changed_inventory,
+            )
+        elif kind == "recovery":
+            reservation = fixture.store.reserve_mutation(
+                scope="fixture-promotion",
+                route_path="/fixture-promotion-recovery",
+                idempotency_key="original-promotion",
+                request_fingerprint="f" * 64,
+                lease_owner="fixture-worker",
+                reconciliation_key="r" * 64,
+            ).record
+            assert reservation is not None
+            reconciled = fixture.store.mark_mutation_reconcile_required(
+                reservation=reservation, reconciliation_key=reservation.reconciliation_key
+            ).record
+            assert reconciled is not None
+            write = partial(
+                second.adopt_reconciled_mutation,
+                reservation=reconciled,
+                response_status_code=202,
+                response_trace_id="launchplane_req_recovery",
+                response_payload={},
+                expected_promotion_evidence=(inventory,),
+                promotion_recovery_inventory=changed_inventory,
+            )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            with patch(
+                "control_plane.production_recipient.authority_snapshot", side_effect=read_snapshot
+            ):
+                first = executor.submit(
+                    fixture.store.write_production_recipient,
+                    expected=None,
+                    replacement=original.model_dump(mode="json"),
+                )
+                self.assertTrue(entered.wait(5))
+                writer = executor.submit(write)
+                try:
+                    deadline = time.monotonic() + 5
+                    waiting = 0
+                    with fixture.store._engine.connect().execution_options(
+                        isolation_level="AUTOCOMMIT"
+                    ) as connection:
+                        while time.monotonic() < deadline:
+                            waiting = int(
+                                connection.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'lp3699-competing-writer' AND wait_event_type = 'Lock'"
+                                    )
+                                )
+                                or 0
+                            )
+                            if waiting:
+                                break
+                            time.sleep(0.01)
+                    self.assertGreater(
+                        waiting, 0, "The competing writer must reach a real PostgreSQL lock wait"
+                    )
+                    self.assertFalse(writer.done())
+                finally:
+                    release.set()
+                first.result(timeout=10)
+                writer.result(timeout=10)
+        with self.assertRaises(ValueError):
+            fixture.adapter.require_unchanged(original)
+        fixture.assert_old_preserved()
