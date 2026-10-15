@@ -3360,6 +3360,163 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         return result, post_deploy, verify, store
 
+    def test_restore_intent_survives_failures_without_override_evidence(self) -> None:
+        from control_plane.testing_restore_prerequisite import incomplete_testing_restore
+
+        errors = (
+            None,
+            SystemExit("fixture worker crash"),
+            OdooTargetReplacementStageError("post_deploy_setup_failed", "fixture failure"),
+            OdooProviderEffectUncertainError("fixture uncertain effect"),
+            DurableOperationAuthorizationDeniedError(
+                code="operation_authorization_revoked", message="fixture denial"
+            ),
+        )
+        for error in errors:
+            with self.subTest(error=type(error).__name__), TemporaryDirectory() as directory:
+                captured: list[_Store] = []
+
+                def fail_after_restore(store: _Store) -> None:
+                    captured.append(store)
+                    if error is not None:
+                        raise error
+
+                def apply() -> object:
+                    return self._apply_upstream_restore(
+                        override_record=None,
+                        post_deploy_results=(
+                            OdooPostDeployResult(
+                                context="opw",
+                                instance="testing",
+                                phase="restore",
+                                post_deploy_status="fail",
+                                error_message="fixture failure",
+                            ),
+                        ),
+                        after_restore=fail_after_restore,
+                        test_instance="testing",
+                    )
+
+                if error is None:
+                    apply()
+                else:
+                    with self.assertRaises(type(error)):
+                        apply()
+                record = captured[0].deployment_records[-1]
+                store = PostgresRecordStore(
+                    database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
+                )
+                try:
+                    store.ensure_schema()
+                    store.write_deployment_record(record)
+                    store.write_dokploy_target_id_record(
+                        captured[0].read_dokploy_target_id_record(
+                            context_name=record.context, instance_name=record.instance
+                        )
+                    )
+                    self.assertEqual(
+                        incomplete_testing_restore(
+                            store, context=record.context, instance=record.instance
+                        ),
+                        record,
+                    )
+                finally:
+                    store.close()
+
+        # Completion comes from the real apply record writer as well; optional
+        # override evidence is not a prerequisite for resuming ordinary deploys.
+        _, _, _, completed = self._apply_upstream_restore(
+            override_record=None,
+            test_instance="testing",
+            post_deploy_results=(
+                OdooPostDeployResult(
+                    context="opw",
+                    instance="testing",
+                    phase="restore",
+                    post_deploy_status="pass",
+                ),
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
+            )
+            try:
+                store.ensure_schema()
+                for record in completed.deployment_records:
+                    store.write_deployment_record(record)
+                store.write_dokploy_target_id_record(
+                    completed.read_dokploy_target_id_record(
+                        context_name="opw", instance_name="testing"
+                    )
+                )
+                self.assertIsNone(
+                    incomplete_testing_restore(store, context="opw", instance="testing")
+                )
+            finally:
+                store.close()
+
+    def test_drill_restore_record_identifies_its_selected_database(self) -> None:
+        from uuid import uuid4
+        from tests.test_odoo_testing_restore import generation
+        from control_plane.testing_restore_prerequisite import incomplete_testing_restore
+
+        fresh = generation().model_copy(
+            update={
+                "product": "odoo-tenant-opw",
+                "context": "opw",
+                "target_id": "compose-opw",
+                "reconcile_requested_at": generation().prepared_at,
+                "drill_database": "lp_drill_" + uuid4().hex,
+            }
+        )
+        _, _, _, store = self._apply_upstream_restore(
+            override_record=_opw_website_override_record().model_copy(
+                update={"instance": "testing"}
+            ),
+            post_deploy_results=(
+                OdooPostDeployResult(
+                    context="opw", instance="testing", phase="restore", post_deploy_status="fail"
+                ),
+            ),
+            test_instance="testing",
+            fresh_generation=fresh,
+        )
+        failed = store.deployment_records[-1]
+        assert failed.resolved_target is not None
+        selected = fresh.model_copy(
+            update={
+                "completed_at": failed.deploy.finished_at,
+                "target_id": failed.resolved_target.target_id,
+            }
+        )
+        restored = selected.model_copy(update={"drill_database": ""})
+        with TemporaryDirectory() as directory:
+            records = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
+            )
+            try:
+                records.ensure_schema()
+                records.write_deployment_record(failed)
+                records.write_dokploy_target_id_record(
+                    store.read_dokploy_target_id_record(
+                        context_name=fresh.context, instance_name=fresh.instance
+                    )
+                )
+                self.assertEqual(
+                    incomplete_testing_restore(
+                        records, context=fresh.context, instance=fresh.instance, generation=selected
+                    ),
+                    failed,
+                )
+                self.assertIsNone(
+                    incomplete_testing_restore(
+                        records, context=fresh.context, instance=fresh.instance, generation=restored
+                    )
+                )
+            finally:
+                records.close()
+
     def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
         from tests.test_odoo_testing_restore import generation
 

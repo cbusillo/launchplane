@@ -41,6 +41,11 @@ from uuid import uuid4
 import click
 from sqlalchemy.exc import SQLAlchemyError
 
+from control_plane.testing_restore_prerequisite import (
+    TestingRestoreHistoryStore,
+    incomplete_testing_restore,
+)
+
 from control_plane.client_test_notes import ClientTestNotes, change_client_review
 from control_plane.dependency_update_review import pure_dependabot_update
 from control_plane.client_release_repositories import recorded_train_candidate
@@ -63,7 +68,10 @@ from control_plane.build_provenance import (
 from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.contracts.promotion_record import env_key_names
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, ArtifactSourceBuild
-from control_plane.contracts.odoo_target_replacement_failures import deploy_failure_description
+from control_plane.contracts.odoo_target_replacement_failures import (
+    TESTING_RESTORE_REQUIRED_CODE,
+    deploy_failure_description,
+)
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -628,6 +636,21 @@ def reconcile_testing_target(
             queued_operation_status=attempt.active.status,
         )
         return ReconcileOutcome(plan)
+    if generation is None or generation.completed_at:
+        incomplete_restore = incomplete_testing_restore(
+            cast(TestingRestoreHistoryStore, record_store),
+            context=lane.context,
+            instance=lane.instance,
+            generation=generation,
+        )
+        if incomplete_restore is not None:
+            plan.update(
+                action="wait",
+                held=True,
+                reason=TESTING_RESTORE_REQUIRED_CODE,
+                failed_restore_deployment_record_id=incomplete_restore.record_id,
+            )
+            return ReconcileOutcome(plan)
     if attempt.failed_attempts >= TESTING_DEPLOY_MAX_FAILED_ATTEMPTS:
         plan["held"] = False
         return ReconcileOutcome(
@@ -1237,7 +1260,8 @@ def _testing_failure_reason(
     validated env-key names, the result's step statuses and the worker attempt;
     never the error message.
     """
-    error_code = operation.error_code.strip()
+    failure = operation.execution_failure
+    error_code = (failure.error_code if failure is not None else operation.error_code).strip()
     if not _ERROR_CODE_PATTERN.match(error_code):
         error_code = _testing_failure_code(operation)
     if error_code.startswith("unexpected."):
@@ -1259,10 +1283,11 @@ def _testing_failure_reason(
             or TESTING_FAILURE_DESCRIPTIONS.get(error_code, _UNKNOWN_TESTING_FAILURE)
         )
     parts = [description]
-    if operation.error_detail_keys:
+    detail_keys = failure.error_detail_keys if failure is not None else operation.error_detail_keys
+    if detail_keys:
         # Env-key names the record validated, such as undeclared runtime keys.
-        parts.append(f"Keys: {', '.join(sorted(operation.error_detail_keys))}.")
-    result = operation.result
+        parts.append(f"Keys: {', '.join(sorted(detail_keys))}.")
+    result = failure.result if failure is not None else operation.result
     if result is not None:
         parts.append(
             f"Steps: deploy {result.deploy_status}, post-deploy {result.post_deploy_status}, "
@@ -1276,9 +1301,9 @@ def _testing_failure_reason(
 
 
 def _testing_failure_code(operation: OdooStableTargetReplacementOperationRecord) -> str:
-    if operation.status == "cancelled":
+    if operation.status == "cancelled" and operation.execution_failure is None:
         return "operation_cancelled"
-    result = operation.result
+    result = operation.execution_failure.result if operation.execution_failure else operation.result
     if result is None:
         return "operation_failed"
     steps = (
