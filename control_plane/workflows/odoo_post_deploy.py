@@ -16,6 +16,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyStatus,
 )
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployWorkflowIntent
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -26,7 +27,11 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
-from control_plane.dokploy.connection_isolation import run_connection_isolation
+from control_plane.dokploy.connection_isolation import (
+    ConnectionIsolationObservation,
+    observe_connection_isolation_operation,
+    run_connection_isolation,
+)
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
@@ -46,6 +51,7 @@ class OdooPostDeployStore(Protocol):
         last_apply: OdooOverrideApplyResult,
         updated_at: str,
         source_label: str,
+        preserve_website_settings: bool = False,
     ) -> OdooInstanceOverrideRecord: ...
 
 
@@ -58,7 +64,8 @@ class OdooPostDeployRequest(BaseModel):
     phase: OdooOverrideApplyPhase = "deploy"
     connection_isolation: OdooConnectionIsolationMode | None = None
     reviewed_dry_run: bool = False
-    reviewed_plan_sha256: str = ""
+    reviewed_plan_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
+    reviewed_resource_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
     reason: str = Field(default="", max_length=500)
 
     @model_validator(mode="after")
@@ -77,6 +84,7 @@ class OdooPostDeployRequest(BaseModel):
             if self.connection_isolation == "apply" and (
                 not self.reviewed_dry_run
                 or len(self.reviewed_plan_sha256) != 64
+                or len(self.reviewed_resource_sha256) != 64
                 or not self.reason.strip()
             ):
                 raise ValueError("Connection isolation apply requires a reviewed dry-run.")
@@ -126,6 +134,9 @@ def _write_odoo_instance_override_apply_result(
     status: OdooOverrideApplyStatus,
     detail: str,
     source_label: str = "odoo-post-deploy-driver",
+    applied_website_settings: OdooWebsiteSettingsIntent | None = None,
+    settings_attempted: bool = False,
+    website_settings_verified: bool | None = None,
 ) -> OdooInstanceOverrideRecord:
     now = utc_now_timestamp()
     return record_store.update_odoo_instance_override_apply_result(
@@ -136,9 +147,16 @@ def _write_odoo_instance_override_apply_result(
             status=status,
             applied_at=now if status in {"pass", "fail"} else "",
             detail=detail,
+            website_settings=applied_website_settings
+            if settings_attempted
+            else record.last_apply.website_settings,
+            website_settings_verified=website_settings_verified
+            if website_settings_verified is not None
+            else record.last_apply.website_settings_verified,
         ),
         updated_at=now,
         source_label=source_label,
+        preserve_website_settings=not settings_attempted,
     )
 
 
@@ -189,6 +207,31 @@ def _resolve_compose_target_definition(
     return target_definition
 
 
+def observe_odoo_connection_isolation(
+    *,
+    control_plane_root: Path,
+    request: OdooPostDeployRequest,
+    provider_operation_key: str,
+    provider_effect_phase: str,
+) -> ConnectionIsolationObservation:
+    try:
+        target = _resolve_compose_target_definition(
+            control_plane_root=control_plane_root, request=request
+        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        return observe_connection_isolation_operation(
+            host=host,
+            token=token,
+            target_definition=target,
+            provider_operation_key=provider_operation_key,
+            provider_effect_phase=provider_effect_phase,
+            reviewed_plan_sha256=request.reviewed_plan_sha256,
+            reviewed_resource_sha256=request.reviewed_resource_sha256,
+        )
+    except (FileNotFoundError, click.ClickException, ValueError):
+        return ConnectionIsolationObservation("unknown", {})
+
+
 def execute_odoo_post_deploy(
     *,
     control_plane_root: Path,
@@ -201,7 +244,13 @@ def execute_odoo_post_deploy(
     provider_operation_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
-    before_connection_isolation_mutation: Callable[[], None] | None = None,
+    before_connection_isolation_mutation: Callable[[str], None] | None = None,
+    connection_isolation_operation_key: str = "",
+    connection_isolation_product: str = "",
+    artifact_id: str = "",
+    release_website_settings: OdooWebsiteSettingsIntent | None = None,
+    release_operation: bool = False,
+    rollback: bool = False,
 ) -> OdooPostDeployResult:
     if request.connection_isolation is not None:
         target = _resolve_compose_target_definition(
@@ -217,6 +266,9 @@ def execute_odoo_post_deploy(
                 mode=request.connection_isolation,
                 reviewed_plan_sha256=request.reviewed_plan_sha256,
                 before_mutation=before_connection_isolation_mutation,
+                reviewed_resource_sha256=request.reviewed_resource_sha256,
+                provider_operation_key=connection_isolation_operation_key,
+                expected_product=connection_isolation_product,
             )
         except dokploy_post_deploy.OdooPostDeployReadbackFailure as error:
             return OdooPostDeployResult(
@@ -281,14 +333,94 @@ def execute_odoo_post_deploy(
         updated_at=utc_now_timestamp(),
     )
 
-    if rendering_record is not None:
-        try:
+    try:
+        accepted_settings: OdooWebsiteSettingsIntent | None = None
+        if rendering_record is not None:
+            if control_plane_odoo_instance_overrides.odoo_instance_is_production(request.instance):
+                if not artifact_id and (
+                    rendering_record.website_settings is not None
+                    or rendering_record.last_apply.website_settings is not None
+                    or release_website_settings is not None
+                ):
+                    release_reader = getattr(record_store, "read_release_tuple_record", None)
+                    if not callable(release_reader):
+                        raise click.ClickException(
+                            "Website settings require recorded artifact identity."
+                        )
+                    try:
+                        artifact_id = release_reader(
+                            context_name=request.context, channel_name=request.instance
+                        ).artifact_id
+                    except FileNotFoundError as error:
+                        raise click.ClickException(
+                            "Website settings require the current production release record."
+                        ) from error
+                if release_operation:
+                    if (
+                        release_website_settings is not None
+                        and release_website_settings.artifact_id != artifact_id
+                    ):
+                        raise click.ClickException(
+                            "Website settings differ from the operation artifact."
+                        )
+                    accepted_settings = release_website_settings
+                    if rollback and accepted_settings is None:
+                        applied = rendering_record.last_apply.website_settings
+                        if (
+                            rendering_record.last_apply.website_settings_verified
+                            and applied is not None
+                            and applied.artifact_id == artifact_id
+                        ):
+                            accepted_settings = applied
+                else:
+                    applied = rendering_record.last_apply.website_settings
+                    if (
+                        not rendering_record.last_apply.website_settings_verified
+                        and applied is not None
+                        and applied.artifact_id != artifact_id
+                    ):
+                        raise click.ClickException(
+                            "Unverified website settings require recovery through the recorded release or rollback operation; ordinary maintenance cannot change its artifact."
+                        )
+                    accepted_settings = (
+                        applied
+                        if applied is not None and applied.artifact_id == artifact_id
+                        else None
+                    )
+            rendered_settings = accepted_settings
+            if (
+                rollback
+                and rendered_settings is None
+                and rendering_record.last_apply.website_settings is not None
+            ):
+                # This is an explicit historical rollback, never preparation or maintenance.
+                rendered_settings = rendering_record.last_apply.website_settings.model_copy(
+                    update={
+                        "artifact_id": artifact_id,
+                        "settings": rendering_record.last_apply.website_settings.settings.model_copy(
+                            update={
+                                "operation": "disable_collection",
+                                "google_analytics_key": "",
+                                "public_indexing_enabled": False,
+                                "cookies_bar": None,
+                                "block_third_party_domains": None,
+                            }
+                        ),
+                    }
+                )
+            rendering_record = rendering_record.model_copy(
+                update={"website_settings": rendered_settings}
+            )
+        if rendering_record is not None:
             post_deploy_environment = (
                 control_plane_odoo_instance_overrides.build_post_deploy_environment(
                     rendering_record,
                     record_store=record_store,
                     workflow_intent=workflow_intent,
                     protected_shopify_store_keys=protected_shopify_store_keys,
+                    selected_website_settings=rendering_record.website_settings.settings
+                    if rendering_record.website_settings is not None
+                    else None,
                 )
             )
             override_payload = post_deploy_environment.payload
@@ -296,25 +428,25 @@ def execute_odoo_post_deploy(
             required_workflow_environment_keys = (
                 post_deploy_environment.required_container_environment_keys
             )
-        except click.ClickException as error:
-            if odoo_override_record is not None and override_should_apply:
-                _write_odoo_instance_override_apply_result(
-                    record_store=typed_record_store,
-                    record=odoo_override_record,
-                    status="fail",
-                    detail=str(error),
-                )
-            return OdooPostDeployResult(
-                context=request.context,
-                instance=request.instance,
-                phase=request.phase,
-                post_deploy_status="fail",
-                override_status="fail" if override_should_apply else "skipped",
-                override_record_found=override_record_found,
-                workflow_intent=workflow_intent,
-                required_container_environment_keys=required_workflow_environment_keys,
-                error_message=str(error),
+    except click.ClickException as error:
+        if odoo_override_record is not None and override_should_apply:
+            _write_odoo_instance_override_apply_result(
+                record_store=typed_record_store,
+                record=odoo_override_record,
+                status="fail",
+                detail=str(error),
             )
+        return OdooPostDeployResult(
+            context=request.context,
+            instance=request.instance,
+            phase=request.phase,
+            post_deploy_status="fail",
+            override_status="fail" if override_should_apply else "skipped",
+            override_record_found=override_record_found,
+            workflow_intent=workflow_intent,
+            required_container_environment_keys=required_workflow_environment_keys,
+            error_message=str(error),
+        )
 
     provider_effect_started = False
 
@@ -345,6 +477,15 @@ def execute_odoo_post_deploy(
         dokploy_post_deploy.require_odoo_module_update_readback_evidence(
             post_deploy_readback_markers
         )
+        if override_payload is not None and override_payload.website_settings is not None:
+            if (
+                post_deploy_readback_markers.get("website_settings_sha256")
+                != override_payload.website_settings.digest
+            ):
+                raise dokploy_post_deploy.OdooPostDeployReadbackFailure(
+                    "Odoo website settings readback does not match the accepted release.",
+                    evidence=post_deploy_readback_markers,
+                )
         if (
             override_payload
             and override_payload.website_bootstrap
@@ -378,6 +519,13 @@ def execute_odoo_post_deploy(
                 record=odoo_override_record,
                 status="fail",
                 detail=str(error),
+                applied_website_settings=rendering_record.website_settings
+                if rendering_record
+                else None,
+                settings_attempted=bool(override_payload and override_payload.website_settings),
+                website_settings_verified=False
+                if override_payload and override_payload.website_settings
+                else None,
             )
         if isinstance(
             error, (OdooProviderSafetyRefusedError, DurableOperationAuthorizationDeniedError)
@@ -440,6 +588,13 @@ def execute_odoo_post_deploy(
             record=odoo_override_record,
             status=override_status,
             detail=detail,
+            applied_website_settings=rendering_record.website_settings
+            if rendering_record is not None
+            else None,
+            settings_attempted=bool(override_payload and override_payload.website_settings),
+            website_settings_verified=True
+            if override_payload and override_payload.website_settings
+            else None,
         )
         applied_at = updated_record.last_apply.applied_at
 

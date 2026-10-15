@@ -19270,7 +19270,9 @@ class PostgresRecordStore(HumanSessionStore):
         unresolved = session.scalar(
             select(LaunchplaneOrdinaryAgentEffectRow.effect_id)
             .where(
-                LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
+                func.lower(
+                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
+                )
                 == repository.lower(),
                 LaunchplaneOrdinaryAgentEffectRow.payload["target"]["base_branch"].as_string()
                 == base_branch,
@@ -26315,6 +26317,7 @@ class PostgresRecordStore(HumanSessionStore):
         required_context_owner: tuple[str, str] | None = None,
         required_product_config_target: tuple[str, str, str] | None = None,
         expected_record: OdooInstanceOverrideRecord | None = None,
+        require_absent: bool = False,
     ) -> None:
         row = LaunchplaneOdooInstanceOverrideRow(
             context=record.context,
@@ -26326,13 +26329,14 @@ class PostgresRecordStore(HumanSessionStore):
             required_context_owner is None
             and required_product_config_target is None
             and expected_record is None
+            and not require_absent
         ):
             self._write_row(row)
             return
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
-            if expected_record is not None:
+            if expected_record is not None or require_absent:
                 current = session.scalar(
                     select(LaunchplaneOdooInstanceOverrideRow)
                     .where(
@@ -26341,10 +26345,12 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                     .with_for_update()
                 )
-                if (
-                    current is None
-                    or OdooInstanceOverrideRecord.model_validate(current.payload) != expected_record
-                ):
+                current_record = (
+                    OdooInstanceOverrideRecord.model_validate(current.payload)
+                    if current is not None
+                    else None
+                )
+                if current_record != expected_record:
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             require_bundle_context_owner(
                 ProductAuthorityBundle(
@@ -26367,6 +26373,7 @@ class PostgresRecordStore(HumanSessionStore):
         last_apply: OdooOverrideApplyResult,
         updated_at: str,
         source_label: str,
+        preserve_website_settings: bool = False,
     ) -> OdooInstanceOverrideRecord:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -26382,6 +26389,13 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise FileNotFoundError("Odoo override record no longer exists")
             current = OdooInstanceOverrideRecord.model_validate(row.payload)
+            if preserve_website_settings:
+                last_apply = last_apply.model_copy(
+                    update={
+                        "website_settings": current.last_apply.website_settings,
+                        "website_settings_verified": current.last_apply.website_settings_verified,
+                    }
+                )
             updated = current.model_copy(
                 update={
                     "last_apply": last_apply,

@@ -64,6 +64,45 @@ def seed(connection: Any) -> None:
 
 
 class ConnectionIsolationTests(unittest.TestCase):
+    def test_preexisting_shared_workflow_refuses_isolation_before_dispatch(self) -> None:
+        from control_plane.dokploy.connection_isolation import run_connection_isolation
+        from control_plane.dokploy.source import DokployTargetDefinition
+        from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
+        from tests.test_connection_isolation_qualification import resource_fixture
+
+        _, identity = resource_fixture()
+        target = DokployTargetDefinition(
+            context="example", instance="testing", target_type="compose", target_id="fixture"
+        )
+        with (
+            patch(
+                "control_plane.dokploy.connection_isolation.api.fetch_dokploy_target_payload",
+                return_value={
+                    "env": f"ODOO_DB_NAME=copy\nLAUNCHPLANE_RUNTIME_IDENTITY_JSON={identity}",
+                    "appName": "app",
+                },
+            ),
+            patch(
+                "control_plane.dokploy.connection_isolation.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", "server", "app", "server"),
+            ),
+            patch(
+                "control_plane.dokploy.connection_isolation.api.find_matching_dokploy_schedule",
+                return_value={"deployments": [{"status": "running"}]},
+            ),
+            patch(
+                "control_plane.dokploy.connection_isolation.post_deploy.run_manual_data_schedule"
+            ) as run,
+        ):
+            with self.assertRaises(ConnectionIsolationPreconditionFailed) as raised:
+                run_connection_isolation(
+                    host="fixture", token="fixture", target_definition=target, mode="dry-run"
+                )
+            self.assertEqual(
+                raised.exception.code, ConnectionIsolationPreconditionFailed("workflow_active").code
+            )
+            run.assert_not_called()
+
     def test_remote_command_exit_retains_findings_through_native_schedule_helper(self) -> None:
         from control_plane.dokploy import api, post_deploy
         from control_plane.dokploy.source import DokployTargetDefinition
@@ -201,7 +240,10 @@ class ConnectionIsolationTests(unittest.TestCase):
     def test_changed_plan_refuses_before_schedule_or_database_mutation(self) -> None:
         from control_plane.dokploy.connection_isolation import run_connection_isolation
         from control_plane.dokploy.source import DokployTargetDefinition
-        import click
+        from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
+        from tests.test_connection_isolation_qualification import resource_fixture
+
+        _, runtime_identity = resource_fixture()
 
         target = DokployTargetDefinition(
             context="example", instance="testing", target_type="compose", target_id="fixture"
@@ -209,20 +251,27 @@ class ConnectionIsolationTests(unittest.TestCase):
         with (
             patch(
                 "control_plane.dokploy.connection_isolation.api.fetch_dokploy_target_payload",
-                return_value={"env": "ODOO_DB_NAME=copy", "appName": "fixture"},
+                return_value={
+                    "env": f"ODOO_DB_NAME=copy\nLAUNCHPLANE_RUNTIME_IDENTITY_JSON={runtime_identity}",
+                    "appName": "fixture",
+                },
             ),
             patch(
                 "control_plane.dokploy.connection_isolation.post_deploy.run_manual_data_schedule"
             ) as schedule,
         ):
-            with self.assertRaises(click.ClickException):
+            with self.assertRaises(ConnectionIsolationPreconditionFailed) as raised:
                 run_connection_isolation(
                     host="fixture",
                     token="fixture",
                     target_definition=target,
                     mode="apply",
                     reviewed_plan_sha256="outdated",
+                    provider_operation_key="fixture-operation",
                 )
+            self.assertEqual(
+                raised.exception.code, ConnectionIsolationPreconditionFailed("plan_changed").code
+            )
         schedule.assert_not_called()
 
     def test_repairs_copy_and_preserves_fixed_delivery_and_shopify(self) -> None:
@@ -337,6 +386,7 @@ class ConnectionIsolationTests(unittest.TestCase):
                     connection_isolation="apply",
                     reviewed_dry_run=True,
                     reviewed_plan_sha256="a" * 64,
+                    reviewed_resource_sha256="b" * 64,
                     reason="Repair testing-copy connections",
                 ),
             )

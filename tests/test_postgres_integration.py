@@ -19,6 +19,7 @@ import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
+from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -965,6 +966,13 @@ class RealPostgresIntegratedProductRetirementTests(
         return self.enterContext(_head_postgres_database())
 
 
+class RealPostgresHistoricalEffectRepositoryFenceTests(
+    historical_storage_tests.HistoricalEffectRepositoryFenceTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
 class RealPostgresLegacyPreviewReconciliationTests(
     legacy_preview_tests.LegacyPreviewReconciliationTests
 ):
@@ -1454,6 +1462,47 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_first_override_write_requires_the_reviewed_absence(self) -> None:
+        from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
+
+        with _store_for_fresh_head_database() as store:
+            record = _import_override_record()
+            store.write_odoo_instance_override_record(record, require_absent=True)
+            with self.assertRaises(OdooInstanceOverrideConflictError):
+                store.write_odoo_instance_override_record(
+                    record.model_copy(update={"updated_at": "concurrent replacement"}),
+                    require_absent=True,
+                )
+            self.assertEqual(
+                store.read_odoo_instance_override_record(
+                    context_name=record.context,
+                    instance_name=record.instance,
+                ),
+                record,
+            )
+
+            from control_plane.contracts.odoo_instance_override_record import (
+                OdooOverrideApplyResult,
+            )
+            from tests.test_odoo_website_settings import intent
+
+            record.last_apply = OdooOverrideApplyResult(
+                website_settings=intent(), website_settings_verified=False
+            )
+            store.write_odoo_instance_override_record(record)
+            retained = store.update_odoo_instance_override_apply_result(
+                context_name=record.context,
+                instance_name=record.instance,
+                last_apply=OdooOverrideApplyResult(),
+                updated_at=record.updated_at,
+                source_label="unrelated-driver",
+                preserve_website_settings=True,
+            )
+            self.assertEqual(
+                retained.last_apply.website_settings, record.last_apply.website_settings
+            )
+            self.assertFalse(retained.last_apply.website_settings_verified)
+
     def test_odoo_copy_connections_are_repaired_with_postgres_sql(self) -> None:
         import psycopg
         from control_plane.odoo_connection_isolation import connection_isolation_library
@@ -7715,6 +7764,35 @@ def _run_integration_provider_operation(
 
 
 class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_connection_isolation_original_key_recovery_on_postgres(self) -> None:
+        from tests import test_odoo_connection_isolation_authority as fixtures
+
+        for scenario in (
+            "test_original_key_adopts_terminal_evidence_without_another_repair",
+            "test_lease_loss_before_dispatch_uses_runner_reconciliation",
+            "test_uncertain_apply_retains_fence_for_same_and_new_keys",
+        ):
+            with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                policy = LaunchplaneAuthzPolicy()
+                digest = authz_policy_sha256(policy)
+                store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id=build_authz_policy_record_id(revision=1, policy_sha256=digest),
+                        revision=1,
+                        status="active",
+                        source="connection-isolation-tests",
+                        updated_at="2026-10-14T00:00:00Z",
+                        policy_sha256=digest,
+                        policy=policy,
+                    )
+                )
+                with patch.object(fixtures, "PostgresRecordStore", return_value=store):
+                    case = fixtures.ConnectionIsolationAuthorityTests(scenario)
+                    try:
+                        case.debug()
+                    finally:
+                        case.doCleanups()
+
     def test_promotion_recovery_adoption_and_evidence_compare_on_postgres(self) -> None:
         from tests import test_generic_web_client_release as release_fixtures
         from tests.test_generic_web_promotion_recovery import PromotionRecoveryTests

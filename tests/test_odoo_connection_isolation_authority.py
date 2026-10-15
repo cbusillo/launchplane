@@ -1,6 +1,5 @@
 """Same authenticated agent observes or repairs only a qualified testing copy."""
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -82,6 +81,7 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
             body.update(
                 reviewed_dry_run=True,
                 reviewed_plan_sha256="a" * 64,
+                reviewed_resource_sha256="b" * 64,
                 reason="Remove copied connections from the testing fixture",
             )
         body.update(changes)
@@ -197,25 +197,18 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
             )
             execute.assert_not_called()
 
-    async def test_unknown_protected_and_stale_lanes_refuse_before_driver(self) -> None:
+    async def test_recorded_protections_refuse_before_driver(self) -> None:
         with patch("control_plane.http_app.execute_odoo_post_deploy_result") as execute:
-            response = await self.call("apply", key="unknown")
-            self.assertEqual(response.status_code, 409, response.text)
             for field, value in (
                 ("usage", "in_use"),
                 ("data", "only_copy"),
                 ("production_resources", "shared"),
-                ("production_resources", "unknown"),
+                ("production_resources", "separation_ready"),
             ):
                 with self.subTest(field=field, value=value):
                     self.safety(**{field: value})
                     response = await self.call("apply", key=f"protected-{field}-{value}")
                     self.assertEqual(response.status_code, 409, response.text)
-            now = datetime.now(timezone.utc)
-            self.safety(
-                observed_at=now - timedelta(minutes=10), expires_at=now - timedelta(minutes=5)
-            )
-            self.assertEqual((await self.call("apply", key="stale")).status_code, 409)
             execute.assert_not_called()
 
     async def test_target_alias_and_staff_hold_refuse_before_driver(self) -> None:
@@ -255,6 +248,7 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
         with patch("control_plane.http_app.execute_odoo_post_deploy_result", side_effect=changed):
             response = await self.call("apply", key="changed-usage")
         self.assertEqual(response.status_code, 409, response.text)
+
         self.assertEqual(response.json()["error"]["code"], "disposable_lane_safety_unknown")
 
     async def test_keyed_readback_is_independent_and_never_replays_old_evidence(self) -> None:
@@ -290,6 +284,48 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.call("apply", key=key)
                 self.assertEqual(response.status_code, 409, response.text)
             execute.assert_called_once()
+
+    async def test_original_key_adopts_terminal_evidence_without_another_repair(self) -> None:
+        from control_plane.dokploy import post_deploy
+        from control_plane.provider_operations import (
+            ProviderObservation,
+            provider_operation_response_payload,
+        )
+        import click
+
+        def uncertain(**kwargs: Any) -> Any:
+            kwargs["before_connection_isolation_mutation"](
+                post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
+            )
+            raise click.ClickException("Acknowledgement lost")
+
+        with (
+            patch(
+                "control_plane.http_app.execute_odoo_post_deploy_result", side_effect=uncertain
+            ) as execute,
+            patch("control_plane.http_app.observe_odoo_connection_isolation_result") as observe,
+        ):
+            first = await self.call("apply", key="recover-original")
+            self.assertEqual(first.status_code, 503, first.text)
+            observe.return_value = ProviderObservation(outcome="unknown")
+            self.assertEqual((await self.call("apply", key="new-key")).status_code, 409)
+            observe.return_value = ProviderObservation(
+                outcome="present",
+                response_status_code=202,
+                response_payload=provider_operation_response_payload(
+                    trace_id="fixture", records={}, result={"post_deploy_status": "pass"}
+                ),
+            )
+            recovered = await self.call("apply", key="recover-original")
+            self.assertEqual(recovered.status_code, 202, recovered.text)
+            self.assertEqual(recovered.json()["result"]["post_deploy_status"], "pass")
+            replayed = await self.call("apply", key="recover-original")
+            self.assertEqual(replayed.status_code, 202, replayed.text)
+            execute.assert_called_once()
+            self.assertEqual(
+                observe.call_args.kwargs["provider_effect_phase"],
+                post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER,
+            )
 
     async def test_explicit_isolation_apply_rule_still_protects_lane(self) -> None:
         self.app = self.make_app(
@@ -373,6 +409,17 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.call("apply", key="lease-lost")
         self.assertEqual(response.status_code, 409, response.text)
+
+        def recovered(**kwargs: Any) -> Any:
+            kwargs["before_connection_isolation_mutation"]()
+            return {}, {"post_deploy_status": "pass"}
+
+        with patch(
+            "control_plane.http_app.execute_odoo_post_deploy_result", side_effect=recovered
+        ) as execute_again:
+            response = await self.call("apply", key="lease-lost")
+        self.assertEqual(response.status_code, 202, response.text)
+        execute_again.assert_called_once()
 
     async def test_post_effect_transport_errors_are_unverified_and_retained(self) -> None:
         import click

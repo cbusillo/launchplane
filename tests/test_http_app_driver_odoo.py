@@ -6443,6 +6443,7 @@ class FastApiOdooPostDeployOverrideTests(unittest.IsolatedAsyncioTestCase):
                                 "connection_isolation": mode,
                                 "reviewed_dry_run": mode == "apply",
                                 "reviewed_plan_sha256": "a" * 64 if mode == "apply" else "",
+                                "reviewed_resource_sha256": "b" * 64 if mode == "apply" else "",
                                 "reason": "Repair testing-copy connections",
                             },
                         },

@@ -19211,6 +19211,17 @@
                 "type": "null"
               }
             ]
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -19324,6 +19335,23 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "website_settings_verified": {
+            "default": true,
+            "title": "Website Settings Verified",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "OdooOverrideApplyResult",
@@ -20552,6 +20580,93 @@
           "url"
         ],
         "title": "OdooWebsiteBootstrapRoute",
+        "type": "object"
+      },
+      "OdooWebsiteSettings": {
+        "additionalProperties": false,
+        "properties": {
+          "block_third_party_domains": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": true,
+            "title": "Block Third Party Domains"
+          },
+          "cookies_bar": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": true,
+            "title": "Cookies Bar"
+          },
+          "google_analytics_key": {
+            "default": "",
+            "title": "Google Analytics Key",
+            "type": "string"
+          },
+          "operation": {
+            "default": "apply",
+            "enum": [
+              "apply",
+              "disable_collection"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "public_indexing_enabled": {
+            "default": false,
+            "title": "Public Indexing Enabled",
+            "type": "boolean"
+          },
+          "public_origin": {
+            "title": "Public Origin",
+            "type": "string"
+          },
+          "website_id": {
+            "minimum": 1,
+            "title": "Website Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "block_third_party_domains",
+          "cookies_bar",
+          "google_analytics_key",
+          "operation",
+          "public_indexing_enabled",
+          "public_origin",
+          "website_id"
+        ],
+        "title": "OdooWebsiteSettings",
+        "type": "object"
+      },
+      "OdooWebsiteSettingsIntent": {
+        "additionalProperties": false,
+        "properties": {
+          "artifact_id": {
+            "minLength": 1,
+            "title": "Artifact Id",
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/OdooWebsiteSettings"
+          }
+        },
+        "required": [
+          "artifact_id",
+          "settings"
+        ],
+        "title": "OdooWebsiteSettingsIntent",
         "type": "object"
       },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {
@@ -34558,6 +34673,17 @@
           "production": {
             "$ref": "#/components/schemas/ReleaseVersion"
           },
+          "production_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "repository": {
             "title": "Repository",
             "type": "string"
@@ -34582,6 +34708,17 @@
             },
             "title": "Untracked Commits",
             "type": "array"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -35386,6 +35523,12 @@
             "pattern": "^[0-9a-f]{40}$",
             "title": "Source Commit",
             "type": "string"
+          },
+          "website_settings_sha256": {
+            "default": "",
+            "title": "Website Settings Sha256",
+            "type": "string",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [

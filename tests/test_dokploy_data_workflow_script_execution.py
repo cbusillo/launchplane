@@ -10,15 +10,18 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
+from tests.test_connection_isolation_qualification import inventory_rows, resource_fixture
 from unittest.mock import patch
 
 from control_plane import dokploy as control_plane_dokploy
@@ -43,6 +46,7 @@ WEB_CONTAINER_ID = "web-id"
 PRODUCTION_VALUE = "production-secret-value"
 
 _FAKE_DOCKER = """\
+import json
 import os
 import subprocess
 import sys
@@ -68,9 +72,41 @@ def main(argv):
             prefix = "label=com.docker.compose.service="
             if argument.startswith(prefix):
                 print(argument[len(prefix):] + "-id")
+                return 0
+        print("web-id\\ndatabase-id\\nscript-runner-id")
+        return 0
+    if command in ("volume", "network"):
+        if argv[1] == "ls":
+            for row in json.loads(os.environ["FAKE_RESOURCE_ROWS"]):
+                if row["kind"] == command:
+                    print(row["name"] if command == "volume" else row["id"])
+        elif argv[1] == "inspect":
+            rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
+            for row in rows:
+                if row["kind"] == command:
+                    print(json.dumps(row))
         return 0
     if command == "inspect":
         template, container_id = argv[2], argv[3]
+        if ".ExecIDs" in template:
+            transient = state_dir / "runner-exec-probe.state"
+            active = os.environ.get("FAKE_RUNNER_EXEC_ACTIVE") == "1"
+            if os.environ.get("FAKE_RUNNER_EXEC_TRANSIENT") == "1" and not transient.exists():
+                transient.touch()
+                active = True
+            print('["orphaned-exec"]' if active else "null")
+            return 0
+        if '"kind"' in template:
+            kind = "environment" if '"environment"' in template else "container"
+            rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
+            if os.environ.get("FAKE_RESOURCE_CHANGED") == "1":
+                for row in rows:
+                    if row["kind"] == "container" and row["id"] == "database-id":
+                        row["ports"] = {"5432/tcp": [{"HostPort": "5432"}]}
+            for row in rows:
+                if row["kind"] == kind and row["id"] in argv[3:]:
+                    print(json.dumps(row))
+            return 42 if os.environ.get("FAKE_METADATA_READ_FAILURE") == "1" else 0
         if ".State.Status" in template:
             path = state_path(container_id)
             status = path.read_text().strip() if path.exists() else "running"
@@ -164,10 +200,16 @@ def main(argv):
         log("workflow kept integrations " + exec_environment.get(kept_key, "<unset>"))
         print(os.environ.get("FAKE_WORKFLOW_OUTPUT", "workflow ran"))
         return int(os.environ.get("FAKE_WORKFLOW_EXIT", "0"))
+    if program[:2] == ["python3", "-c"] or program[:3] == ["python3", "-I", "-c"]:
+        log("exec qualify" + (" -i" if interactive else ""))
+        return subprocess.run([sys.executable, *program[1:]],
+                              stdin=None if interactive else subprocess.DEVNULL).returncode
     if program[:2] == ["python3", "-"]:
         log("exec readback" + (" -i" if interactive else ""))
         environment = dict(os.environ)
+        environment.update(exec_environment)
         environment["PYTHONPATH"] = str(state_dir / "modules")
+        environment.update(exec_environment)
         # Docker attaches the caller's stdin only with -i.
         stdin = None if interactive else subprocess.DEVNULL
         if program[2:] == ["/volumes/scripts/odoo_website_bootstrap.py"]:
@@ -448,6 +490,10 @@ def _render_post_deploy_script(
                     ODOO_UPSTREAM_DB_USER=odoo
                     ODOO_UPSTREAM_FILESTORE_PATH=/source/filestore
                     """
+                )
+                + "".join(
+                    f"\n{key}={value}"
+                    for key, value in (workflow_environment_overrides or {}).items()
                 ),
                 "appName": "example-testing-app",
                 "serverId": "server-123",
@@ -501,6 +547,165 @@ def _render_post_deploy_script(
 
 @unittest.skipIf(BASH is None, "bash 4 or newer is required to run the rendered script")
 class DataWorkflowScriptExecutionTests(unittest.TestCase):
+    def test_finished_health_probe_does_not_refuse_post_deploy(self) -> None:
+        run = self._run(_render_post_deploy_script(None), FAKE_RUNNER_EXEC_TRANSIENT="1")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertIn("exec workflow", run.docker_log)
+
+    def test_runner_exec_left_after_transport_exit_blocks_repair_and_restore(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        policy = integration_readback_policy(
+            instance_name="testing", policies=_policies(), workflow_mode="maintenance"
+        )
+        scripts = (
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+                reviewed_resource_sha256=self.resource_digest,
+            ),
+            _render_post_deploy_script(None),
+            _render_post_deploy_script(None, run_destructive_restore=True),
+        )
+        for index, script in enumerate(scripts):
+            with self.subTest(index=index):
+                run = self._run(script, FAKE_RUNNER_EXEC_ACTIVE="1")
+                self.assertNotEqual(run.returncode, 0)
+                self.assertNotIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
+                self.assertFalse(run.web_restarted)
+                self.assertFalse(run.readback_ran)
+                self.assertNotIn("exec workflow", run.docker_log)
+
+    def test_running_isolation_excludes_restore_and_maintenance_until_remote_exit(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        prefix = dokploy_post_deploy.odoo_testing_schedule_lock_script("example-testing-app")
+        ready = self.root / "lock-held"
+        holder = subprocess.Popen(
+            [
+                self.bash,
+                "-c",
+                prefix + f"\nprintf ready >{shlex.quote(str(ready))}\nread -r release\n",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=self.base_environment,
+        )
+        try:
+            deadline = time.monotonic() + 5
+            while not ready.exists() and holder.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(ready.exists())
+            policy = integration_readback_policy(
+                instance_name="testing",
+                policies=_policies(),
+                workflow_mode="maintenance",
+            )
+            scripts = (
+                isolation_script(
+                    compose_app_name="example-testing-app",
+                    database_name="example_testing",
+                    instance="testing",
+                    mode="apply",
+                    readback_spec=policy.encoded_spec(),
+                    context="example",
+                    runtime_identity=self.runtime_identity,
+                    reviewed_resource_sha256=self.resource_digest,
+                ),
+                _render_post_deploy_script(None),
+                _render_post_deploy_script(None, run_destructive_restore=True),
+            )
+            for script in scripts:
+                with self.subTest(script_kind=scripts.index(script)):
+                    run = self._run(script)
+                    self.assertNotEqual(run.returncode, 0)
+                    self.assertNotIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
+                    self.assertFalse(run.web_restarted)
+                    self.assertNotIn("exec workflow", run.docker_log)
+                    self.assertNotIn("exec readback", run.docker_log)
+        finally:
+            holder.communicate("release\n", timeout=5)
+        run = self._run(_render_post_deploy_script(None))
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_apply_without_resource_review_never_dispatches_docker(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        policy = integration_readback_policy(
+            instance_name="testing",
+            policies=_policies(),
+            workflow_mode="maintenance",
+        )
+        run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+            )
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(run.docker_log, ())
+
+    def test_resource_drift_refuses_before_web_stop_or_sql(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        policy = integration_readback_policy(
+            instance_name="testing",
+            policies=_policies(allowed=("shopify",)),
+            workflow_mode="maintenance",
+        )
+        run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+                reviewed_resource_sha256=self.resource_digest,
+            ),
+            FAKE_RESOURCE_CHANGED="1",
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn("stop web-id", run.docker_log)
+        self.assertNotIn("exec readback", run.docker_log)
+        self.assertFalse(run.web_restarted)
+
+    def test_failed_metadata_read_cannot_use_even_complete_looking_partial_output(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        policy = integration_readback_policy(
+            instance_name="testing", policies=_policies(), workflow_mode="maintenance"
+        )
+        run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+                reviewed_resource_sha256=self.resource_digest,
+            ),
+            FAKE_METADATA_READ_FAILURE="1",
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
+        self.assertFalse(run.readback_ran)
+
     def test_scoped_connection_repair_modes_and_failed_readback(self) -> None:
         from control_plane.dokploy.connection_isolation import isolation_script
 
@@ -518,6 +723,9 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                         instance="testing",
                         mode=mode,
                         readback_spec=policy.encoded_spec(),
+                        context="example",
+                        runtime_identity=self.runtime_identity,
+                        reviewed_resource_sha256=self.resource_digest if mode == "apply" else "",
                     ),
                     FAKE_ODOO_DB=_fake_database({"shopify.api_token": "test-token"}),
                 )
@@ -531,6 +739,9 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 instance="testing",
                 mode="apply",
                 readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+                reviewed_resource_sha256=self.resource_digest,
             ),
             FAKE_ODOO_DB=_fake_database({"printnode.api_key": PRODUCTION_VALUE}),
         )
@@ -545,6 +756,8 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 instance="testing",
                 mode="dry-run",
                 readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
             ),
             FAKE_ODOO_DB=_fake_database({"printnode.api_key": PRODUCTION_VALUE}),
         )
@@ -558,6 +771,8 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 instance="testing",
                 mode="readback",
                 readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
             ),
             FAKE_ODOO_DB=_fake_database(
                 {"sms.endpoint": "enabled-test", "printnode.api_key": PRODUCTION_VALUE}
@@ -572,17 +787,50 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.root = Path(temporary_directory.name)
+        self.enterContext(
+            patch.object(dokploy_post_deploy, "ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY", self.root)
+        )
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         docker = bin_dir / "docker"
         docker.write_text(f"#!{sys.executable}\n{_FAKE_DOCKER}", encoding="utf-8")
         docker.chmod(0o755)
+        flock = bin_dir / "flock"
+        flock.write_text(
+            f"#!{sys.executable}\nimport fcntl, sys\ntry:\n    fcntl.flock(int(sys.argv[-1]), fcntl.LOCK_EX | fcntl.LOCK_NB)\nexcept BlockingIOError:\n    sys.exit(1)\n"
+        )
+        flock.chmod(0o755)
         modules = self.root / "modules"
         modules.mkdir()
         (modules / "psycopg2.py").write_text(_FAKE_PSYCOPG2, encoding="utf-8")
+        (modules / "run_odoo_startup.py").write_text(
+            "import os\n"
+            "def _load_settings(arguments): return arguments\n"
+            "def _write_runtime_config(settings): pass\n"
+            "def _run_odoo_shell(settings, program, *, label):\n"
+            "    if os.environ.get('FAKE_WEBSITE_SETTINGS_FAILURE') == '1': raise RuntimeError('native consumer failed')\n"
+            "    print('website_settings_nonproduction_excluded=true')\n",
+            encoding="utf-8",
+        )
         assert BASH is not None
         self.bash = BASH
+        resource_snapshot, self.runtime_identity = resource_fixture()
+        namespace: dict[str, Any] = {}
+        from control_plane.connection_isolation_qualification import RESOURCE_QUALIFICATION_LIBRARY
+
+        exec(RESOURCE_QUALIFICATION_LIBRARY, namespace)
+        self.resource_digest, _ = namespace["qualify_resources"](
+            resource_snapshot,
+            "example-testing-app",
+            "example_testing",
+            "example",
+            self.runtime_identity,
+        )
+        resource_rows = inventory_rows(resource_snapshot)
         self.base_environment = {
+            "FAKE_RESOURCE_ROWS": json.dumps(
+                [json.loads(line) for line in resource_rows.splitlines()]
+            ),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "FAKE_DOCKER_STATE": str(self.root),
             "FAKE_ODOO_DB": _fake_database(),
@@ -1119,6 +1367,37 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertNotEqual(still_refused.returncode, 0)
         self.assertFalse(still_refused.web_restarted, still_refused.docker_log)
 
+    def test_native_settings_retry_can_start_previously_stopped_production_web(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+        from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+        from tests.test_odoo_website_settings import intent
+
+        payload = OdooPostDeployPayload(
+            context="example", instance="prod", website_settings=intent().settings
+        )
+        script = _render_post_deploy_script(
+            None,
+            instance="prod",
+            workflow_environment_overrides={
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    payload.to_wire_json_bytes()
+                ).decode()
+            },
+        )
+        for failed in ("0", "1"):
+            with self.subTest(failed=failed):
+                run = self._run(script, web_status="exited", FAKE_WEBSITE_SETTINGS_FAILURE=failed)
+                self.assertEqual(run.returncode == 0, failed == "0", run.stdout + run.stderr)
+                self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
+        for failed in ("0", "1"):
+            with self.subTest(workflow_failure=True, native_failure=failed):
+                run = self._run(
+                    script, FAKE_WORKFLOW_EXIT="7", FAKE_WEBSITE_SETTINGS_FAILURE=failed
+                )
+                self.assertEqual(run.returncode, 7, run.stdout + run.stderr)
+                self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
+
     def test_stopped_web_without_a_readback_still_fails(self) -> None:
         run = self._run(_render_script(instance="prod"), web_status="exited")
 
@@ -1269,6 +1548,17 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn("odoo_restore_completed", run.stdout)
         self.assertNotIn("odoo_restore_failure_logged", run.stdout)
+
+    def test_native_settings_failure_keeps_web_stopped_on_success_and_error_paths(self) -> None:
+        for workflow_exit in ("0", "7"):
+            with self.subTest(workflow_exit=workflow_exit):
+                run = self._run(
+                    _render_restore_script(),
+                    FAKE_WORKFLOW_EXIT=workflow_exit,
+                    FAKE_WEBSITE_SETTINGS_FAILURE="1",
+                )
+                self.assertNotEqual(run.returncode, 0)
+                self.assertFalse(run.web_restarted, run.docker_log)
 
 
 if __name__ == "__main__":

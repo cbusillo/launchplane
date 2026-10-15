@@ -16,12 +16,15 @@ class ConnectionIsolationOutcomeUnknown(RuntimeError):
 
 
 class ConnectionIsolationPreconditionFailed(click.ClickException):
-    def __init__(self, reason: Literal["plan_changed", "workflow_active"]) -> None:
+    def __init__(
+        self, reason: Literal["plan_changed", "workflow_active", "runtime_unverified"]
+    ) -> None:
         self.code = "connection_isolation_" + reason
         super().__init__(
             {
                 "plan_changed": "The connection isolation plan changed; run a new dry-run.",
                 "workflow_active": "A data workflow is active on this lane; wait for it, then run a new dry-run.",
+                "runtime_unverified": "The current testing runtime identity is unavailable or mismatched; qualify it before repair.",
             }[reason]
         )
 

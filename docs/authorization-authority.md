@@ -205,9 +205,11 @@ requests separately from general maintenance. Its instance-scoped plan and
 read actions inherit the Director's standing observation permission; a scoped
 `agent.read` rule alone does not execute its provider schedule. Isolation apply remains
 a write. Only the authenticated Director identity can use the source-owned
-testing repair without a policy grant, after fresh disposable-lane checks.
-Production, staff use, only-copy data, unknown safety and shared resources remain
-protected. No new policy record or credential is installed. General post-deploy
+testing repair without a policy grant, after operation-specific qualification.
+The fixed repair preserves application records without asserting that a copy is
+unused or reproducible. Production, staff holds, recorded protected use or
+only-copy data, target aliases, shared resources and unverified actual testing
+resources refuse. No new policy record or credential is installed. General post-deploy
 authority does not authorize isolation apply. See the
 [repair procedure](operations.md#repair-copied-carrier-and-customer-sms-connections)
 for reviewed plan binding, stable idempotency, independent readback and current
