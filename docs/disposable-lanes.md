@@ -439,6 +439,10 @@ connections. Strict integration readback has no inherited allowances and also
 checks reapplied instance settings before hooks. A final readback gates web start.
 Fresh copies include the deploy-phase website settings inside that guarded restore;
 they do not run a second ordinary maintenance pass with inherited allowances.
+The same native website-settings program used by ordinary testing deployments
+excludes analytics and search indexing after the guarded restore. Its failure
+keeps web stopped; final integration readback follows that program before opening
+the web gate.
 The shared testing connection-isolation pass also clears analytics on existing
 testing lanes; production behavior is unchanged.
 Completion consumes the post-deploy readback markers before publishing successful

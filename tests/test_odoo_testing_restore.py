@@ -180,6 +180,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.volumes: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
         self.sanitized = True
+        self.website_settings_pass = True
+        self.website_settings_call: list[str] | None = None
         self.existing_database = False
         self.resume_verified = False
         self.gate_payload = "payload-fixture"
@@ -228,6 +230,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
 
     def command(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
+
         self.calls.append(command)
         result = b""
         if command[0] in {"ssh", "rsync"}:
@@ -253,6 +257,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     if self.sanitized
                     else b"private-error-value"
                 )
+            elif kwargs.get("input") == WEBSITE_SETTINGS_PROGRAM.encode():
+                self.website_settings_call = command
+                if not self.website_settings_pass:
+                    return subprocess.CompletedProcess(
+                        command, 1, stdout=b"", stderr=b"private website failure"
+                    )
             elif kwargs.get("input") == b"fixture readback":
                 result = b"integration_readback_ok=true"
             elif command[-2] == "-c" and command[-1].startswith("import hashlib,os"):
@@ -353,6 +363,31 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         status, _output = self.run_program()
         self.assertNotEqual(status, 0)
         self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
+
+    def test_website_exclusion_is_required_before_web_start(self) -> None:
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertIsNotNone(self.website_settings_call)
+        assert self.website_settings_call is not None
+        self.assertEqual(self.website_settings_call[-2:], [self.database, self.gen.instance])
+        readback = next(
+            index
+            for index, call in enumerate(self.calls)
+            if call[-2:] == [self.database, self.spec["readback_spec"]]
+        )
+        self.assertLess(
+            self.calls.index(self.website_settings_call),
+            readback,
+        )
+        self.assertLess(readback, self.calls.index(["docker", "start", "web"]))
+        self.calls.clear()
+        self.gate_hash = ""
+        self.website_settings_pass = False
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+        self.assertNotIn(["docker", "start", "web"], self.calls)
+        self.assertEqual(self.gate_hash, "")
+        self.assertNotIn("private website failure", output)
 
     def test_existing_database_and_failed_sanitization_keep_web_stopped(self) -> None:
         for fault in ("existing", "sanitization"):

@@ -683,7 +683,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
     def test_execute_applies_deploy_phase_overrides_during_destructive_restore(self) -> None:
         self._restore_overrides(fresh=False)
 
-    def test_fresh_copy_applies_website_inside_the_strict_restore(self) -> None:
+    def test_fresh_copy_includes_deploy_bootstrap_in_restore_payload(self) -> None:
         self._restore_overrides(fresh=True)
 
     def _restore_overrides(self, *, fresh: bool) -> None:

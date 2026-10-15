@@ -3,6 +3,7 @@
 import base64
 import json
 from typing import Literal, TypeVar
+from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductRuntimeConfigRequirement,
@@ -298,6 +299,7 @@ def build_fresh_testing_restore_script(
         # and module/readback proof before the payload-bound web gate opens.
         "copy_binding_sha256": generation_binding(generation),
         "runner": TESTING_COPY_RUNNER,
+        "website_settings_program": WEBSITE_SETTINGS_PROGRAM,
         "workflow_environment": workflow_environment,
         "ssh_key_path": source_environment.get("DATA_WORKFLOW_SSH_KEY", ""),
         "ssh_directory": source_environment.get("DATA_WORKFLOW_SSH_DIR", ""),
@@ -554,6 +556,8 @@ def restore_main():
         markers = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
         if any(markers.get(key) != "true" for key in ("testing_copy_sanitized", "testing_copy_pre_registry_sanitized", "odoo_module_update_completed", "odoo_module_update_modules_configured")):
             raise RuntimeError("Testing copy lacks sanitization or module update proof")
+        docker(*arguments, runner, "python3", "-", database, gen["instance"],
+            stdin=spec["website_settings_program"].encode())
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
