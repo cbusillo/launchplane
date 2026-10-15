@@ -28,6 +28,57 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
 
 
+def require_empty_testing_target_creation(
+    record_store: PostgresRecordStore,
+    request: "DokployTargetSetupEnvelope",
+    *,
+    product: str,
+) -> None:
+    """Stage new empty resources without borrowing authority over an existing lane."""
+    from control_plane.authz_candidate_preparation import (
+        is_exclusive_product_lane_context,
+        product_context_owners,
+    )
+
+    if (
+        request.operation != "create-compose"
+        or request.instance != "testing"
+        or request.project_id
+        or request.environment_id
+        or request.target_id
+        or request.expected_current_provider_target is not None
+        or request.replaces_operation_id
+        or request.source_type != "raw"
+        or request.custom_git_branch
+        or request.domains
+        or request.runtime_port is not None
+        or not request.project_name
+        or not request.environment_name
+    ):
+        raise ValueError("First testing setup only creates an empty compose in new placement.")
+    profile = record_store.read_product_profile_record(product)
+    if profile.lifecycle_state != "active" or not is_exclusive_product_lane_context(
+        context=request.context,
+        product=product,
+        owners=product_context_owners(record_store),
+    ):
+        raise ValueError("First testing setup requires an active exclusive context owner.")
+    # An existing registered lane needs its own current disposable-lane facts;
+    # first setup cannot replace it or take over its usage/data commitments.
+    if any(lane.instance == request.instance for lane in profile.lanes):
+        raise ValueError("First testing setup cannot change an already registered lane.")
+    for read in (
+        record_store.read_dokploy_target_record,
+        record_store.read_dokploy_target_id_record,
+        record_store.read_provider_target_record,
+    ):
+        try:
+            read(context_name=request.context, instance_name=request.instance)
+        except FileNotFoundError:
+            continue
+        raise ValueError("First testing setup cannot replace existing target authority.")
+
+
 class DokployTargetSetupEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

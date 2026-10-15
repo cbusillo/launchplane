@@ -84,6 +84,7 @@ from control_plane.dokploy_target_setup_http import (
     DokployComposeDomainPartialError,
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
+    require_empty_testing_target_creation,
 )
 from control_plane.workflows.dokploy_target_adoption import (
     DokployTargetComparisonEvidenceUnavailableError,
@@ -25018,10 +25019,19 @@ def create_launchplane_fastapi_app(
             and bool(setup_request.replaces_operation_id)
             and bool(lane_owner)
         )
+        first_testing_setup = (
+            director_agent_identity(identity)
+            and setup_request.mode == "apply"
+            and setup_request.operation == "create-compose"
+            and setup_request.instance == "testing"
+            and not setup_request.replaces_operation_id
+            and bool(lane_owner)
+        )
         if (
             isinstance(identity, TerminalAgentIdentity)
             and setup_request.mode == "apply"
             and not disposable_rebuild_setup
+            and not first_testing_setup
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -25049,7 +25059,12 @@ def create_launchplane_fastapi_app(
                 target=AuthorizationTarget(scope="instance", instances=(setup_request.instance,)),
             )
         )
-        can_setup_target = service_scoped or lane_scoped_only or disposable_rebuild_setup
+        first_testing_setup = first_testing_setup and (
+            isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
+        )
+        can_setup_target = (
+            service_scoped or lane_scoped_only or disposable_rebuild_setup or first_testing_setup
+        )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
             can_setup_target
             or resolved_authz_policy_runtime.allows(
@@ -25170,6 +25185,11 @@ def create_launchplane_fastapi_app(
             return replayed_response
 
         def rebuild_checkpoint() -> None:
+            if first_testing_setup:
+                require_empty_testing_target_creation(
+                    database_store, setup_request, product=lane_owner
+                )
+                return
             if not disposable_rebuild_setup or setup_request.mode != "apply":
                 return
             operation = database_store.read_odoo_stable_target_replacement_operation_record(
@@ -25225,10 +25245,15 @@ def create_launchplane_fastapi_app(
                     # A lane-scoped caller's owner is re-checked when records commit.
                     required_context_owner=(
                         (lane_owner, setup_request.context)
-                        if lane_scoped_only or role_only_setup or disposable_rebuild_setup
+                        if lane_scoped_only
+                        or role_only_setup
+                        or disposable_rebuild_setup
+                        or first_testing_setup
                         else None
                     ),
-                    disposable_checkpoint=checkpoint if disposable_rebuild_setup else None,
+                    disposable_checkpoint=checkpoint
+                    if disposable_rebuild_setup or first_testing_setup
+                    else None,
                 )
         except DokployComposeDomainPartialError as error:
             raise LaunchplaneHTTPException(
