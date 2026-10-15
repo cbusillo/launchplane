@@ -1,6 +1,8 @@
 import contextlib
+import hashlib
 import io
 import json
+import logging
 import os
 import struct
 import subprocess
@@ -212,7 +214,9 @@ class DiagnosticTests(unittest.TestCase):
         with (
             contextlib.redirect_stdout(io.StringIO()) as stdout,
             contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertLogs(level="DEBUG") as logs,
         ):
+            logging.getLogger(__name__).debug("Capture diagnostic log output")
             result = self.run_diagnostic()
         self.assertEqual(result.runtime, "verified")
         for source in result.sources:
@@ -220,9 +224,19 @@ class DiagnosticTests(unittest.TestCase):
             self.assertTrue(all(item.agreement == "match" for item in source.parameters))
             self.assertEqual(source.managed_connection_grants, "read_only")
             self.assertEqual(source.applied_connection_grants, "unknown")
-        for private in (PRIVATE, "fixture_reader", ".invalid", "fixture-ciphertext"):
+        for private in (
+            PRIVATE,
+            hashlib.sha256(PRIVATE.encode()).hexdigest(),
+            "fixture_reader",
+            ".invalid",
+            "fixture-ciphertext",
+        ):
             self.assertNotIn(
-                private, result.model_dump_json() + stdout.getvalue() + stderr.getvalue()
+                private,
+                result.model_dump_json()
+                + stdout.getvalue()
+                + stderr.getvalue()
+                + "\n".join(logs.output),
             )
         self.assertFalse(result.applied)
         writes = [
@@ -482,14 +496,20 @@ class GrantTests(unittest.TestCase):
 
     def test_failed_login_polling_is_cooled_down_but_success_is_fresh(self) -> None:
         settings = {"host": "source.invalid", "user": "reader", "password": PRIVATE}
+        password_digest = hashlib.sha256(PRIVATE.encode()).hexdigest()
         with (
+            contextlib.redirect_stdout(io.StringIO()) as stdout,
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            self.assertLogs(level="DEBUG") as logs,
             patch(
                 "control_plane.odoo_import_diagnostics.time.monotonic", return_value=100
             ) as clock,
             patch(
-                "control_plane.odoo_import_diagnostics.subprocess.run", side_effect=OSError(PRIVATE)
+                "control_plane.odoo_import_diagnostics.subprocess.run",
+                side_effect=OSError(f"{PRIVATE}:{password_digest}"),
             ) as run,
         ):
+            logging.getLogger(__name__).debug("Capture diagnostic log output")
             self.assertEqual(
                 diagnostic.managed_grants(
                     settings, binding_id="fixture-binding", version_id="fixture-version"
@@ -498,12 +518,22 @@ class GrantTests(unittest.TestCase):
             )
             self.assertEqual(
                 diagnostic.managed_grants(
-                    settings, binding_id="fixture-binding", version_id="fixture-version"
+                    {**settings, "password": "different-fixture-password"},
+                    binding_id="fixture-binding",
+                    version_id="fixture-version",
                 ),
                 "unknown",
             )
             run.assert_called_once()
-            self.assertNotIn(PRIVATE, repr(diagnostic._FAILED_PROBES))
+            output = (
+                stdout.getvalue()
+                + stderr.getvalue()
+                + "\n".join(logs.output)
+                + repr(diagnostic._FAILED_PROBES)
+                + repr(diagnostic._ACTIVE_PROBES)
+            )
+            for private in (PRIVATE, password_digest, "different-fixture-password"):
+                self.assertNotIn(private, output)
             clock.return_value = 1000
             run.side_effect = None
             run.return_value = subprocess.CompletedProcess(
