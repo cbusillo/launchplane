@@ -21652,6 +21652,10 @@ class PostgresRecordStore(HumanSessionStore):
                 {
                     **record.model_dump(),
                     "state": "pending" if record.rerequested_while_running else outcome,
+                    # A deferred or newly requested pass yields to work already waiting.
+                    "requested_at": (
+                        completed_at if record.rerequested_while_running else record.requested_at
+                    ),
                     "updated_at": completed_at,
                     "lease_owner": "",
                     "lease_expires_at": "",

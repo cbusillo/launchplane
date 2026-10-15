@@ -504,6 +504,9 @@ A PR author controls that PR's build, so its uploads are untrusted input.
 - One worker handles one reconcile at a time per product.
 - A target whose reconcile fails is retried with backoff and stays visible
   as failing.
+- A completed reconcile requested again while running returns to the queue at
+  its completion time. Deferred busy lanes therefore yield to other waiting
+  targets while preserving their next pass and latest plan.
 
 ## Who the work runs as
 
