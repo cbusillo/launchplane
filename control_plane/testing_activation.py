@@ -737,29 +737,67 @@ class TestingActivationAdapter:
         if (
             payload.get("composeId") != record.target_id
             or payload.get("appName") != record.app_name
-            or payload.get("sourceType") != "raw"
+        ):
+            raise TestingActivationRefusal(
+                "Fresh recipient identity changed.",
+                code=TestingActivationRefusalCode.RECIPIENT_IDENTITY_UNVERIFIED,
+            )
+        if (
+            payload.get("sourceType") != "raw"
             or payload.get("autoDeploy") is not False
             or payload.get("mounts")
             or payload.get("serviceNetworks")
             or payload.get("randomize")
             or payload.get("isolatedDeployment")
-            or json.loads(str(payload.get("composeFile") or "null")) != expected
         ):
-            raise TestingActivationRefusal("Fresh provider source or recipient identity changed.")
+            raise TestingActivationRefusal(
+                "Fresh recipient options remain unverified.",
+                code=TestingActivationRefusalCode.RECIPIENT_OPTIONS_UNVERIFIED,
+            )
+        try:
+            configured_source = json.loads(str(payload.get("composeFile") or "null"))
+        except ValueError as error:
+            raise TestingActivationRefusal(
+                "Fresh recipient source remains unverified.",
+                code=TestingActivationRefusalCode.RECIPIENT_SOURCE_UNVERIFIED,
+            ) from error
+        if configured_source != expected:
+            raise TestingActivationRefusal(
+                "Fresh recipient source differs from the reviewed source.",
+                code=TestingActivationRefusalCode.RECIPIENT_SOURCE_UNVERIFIED,
+            )
         if api.parse_dokploy_env_text(str(payload.get("env") or "")) != values:
             raise TestingActivationRefusal(
-                "Fresh provider environment differs from safe managed inputs."
+                "Fresh provider environment differs from safe managed inputs.",
+                code=TestingActivationRefusalCode.RECIPIENT_ENVIRONMENT_UNVERIFIED,
             )
-        actual = yaml.safe_load(
-            compose.fetch_dokploy_converted_compose_file(
-                host=host, token=token, compose_id=record.target_id
+        try:
+            actual = yaml.safe_load(
+                compose.fetch_dokploy_converted_compose_file(
+                    host=host, token=token, compose_id=record.target_id
+                )
             )
-        )
+        except yaml.YAMLError as error:
+            raise TestingActivationRefusal(
+                "The actual provider render is malformed.",
+                code=TestingActivationRefusalCode.RECIPIENT_RENDER_UNVERIFIED,
+            ) from error
         if isinstance(actual, dict) and isinstance(actual.get("services"), dict):
             for service_name, service in actual["services"].items():
+                if not isinstance(service, dict):
+                    raise TestingActivationRefusal(
+                        "The actual provider service is malformed.",
+                        code=TestingActivationRefusalCode.RECIPIENT_RENDER_UNVERIFIED,
+                    )
                 labels = service.pop("labels", {})
                 if isinstance(labels, list):
-                    labels = dict(item.split("=", 1) for item in labels)
+                    try:
+                        labels = dict(item.split("=", 1) for item in labels)
+                    except (AttributeError, TypeError, ValueError) as error:
+                        raise TestingActivationRefusal(
+                            "The provider added unverified labels.",
+                            code=TestingActivationRefusalCode.RECIPIENT_LABELS_UNVERIFIED,
+                        ) from error
                 if not isinstance(labels, dict) or set(labels) - {
                     "dokploy.organization.id",
                     "dokploy.project.id",
@@ -771,24 +809,32 @@ class TestingActivationAdapter:
                     "dokploy.service",
                 }:
                     raise TestingActivationRefusal(
-                        "The provider added an unqualified routing label."
+                        "The provider added an unqualified routing label.",
+                        code=TestingActivationRefusalCode.RECIPIENT_LABELS_UNVERIFIED,
                     )
                 if labels and (
                     labels.get("dokploy.application.id") != record.target_id
                     or labels.get("dokploy.service") != service_name
                 ):
                     raise TestingActivationRefusal(
-                        "Provider metadata labels identify another recipient."
+                        "Provider metadata labels identify another recipient.",
+                        code=TestingActivationRefusalCode.RECIPIENT_LABELS_UNVERIFIED,
                     )
-        actual = interpolate(actual, values)
-        qualify_compose(
-            actual,
-            volumes=set(resources.volumes.values()),
-            ports=ports_for(record, values),
-            credential_values={
-                value for key, value in values.items() if looks_like_credential(key, value)
-            },
-        )
+        try:
+            actual = interpolate(actual, values)
+            qualify_compose(
+                actual,
+                volumes=set(resources.volumes.values()),
+                ports=ports_for(record, values),
+                credential_values={
+                    value for key, value in values.items() if looks_like_credential(key, value)
+                },
+            )
+        except TestingActivationRefusal as error:
+            raise TestingActivationRefusal(
+                "The actual provider render has unqualified resources.",
+                code=TestingActivationRefusalCode.RECIPIENT_RENDER_UNVERIFIED,
+            ) from error
         # Semantic equality prevents a provider conversion from replacing safe env,
         # command or health values while retaining only the storage settings.
         expected_render = interpolate(expected, values)
@@ -796,7 +842,8 @@ class TestingActivationAdapter:
             actual.pop("name", None)
         if actual != expected_render:
             raise TestingActivationRefusal(
-                "Actual provider render differs from the reviewed source and values."
+                "Actual provider render differs from the reviewed source and values.",
+                code=TestingActivationRefusalCode.RECIPIENT_RENDER_CHANGED,
             )
 
     def unused_recipient(self, record: TestingActivationRecord) -> dict[str, Any]:

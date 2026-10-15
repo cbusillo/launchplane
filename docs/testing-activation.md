@@ -65,8 +65,16 @@ cross-process executor and authority exclusion. Final recipient publication and
 its custody receipt commit atomically, with the unchanged hold still set.
 
 Keep the original key after interruption. `receipt` reads its immutable completed
-result; `readback` checks the current published recipient. An original-key apply
-may adopt a fully persisted, exactly matching configuration after a lost reply
+result; `readback` checks the current published recipient. An interrupted
+configuration can also be diagnosed before publication. In the recorded
+`configure_new_recipient` phase, `readback` checks that caller's persisted
+recipient and reports a closed identity, options, source, environment, labels
+or render qualification category. It returns no provider values or exception
+text, recovers no placement and performs no host inspection, publication,
+reservation adoption or retry. Even a passing provider check still refuses an
+unpublished recipient; it is not proof of separation or permission to lift a hold.
+An original-key apply may adopt a fully persisted, exactly matching configuration
+after a lost reply
 and fresh storage/port readback. It does not redispatch creation. Missing creation
 identities are recovered only from one unambiguous original namespace and
 placement; only previously undispatched creation steps continue. Unknown absent

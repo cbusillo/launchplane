@@ -1155,8 +1155,9 @@ class ActivationTests(unittest.TestCase):
             )
 
         for instance in ("prod", "preview-1"):
-            response = asyncio.run(post({**draft, "instance": instance}))
-            self.assertIn(response.status_code, (400, 422), response.text)
+            for mode in ("dry-run", "readback"):
+                response = asyncio.run(post({**draft, "instance": instance, "mode": mode}))
+                self.assertIn(response.status_code, (400, 422), response.text)
         self.assertEqual(self.writes, [])
         planned = asyncio.run(post(draft))
         self.assertEqual(planned.status_code, 202, planned.text)
@@ -1182,6 +1183,126 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(repeated.status_code, 202, repeated.text)
         readback = asyncio.run(post({**draft, "mode": "readback"}))
         self.assertEqual(readback.status_code, 409, readback.text)
+
+    def test_unpublished_readback_diagnoses_qualification_without_effects_or_publication(
+        self,
+    ) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        private = "private-provider-diagnostic-sentinel"
+        with patch.object(
+            TestingActivationAdapter, "verify_provider", side_effect=ValueError(private)
+        ):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        record = self.adapter.current()
+        self.assertFalse(record.published)
+        self.assertEqual(record.phase, "configure_new_recipient")
+        payload = deepcopy(self.payloads[record.target_id])
+        converted = json.loads(self.converted(compose_id=record.target_id))
+        unsafe_network = deepcopy(converted)
+        unsafe_network["networks"] = {"default": {"external": True}}
+        changed_command = deepcopy(converted)
+        changed_command["services"]["web"]["command"] = private
+        routed = deepcopy(converted)
+        routed["services"]["web"]["labels"] = {"traefik.enable": "true"}
+        code = TestingActivationRefusalCode
+        cases: tuple[tuple[dict[str, Any], Any, TestingActivationRefusalCode], ...] = (
+            ({"appName": private}, None, code.RECIPIENT_IDENTITY_UNVERIFIED),
+            ({"autoDeploy": True}, None, code.RECIPIENT_OPTIONS_UNVERIFIED),
+            ({"composeFile": private}, None, code.RECIPIENT_SOURCE_UNVERIFIED),
+            (
+                {"env": payload["env"] + "\nUNMANAGED=" + private},
+                None,
+                code.RECIPIENT_ENVIRONMENT_UNVERIFIED,
+            ),
+            ({}, routed, code.RECIPIENT_LABELS_UNVERIFIED),
+            ({}, unsafe_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, "services: [" + private, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, {"services": {"web": private}}, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, changed_command, code.RECIPIENT_RENDER_CHANGED),
+            ({}, ValueError(private), code.DEPENDENCY_UNVERIFIED),
+            ({}, None, code.RECIPIENT_UNQUALIFIED),
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        draft = self.request.model_copy(
+            update={"mode": "readback", "reviewed_plan_sha256": ""}
+        ).model_dump(mode="json")
+        writes, inspections = deepcopy(self.writes), list(self.inspections)
+        fences = self.store.list_held_provider_target_reservations()
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        reservation = self.store.read_idempotency_record(
+            scope=self.scope,
+            route_path=ROUTE.format(product=self.product),
+            idempotency_key="activate",
+        )
+        for updates, render, expected_code in cases:
+            with self.subTest(category=expected_code):
+                self.payloads[record.target_id] = {**deepcopy(payload), **updates}
+                provider_render = (
+                    patch(
+                        "control_plane.testing_activation.compose.fetch_dokploy_converted_compose_file",
+                        side_effect=render,
+                    )
+                    if isinstance(render, Exception)
+                    else patch(
+                        "control_plane.testing_activation.compose.fetch_dokploy_converted_compose_file",
+                        return_value=(
+                            render
+                            if isinstance(render, str)
+                            else json.dumps(render if render is not None else converted)
+                        ),
+                    )
+                )
+                with provider_render:
+                    response = asyncio.run(
+                        request(
+                            app,
+                            "POST",
+                            ROUTE.format(product=self.product),
+                            headers={"Authorization": "Bearer local-operator-token"},
+                            payload=draft,
+                        )
+                    )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], expected_code.value)
+                self.assertNotIn(private, response.text)
+                self.assertEqual(self.adapter.current(), record)
+                self.assertEqual(self.writes, writes)
+                self.assertEqual(self.inspections, inspections)
+                self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
+                self.assertEqual(
+                    self.store.read_idempotency_record(
+                        scope=self.scope,
+                        route_path=ROUTE.format(product=self.product),
+                        idempotency_key="activate",
+                    ),
+                    reservation,
+                )
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    ),
+                    self.preparation.retained,
+                )
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="prod"
+                    ),
+                    production,
+                )
+        self.payloads[record.target_id] = payload
 
     def test_route_reports_real_carried_key_refusal_before_provider_effects(self) -> None:
         import asyncio
