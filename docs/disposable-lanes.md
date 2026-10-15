@@ -24,6 +24,14 @@ Recording or refreshing an observation changes no profile or ownership digest.
 Actual ownership and runtime/secret authority still must match, and each
 destructive checkpoint validates fresh facts.
 
+[Product retirement](product-retirement.md#direction-and-retirement-eligibility)
+uses the existing prelaunch classification and protected-use exceptions instead
+of requiring positive unused/reproducible/isolated observations. Its bounded
+agent executor checks exact applications with empty mount inventories and
+preserves production target and secret consumers. The positive-observation
+requirements below continue to govern runtime sync and rebuild, which can
+start or change a lane.
+
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
@@ -45,6 +53,51 @@ been verified independent, all existing execution is excluded, and nothing
 shared with production changes. It permits runtime sync with deployment
 disabled and the bounded empty replacement staging below. Starting a lane requires `isolated`; normal key-safety and sanitized
 restore checks remain in their existing drivers.
+
+## Preparing a testing production-copy policy
+
+The Director agent can prepare an existing Odoo testing lane for a sanitized
+production copy through
+`POST /v1/product-profiles/{product}/testing-restore-policy`. This changes only
+testing's `odoo_data_policy`: it adds
+`upstream_restore` to the existing permitted sources, requires runtime identity,
+and derives an upstream source reference from the same product's single recorded
+production lane. It accepts no different product, source host, production
+destination, credentials, runtime values, prelaunch approval, or full profile.
+The production lane and all other profile authority remain unchanged.
+Existing testing data authority is preserved, including an authoritative lane's
+backup requirement and a resettable lane's empty-rebuild eligibility. Only
+unknown data authority becomes conservatively `authoritative`, retaining its
+existing backup-before-replacement requirement while allowing an upstream
+source. This metadata preparation never waives a replacement backup requirement
+and does not qualify unknown custody or isolation facts for execution.
+
+Use the bounded repo client with the installed authenticated agent transport. Save its
+review evidence outside the checkout:
+
+```bash
+uv run python scripts/prepare-testing-restore-policy.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <testing-context> --reason '<reason>' \
+  --evidence-file <private-review-file>
+```
+
+After reviewing the policy change, repeat the same request with `apply`,
+`--reviewed-dry-run` and a stable `--idempotency-key`. The service binds review
+to the complete current profile and commits the testing policy and replay receipt
+atomically. Profile drift refuses apply. A lost reply is retried with the original
+evidence, request and key. The client then reads testing's policy back and reports
+only digest, status and agreement. An interrupted accepted readback remains
+`accepted_unverified`; keep the original mutation key.
+
+This is metadata preparation, not a restore, isolation finding or sanitization
+attestation. Operational upstream settings still come from managed runtime
+records; the source reference is not an SSH address. Existing rebuild,
+current-resource safety and pre-web integration readback checks remain in force.
+Before a restored copy runs, its live keys and outbound email, payment, carrier,
+analytics and similar connections must be removed or neutralized and verified
+without exposing their values. A successful policy readback does not prove that
+work happened or permit apply while required physical isolation is unknown.
 
 ## First service collector
 

@@ -920,6 +920,9 @@ from control_plane.http_routes.product_generic_web_transition import (
     register_product_generic_web_transition_routes,
 )
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
+from control_plane.http_routes.product_testing_restore_policy import (
+    register_testing_restore_policy_routes,
+)
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
 )
@@ -23359,7 +23362,11 @@ def create_launchplane_fastapi_app(
             adapter_type = NoTargetProductRetirementAdapter
 
         def disposable_retirement_checkpoint(phase: str) -> None:
-            if phase != "finalize_no_target" and not phase.startswith(("delete_", "preview:")):
+            if phase not in {
+                "preflight",
+                "finalize_authority",
+                "finalize_no_target",
+            } and not phase.startswith(("delete_", "preview:")):
                 return
             require_disposable_lane(
                 cast(DisposableLaneStore, retirement_store),
@@ -23368,14 +23375,20 @@ def create_launchplane_fastapi_app(
                 instance=retirement_request.instance,
                 retirement=True,
             )
+            if (
+                phase == "preflight" or phase.startswith("delete_")
+            ) and plan_record.provider_observation.state == "present":
+                control_plane_product_retirement.require_unmounted_retirement_application(
+                    control_plane_root=resolved_control_plane_root,
+                    target_id=plan_record.provider_observation.target_id,
+                )
             for preview_plan in plan_record.preview_plans:
                 preview = cast(PostgresRecordStore, retirement_store).read_preview_record(
                     preview_plan.preview.preview_id
                 )
                 if (
-                    phase.startswith(f"preview:{preview.preview_id}:")
-                    and preview.state != "destroyed"
-                ):
+                    phase == "preflight" or phase.startswith(f"preview:{preview.preview_id}:")
+                ) and preview.state != "destroyed":
                     current = retirement_store.read_product_profile_record(
                         retirement_request.product
                     )
@@ -23389,6 +23402,11 @@ def create_launchplane_fastapi_app(
                         retirement=True,
                         preview=preview,
                     )
+                    if preview_plan.provider_observation is not None:
+                        control_plane_product_retirement.require_unmounted_retirement_application(
+                            control_plane_root=resolved_control_plane_root,
+                            target_id=preview_plan.provider_observation.target_id,
+                        )
 
         adapter = adapter_type(
             disposable_checkpoint=(
@@ -28543,6 +28561,9 @@ def create_launchplane_fastapi_app(
         mutation_identity=read_browser_mutation_identity,
     )
     register_product_display_name_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+    register_testing_restore_policy_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 

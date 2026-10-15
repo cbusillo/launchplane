@@ -150,6 +150,39 @@ def require_disposable_lane(
             "The lane is held for staff testing; usage must be resolved before disposable work."
         )
     evidence = store.read_disposable_lane_safety(product, context, instance)
+    if retirement:
+        # Prelaunch is the product's authoritative disposable classification.
+        # Retirement stops an owned application; it neither starts a lane nor
+        # needs a recipe for reproducing disposable output. Known exceptions
+        # remain holds, including old observations: expiry cannot erase them.
+        if evidence is not None and (
+            evidence.usage == "in_use"
+            or evidence.data == "only_copy"
+            or evidence.production_resources in {"shared", "separation_ready"}
+        ):
+            raise DisposableLaneSafetyUnknown(
+                "Retirement is held by recorded usage, needed data or shared resources."
+            )
+        retired_secret_ids = {
+            item.secret_id
+            for item in store.list_secret_records(context_name=context, instance_name=instance)
+        }
+        if any(
+            item.secret_id in retired_secret_ids
+            and item.status != "disabled"
+            and (item.context, item.instance) != (context, instance)
+            for item in store.list_secret_bindings()
+        ):
+            raise DisposableLaneSafetyUnknown(
+                "Retirement would disable a secret referenced outside this lane."
+            )
+        return disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            preview,
+            disposable_lane_configuration(store, context, instance),
+        )
     if evidence is None:
         raise DisposableLaneSafetyUnknown(
             "Disposable lane usage, only-copy and production-isolation evidence is unavailable."

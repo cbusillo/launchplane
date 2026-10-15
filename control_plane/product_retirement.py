@@ -36,6 +36,7 @@ from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -338,6 +339,28 @@ def observe_tracked_dokploy_application(
         deployment_history_state=deployment_history.state,
         observed_at=observed_at,
     )
+
+
+def require_unmounted_retirement_application(*, control_plane_root: Path, target_id: str) -> None:
+    """Bound agent deletion to applications with no attached persistent storage.
+
+    Stopping this exact service does not reconfigure another service's database,
+    ports or credentials. Mount deletion can destroy shared or needed data, so
+    an absent/incomplete mount inspection cannot qualify this bounded path.
+    """
+    host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+    try:
+        payload = dokploy_api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="application", target_id=target_id
+        )
+    except dokploy_api.DokployRequestFailed as error:
+        if error.status_code == 404:
+            return
+        raise
+    if _application_id(payload) != target_id or payload.get("mounts") != []:
+        raise ProductRetirementBlockedError(
+            "Agent retirement requires an exact application with a complete empty mount inventory."
+        )
 
 
 def build_provider_observation(
@@ -657,6 +680,8 @@ class DokployProductRetirementAdapter:
             _require_single_lane_retirement_profile(
                 self._record_store.read_product_profile_record(self._request.product)
             )
+            if self._disposable_checkpoint is not None:
+                self._disposable_checkpoint("preflight")
             self._write_started_record(provider_operation_key)
             if self._lifecycle_before_value in {"retiring", "retired"}:
                 # Restore the existing retirement checkpoint before retry validation.
@@ -730,6 +755,7 @@ class DokployProductRetirementAdapter:
         except (
             FileNotFoundError,
             ProductRetirementBlockedError,
+            DisposableLaneSafetyUnknown,
             click.ClickException,
             TimeoutError,
         ) as error:
@@ -1078,6 +1104,8 @@ class DokployProductRetirementAdapter:
         return profile
 
     def _finalize_authority(self, provider_operation_key: str) -> None:
+        if self._disposable_checkpoint is not None:
+            self._disposable_checkpoint("finalize_authority")
         if self._request.include_previews:
             from control_plane.product_retirement_previews import verify_retired_previews
 
