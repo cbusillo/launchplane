@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Protocol, cast
 
 import click
@@ -267,6 +267,10 @@ def preview_lifecycle_sweep_profiles(
     return tuple(sorted(profiles, key=lambda profile: profile.product))
 
 
+class PreviewLifecycleSweepCancelled(Exception):
+    """The service is stopping; the sweep ends between products."""
+
+
 def build_preview_lifecycle_sweep(
     *,
     control_plane_root: Path,
@@ -274,6 +278,7 @@ def build_preview_lifecycle_sweep(
     request: PreviewLifecycleSweepEnvelope,
     denied_actions_by_product: Mapping[str, str] | None = None,
     requested_profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
+    should_stop: Callable[[], bool] = lambda: False,
 ) -> dict[str, object]:
     profiles = (
         requested_profiles
@@ -286,6 +291,8 @@ def build_preview_lifecycle_sweep(
     denied_actions = denied_actions_by_product or {}
     entries: list[dict[str, object]] = []
     for profile in profiles:
+        if should_stop():
+            raise PreviewLifecycleSweepCancelled()
         cleanup_driver_id = preview_lifecycle_cleanup_driver_id(profile)
         entry: dict[str, object] = {
             "product": profile.product,

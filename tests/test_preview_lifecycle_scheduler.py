@@ -7,6 +7,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane import preview_lifecycle_scheduler
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.preview_lifecycle_cleanup_routes import (
+    PreviewLifecycleSweepCancelled,
+    PreviewLifecycleSweepEnvelope,
+    build_preview_lifecycle_sweep,
+)
 from control_plane.preview_lifecycle_scheduler import (
     SWEEP_INTERVAL_SECONDS,
     SWEEP_LEASE_SECONDS,
@@ -17,6 +23,7 @@ from control_plane.preview_lifecycle_scheduler import (
     sweep_slot,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import _sqlite_database_url
 
 
@@ -117,6 +124,42 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
         self.now += SWEEP_INTERVAL_SECONDS
         self.assertTrue(self.make_scheduler().run_once())
         self.assertEqual(self.receipt()["status"], "partial")
+
+    def test_stopping_ends_the_sweep_between_products_without_a_receipt(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+        with self.assertRaises(PreviewLifecycleSweepCancelled):
+            build_preview_lifecycle_sweep(
+                control_plane_root=Path(self.directory.name),
+                record_store=self.store,
+                request=PreviewLifecycleSweepEnvelope(),
+                requested_profiles=(profile,),
+                should_stop=lambda: True,
+            )
+        self.assertEqual(self.store.list_preview_inventory_scan_records(), ())
+        scheduler = PreviewLifecycleScheduler(
+            self.store, control_plane_root=Path(self.directory.name), clock=lambda: self.now
+        )
+
+        def stop_during_sweep(**kwargs: object) -> dict[str, object]:
+            scheduler.stop()
+            should_stop = kwargs["should_stop"]
+            assert callable(should_stop)
+            if should_stop():
+                raise PreviewLifecycleSweepCancelled()
+            return _sweep_result()
+
+        with patch.object(
+            preview_lifecycle_scheduler,
+            "build_preview_lifecycle_sweep",
+            side_effect=stop_during_sweep,
+        ):
+            self.assertFalse(scheduler.run_once())
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=_SCOPE, route_path=_ROUTE, idempotency_key=str(sweep_slot(self.now))
+            )
+        )
+        self.assertTrue(self.make_scheduler().run_once())
 
     def test_replica_waits_for_lease_holder_and_recovers_an_expired_lease(self) -> None:
         with patch.object(

@@ -4074,6 +4074,8 @@ the daily sweep itself: one replica holds the sweep lease, each daily slot
 slot receipt records the overall and per-product status. Scheduled sweeps are
 always report-only; there is no setting that makes them apply. A sweep that
 raises is logged and recorded as `error`, and the next slot runs normally.
+Stopping the service ends a running sweep between products without a
+receipt, so that slot runs again after restart.
 The service derives the participating products from product profiles where
 `preview.enabled=true`, refreshes provider inventory, discovers desired preview
 anchors from GitHub PR label state, writes lifecycle plans, and records cleanup

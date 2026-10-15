@@ -18,6 +18,7 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
 )
 from control_plane.preview_lifecycle_cleanup_routes import (
+    PreviewLifecycleSweepCancelled,
     PreviewLifecycleSweepEnvelope,
     build_preview_lifecycle_sweep,
     require_preview_lifecycle_sweep_store,
@@ -166,6 +167,9 @@ class PreviewLifecycleScheduler:
                 return False
             try:
                 summary = sweep_summary(self.run_sweep())
+            except PreviewLifecycleSweepCancelled:
+                # Stopping is not a result; the slot runs again after restart.
+                return False
             except Exception as error:
                 # A failed slot waits for the next one, like the daily workflow did;
                 # retrying every poll would repeat provider and GitHub reads all day.
@@ -184,4 +188,5 @@ class PreviewLifecycleScheduler:
             control_plane_root=self.control_plane_root,
             record_store=require_preview_lifecycle_sweep_store(self.store),
             request=PreviewLifecycleSweepEnvelope(apply=False),
+            should_stop=self._stop.is_set,
         )
