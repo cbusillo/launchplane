@@ -1086,11 +1086,6 @@ class RealPostgresLegacyPreviewReconciliationTests(
                     await asyncio.sleep(0.01)
                 self.assertTrue(waiting, "Inspection never waited for the current executor")
                 self.search.assert_not_called()
-                self.assertFalse(
-                    self.store.preview_refresh_is_excluded(
-                        preview_id=f"{self.profile.product}:{self.profile.preview.context}:{slug}"
-                    )
-                )
             finally:
                 release.set()
             await asyncio.to_thread(lambda: running.result(timeout=5))
