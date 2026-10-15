@@ -24,6 +24,8 @@ from control_plane.odoo_testing_restore import (
     FRESH_TESTING_RESTORE_HOST_PROGRAM,
     FRESH_TESTING_STALE_LOCK_PROGRAM,
     TESTING_COPY_COMPLETION_PARAMETER,
+    TestingCredentialsOverlap,
+    TestingCredentialVersionsMissing,
     FreshOdooTestingGeneration,
     generation_binding,
     build_fresh_testing_restore_script,
@@ -74,7 +76,7 @@ class TestingCredentialProofTests(unittest.TestCase):
             "control_plane.secrets.resolve_secret_values_for_integration_from_store",
             side_effect=[testing, source],
         ):
-            with self.assertRaises(ValueError) as error:
+            with self.assertRaises(TestingCredentialsOverlap) as error:
                 require_distinct_testing_credentials(Mock(), self.profile, self.context)
         self.assertFalse(any(value in str(error.exception) for value in testing.values()))
 
@@ -83,7 +85,7 @@ class TestingCredentialProofTests(unittest.TestCase):
             "control_plane.secrets.resolve_secret_values_for_integration_from_store",
             side_effect=[{}, {}],
         ):
-            with self.assertRaises(ValueError):
+            with self.assertRaises(TestingCredentialVersionsMissing):
                 require_distinct_testing_credentials(Mock(), self.profile, self.context)
 
     def test_narrowing_requirements_preserves_effective_production_contract(self) -> None:

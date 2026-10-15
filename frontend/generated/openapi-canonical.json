@@ -47129,6 +47129,84 @@
         "title": "TerminalAgentPolicyRule",
         "type": "object"
       },
+      "TestingActivationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "interlock_record_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Interlock Record Sha256",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback",
+              "receipt"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "port_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Port Keys",
+            "type": "array"
+          },
+          "preparation_key": {
+            "minLength": 1,
+            "title": "Preparation Key",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "source_commit": {
+            "pattern": "^[a-f0-9]{40}$",
+            "title": "Source Commit",
+            "type": "string"
+          },
+          "volume_keys": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Volume Keys",
+            "type": "object"
+          }
+        },
+        "required": [
+          "context",
+          "preparation_key",
+          "interlock_record_sha256",
+          "source_commit",
+          "volume_keys",
+          "port_keys",
+          "reason"
+        ],
+        "title": "TestingActivationRequest",
+        "type": "object"
+      },
       "TestingExclusionFacet": {
         "additionalProperties": false,
         "properties": {
@@ -77685,6 +77763,12 @@
               "schema": {
                 "additionalProperties": false,
                 "properties": {
+                  "activation_plan_sha256": {
+                    "default": "",
+                    "pattern": "^(?:[a-f0-9]{64})?$",
+                    "title": "Activation Plan Sha256",
+                    "type": "string"
+                  },
                   "context": {
                     "title": "Context",
                     "type": "string"
@@ -86219,6 +86303,127 @@
           }
         },
         "summary": "List product runtime secret binding metadata without values"
+      }
+    },
+    "/v1/products/{product}/testing-activation": {
+      "post": {
+        "operationId": "activate_independent_generic_web_testing",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingActivationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Activate a qualified independent testing recipient while retaining historical effects"
       }
     },
     "/v1/products/{product}/testing-replacement-bootstrap": {

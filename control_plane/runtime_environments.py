@@ -176,11 +176,14 @@ def resolve_site_runtime_environment(
     context_name: str,
     instance_name: str,
     database_url: str | None = None,
+    target_environment_override: dict[str, str] | None = None,
 ) -> SiteRuntimeEnvironment:
     """The environment a site's lane runs with: its own values and nothing else.
 
     Values shared by every product and Launchplane's own credentials are left out. Secrets
     shared across the site reach its testing and prod lanes, never a preview.
+    A replacement can supply its intended target layer explicitly, so preparing
+    it never inherits overrides from the retained recipient.
 
     Every path that writes a site's app runtime from Launchplane records uses this
     resolver, so the lane's ``retired_provider_keys`` are dropped and the
@@ -202,7 +205,9 @@ def resolve_site_runtime_environment(
     if instance_definition is not None:
         values.update(_normalize_scalar_map(instance_definition.env))
     values.update(
-        resolve_tracked_target_environment_values(
+        target_environment_override
+        if target_environment_override is not None
+        else resolve_tracked_target_environment_values(
             control_plane_root=control_plane_root,
             context_name=context_name,
             instance_name=instance_name,

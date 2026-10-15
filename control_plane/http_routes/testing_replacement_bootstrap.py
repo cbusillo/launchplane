@@ -23,6 +23,7 @@ from control_plane.testing_replacement_bootstrap import (
     ROUTE,
     TestingReplacementBootstrapAdapter,
     TestingReplacementBootstrapRequest,
+    TestingBootstrapPrerequisiteError,
     bootstrap_plan,
 )
 
@@ -61,9 +62,12 @@ def register_testing_replacement_bootstrap_routes(
         adapter = TestingReplacementBootstrapAdapter(root, record_store, product, body, trace)
         try:
             if body.mode == "dry-run":
-                result = await run_in_worker_thread(
-                    lambda: bootstrap_plan(record_store, product, body).model_dump(mode="json")
-                )
+                try:
+                    result = await run_in_worker_thread(
+                        lambda: bootstrap_plan(record_store, product, body).model_dump(mode="json")
+                    )
+                except TestingBootstrapPrerequisiteError as error:
+                    refuse(409, error.code, str(error))
             elif body.mode == "readback":
                 result = await run_in_worker_thread(adapter.readback)
             else:

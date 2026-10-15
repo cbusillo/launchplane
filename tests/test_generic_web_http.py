@@ -1,7 +1,6 @@
 import asyncio
 import json
 import threading
-import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -3706,104 +3705,132 @@ class GenericWebHttpTests(unittest.TestCase):
                 authz_policy=policy,
                 control_plane_root_path=root,
             )
-            provider_wait_started = threading.Event()
-            release_provider_wait = threading.Event()
-            provider_wait_started_at: list[float] = []
             provider_refresh_calls: list[None] = []
 
-            def _slow_refresh(**_kwargs: object) -> dict[str, object]:
-                provider_refresh_calls.append(None)
-                provider_wait_started_at.append(time.monotonic())
-                provider_wait_started.set()
-                release_provider_wait.wait(timeout=0.75)
-                return {
-                    "refresh_status": "pass",
-                    "refresh_started_at": "2026-05-03T15:00:00Z",
-                    "refresh_finished_at": "2026-05-03T15:05:00Z",
-                    "product": "sellyouroutboard",
-                    "context": "sellyouroutboard-testing",
-                    "preview_slug": "preview-42",
-                    "application_name": "sellyouroutboard-preview-42",
-                    "application_id": "app-preview",
-                    "preview_url": "https://pr-42.example.test",
-                }
+            async def _exercise_refresh_and_health() -> tuple[Any, Any, Any]:
+                loop = asyncio.get_running_loop()
+                event_loop_thread = threading.get_ident()
+                provider_wait_started = asyncio.Event()
+                release_provider_wait = threading.Event()
 
-            async def _exercise_refresh_and_health() -> tuple[Any, Any, Any, float]:
-                refresh_task = asyncio.create_task(
-                    _http_request_for_service_test(
-                        app,
-                        method="POST",
-                        path="/v1/drivers/generic-web/preview-refresh",
-                        payload={
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                            "refresh": {
-                                "schema_version": 1,
-                                "product": "sellyouroutboard",
-                                "anchor_pr_number": 42,
-                                "preview_url": "https://pr-42.example.test",
-                                "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
-                            },
-                        },
-                        authorization="Bearer valid-token",
-                        headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42"},
+                def _slow_refresh(**_kwargs: object) -> dict[str, object]:
+                    provider_refresh_calls.append(None)
+                    self.assertNotEqual(
+                        threading.get_ident(),
+                        event_loop_thread,
+                        "Provider work must run outside the ASGI event loop",
                     )
-                )
-                await asyncio.wait_for(
-                    asyncio.to_thread(provider_wait_started.wait, 1), timeout=1.25
-                )
-                competing_response = await asyncio.wait_for(
-                    _http_request_for_service_test(
-                        app,
-                        method="POST",
-                        path="/v1/drivers/generic-web/preview-refresh",
-                        payload={
-                            "schema_version": 1,
-                            "product": "sellyouroutboard",
-                            "refresh": {
+                    loop.call_soon_threadsafe(provider_wait_started.set)
+                    self.assertTrue(
+                        release_provider_wait.wait(timeout=30),
+                        "Provider was never released; the event loop may be blocked",
+                    )
+                    return {
+                        "refresh_status": "pass",
+                        "refresh_started_at": "2026-05-03T15:00:00Z",
+                        "refresh_finished_at": "2026-05-03T15:05:00Z",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard-testing",
+                        "preview_slug": "preview-42",
+                        "application_name": "sellyouroutboard-preview-42",
+                        "application_id": "app-preview",
+                        "preview_url": "https://pr-42.example.test",
+                    }
+
+                with patch(
+                    "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
+                    side_effect=_slow_refresh,
+                ):
+                    refresh_task = asyncio.create_task(
+                        _http_request_for_service_test(
+                            app,
+                            method="POST",
+                            path="/v1/drivers/generic-web/preview-refresh",
+                            payload={
                                 "schema_version": 1,
                                 "product": "sellyouroutboard",
-                                "preview_slug": "preview-42",
-                                "preview_url": "https://pr-42.example.test",
-                                "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                                "refresh": {
+                                    "schema_version": 1,
+                                    "product": "sellyouroutboard",
+                                    "anchor_pr_number": 42,
+                                    "preview_url": "https://pr-42.example.test",
+                                    "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                                },
                             },
-                        },
-                        authorization="Bearer valid-token",
-                        headers={
-                            "Idempotency-Key": "generic-web-preview-refresh:syo:pr-42-competing"
-                        },
-                    ),
-                    timeout=0.5,
-                )
-                health_response = await asyncio.wait_for(
-                    _http_request_for_service_test(
-                        app,
-                        method="GET",
-                        path="/v1/health",
-                    ),
-                    timeout=0.5,
-                )
-                health_elapsed_seconds = time.monotonic() - provider_wait_started_at[0]
-                release_provider_wait.set()
-                refresh_response = await asyncio.wait_for(refresh_task, timeout=1)
-                return refresh_response, competing_response, health_response, health_elapsed_seconds
+                            authorization="Bearer valid-token",
+                            headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42"},
+                        )
+                    )
+                    request_tasks = [refresh_task]
 
-            with patch(
-                "control_plane.generic_web_preview_http.execute_generic_web_preview_refresh",
-                side_effect=_slow_refresh,
-            ):
-                (
-                    refresh_response,
-                    competing_response,
-                    health_response,
-                    health_elapsed_seconds,
-                ) = asyncio.run(_exercise_refresh_and_health())
+                    async def _response(request: Any) -> Any:
+                        task = asyncio.create_task(request)
+                        request_tasks.append(task)
+                        done, _ = await asyncio.wait((task,), timeout=30)
+                        self.assertIn(task, done, "Request blocked while provider was held")
+                        return task.result()
+
+                    started_task = asyncio.create_task(provider_wait_started.wait())
+                    try:
+                        # These timeouts only bound deadlocks; ordering comes from the events.
+                        done, _ = await asyncio.wait(
+                            (started_task, refresh_task),
+                            return_when=asyncio.FIRST_COMPLETED,
+                            timeout=30,
+                        )
+                        if refresh_task in done:
+                            await refresh_task
+                            self.fail("Refresh completed before the provider was released")
+                        self.assertIn(started_task, done, "Provider did not start")
+                        competing_response = await _response(
+                            _http_request_for_service_test(
+                                app,
+                                method="POST",
+                                path="/v1/drivers/generic-web/preview-refresh",
+                                payload={
+                                    "schema_version": 1,
+                                    "product": "sellyouroutboard",
+                                    "refresh": {
+                                        "schema_version": 1,
+                                        "product": "sellyouroutboard",
+                                        "preview_slug": "preview-42",
+                                        "preview_url": "https://pr-42.example.test",
+                                        "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                                    },
+                                },
+                                authorization="Bearer valid-token",
+                                headers={
+                                    "Idempotency-Key": "generic-web-preview-refresh:syo:pr-42-competing"
+                                },
+                            )
+                        )
+                        health_response = await _response(
+                            _http_request_for_service_test(
+                                app,
+                                method="GET",
+                                path="/v1/health",
+                            )
+                        )
+                        self.assertFalse(refresh_task.done())
+                        self.assertEqual(len(provider_refresh_calls), 1)
+                    finally:
+                        release_provider_wait.set()
+                        started_task.cancel()
+                        await asyncio.gather(started_task, return_exceptions=True)
+                        await asyncio.wait_for(
+                            asyncio.gather(*request_tasks, return_exceptions=True), timeout=30
+                        )
+                    return refresh_task.result(), competing_response, health_response
+
+            refresh_response, competing_response, health_response = asyncio.run(
+                _exercise_refresh_and_health()
+            )
 
         self.assertEqual(refresh_response.status_code, 202)
+        self.assertEqual(refresh_response.json()["result"]["refresh_status"], "pass")
         self.assertEqual(competing_response.status_code, 409)
         self.assertEqual(competing_response.json()["error"]["code"], "mutation_in_progress")
         self.assertEqual(health_response.status_code, 200)
-        self.assertLess(health_elapsed_seconds, 0.5)
         self.assertEqual(len(provider_refresh_calls), 1)
 
     def test_generic_web_preview_refresh_mutation_builder_records_smoke_failure(

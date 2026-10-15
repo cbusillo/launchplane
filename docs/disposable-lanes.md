@@ -223,6 +223,12 @@ work happened or permit apply while required physical isolation is unknown.
 
 ## Independent storage under a retained generic-web hold and deploy fence
 
+The [complete activation continuation](testing-activation.md) consumes this
+original allocation on a fresh recipient, retaining the old target, unchanged
+hold and historical fence. Its exact-receipt hold continuation is the bounded
+exception to the ordinary Director-agent staging-lift refusal described above.
+It proves separation before requesting normal testing reconciliation.
+
 `POST /v1/products/{product}/testing-separation-resources` provides preparation
 when the old testing recipient cannot be changed. It accepts only the exact
 owned generic-web testing context, a reason, mode and reviewed plan digest.
@@ -527,6 +533,22 @@ this route never creates, copies or grants a credential. Shared service-user and
 mail credentials are retired from testing delivery. Existing shared requirements
 are narrowed to their other lanes so production's effective required settings
 remain the same. Production secret records, bindings and values are not changed.
+
+Bootstrap dry-run prerequisite refusals identify whether existing credentials lack
+lane-local safety proof (`testing_credentials_unsafe`), their existing managed
+versions cannot prove separation (`testing_credentials_unverified`), or the
+supported source configuration is incomplete (`testing_restore_source_unconfigured`).
+Known missing-version and password-overlap cases are distinguished as
+`testing_credential_versions_missing` and `testing_credentials_overlap`.
+Other bounded failures within a named prerequisite report that its proof is
+unavailable; the phase classification does not assert the underlying cause.
+These HTTP 409 results expose fixed descriptions, never the private exception or
+credential values. Correct the named prerequisite and repeat the dry run before
+any apply; a refused dry run has prepared no generation, route or restore.
+Other failures remain `testing_bootstrap_unverified`. These classifications
+neither grant authority nor relax the source, isolation or sanitization checks.
+Apply and readback failures retain the generic original-key recovery guidance,
+including when a prerequisite changes after review or during provider effects.
 
 The new compose uses only its three qualified local volumes, no host ports and no
 SSH mounts. Its database and script runner use an internal network. The host's
