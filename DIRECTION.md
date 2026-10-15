@@ -92,7 +92,8 @@ blocks that run is the next piece of work.
   it runs in Launchplane as the signed-in admin or an agent identity, within
   the stop boundaries above. Its workflow, workflow-identity grant and the
   GitHub secrets only that workflow uses are deleted once the deployed
-  service does every mode the workflow covered. CI stays on GitHub, and so
+  service does every mode the workflow covered. Until then, that workflow is
+  the supported way to run it. CI stays on GitHub, and so
   does `deploy-launchplane.yml`, whose `emergency-dokploy-rollback` job
   rolls Launchplane back while Launchplane is down
 
