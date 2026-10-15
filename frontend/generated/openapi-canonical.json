@@ -31310,6 +31310,15 @@
             ],
             "title": "Current Enabled"
           },
+          "current_expected_dns_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicDnsExpectedTarget"
+            },
+            "title": "Current Expected Dns Targets",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "current_monitoring_intent": {
             "enum": [
               "public",
@@ -31403,6 +31412,15 @@
           "requested_enabled": {
             "title": "Requested Enabled",
             "type": "boolean"
+          },
+          "requested_expected_dns_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicDnsExpectedTarget"
+            },
+            "title": "Requested Expected Dns Targets",
+            "type": "array",
+            "x-launchplane-optional-response": true
           },
           "requested_monitoring_intent": {
             "enum": [
@@ -32440,6 +32458,16 @@
             "title": "Enabled",
             "type": "boolean"
           },
+          "expected_dns_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicDnsExpectedTarget"
+            },
+            "maxItems": 16,
+            "title": "Expected Dns Targets",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "kind": {
             "default": "public_http",
             "enum": [
@@ -33143,6 +33171,15 @@
       "ProductObservedTopology": {
         "additionalProperties": false,
         "properties": {
+          "dns_targets": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/PublicDnsDiagnostic"
+            },
+            "title": "Dns Targets",
+            "type": "array",
+            "x-launchplane-optional-response": true
+          },
           "ingress": {
             "$ref": "#/components/schemas/ProductObservedIngress"
           },
@@ -38865,6 +38902,86 @@
           "storage_id"
         ],
         "title": "ProxmoxStorageBackupDestinationReference",
+        "type": "object"
+      },
+      "PublicDnsDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "check_name": {
+            "title": "Check Name",
+            "type": "string"
+          },
+          "expected_addresses": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Expected Addresses",
+            "type": "array"
+          },
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "observed_addresses": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Observed Addresses",
+            "type": "array"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "public_name": {
+            "title": "Public Name",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "match",
+              "mismatch",
+              "unavailable",
+              "missing_expectation",
+              "stale"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "check_name",
+          "public_name",
+          "status",
+          "provenance"
+        ],
+        "title": "PublicDnsDiagnostic",
+        "type": "object"
+      },
+      "PublicDnsExpectedTarget": {
+        "additionalProperties": false,
+        "properties": {
+          "addresses": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "title": "Addresses",
+            "type": "array"
+          },
+          "public_name": {
+            "title": "Public Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "public_name",
+          "addresses"
+        ],
+        "title": "PublicDnsExpectedTarget",
         "type": "object"
       },
       "PublicHostEffect": {
@@ -76915,6 +77032,16 @@
                         "title": "Enabled",
                         "type": "boolean"
                       },
+                      "expected_dns_targets": {
+                        "default": [],
+                        "items": {
+                          "$ref": "#/$defs/PublicDnsExpectedTarget"
+                        },
+                        "maxItems": 16,
+                        "title": "Expected Dns Targets",
+                        "type": "array",
+                        "x-launchplane-optional-response": true
+                      },
                       "kind": {
                         "default": "public_http",
                         "enum": [
@@ -77813,6 +77940,30 @@
                     ],
                     "title": "ProductSecretConfigRequirement",
                     "type": "object"
+                  },
+                  "PublicDnsExpectedTarget": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "addresses": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 32,
+                        "minItems": 1,
+                        "title": "Addresses",
+                        "type": "array"
+                      },
+                      "public_name": {
+                        "title": "Public Name",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "public_name",
+                      "addresses"
+                    ],
+                    "title": "PublicDnsExpectedTarget",
+                    "type": "object"
                   }
                 },
                 "additionalProperties": false,
@@ -78474,6 +78625,32 @@
           "content": {
             "application/json": {
               "schema": {
+                "$defs": {
+                  "PublicDnsExpectedTarget": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "addresses": {
+                        "items": {
+                          "type": "string"
+                        },
+                        "maxItems": 32,
+                        "minItems": 1,
+                        "title": "Addresses",
+                        "type": "array"
+                      },
+                      "public_name": {
+                        "title": "Public Name",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "public_name",
+                      "addresses"
+                    ],
+                    "title": "PublicDnsExpectedTarget",
+                    "type": "object"
+                  }
+                },
                 "additionalProperties": false,
                 "properties": {
                   "check_kind": {
@@ -78497,6 +78674,21 @@
                     "default": true,
                     "title": "Enabled",
                     "type": "boolean"
+                  },
+                  "expected_dns_targets": {
+                    "anyOf": [
+                      {
+                        "items": {
+                          "$ref": "#/$defs/PublicDnsExpectedTarget"
+                        },
+                        "maxItems": 16,
+                        "type": "array"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ],
+                    "title": "Expected Dns Targets"
                   },
                   "instance": {
                     "title": "Instance",

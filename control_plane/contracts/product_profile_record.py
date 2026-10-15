@@ -14,6 +14,7 @@ from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
+from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 
 
 ProductLifecycleState = Literal["active", "retiring", "retired"]
@@ -188,6 +189,12 @@ class ProductLaneHealthCheck(BaseModel):
     enabled: bool = True
     url: str = ""
     private_endpoint_key: str = ""
+    expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = Field(
+        default=(),
+        max_length=16,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     require_runtime_identity: bool = False
     recovery_observation_threshold: int = Field(default=1, ge=1, le=10)
     provider: str = ""
@@ -202,6 +209,11 @@ class ProductLaneHealthCheck(BaseModel):
         if not self.name:
             raise ValueError("product lane health check requires name")
         self.private_endpoint_key = self.private_endpoint_key.strip()
+        if self.expected_dns_targets and self.kind != "public_http":
+            raise ValueError("DNS expectations are only supported on public HTTP checks")
+        names = [target.public_name for target in self.expected_dns_targets]
+        if len(names) != len(set(names)):
+            raise ValueError("DNS expectation names must be unique")
         if self.kind == "private_http" and self.url:
             raise ValueError("private HTTP health checks must use private_endpoint_key")
         if not health_check_record_token(self.name):

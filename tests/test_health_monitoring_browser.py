@@ -132,6 +132,13 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
             )
             path = "/v1/product-profiles/health-monitoring/apply"
             payload = _product_health_monitoring_payload()
+            expected_addresses = ("8.8.8.8",)
+            payload["expected_dns_targets"] = [
+                {
+                    "public_name": "cm-testing.example.com",
+                    "addresses": list(expected_addresses),
+                }
+            ]
             rejected = await request(
                 app,
                 "POST",
@@ -154,11 +161,36 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                 original.lanes[0].health_monitoring.checks[0].private_endpoint_key,
             )
             self.assertEqual(store.read_product_profile_record(original.product), original)
+            self.assertEqual(
+                plan.json()["result"]["requested_expected_dns_targets"],
+                payload["expected_dns_targets"],
+            )
             apply_payload = {
                 **payload,
                 "mode": "apply",
                 "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
             }
+            changed_payload = {
+                **apply_payload,
+                "expected_dns_targets": [
+                    {
+                        "public_name": "cm-testing.example.com",
+                        "addresses": ["1.1.1.1"],
+                    }
+                ],
+            }
+            changed_response = await request(
+                app,
+                "POST",
+                path,
+                payload=changed_payload,
+                headers={
+                    **_browser_mutation_headers(manager, session),
+                    "Idempotency-Key": "changed-dns",
+                },
+            )
+            self.assertEqual(changed_response.status_code, 409)
+            self.assertEqual(store.read_product_profile_record(original.product), original)
             responses = []
             for _ in range(2):
                 responses.append(
@@ -178,6 +210,10 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(responses[1].json()["replayed"])
             saved = store.read_product_profile_record(original.product)
             self.assertTrue(saved.lanes[0].health_monitoring.checks[0].require_runtime_identity)
+            self.assertEqual(
+                saved.lanes[0].health_monitoring.checks[0].expected_dns_targets[0].addresses,
+                expected_addresses,
+            )
             self.assertEqual(saved.lanes[0].health_url, original.lanes[0].health_url)
             self.assertEqual(saved.lanes[1:], original.lanes[1:])
             store.close()
