@@ -392,6 +392,7 @@ def inspect_dokploy_target(
             "custom_git_url": _public_repository_url(target_record.custom_git_url),
             "custom_git_branch": target_record.custom_git_branch,
             "domains": list(target_record.domains),
+            "public_hosts": list(target_record.public_hosts),
             "healthcheck_path": target_record.healthcheck_path,
             "deploy_timeout_seconds": target_record.deploy_timeout_seconds,
             "source_label": target_record.source_label,

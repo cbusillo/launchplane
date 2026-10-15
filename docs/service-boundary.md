@@ -252,6 +252,9 @@ remaining domain and storage removal is tracked in #2437.
     provider-domain count without disclosing sibling domain names or granting
     route authority over them.
 - native FastAPI Dokploy target inspect read:
+  - `GET /v1/dokploy/inventory`, requiring the global `dokploy_target.inspect`
+    action for the Launchplane service context; see [inventory coverage and
+    pagination](dokploy-inventory.md). Scoped `driver.read` is insufficient.
   - `GET /v1/dokploy-targets/inspect`, requiring `dokploy_target.inspect` for
     the Launchplane service context or `local_operator` `driver.read` for the
     requested tracked context/instance, and returning redacted provider
@@ -2703,7 +2706,11 @@ requires `dokploy_target.inspect` authz for product/context `launchplane`, reads
 Dokploy through Launchplane-managed secrets, and returns a redacted identity
 summary only: target ids, names, project/environment/server identity, domain
 summaries, source metadata, and environment key names/counts. It must not return
-raw provider payloads or environment values. For a tracked target, its
+raw provider payloads or environment values. A tracked target's `public_hosts`
+returns its stored product-config hostname intent separately from origin `domains`
+and the provider's observed domain summaries. Compare those lists before HTTP
+Host/runtime qualification; provider routes alone do not establish managed intent.
+For a tracked target, its
 `provider_target_record` includes the complete stored `provider_evidence` for
 the domain-authority planner's expected-current reference when it is empty or
 exactly matches canonical Dokploy metadata derived from the tracked target and
@@ -3016,6 +3023,8 @@ For reviewed reconciliation of provider-absent legacy preview history, see
 - `GET /v1/ingress/route-audits/records/{record_id}` (native FastAPI for
   bearer-token and human-session callers)
 - `GET /v1/dokploy-targets/inspect` (native FastAPI for bearer-token and
+  human-session callers)
+- `GET /v1/dokploy/inventory` (native FastAPI for bearer-token and
   human-session callers)
 - `GET /v1/every-code/summary` (native FastAPI for bearer-token,
   human-session, and Every Code worker-token callers)

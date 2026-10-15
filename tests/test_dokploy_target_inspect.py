@@ -92,6 +92,7 @@ class DokployTargetInspectTests(unittest.TestCase):
                         target_name="cm-prod",
                         project_name="odoo",
                         domains=("cm-website-prod.shinycomputers.com",),
+                        public_hosts=("example.com", "www.example.com"),
                         updated_at="2026-06-14T00:00:00Z",
                         source_label="test",
                     )
@@ -133,6 +134,9 @@ class DokployTargetInspectTests(unittest.TestCase):
                 stored_evidence = store.read_provider_target_record(
                     context_name="cm_website", instance_name="prod"
                 ).provider_evidence
+                stored_target = store.read_dokploy_target_record(
+                    context_name="cm_website", instance_name="prod"
+                )
             finally:
                 store.close()
 
@@ -143,6 +147,8 @@ class DokployTargetInspectTests(unittest.TestCase):
         provider_environment = _require_mapping(provider["environment"])
         provider_env = _require_mapping(provider["env"])
         self.assertEqual(tracked_target["target_name"], "cm-prod")
+        self.assertEqual(tracked_target["public_hosts"], list(stored_target.public_hosts))
+        self.assertEqual(tracked_target["domains"], list(stored_target.domains))
         self.assertEqual(provider_target_record["display_name"], "cm-prod")
         self.assertEqual(
             provider_target_record["provider_evidence"],

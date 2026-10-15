@@ -109,7 +109,7 @@ for (const action of ["Accept", "Request changes"]) {
     await expect(page.getByRole("button", { name: "Accept", exact: true })).toBeEnabled();
     await page.getByRole("button", { name: "Accept", exact: true }).click();
     await expect(page.getByRole("region", { name: `Decision for ${current.display_name}` }).getByRole("status")).toBeVisible();
-    expect(submitted).toHaveLength(2);
+    await expect.poll(() => submitted).toHaveLength(2);
     expect(submitted[1]).toMatchObject({ reviewed_head_sha: current.head_sha, reviewed_preview_url: current.preview_url, reviewed_generation_id: current.preview_generation_id });
   });
 }

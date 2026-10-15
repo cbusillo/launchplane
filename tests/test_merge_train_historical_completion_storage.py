@@ -453,3 +453,76 @@ class HistoricalCompletionContractTests(unittest.TestCase):
                 )
             )
             effect_store.close()
+
+
+class RetiredOrdinaryStorageFenceTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.store = PostgresRecordStore(database_url="sqlite+pysqlite:///:memory:")
+        self.addCleanup(self.store.close)
+        self.store.ensure_schema()
+        self.normal = _record(plan=_landing_plan())
+
+    def test_native_write_cannot_replace_or_bypass_bound_progress(self) -> None:
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+
+        bound = _record(plan=self.normal.landing_plan, ordinary=True)
+        with self.assertRaises(OrdinaryAgentSessionAdmissionDenied):
+            self.store.write_merge_train_batch_landing_plan_record(bound)
+        with self.store._session_factory() as session:
+            session.add(
+                LaunchplaneMergeTrainBatchLandingPlanRow(
+                    record_id=bound.record_id,
+                    status=bound.status,
+                    source=bound.source,
+                    updated_at=bound.updated_at,
+                    repository=bound.landing_plan.repository,
+                    base_branch=bound.landing_plan.base_branch,
+                    batch_id=bound.landing_plan.batch_id,
+                    plan_id=bound.landing_plan.plan_id,
+                    payload=bound.model_dump(mode="json", exclude_none=True),
+                )
+            )
+            session.commit()
+        with self.assertRaises(OrdinaryAgentSessionAdmissionDenied):
+            self.store.write_merge_train_batch_landing_plan_record(self.normal)
+        self.assertEqual(self.store.list_merge_train_batch_landing_plan_records(), (bound,))
+
+    def test_unresolved_effect_blocks_native_write_until_terminal_history(self) -> None:
+        from control_plane.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionAdmissionDenied,
+        )
+
+        plan = self.normal.landing_plan
+        with self.store._session_factory() as session:
+            session.add(
+                LaunchplaneOrdinaryAgentEffectRow(
+                    effect_id="legacy-unresolved-effect",
+                    lease_id="legacy-lease",
+                    request_id="legacy-request",
+                    scope_sha256="d" * 64,
+                    binding_revision=1,
+                    action_ordinal=1,
+                    semantic_key="merge-train",
+                    command_sha256="e" * 64,
+                    revision=1,
+                    payload={
+                        "target": {"repository": plan.repository, "base_branch": plan.base_branch},
+                        "state": "reconciliation_required",
+                    },
+                )
+            )
+            session.commit()
+        with self.assertRaises(OrdinaryAgentSessionAdmissionDenied):
+            self.store.write_merge_train_batch_landing_plan_record(self.normal)
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneOrdinaryAgentEffectRow, "legacy-unresolved-effect")
+            assert row is not None
+            row.payload = {**row.payload, "state": "completed"}
+            session.commit()
+        self.store.write_merge_train_batch_landing_plan_record(self.normal)
+        self.assertEqual(
+            self.store.list_merge_train_batch_landing_plan_records(),
+            (self.normal,),
+        )
