@@ -226,9 +226,18 @@ def main() -> int:
         print(json.dumps({"status": "ok", "mode": args.mode, "result": result}))
         return 0
     except urllib.error.HTTPError as error:
-        transport["emit_http_error_payload"](
+        failure = transport["summarize_http_error"](
             operation="retirement-inventory", request={"mode": args.mode}, exc=error
         )
+        # This repo-owned operation is outside the catalog command registry.
+        # Preserve the helper's bounded diagnostics without its default write label.
+        failure["warnings"] = [
+            {
+                "code": failure["summary"]["error_code"],
+                "message": "Launchplane inventory read was refused; inspect the recorded trace.",
+            }
+        ]
+        transport["emit"](failure)
     except (KeyError, TypeError, ValueError):
         print(json.dumps({"status": "unverified", "mode": args.mode, "code": "invalid_inventory"}))
     except (OSError, http.client.HTTPException):
