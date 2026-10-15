@@ -1,13 +1,8 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 for (const theme of ["dark", "light"] as const) {
   test(`sidebar refreshes, distinguishes stale data and recovers in ${theme}`, { tag: "@layout" }, async ({ page }, testInfo) => {
-    // Install before the app schedules timers, then freeze before loading fixtures.
-    const clockStart = Date.now();
-    await page.clock.install({ time: new Date(clockStart) });
-    // A 1ms pause can be in the past by the time the browser receives the RPC.
-    await page.clock.pauseAt(new Date(clockStart + testInfo.timeout));
     await page.goto("/ui/products?fixture=products");
     const fixtures = await page.evaluate(async () => {
       const modulePath = "/ui/src/dev-fixtures.ts";
@@ -59,14 +54,13 @@ for (const theme of ["dark", "light"] as const) {
     const testing = page.locator('.rail-product-link [data-lane="testing"]');
     await expect(testing).toHaveAttribute("data-tone", "verified");
     const screenshot = async (state: string) => {
-      await page.clock.runFor(200);
       await page.screenshot({ path: `../tmp/browser-smoke/sidebar-${state}-${theme}-${testInfo.project.name}.png`, animations: "disabled" });
     };
     await screenshot("fresh");
     mode = "warning";
     const initialReads = reads;
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
-    await expect.poll(() => reads).toBe(initialReads + 1);
+    await waitForState(() => reads).toBe(initialReads + 1);
     await expect(testing).toHaveAttribute("data-tone", "warning");
     if (testInfo.project.name === "desktop") await testing.hover();
     await expect(testing).toHaveAttribute("title", /DNS\/TLS/);
@@ -89,7 +83,7 @@ for (const theme of ["dark", "light"] as const) {
     await expect(page.locator(".rail-freshness")).not.toContainText("Stale data");
     mode = "delay";
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
-    await expect.poll(() => Boolean(release)).toBe(true);
+    await waitForState(() => Boolean(release)).toBe(true);
     const pendingReads = reads;
     // A wall-clock correction cannot extend the inventory's freshness bound.
     await page.clock.setSystemTime(new Date(fixtures.now - 3600_000));
@@ -104,7 +98,7 @@ for (const theme of ["dark", "light"] as const) {
     const activityReads = reads;
     mode = "warning";
     await page.clock.runFor(READ_REFRESH_INTERVAL_MS + 10);
-    await expect.poll(() => reads).toBe(activityReads + 1);
+    await waitForState(() => reads).toBe(activityReads + 1);
     // Observe the response's new state before testing the next focus refresh.
     await expect(testing).toHaveAttribute("data-tone", "warning");
     release = undefined;
@@ -113,7 +107,7 @@ for (const theme of ["dark", "light"] as const) {
     // immediately expire old inventory and request current observations.
     await page.clock.setSystemTime(new Date(fixtures.now + 3600_000));
     await page.evaluate(() => window.dispatchEvent(new Event("focus")));
-    await expect.poll(() => Boolean(release)).toBe(true);
+    await waitForState(() => Boolean(release)).toBe(true);
     await expect(testing).toHaveAttribute("data-tone", "stale");
     mode = "fresh";
     release!();

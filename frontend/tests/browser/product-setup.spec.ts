@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "declaration-uncertain", "declaration-uncertain-stale", "private", "uncertain-profile"] as const) {
   test(`signed-in setup: ${outcome}, exact diff, declaration apply and secret navigation`, async ({ page }, testInfo) => {
@@ -90,7 +90,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       // Recovery must be visible after reload, without expanding a disclosure.
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
       await panel.getByRole("button", { name: "Retry original apply" }).click();
-      await expect.poll(() => applies.length).toBe(2);
+      await waitForState(() => applies.length).toBe(2);
       expect(applies[1]).toEqual(applies[0]);
       if (outcome === "uncertain-stale") {
         await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
@@ -99,7 +99,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
         await panel.getByRole("button", { name: "Run dry-run", exact: true }).click();
         await panel.getByRole("checkbox").check();
         await panel.getByRole("button", { name: "Apply reviewed change" }).click();
-        await expect.poll(() => applies.length).toBe(3);
+        await waitForState(() => applies.length).toBe(3);
         expect(applies[2].key).not.toBe(applies[0].key);
       }
     }
@@ -123,7 +123,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
     await declarations.getByRole("button", { name: "Run dry-run", exact: true }).click();
     await declarations.getByRole("checkbox").check();
     await declarations.getByRole("button", { name: "Apply reviewed change" }).click();
-    await expect.poll(() => applies.at(-1)?.body.mode === "apply" && Boolean(applies.at(-1)?.body.managed_secret_bindings)).toBe(true);
+    await waitForState(() => applies.at(-1)?.body.mode === "apply" && Boolean(applies.at(-1)?.body.managed_secret_bindings)).toBe(true);
     const body = applies.at(-1)!.body;
     expect(body.managed_secret_bindings).toEqual([
       { binding_key: "BOT_TOKEN", integration: "runtime_environment", context: "atlas-commerce", instance: "testing", owner_input: null },
@@ -135,7 +135,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
       panel = page.getByRole("region", { name: "Set up a non-production environment" });
       await expect(panel.getByRole("button", { name: "Retry original apply" })).toBeVisible();
       await panel.getByRole("button", { name: "Retry original apply" }).click();
-      await expect.poll(() => applies.length).toBe(3);
+      await waitForState(() => applies.length).toBe(3);
       expect(applies[2]).toEqual(applies[1]);
       if (outcome === "declaration-uncertain-stale") {
         await expect(panel.getByRole("button", { name: "Retry original apply" })).toHaveCount(0);
@@ -146,7 +146,7 @@ for (const outcome of ["success", "uncertain", "readback", "uncertain-stale", "d
         await recoveredDeclarations.getByRole("button", { name: "Run dry-run", exact: true }).click();
         await recoveredDeclarations.getByRole("checkbox").check();
         await recoveredDeclarations.getByRole("button", { name: "Apply reviewed change" }).click();
-        await expect.poll(() => applies.length).toBe(4);
+        await waitForState(() => applies.length).toBe(4);
         expect(applies[3].key).not.toBe(applies[1].key);
       }
     }
@@ -255,7 +255,7 @@ test("a declaration review after a lost dry-run response reads current metadata"
   await declarations.getByLabel("Reason", { exact: true }).fill("Current testing declarations");
   const review = declarations.getByRole("button", { name: "Run dry-run", exact: true });
   await review.click();
-  await expect.poll(() => requests).toBe(1);
+  await waitForState(() => requests).toBe(1);
   await expect(review).toBeEnabled();
   // Another administrator declared the field while this response was lost.
   profile.expected_config.managed_secret_bindings = [binding];

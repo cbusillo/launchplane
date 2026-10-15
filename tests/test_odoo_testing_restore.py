@@ -10,10 +10,12 @@ import sys
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
+import yaml
 from unittest.mock import Mock, patch
 from control_plane.dokploy.compose import (
     ODOO_DATABASE_DATA_DIRECTORY,
     ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
+    render_odoo_raw_compose_file,
     _odoo_web_command,
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
@@ -423,6 +425,45 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 for call in self.calls
             )
         )
+
+    def test_provider_converted_testing_networks_pass_the_receiver_guard(self) -> None:
+        """Execute the guard on the renderer's graph plus Dokploy's domain injection."""
+        composition = yaml.safe_load(
+            render_odoo_raw_compose_file(
+                image_reference=self.spec["image_reference"],
+                hold_web_until_integration_readback=True,
+                domain_hosts=(self.gen.domain_host,),
+                publish_host_ports=False,
+                mount_workflow_ssh=False,
+                isolated_testing=True,
+            )
+        )
+        for service, container in self.containers.items():
+            networks = composition["services"][service]["networks"]
+            container["NetworkSettings"]["Networks"] = dict.fromkeys(networks, {})
+        # The installed provider preserves explicit networks and appends these
+        # two names when a domain routes to web (Dokploy upstream #4499).
+        self.containers["web"]["NetworkSettings"]["Networks"].update(
+            {"default": {}, "dokploy-network": {}}
+        )
+        command = self.command
+
+        def provider_command(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[:2] == ["docker", "inspect"] and arguments[2] in composition["networks"]:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    stdout=json.dumps(
+                        [{"Internal": composition["networks"][arguments[2]].get("internal", False)}]
+                    ).encode(),
+                )
+            return command(arguments, **kwargs)
+
+        self.spec["inspection_only"] = True
+        with patch.object(self, "command", side_effect=provider_command):
+            status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertFalse(any(call[:2] == ["docker", "start"] for call in self.calls))
 
     def test_native_receiver_refuses_shared_storage_before_inspection_success(self) -> None:
         self.spec["inspection_only"] = True

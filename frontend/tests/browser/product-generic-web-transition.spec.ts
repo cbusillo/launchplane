@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 
 async function arrange(page: import("@playwright/test").Page, failure: "none" | "uncertain" | "uncertain-changed" | "stale" = "none") {
   await page.goto("/ui/products/atlas-commerce?fixture=products");

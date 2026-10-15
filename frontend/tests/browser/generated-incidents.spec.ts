@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 
 test("canonical generated incidents render once and disappear after resolution", async ({ page }, testInfo) => {
   await page.goto("/ui/products?fixture=products");

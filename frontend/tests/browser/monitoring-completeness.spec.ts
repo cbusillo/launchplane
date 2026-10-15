@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { setClockTime, expect, test, type Page } from "./state";
 import type { ProductSiteOverview } from "../../src/generated/openapi.ts";
 
 async function installInventoryReads(page: Page, product: ProductSiteOverview, identity: unknown) {
@@ -24,7 +24,7 @@ for (const mode of ["missing", "stale", "fresh", "disabled", "inapplicable"] as 
       return { product, identity: module.fixtureIdentity };
     });
     const start = Date.parse(fixture.product.environments[0].provenance.refreshed_at);
-    await page.clock.install({ time: new Date(start) });
+    await setClockTime(page, start);
     const check = fixture.product.environments[0].health_monitoring.checks[0];
     check.trust_state = mode === "stale" ? "verified" : mode === "fresh" ? "verified" : "missing";
     check.provenance.stale_after = new Date(start + (mode === "stale" ? -1000 : 60_000)).toISOString();
