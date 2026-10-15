@@ -483,7 +483,7 @@ def _migrate_odoo_override_secret_transport_record(
             updated_at=utc_now_timestamp(),
             source_label=source_label.strip() or "odoo-secret-transport-migration",
         )
-        record_store.write_odoo_instance_override_record(updated_record, expected_record=record)
+        record_store.write_odoo_instance_override_record(updated_record)
     return updated_record, changes
 
 

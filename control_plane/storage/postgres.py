@@ -39312,6 +39312,7 @@ class PostgresRecordStore(HumanSessionStore):
         last_apply: OdooOverrideApplyResult,
         updated_at: str,
         source_label: str,
+        preserve_website_settings: bool = False,
     ) -> OdooInstanceOverrideRecord:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -39327,6 +39328,13 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise FileNotFoundError("Odoo override record no longer exists")
             current = OdooInstanceOverrideRecord.model_validate(row.payload)
+            if preserve_website_settings:
+                last_apply = last_apply.model_copy(
+                    update={
+                        "website_settings": current.last_apply.website_settings,
+                        "website_settings_verified": current.last_apply.website_settings_verified,
+                    }
+                )
             updated = current.model_copy(
                 update={
                     "last_apply": last_apply,

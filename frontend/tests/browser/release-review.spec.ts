@@ -605,7 +605,7 @@ test("Client sees website settings before accepting the bound release", { tag: "
   const settings = page.locator("[data-website-settings]");
   await expect(settings).toContainText(review.review.checklist!.website_settings.settings.public_origin);
   await expect(settings).toContainText(review.review.checklist!.website_settings.settings.google_analytics_key);
-  await expect(settings.locator("[data-setting='google_analytics_key'] td").first()).toHaveText(productionSettings.settings.google_analytics_key);
+  await expect(settings.locator("[data-setting='google_analytics_key'] [data-column='current']")).toHaveText(productionSettings.settings.google_analytics_key);
   await expect(settings.locator("[data-setting='public_indexing_enabled']")).toHaveAttribute("data-change", "changed");
   await expect(settings.locator("[data-setting='cookies_bar']")).toHaveAttribute("data-change", "kept");
   await expect(settings.locator("[data-setting='cookies_bar']")).toHaveAttribute("data-state", "enabled");
@@ -626,5 +626,16 @@ test("Client sees website settings before accepting the bound release", { tag: "
     await expect(settings.locator(`[data-setting='${field}']`)).toHaveAttribute("data-change", "kept");
   }
   await page.screenshot({ path: testInfo.outputPath("website-settings-preserved.png"), fullPage: true });
+  review.review.checklist!.website_settings.settings = { ...productionSettings.settings };
+  review.review.checklist!.production_website_settings = {
+    ...productionSettings,
+    settings: { ...productionSettings.settings, operation: "disable_collection", public_indexing_enabled: false,
+      google_analytics_key: "", cookies_bar: null, block_third_party_domains: null },
+  };
+  await page.reload();
+  for (const field of ["cookies_bar", "block_third_party_domains"]) {
+    await expect(settings.locator(`[data-setting='${field}']`)).toHaveAttribute("data-change", "unknown");
+    await expect(settings.locator(`[data-setting='${field}']`)).toHaveAttribute("data-state", "enabled");
+  }
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

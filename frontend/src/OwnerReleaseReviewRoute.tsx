@@ -26,6 +26,7 @@ export const RELEASE_PROGRESS_REFRESH_MS = 10_000;
 const ACTIVE_RELEASE_RUN_STATES: ReadonlySet<ClientReleaseRunView["state"]> = new Set(["waiting", "running"]);
 
 const WEBSITE_SETTING_FIELDS = [
+  ["public_origin", "Website address"],
   ["public_indexing_enabled", "Search indexing"], ["google_analytics_key", "Google Analytics"],
   ["cookies_bar", "Cookie consent bar"], ["block_third_party_domains", "Third-party blocking"],
 ] as const;
@@ -41,10 +42,10 @@ function WebsiteSettingsComparison({ candidate, production }: { candidate: OdooW
       const next = candidate[key];
       const current = production?.[key];
       const change = next == null || current != null && next === current ? "kept" : current == null ? "unknown" : "changed";
-      const state = next == null ? "preserved" : next ? "enabled" : "disabled";
+      const state = key === "public_origin" ? "specified" : next == null ? "preserved" : next ? "enabled" : "disabled";
       return <tr key={key} data-setting={key} data-state={state} data-change={change}>
-        <th scope="row">{label}</th><td>{websiteSettingValue(current)}</td>
-        <td>{next == null ? "unchanged" : websiteSettingValue(next)}<small>{change === "kept" ? "Kept" : change === "changed" ? "Changes" : "Current value not recorded"}</small></td>
+        <th scope="row">{label}</th><td data-column="current">{websiteSettingValue(current)}</td>
+        <td data-column="candidate">{next == null ? "unchanged" : websiteSettingValue(next)}<small>{change === "kept" ? "Kept" : change === "changed" ? "Changes" : "Current value not recorded"}</small></td>
       </tr>;
     })}</tbody>
   </table>;

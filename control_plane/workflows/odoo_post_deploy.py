@@ -47,6 +47,7 @@ class OdooPostDeployStore(Protocol):
         last_apply: OdooOverrideApplyResult,
         updated_at: str,
         source_label: str,
+        preserve_website_settings: bool = False,
     ) -> OdooInstanceOverrideRecord: ...
 
 
@@ -147,6 +148,7 @@ def _write_odoo_instance_override_apply_result(
         ),
         updated_at=now,
         source_label=source_label,
+        preserve_website_settings=not settings_attempted,
     )
 
 

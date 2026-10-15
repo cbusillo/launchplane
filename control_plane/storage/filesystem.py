@@ -7143,12 +7143,20 @@ class FilesystemRecordStore:
         last_apply: OdooOverrideApplyResult,
         updated_at: str,
         source_label: str,
+        preserve_website_settings: bool = False,
     ) -> OdooInstanceOverrideRecord:
         with self._product_authority_bundle_lock():
             record_id = f"{context_name}-{instance_name}"
             current = self._read_model_locked(
                 OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
             )
+            if preserve_website_settings:
+                last_apply = last_apply.model_copy(
+                    update={
+                        "website_settings": current.last_apply.website_settings,
+                        "website_settings_verified": current.last_apply.website_settings_verified,
+                    }
+                )
             updated = current.model_copy(
                 update={
                     "last_apply": last_apply,

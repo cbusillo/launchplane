@@ -326,6 +326,9 @@ class WebsiteSettingsTests(unittest.TestCase):
             from types import SimpleNamespace
             from unittest.mock import Mock
 
+            stale_record = record.model_copy(deep=True)
+            stale_record.last_apply = OdooOverrideApplyResult()
+
             adapter = SimpleNamespace(
                 ensure_schema=Mock(),
                 close=Mock(),
@@ -334,7 +337,7 @@ class WebsiteSettingsTests(unittest.TestCase):
             with patch("control_plane.cli.PostgresRecordStore", return_value=adapter):
                 legacy_write(
                     database_url="fixture",
-                    record=record,
+                    record=stale_record,
                     status="pass",
                     detail="Unrelated successful legacy ship",
                 )
@@ -345,6 +348,20 @@ class WebsiteSettingsTests(unittest.TestCase):
                 persisted.last_apply.website_settings, record.last_apply.website_settings
             )
             self.assertFalse(persisted.last_apply.website_settings_verified)
+            from control_plane.workflows.odoo_post_deploy import (
+                _write_odoo_instance_override_apply_result as maintenance_write,
+            )
+
+            maintained = maintenance_write(
+                record_store=store,
+                record=stale_record,
+                status="pass",
+                detail="Unrelated maintenance from a stale snapshot",
+            )
+            self.assertEqual(
+                maintained.last_apply.website_settings, record.last_apply.website_settings
+            )
+            self.assertFalse(maintained.last_apply.website_settings_verified)
             self.assertFalse(
                 build_release_review(store=store, profile=profile(), read=github_read).approved
             )
