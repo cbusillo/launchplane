@@ -11043,6 +11043,100 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         self.addCleanup(self.scenario.doCleanups)
         self.scenario.seed(self.enterContext(_head_postgres_database()))
 
+    def test_drill_login_history_query_on_real_postgres(self) -> None:
+        from datetime import timedelta
+        import subprocess
+        from psycopg import sql
+        from tests.test_odoo_testing_restore import FreshTestingHostProgramTests
+
+        host = FreshTestingHostProgramTests()
+        host.setUp()
+        self.addCleanup(host.doCleanups)
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=1)
+        host.spec.update(inspection_only=True, usage_only=True, usage_since=since.isoformat())
+        host.existing_database = True
+        engine = self.scenario.store._engine
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE res_users_log (id serial PRIMARY KEY, create_uid integer, create_date timestamp)"
+            )
+            connection.execute(
+                text("INSERT INTO res_users_log (create_uid, create_date) VALUES (44, :moment)"),
+                {"moment": (since - timedelta(seconds=1)).replace(tzinfo=None)},
+            )
+        command = host.command
+
+        def database_read(arguments: list[str], **kwargs: Any) -> Any:
+            query = kwargs.get("input") or b""
+            if b"ir_config_parameter" in query:
+                result = host.spec["copy_binding_sha256"].encode()
+            elif b"res_users_log" in query:
+                try:
+                    with engine.connect().execution_options(
+                        isolation_level="AUTOCOMMIT"
+                    ) as connection:
+                        raw = connection.connection.driver_connection
+                        assert raw is not None
+                        program = query.decode().replace(
+                            ":'usage_since'", sql.Literal(arguments[-1]).as_string(raw)
+                        )
+                        with raw.cursor() as cursor:
+                            cursor.execute(program)
+                            values = []
+                            while True:
+                                if cursor.description:
+                                    values.extend(cursor.fetchall())
+                                if not cursor.nextset():
+                                    break
+                        result = (
+                            b"t"
+                            if values == [(True,)]
+                            else b"f"
+                            if values == [(False,)]
+                            else b"invalid"
+                        )
+                except Exception:
+                    return subprocess.CompletedProcess(
+                        arguments, 1, stdout=b"", stderr=b"unavailable"
+                    )
+            else:
+                return command(arguments, **kwargs)
+            return subprocess.CompletedProcess(arguments, 0, stdout=result, stderr=b"")
+
+        with patch.object(host, "command", side_effect=database_read):
+            status, output = host.run_program()
+            self.assertEqual(status, 0, output)
+            self.assertEqual(
+                json.loads(output.strip().removeprefix("fixture:"))["recent_signins"], False
+            )
+            for account in (1, 44):
+                with self.subTest(account=account):
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "INSERT INTO res_users_log (create_uid, create_date) VALUES (:account, :moment)"
+                            ),
+                            {"account": account, "moment": since.replace(tzinfo=None)},
+                        )
+                    status, output = host.run_program()
+                    self.assertEqual(status, 0, output)
+                    self.assertEqual(
+                        json.loads(output.strip().removeprefix("fixture:"))["recent_signins"], True
+                    )
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "DELETE FROM res_users_log WHERE create_uid = :account AND create_date >= :moment"
+                            ),
+                            {"account": account, "moment": since.replace(tzinfo=None)},
+                        )
+            with engine.begin() as connection:
+                connection.exec_driver_sql("DROP TABLE res_users_log")
+            status, output = host.run_program()
+            self.assertNotEqual(status, 0)
+            self.assertNotIn('"recent_signins": false', output)
+
     def test_replicas_admit_one_fresh_database_and_restore(self) -> None:
         from concurrent.futures import ThreadPoolExecutor
         from control_plane.odoo_testing_drill import lane_key, DRILL_INTERVAL_SECONDS
@@ -11068,6 +11162,80 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         )
         self.assertEqual(
             tuple(item.operation_id for item in operations), (scenario.evidence().operation_id,)
+        )
+
+    def test_login_collection_excludes_first_alias_insert_and_activation_rechecks(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        scenario = self.scenario
+        second = PostgresRecordStore(database_url=scenario.store.database_url)
+        self.addCleanup(second.close)
+        second._engine.update_execution_options(isolation_level="READ COMMITTED")
+        entered = threading.Event()
+        release = threading.Event()
+        at_lock = threading.Event()
+        original_lock = second._lock_product_authority_bundle_write
+
+        def collect(*args: Any) -> bool:
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("Fixture collector was not released")
+            return False
+
+        def lock(session: Any) -> None:
+            session.execute(text("SET application_name = 'lp3727-alias-writer'"))
+            at_lock.set()
+            original_lock(session)
+
+        scenario.signins.side_effect = collect
+        with patch.object(second, "_lock_product_authority_bundle_write", side_effect=lock):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                admission = pool.submit(
+                    scenario.store.enqueue_odoo_testing_drill,
+                    scenario.profile.product,
+                    scenario.context,
+                    "fixture-login-lock",
+                    scenario.now,
+                )
+                self.assertTrue(entered.wait(5))
+                writer = pool.submit(
+                    second.write_dokploy_target_id_record,
+                    DokployTargetIdRecord(
+                        context="foreign-context",
+                        instance="testing",
+                        target_id=scenario.gen.target_id,
+                        updated_at=scenario.profile.updated_at,
+                    ),
+                )
+                try:
+                    self.assertTrue(at_lock.wait(5))
+                    deadline = time.monotonic() + 5
+                    waiting = False
+                    with scenario.store._engine.connect() as connection:
+                        while time.monotonic() < deadline:
+                            waiting = bool(
+                                connection.scalar(
+                                    text(
+                                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'lp3727-alias-writer' AND wait_event_type = 'Lock')"
+                                    )
+                                )
+                            )
+                            if waiting:
+                                break
+                            time.sleep(0.01)
+                    self.assertTrue(waiting)
+                    self.assertFalse(writer.done())
+                finally:
+                    release.set()
+                admission.result(timeout=10)
+                writer.result(timeout=10)
+        with self.assertRaises(ValueError):
+            scenario.activate()
+        self.assertEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
         )
 
     def test_lost_admission_transaction_preserves_old_copy_and_runtime(self) -> None:

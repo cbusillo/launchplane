@@ -10895,23 +10895,13 @@ class PostgresRecordStore(HumanSessionStore):
                 raise DrillPrerequisite("drill_generation_missing")
             current = FreshOdooTestingGeneration.model_validate(row.payload)
             if generation_binding(current) == generation_binding(planned):
-                from control_plane.disposable_lanes import (
-                    require_disposable_lane,
-                    DisposableLaneStore,
+                from control_plane.odoo_testing_drill import (
+                    collect_drill_admission,
+                    require_drill_checkpoint,
                 )
-                from control_plane.odoo_testing_drill import require_drill_checkpoint
 
                 if receipt.response_payload.get("activation_attempt") != operation.attempt:
-                    require_disposable_lane(
-                        cast(DisposableLaneStore, self),
-                        product=operation.product,
-                        context=operation.context,
-                        instance="testing",
-                    )
-                    current_safety = self.read_disposable_lane_safety(
-                        operation.product, operation.context, "testing"
-                    )
-                    assert current_safety is not None
+                    current_safety = collect_drill_admission(self, current, now)
                     receipt.response_payload["activation_safety"] = current_safety.model_dump(
                         mode="json"
                     )

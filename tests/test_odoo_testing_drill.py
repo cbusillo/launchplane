@@ -222,6 +222,9 @@ class TestingDrillScenario(unittest.TestCase):
         self.enterContext(
             patch("control_plane.odoo_testing_restore.require_distinct_testing_credentials")
         )
+        self.signins = self.enterContext(
+            patch("control_plane.odoo_testing_drill.read_drill_recent_signins", return_value=False)
+        )
 
     def evidence(self) -> Any:
         return testing_drill_evidence(self.store, self.profile.product, self.context, "testing")
@@ -285,6 +288,46 @@ class TestingDrillTests(TestingDrillScenario):
         root = Path(self.enterContext(TemporaryDirectory()))
         self.seed(f"sqlite+pysqlite:///{root / 'state.db'}")
 
+    def test_recent_successful_signin_skips_without_queueing_or_selecting_database(self) -> None:
+        self.signins.return_value = True
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "skipped")
+        self.assertEqual(self.evidence().step, "recent_successful_signin")
+        self.assertEqual(self.evidence().operation_id, "")
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+        self.assertFalse(self.notifications.called)
+
+    def test_unreadable_successful_login_check_skips_without_leaking_error(self) -> None:
+        self.signins.side_effect = RuntimeError("private-provider-value")
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "skipped")
+        self.assertEqual(self.evidence().step, "successful_login_check_unreadable")
+        self.assertNotIn("private-provider-value", self.evidence().model_dump_json())
+        self.assertEqual(self.evidence().operation_id, "")
+
+    def test_idle_lane_runs_without_renewing_general_safety_facts(self) -> None:
+        self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "queued")
+        self.activate()
+        self.assertEqual(self.signins.call_count, 2)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(self.profile.product, self.context, "testing")
+        )
+
+    def test_signin_between_queue_and_activation_protects_served_copy(self) -> None:
+        self.scheduler.run_once()
+        self.signins.return_value = True
+        with self.assertRaises(DrillSkipped):
+            self.activate()
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+
     def test_daily_admission_is_atomic_and_restart_does_not_repeat(self) -> None:
         before = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="prod"
@@ -321,7 +364,7 @@ class TestingDrillTests(TestingDrillScenario):
         )
 
     def test_hold_and_recorded_use_preserve_runtime_and_copy(self) -> None:
-        for protection in ("hold", "in_use", "only_copy", "expired", "shared", "unknown"):
+        for protection in ("hold", "in_use", "only_copy", "shared"):
             with self.subTest(protection=protection):
                 target = self.store.read_dokploy_target_record(
                     context_name=self.context, instance_name="testing"
@@ -364,7 +407,7 @@ class TestingDrillTests(TestingDrillScenario):
                 )
                 self.assertEqual(
                     self.evidence().status,
-                    "skipped" if protection in {"hold", "in_use", "only_copy"} else "fail",
+                    "skipped",
                 )
                 self.assertEqual(
                     self.store.read_fresh_odoo_testing_generation(
@@ -587,19 +630,17 @@ class TestingDrillTests(TestingDrillScenario):
 
     def test_undelivered_alert_does_not_block_repaired_prerequisite_next_day(self) -> None:
         self.notifications.return_value = False
-        self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"artifact_identity": None})
+        )
         self.scheduler.run_once()
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "fail")
         self.now += DRILL_INTERVAL_SECONDS
-        record_safety(
-            self.store,
-            self.profile.product,
-            self.context,
-            "testing",
-            observed_at=datetime.fromtimestamp(self.now, timezone.utc),
-            expires_at=datetime.fromtimestamp(self.now, timezone.utc) + timedelta(minutes=5),
-        )
+        self.store.write_environment_inventory(inventory)
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "queued")
         self.assertTrue(
@@ -735,10 +776,15 @@ class TestingDrillTests(TestingDrillScenario):
         require_drill_checkpoint(self.store, operation)
 
     def test_repaired_precondition_can_admit_same_daily_slot(self) -> None:
-        self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"artifact_identity": None})
+        )
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "fail")
-        record_safety(self.store, self.profile.product, self.context, "testing")
+        self.store.write_environment_inventory(inventory)
         self.now = datetime.now(timezone.utc).timestamp()
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "queued")
@@ -896,7 +942,12 @@ class TestingDrillTests(TestingDrillScenario):
         self,
     ) -> None:
         self.notifications.return_value = False
-        self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
+        inventory = self.store.read_environment_inventory(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"artifact_identity": None})
+        )
         for offset in range(3):
             self.store.enqueue_odoo_testing_drill(
                 self.profile.product,

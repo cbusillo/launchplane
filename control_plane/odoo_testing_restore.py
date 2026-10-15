@@ -695,7 +695,7 @@ def restore_main():
     if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}", database):
         raise RuntimeError("Testing database identity is invalid")
     modules = [name.strip() for name in str(spec["workflow_environment"].get("ODOO_UPDATE_MODULES", "")).split(",") if name.strip()]
-    if not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules):
+    if not spec.get('usage_only') and (not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules)):
         raise RuntimeError("Testing restore has no exact declared module update intent")
     volumes = {namespace + "-data", namespace + "-db", namespace + "-logs"}
     containers = {}
@@ -792,6 +792,25 @@ def restore_main():
             if marker!=spec['copy_binding_sha256']:
                 raise RuntimeError('Existing testing database lacks its generation witness')
         prefix=sys.argv[2]
+        if spec.get('usage_only'):
+            if present != '1':
+                raise RuntimeError('Testing login history is unavailable')
+            # Odoo records successful logins in res_users_log.create_date with
+            # create_uid naming the account. Read all accounts without logging
+            # identities or creating an Odoo session (which would add a login).
+            since=spec['usage_since']
+            from datetime import datetime,timezone
+            moment=datetime.fromisoformat(since)
+            if moment.tzinfo is None:
+                raise RuntimeError('Testing usage cutoff requires UTC authority')
+            cutoff=moment.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M:%S.%f')
+            used=docker('exec','-i',containers['database'][0],'sh','-c',
+                'psql -X -q -t -A -v ON_ERROR_STOP=1 -v usage_since="$2" -U "$POSTGRES_USER" -d "$1"',
+                '_',database,cutoff,stdin=b"BEGIN READ ONLY; SET LOCAL statement_timeout = '10s'; SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= :'usage_since'::timestamp); ROLLBACK;\n").decode().strip()
+            if used not in {'t','f'}:
+                raise RuntimeError('Testing login history is unreadable')
+            print(prefix+json.dumps({'type':'complete','recent_signins':used=='t'}),flush=True)
+            return
         capture=spec.get('native_capture')
         artifacts={}
         if capture is not None and present=='0':
