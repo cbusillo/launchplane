@@ -10,7 +10,8 @@ must send exactly one trigger and report what actually happened.
 from __future__ import annotations
 
 import unittest
-from collections.abc import Callable
+from contextlib import contextmanager
+from collections.abc import Callable, Iterator
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -315,6 +316,51 @@ class DataWorkflowExecutionBudgetTests(unittest.TestCase):
         self.assertEqual(
             provider.trigger_calls, [dokploy_api.DEFAULT_DOKPLOY_SCHEDULE_TRIGGER_TIMEOUT_SECONDS]
         )
+
+
+class GuardedScheduleDispatchTests(unittest.TestCase):
+    def test_dispatch_is_fenced_but_exact_job_observation_holds_no_guard(self) -> None:
+        guarded = False
+        before_calls = []
+
+        @contextmanager
+        def guard() -> Iterator[None]:
+            nonlocal guarded
+            guarded = True
+            try:
+                yield
+            finally:
+                guarded = False
+
+        def before_trigger() -> None:
+            self.assertTrue(guarded)
+            before_calls.append("admitted")
+
+        running = _deployment("guarded-job", "running", timedelta())
+        done = _deployment("guarded-job", "done", timedelta())
+        provider = FakeProvider(
+            trigger=_timed_out,
+            listings=[lambda: [BEFORE], lambda: [BEFORE, running], lambda: [BEFORE, done]],
+        )
+
+        def request(**kwargs: object) -> JsonValue:
+            self.assertEqual(guarded, kwargs["path"] == TRIGGER_PATH)
+            return provider.request(**kwargs)
+
+        with patch.object(dokploy_api, "dokploy_request", side_effect=request):
+            result = dokploy_api.run_dokploy_schedule(
+                host="https://fixture.example",
+                token="fixture",
+                schedule_id=SCHEDULE_ID,
+                timeout_seconds=600,
+                provider_mutation_guard=guard,
+                before_trigger=before_trigger,
+            )
+        self.assertIn("guarded-job", result)
+        self.assertTrue(before_calls)
+        self.assertEqual(len(provider.trigger_calls), 1)
+        self.assertLess(provider.trigger_calls[0], 600)
+        self.assertFalse(guarded)
 
 
 if __name__ == "__main__":

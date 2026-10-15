@@ -1,3 +1,4 @@
+from contextlib import AbstractContextManager
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -412,6 +413,8 @@ def execute_odoo_preview_apply_result(
     deployment_record_id: str,
     runtime_identity: RuntimeIdentity | None = None,
     propagate_domain_lookup_error: bool = False,
+    qualify_existing_refresh: bool = False,
+    provider_mutation_guard: Callable[[], AbstractContextManager[None]] | None = None,
 ) -> dict[str, object]:
     current_request = refresh_odoo_preview_issued_plan(
         control_plane_root=control_plane_root_path,
@@ -492,6 +495,8 @@ def execute_odoo_preview_apply_result(
         expected_runtime_identity=resolved_runtime_identity,
         propagate_domain_lookup_error=propagate_domain_lookup_error,
         integration_allowances=resolved_environment.integration_allowances,
+        qualify_existing_refresh=qualify_existing_refresh,
+        provider_mutation_guard=provider_mutation_guard,
     )
     return driver_result.model_dump(mode="json")
 

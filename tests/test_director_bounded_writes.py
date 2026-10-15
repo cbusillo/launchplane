@@ -1,7 +1,9 @@
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
+from collections.abc import Iterator
 import unittest
 from unittest.mock import patch
 
@@ -38,6 +40,13 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             database_url=f"sqlite+pysqlite:///{self.root / 'state.db'}"
         )
         self.store.ensure_schema()
+        # SQLite is only an HTTP rehearsal. Real exclusion is exercised with
+        # independent PostgreSQL connections in test_postgres_integration.
+        guard = patch.object(
+            self.store, "serialize_existing_preview_refresh", return_value=nullcontext()
+        )
+        guard.start()
+        self.addCleanup(guard.stop)
         self.addCleanup(self.store.close)
         self.profile = LaunchplaneProductProfileRecord.model_validate(
             _odoo_preview_profile_payload()
@@ -309,15 +318,14 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         execute.assert_called_once()
         self.assertEqual(self.store.list_promotion_records(), ())
 
-    async def test_unknown_protected_and_expired_preview_refuse_before_execution(self) -> None:
+    async def test_protected_preview_refuses_even_when_report_is_expired(self) -> None:
         with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
-            self.assertEqual((await self.preview_apply()).status_code, 409)
             for changes in (
                 {"usage": "in_use"},
                 {"data": "only_copy"},
                 {"production_resources": "shared"},
-                {"production_resources": "unknown"},
                 {
+                    "usage": "in_use",
                     "observed_at": datetime.now(timezone.utc) - timedelta(minutes=10),
                     "expires_at": datetime.now(timezone.utc) - timedelta(minutes=5),
                 },
@@ -326,6 +334,106 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.preview_apply()
                 self.assertEqual(result.status_code, 409, result.text)
             execute.assert_not_called()
+
+    async def test_refresh_does_not_require_invented_positive_usage_or_custody(self) -> None:
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result",
+            return_value={"status": "blocked"},
+        ) as execute:
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue(execute.call_args.kwargs["qualify_existing_refresh"])
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, self.preview.context, "pr-42"
+            )
+        )
+
+    async def test_refresh_rechecks_protected_use_after_first_provider_effect(self) -> None:
+        def execute(**kwargs: Any) -> Any:
+            kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+            self.safety(usage="in_use")
+            kwargs["provider_effect_checkpoint"]("fixture-second-effect")
+            self.fail("The second effect must not run")
+
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute):
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 409, response.text)
+        # A refusal after an effect retains uncertainty; it cannot release the
+        # reservation as though the first effect never happened.
+        self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
+
+    async def test_lifecycle_progress_during_refresh_does_not_create_a_false_fence(self) -> None:
+        def execute(**kwargs: Any) -> Any:
+            with kwargs["provider_mutation_guard"]():
+                kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+            self.store.write_preview_record(
+                self.preview.model_copy(
+                    update={
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "latest_generation_id": "newer-announced-generation",
+                    }
+                )
+            )
+            with kwargs["provider_mutation_guard"]():
+                kwargs["provider_effect_checkpoint"]("fixture-second-effect")
+            return {
+                "status": "pass",
+                "provider_effect_attempted": True,
+                "operation": "refresh",
+                "product": self.profile.product,
+                "repository": self.profile.repository,
+                "preview_slug": "pr-42",
+                "preview_url": self.payload["apply"]["dry_run_plan"]["preview_url"],
+                "domain_host": self.payload["apply"]["dry_run_plan"]["domain_host"],
+                "compose_name": "cm-odoo-preview-pr-42",
+            }
+
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute):
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 202, response.text)
+
+    async def test_refused_fence_entry_is_a_known_pre_effect_refusal(self) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        @contextmanager
+        def held_by_staff() -> Iterator[None]:
+            self.safety(usage="in_use")
+            yield
+
+        def execute(**kwargs: Any) -> Any:
+            with kwargs["provider_mutation_guard"]():
+                self.fail("The first provider effect must not run")
+
+        for fault in (held_by_staff, OperationalError("fixture", {}, Exception("lock timeout"))):
+            self.store.clear_disposable_lane_safety(
+                self.profile.product, self.preview.context, "pr-42"
+            )
+            with (
+                patch.object(self.store, "serialize_existing_preview_refresh", side_effect=fault),
+                patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute
+                ),
+            ):
+                response = await self.preview_apply()
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertNotEqual(
+                response.json()["error"]["code"], "mutation_reconciliation_required"
+            )
+            self.store.clear_disposable_lane_safety(
+                self.profile.product, self.preview.context, "pr-42"
+            )
+            with (
+                patch(
+                    "control_plane.http_app.execute_odoo_preview_apply_result",
+                    return_value={"status": "blocked"},
+                ) as retry,
+                patch("control_plane.http_app.observe_odoo_preview_apply_result") as observe,
+            ):
+                response = await self.preview_apply()
+            self.assertEqual(response.status_code, 202, response.text)
+            retry.assert_called_once()
+            observe.assert_not_called()
 
     async def test_recorded_stable_lane_collision_cannot_be_used_as_a_preview(self) -> None:
         collided = self.profile.model_copy(
@@ -629,20 +737,28 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 
         self.safety()
-        self.store.write_runtime_environment_record(
-            RuntimeEnvironmentRecord(
-                scope="instance",
-                context=self.preview.context,
-                instance=self.profile.preview.template_instance,
-                env={"FIXTURE_OUTBOUND_ENDPOINT": "changed-connection"},
-                updated_at=self.profile.updated_at,
-                source_label="fixture",
+
+        def drift(**kwargs: Any) -> Any:
+            self.store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context=self.preview.context,
+                    instance=self.profile.preview.template_instance,
+                    env={"FIXTURE_OUTBOUND_ENDPOINT": "changed-connection"},
+                    updated_at=self.profile.updated_at,
+                    source_label="fixture",
+                )
             )
-        )
-        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            with kwargs["provider_mutation_guard"]():
+                kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+                self.fail("Changed inputs must prevent the effect")
+
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=drift
+        ) as execute:
             response = await self.preview_apply()
         self.assertEqual(response.status_code, 409, response.text)
-        execute.assert_not_called()
+        execute.assert_called_once()
 
     async def test_key_safety_policy_change_invalidates_preview_safety(self) -> None:
         from control_plane.contracts.runtime_key_safety_policy import (
@@ -651,20 +767,28 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.safety()
-        self.store.write_runtime_key_safety_policy_record(
-            RuntimeKeySafetyPolicyRecord(
-                record_id="changed-preview-key-policy",
-                source="fixture",
-                updated_at=self.profile.updated_at,
-                rules=(
-                    RuntimeSecretSafetyRule(binding_key="SMTP_URL", secret_class="shared_safe"),
-                ),
+
+        def drift(**kwargs: Any) -> Any:
+            self.store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="changed-preview-key-policy",
+                    source="fixture",
+                    updated_at=self.profile.updated_at,
+                    rules=(
+                        RuntimeSecretSafetyRule(binding_key="SMTP_URL", secret_class="shared_safe"),
+                    ),
+                )
             )
-        )
-        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            with kwargs["provider_mutation_guard"]():
+                kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+                self.fail("Changed inputs must prevent the effect")
+
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=drift
+        ) as execute:
             response = await self.preview_apply()
         self.assertEqual(response.status_code, 409, response.text)
-        execute.assert_not_called()
+        execute.assert_called_once()
 
     async def test_bootstrap_override_change_invalidates_preview_safety(self) -> None:
         from control_plane.contracts.odoo_instance_override_record import (
@@ -673,21 +797,29 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.safety()
-        self.store.write_odoo_instance_override_record(
-            OdooInstanceOverrideRecord(
-                context=self.preview.context,
-                instance=self.profile.preview.template_instance,
-                website_bootstrap=OdooWebsiteBootstrapPayload(
-                    name="Changed preview fixture", company_email="changed@example.test"
-                ),
-                updated_at=self.profile.updated_at,
-                source_label="fixture",
+
+        def drift(**kwargs: Any) -> Any:
+            self.store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context=self.preview.context,
+                    instance=self.profile.preview.template_instance,
+                    website_bootstrap=OdooWebsiteBootstrapPayload(
+                        name="Changed preview fixture", company_email="changed@example.test"
+                    ),
+                    updated_at=self.profile.updated_at,
+                    source_label="fixture",
+                )
             )
-        )
-        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            with kwargs["provider_mutation_guard"]():
+                kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+                self.fail("Changed inputs must prevent the effect")
+
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=drift
+        ) as execute:
             response = await self.preview_apply()
         self.assertEqual(response.status_code, 409, response.text)
-        execute.assert_not_called()
+        execute.assert_called_once()
 
     async def test_product_identity_preserves_production_history_across_context_changes(
         self,

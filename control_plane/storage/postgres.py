@@ -5987,6 +5987,7 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneSecretRow
                 | LaunchplaneSecretVersionRow
                 | LaunchplaneSecretBindingRow
+                | LaunchplaneOdooInstanceOverrideRow
                 | LaunchplaneRuntimeKeySafetyPolicyRow
                 | LaunchplaneDisposableLaneSafetyRow
                 | LaunchplaneDisposableReplacementPreparationRow
@@ -7675,6 +7676,31 @@ class PostgresRecordStore(HumanSessionStore):
 
             try:
                 yield checkpoint
+            finally:
+                self._disposable_authority_context.session = None
+                session.rollback()
+
+    @contextmanager
+    def serialize_existing_preview_refresh(self) -> Iterator[None]:
+        """Exclude authority/preview inserts and updates for one bounded dispatch.
+
+        The executor is held first. No deploy/job wait or smoke check runs
+        inside this guard. SQLite cannot qualify the live path.
+        """
+        if self.database_dialect_name != "postgresql":
+            raise ValueError("Existing preview qualification requires PostgreSQL.")
+        held = getattr(self._disposable_authority_context, "session", None)
+        if held is not None:
+            held.execute(text("SELECT 1"))
+            yield
+            return
+        with self._session_factory() as session:
+            session.execute(text("SET LOCAL lock_timeout = '5s'"))
+            self._lock_product_authority_bundle_write(session)
+            session.execute(text("LOCK TABLE launchplane_preview_records IN SHARE MODE"))
+            self._disposable_authority_context.session = session
+            try:
+                yield
             finally:
                 self._disposable_authority_context.session = None
                 session.rollback()

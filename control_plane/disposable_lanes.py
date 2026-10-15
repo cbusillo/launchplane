@@ -88,6 +88,8 @@ def disposable_lane_binding_sha256(
     target_id: DokployTargetIdRecord | None,
     preview: PreviewRecord | None = None,
     configuration: tuple[LaneConfigurationRecord, ...] = (),
+    *,
+    preview_lifecycle: bool = True,
 ) -> str:
     # The observation itself is not part of the binding it observes. Updating
     # timestamps or retirement lifecycle state does not change lane ownership.
@@ -98,7 +100,27 @@ def disposable_lane_binding_sha256(
         preview_profile.pop("enabled", None)
     bindings: list[object] = [
         payload,
-        *(item.model_dump(mode="json") if item else None for item in (target, target_id, preview)),
+        *(item.model_dump(mode="json") if item else None for item in (target, target_id)),
+        (
+            preview.model_dump(
+                mode="json",
+                include=(
+                    None
+                    if preview_lifecycle
+                    else {
+                        "preview_id",
+                        "context",
+                        "anchor_repo",
+                        "anchor_pr_number",
+                        "anchor_pr_url",
+                        "canonical_url",
+                        "state",
+                    }
+                ),
+            )
+            if preview
+            else None
+        ),
     ]
     bindings.append(
         sorted(
@@ -119,6 +141,7 @@ def require_disposable_lane(
     instance: str,
     retirement: bool = False,
     separation_only: bool = False,
+    preview_refresh: bool = False,
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
 ) -> str:
@@ -176,6 +199,35 @@ def require_disposable_lane(
             "The lane is held for staff testing; usage must be resolved before disposable work."
         )
     evidence = store.read_disposable_lane_safety(product, context, instance)
+    if preview_refresh:
+        # Overall direction makes previews disposable unless there is an actual
+        # protected use or needed copy. No source produces a universal positive
+        # occupancy/custody fact. Resource safety is checked separately against
+        # the real Docker host immediately before refresh effects.
+        if not owned_preview or profile.driver_id != "odoo":
+            raise DisposableLaneSafetyUnknown(
+                "Refresh qualification requires an owned Odoo preview."
+            )
+        if preview is not None and preview.state != "active":
+            raise DisposableLaneSafetyUnknown("Only an active existing preview can be refreshed.")
+        if evidence is not None and (
+            evidence.usage == "in_use"
+            or evidence.data == "only_copy"
+            or evidence.production_resources in {"shared", "separation_ready"}
+        ):
+            # Expiry or config drift cannot silently erase a protective report.
+            raise DisposableLaneSafetyUnknown(
+                "The preview has a recorded protected use or resource."
+            )
+        binding = disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            preview,
+            disposable_lane_configuration(store, context, instance),
+            preview_lifecycle=False,
+        )
+        return binding
     if retirement:
         # Prelaunch is the product's authoritative disposable classification.
         # Retirement stops an owned application; it neither starts a lane nor

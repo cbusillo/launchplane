@@ -5,7 +5,7 @@ import asyncio
 import base64
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
@@ -9901,3 +9901,161 @@ class RealPostgresTestingSeparationTests(testing_separation.TestingRuntimeSepara
                     with self.assertRaises(TimeoutError):
                         future.result(timeout=0.1)
                 future.result(timeout=10)
+
+
+class RealPostgresExistingPreviewQualificationTests(unittest.TestCase):
+    def test_refresh_guard_excludes_new_alias_configuration_hold_and_protection_writers(
+        self,
+    ) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooInstanceOverrideRecord,
+            OdooWebsiteBootstrapPayload,
+        )
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from control_plane.contracts.runtime_key_safety_policy import (
+            RuntimeKeySafetyPolicyRecord,
+            RuntimeSecretSafetyRule,
+        )
+        from control_plane.contracts.dokploy_target_record import (
+            DokployTargetStaffTestingHold,
+            DokployTargetPolicies,
+        )
+        from tests.test_director_bounded_writes import DirectorBoundedWritesTests
+        from tests.support.disposable_lanes import record_safety
+
+        for change in (
+            "first-global",
+            "new-alias",
+            "staff-hold",
+            "key-policy",
+            "bootstrap",
+            "protection",
+            "preview",
+        ):
+            with self.subTest(change=change), _head_postgres_database() as url:
+                fixture = DirectorBoundedWritesTests()
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                with (
+                    closing(PostgresRecordStore(database_url=url)) as first,
+                    closing(PostgresRecordStore(database_url=url)) as second,
+                ):
+                    first.write_product_profile_record(fixture.profile)
+                    first.write_preview_record(fixture.preview)
+                    preview = fixture.preview
+                    at_write = threading.Event()
+                    original = second._lock_product_authority_bundle_write
+
+                    def signal(session: Any) -> None:
+                        at_write.set()
+                        original(session)
+
+                    def write() -> None:
+                        if change == "preview":
+                            # Signal immediately before the real public writer;
+                            # PostgreSQL's table lock independently excludes it.
+                            at_write.set()
+                            second.write_preview_record(
+                                preview.model_copy(update={"state": "paused"})
+                            )
+                        elif change == "new-alias":
+                            second.write_dokploy_target_id_record(
+                                DokployTargetIdRecord(
+                                    context="other",
+                                    instance="prod",
+                                    target_id="preview-target",
+                                    updated_at=fixture.profile.updated_at,
+                                )
+                            )
+                        elif change == "staff-hold":
+                            second.write_dokploy_target_record(
+                                DokployTargetRecord(
+                                    context=preview.context,
+                                    instance="pr-42",
+                                    updated_at=fixture.profile.updated_at,
+                                    policies=DokployTargetPolicies(
+                                        staff_testing_hold=DokployTargetStaffTestingHold(
+                                            reason="Staff using preview"
+                                        )
+                                    ),
+                                )
+                            )
+                        elif change == "key-policy":
+                            second.write_runtime_key_safety_policy_record(
+                                RuntimeKeySafetyPolicyRecord(
+                                    record_id="new-policy",
+                                    rules=(
+                                        RuntimeSecretSafetyRule(
+                                            binding_key="SMTP_URL", secret_class="shared_safe"
+                                        ),
+                                    ),
+                                    source="fixture",
+                                    updated_at=fixture.profile.updated_at,
+                                )
+                            )
+                        elif change == "bootstrap":
+                            second.write_odoo_instance_override_record(
+                                OdooInstanceOverrideRecord(
+                                    context=preview.context,
+                                    instance=fixture.profile.preview.template_instance,
+                                    updated_at=fixture.profile.updated_at,
+                                    website_bootstrap=OdooWebsiteBootstrapPayload(
+                                        name="Changed preview fixture"
+                                    ),
+                                )
+                            )
+                        elif change == "protection":
+                            record_safety(
+                                second,
+                                fixture.profile.product,
+                                preview.context,
+                                "pr-42",
+                                preview=preview,
+                                usage="in_use",
+                            )
+                        else:
+                            second.write_runtime_environment_record(
+                                RuntimeEnvironmentRecord(
+                                    scope="global",
+                                    env={"EXAMPLE_SETTING": "new"},
+                                    updated_at=fixture.profile.updated_at,
+                                )
+                            )
+
+                    with (
+                        patch.object(
+                            second, "_lock_product_authority_bundle_write", side_effect=signal
+                        ),
+                        ThreadPoolExecutor(max_workers=1) as pool,
+                    ):
+                        with first.serialize_existing_preview_refresh():
+                            future = pool.submit(write)
+                            if not at_write.wait(10):
+                                future.result(timeout=1)
+                                self.fail("The competing writer did not reach the database")
+                            deadline = time.monotonic() + 5
+                            waiting = 0
+                            while not future.done() and time.monotonic() < deadline:
+                                with first._engine.connect() as observer:
+                                    waiting = (
+                                        observer.scalar(
+                                            text(
+                                                "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'"
+                                            )
+                                        )
+                                        or 0
+                                    )
+                                if waiting:
+                                    break
+                                time.sleep(0.01)
+                            self.assertGreater(
+                                waiting,
+                                0,
+                                "The competing writer must reach an actual database wait",
+                            )
+                            self.assertFalse(future.done())
+                        future.result(timeout=10)
+                    if change == "preview":
+                        self.assertEqual(
+                            first.read_preview_record(preview.preview_id).state, "paused"
+                        )
