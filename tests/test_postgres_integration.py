@@ -10327,6 +10327,9 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
     def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
         self.scenario("normal")
 
+    def test_native_capture_keeps_original_generation_source_and_immutable_receipt(self) -> None:
+        self.native_capture_custody()
+
     def test_credential_comparison_failure_precedes_source_or_writes(self) -> None:
         self.credential_comparison_failure()
 
