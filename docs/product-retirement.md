@@ -117,7 +117,12 @@ rebuild retain their existing positive safety-evidence requirements.
 
 Protective observations remain holds even after their timestamps expire or their
 binding changes: age cannot make known users, needed data or sharing disappear.
-Resolve their underlying source before clearing them. Missing or unknown
+The retirement consumer checks such retained rows, but the current observation
+API has no supported writer for needed-copy facts: `record` stores unknowns,
+and `collect` produces only staff holds and target aliases. Those two sources
+are independently checked live. Observation refresh and clear can replace old
+rows; they are evidence maintenance, not resolution of a person's use or needed
+data. Resolve that knowledge with the person before applying. Missing or unknown
 observations do not override the product's explicit prelaunch classification;
 they are neither positive facts nor a way to qualify runtime sync or rebuild.
 The Director's answer on the operational issue supplies missing human knowledge;

@@ -36,6 +36,7 @@ from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
+from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -754,6 +755,7 @@ class DokployProductRetirementAdapter:
         except (
             FileNotFoundError,
             ProductRetirementBlockedError,
+            DisposableLaneSafetyUnknown,
             click.ClickException,
             TimeoutError,
         ) as error:

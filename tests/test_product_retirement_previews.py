@@ -705,6 +705,49 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertFalse(self.deleted)
 
+    async def test_hold_arriving_at_reservation_does_not_leave_a_busy_target(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        self.use_director_identity()
+        payload = await self.director_plan()
+        reserve = self.store.reserve_mutation
+
+        def reserve_then_hold(**kwargs: Any) -> Any:
+            result = reserve(**kwargs)
+            record_safety(
+                self.store,
+                self.profile.product,
+                self.profile.lanes[0].context,
+                "testing",
+                usage="in_use",
+            )
+            return result
+
+        with patch.object(self.store, "reserve_mutation", side_effect=reserve_then_hold):
+            response = await request(
+                self.app,
+                "POST",
+                "/v1/product-retirement",
+                headers=self.director_headers,
+                payload=payload,
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+        self.store.clear_disposable_lane_safety(
+            self.profile.product, self.profile.lanes[0].context, "testing"
+        )
+        self.director_headers["Idempotency-Key"] = "after-resolved-hold"
+        fresh = await self.director_plan()
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=fresh,
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(set(self.deleted), {"testing-app", "preview-6"})
+
     async def test_cross_lane_secret_consumer_prevents_retirement(self) -> None:
         from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 
