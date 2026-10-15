@@ -10,6 +10,7 @@ worker can run the same operation without a FastAPI request or a
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from collections.abc import Callable
 from dataclasses import dataclass
 import hashlib
@@ -81,9 +82,11 @@ class OdooPreviewProviderMutationAdapter:
         execute_apply: ExecuteOdooPreviewApply = execute_odoo_preview_apply_result,
         observe_apply: ObserveOdooPreviewApply = observe_odoo_preview_apply_result,
         pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
+        qualify_existing_refresh: bool = False,
     ) -> None:
         self._control_plane_root = control_plane_root
         self._pre_mutation_guard = pre_mutation_guard
+        self._qualify_existing_refresh = qualify_existing_refresh
         self._record_store = record_store
         self._profile = profile
         self._apply_request = apply_request
@@ -243,28 +246,45 @@ class OdooPreviewProviderMutationAdapter:
         def checkpoint_effect(phase: str) -> None:
             nonlocal effect_started
             self.execution_check()
-            if not effect_started and self._pre_mutation_guard is not None:
+            if (
+                not effect_started or self._qualify_existing_refresh
+            ) and self._pre_mutation_guard is not None:
                 try:
                     self._pre_mutation_guard()
                 except Exception as error:
-                    raise ProviderMutationRejectedError(error) from error
+                    if not effect_started:
+                        raise ProviderMutationRejectedError(error) from error
+                    raise ProviderMutationUnknownError(str(error)) from error
             lease.checkpoint_effect(phase)
             effect_started = True
 
         try:
-            driver_result = self._execute_apply(
-                control_plane_root_path=self._control_plane_root,
-                record_store=self._record_store,
-                profile=self._profile,
-                request=self._apply_request,
-                issued_plan=self._issued_plan,
-                database_url=self._database_url,
-                provider_operation_title=provider_operation_title(provider_operation_key),
-                provider_effect_checkpoint=checkpoint_effect,
-                provider_lease_check=lease.assert_current,
-                deployment_record_id=self._deployment_record_id,
-                runtime_identity=self._runtime_identity,
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            authority = (
+                cast(PostgresRecordStore, self._record_store).serialize_existing_preview_refresh()
+                if self._qualify_existing_refresh
+                else nullcontext()
             )
+            with authority:
+                if self._pre_mutation_guard is not None:
+                    self._pre_mutation_guard()
+                driver_result = self._execute_apply(
+                    control_plane_root_path=self._control_plane_root,
+                    record_store=self._record_store,
+                    profile=self._profile,
+                    request=self._apply_request,
+                    issued_plan=self._issued_plan,
+                    database_url=self._database_url,
+                    provider_operation_title=provider_operation_title(provider_operation_key),
+                    provider_effect_checkpoint=checkpoint_effect,
+                    provider_lease_check=lease.assert_current,
+                    deployment_record_id=self._deployment_record_id,
+                    runtime_identity=self._runtime_identity,
+                    **(
+                        {"qualify_existing_refresh": True} if self._qualify_existing_refresh else {}
+                    ),
+                )
         except LaneMovementRefused as error:
             from control_plane.lane_movement import LaneBuild, record_preview_refusal
 
@@ -423,6 +443,7 @@ def prepare_odoo_preview_apply_operation(
         odoo_preview_supersession_is_quiescent
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
+    qualify_existing_refresh: bool = False,
 ) -> OdooPreviewApplyOperation:
     """Build the adapter and supersession policy for a service-issued plan.
 
@@ -447,6 +468,7 @@ def prepare_odoo_preview_apply_operation(
         execute_apply=execute_apply,
         observe_apply=observe_apply,
         pre_mutation_guard=pre_mutation_guard,
+        qualify_existing_refresh=qualify_existing_refresh,
     )
 
     def qualified_supersession(reservation: object) -> bool:

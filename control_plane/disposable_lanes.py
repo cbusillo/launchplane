@@ -119,6 +119,7 @@ def require_disposable_lane(
     instance: str,
     retirement: bool = False,
     separation_only: bool = False,
+    preview_refresh: bool = False,
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
 ) -> str:
@@ -176,6 +177,46 @@ def require_disposable_lane(
             "The lane is held for staff testing; usage must be resolved before disposable work."
         )
     evidence = store.read_disposable_lane_safety(product, context, instance)
+    if preview_refresh:
+        # Overall direction makes previews disposable unless there is an actual
+        # protected use or needed copy. No source produces a universal positive
+        # occupancy/custody fact. Resource safety is checked separately against
+        # the real Docker host immediately before refresh effects.
+        if not owned_preview or profile.driver_id != "odoo":
+            raise DisposableLaneSafetyUnknown(
+                "Refresh qualification requires an owned Odoo preview."
+            )
+        if preview is not None and preview.state != "active":
+            raise DisposableLaneSafetyUnknown("Only an active existing preview can be refreshed.")
+        if evidence is not None and (
+            evidence.usage == "in_use"
+            or evidence.data == "only_copy"
+            or evidence.production_resources in {"shared", "separation_ready"}
+        ):
+            # Expiry or config drift cannot silently erase a protective report.
+            raise DisposableLaneSafetyUnknown(
+                "The preview has a recorded protected use or resource."
+            )
+        binding = disposable_lane_binding_sha256(
+            profile,
+            target,
+            target_id,
+            preview,
+            disposable_lane_configuration(store, context, instance),
+        )
+        if evidence is not None and any(
+            fact != "unknown"
+            for fact in (evidence.usage, evidence.data, evidence.production_resources)
+        ):
+            current_time = now or datetime.now(timezone.utc)
+            if (
+                not evidence.observed_at <= current_time < evidence.expires_at
+                or evidence.binding_sha256 != binding
+            ):
+                raise DisposableLaneSafetyUnknown(
+                    "Recorded preview qualification is stale or changed."
+                )
+        return binding
     if retirement:
         # Prelaunch is the product's authoritative disposable classification.
         # Retirement stops an owned application; it neither starts a lane nor

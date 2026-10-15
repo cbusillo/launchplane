@@ -225,29 +225,54 @@ classification keeps its existing response shape and supplies no exemption.
 Odoo preview apply uses the same source-owned Director identity boundary as
 [testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
 including preview destruction. It requires the caller's exact service-issued
-plan, an existing uniquely owned preview, and current disposable-lane facts.
-Stable lanes cannot be substituted for a preview. The route checks the binding
-under the durable reservation and immediately before the first provider
-effect. The frozen service plan must name the discovered preview compose and cannot
-alias a recorded stable target. Real previews need no synthetic stable target-ID
-record; the driver revalidates complete provider discovery before effects.
-Safety also binds the settings and bootstrap override copied from the template
-lane and the active runtime key-safety policy, so changes invalidate older
-qualification. Completed same-key
-replays and outcome reconciliation remain available after safety expires or
-lifecycle evidence changes; only a new effect needs fresh safety. Expired or changed safety, actual use,
-only-copy data, shared production resources and unknown isolation stop execution.
-Existing scoped callers retain their explicit policy rules; they inherit no
-Director authority. Source-read permission for an import credential is still
-separate from preview execution.
+plan and an existing uniquely owned preview. Stable lanes cannot be substituted
+for a preview. The frozen plan must name the discovered compose and cannot alias
+a recorded stable target. Completed same-key replay and read-only outcome
+reconciliation remain available after qualification expires or lifecycle changes.
+Scoped callers retain their explicit policy rules and inherit no Director authority.
+Source-read permission for an import credential remains separate from execution.
 
-The current conservative collector cannot establish positive usage, custody or
-physical-isolation facts for an existing preview. Such a preview returns
-`disposable_lane_safety_unknown` until the authoritative producer tracked by
-#3611 supplies them or the operation preserves protected resources by
-construction. Neither a ready preview plan nor an agent-supplied assertion
-supplies those facts. This source correction removes the wrong grant refusal;
-it does not claim that an unqualified copy can run or that an import succeeded.
+Existing **Odoo preview refresh** follows overall direction's disposable-preview
+rule rather than requiring positive `unused` or `reproducible` observations that
+no source produces. This does not publish either fact. An active, unique service
+preview is required. A staff hold or recorded `in_use`, `only_copy` or shared
+resource report refuses refresh even after that report expires or its binding
+changes. Resolve the real exception first through the existing target-policy or
+`/v1/disposable-lanes/observations` clear path; expiry never clears it. Existing
+positive observations, when present, still must be fresh and match their binding.
+Destroy and stable testing retain their existing qualification requirements.
+
+Before changing an existing preview compose and again before deployment, the
+service runs a fixed read-only Docker inspector on that compose's actual server
+through its manual-only, disabled data schedule. Its spec contains only target,
+project and resource identifiers. It requires all three current/proposed volume
+names to agree, actual local volumes without external backing options, distinct
+resolved backing directories, and complete container mount inventory (including
+stopped containers). Foreign consumers, writable parent mounts, unknown backing,
+host networking or published ports refuse. Read-only administrative parent mounts
+are allowed; exact/child consumers are protected. Existing data is inspected,
+never emptied or deleted. The generated preview compose has no host ports or host
+SSH mounts. Managed integration-key filtering and exact managed-source authority
+remain in force; no template source allowance is inherited.
+
+The schedule receipt binds the target/project/volumes, is consumed immediately,
+and is invalidated by a changed provider target readback. It is not a reusable
+positive usage/custody assertion. A new apply repeats collection automatically;
+no manual DB qualification or grant is required. Missing/failed/stale/conflicting
+inspection refuses before new application effects. The same operation/key observes
+an uncertain effect without redispatch; preserve it and use normal reconciliation.
+A refused or expired issued plan requires fresh plan/apply inputs.
+
+PostgreSQL excludes managed configuration, first global/instance settings, aliases,
+secret metadata, bootstrap overrides, key policy and safety-evidence writers during
+the synchronous refresh. Preview-record writes are excluded too. The guard is
+acquired after the preview executor/reservation and released before lifecycle
+finalization. Its service-wide authority fence can delay configuration writers for
+the bounded refresh/deploy timeout; it does not lock out direct external host
+administration. Current profile/configuration equality and protective reports are
+checked at every provider checkpoint; a late refusal retains uncertain outcomes.
+SQLite remains a rehearsal backend and cannot enable this live qualification.
+No production, backup, promotion or Client-access boundary changes.
 
 ## Current Transitional Model
 

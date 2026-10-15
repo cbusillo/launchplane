@@ -105,6 +105,7 @@ def render_odoo_raw_compose_file(
     domain_hosts: tuple[str, ...] = (),
     runtime_port: int = 8069,
     publish_host_ports: bool = True,
+    mount_workflow_ssh: bool = True,
     domain_certificate_type: Literal["none", "letsencrypt"] = "none",
 ) -> str:
     normalized_image_reference = image_reference.strip()
@@ -129,6 +130,12 @@ def render_odoo_raw_compose_file(
       - "${ODOO_WEB_HOST_PORT:-8069}:8069"
       - "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"
 """
+    workflow_ssh_mounts = (
+        "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro\n"
+        "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro\n"
+        if mount_workflow_ssh
+        else ""
+    )
     # Keep this intentionally close to odoo-devkit/docker-compose.yml. Launchplane
     # renders the image reference directly so Dokploy git checkout state cannot
     # decide what Odoo artifact is deployed.
@@ -250,8 +257,7 @@ services:
     volumes:
       - odoo_data:/volumes/data
       - odoo_logs:/volumes/logs
-      - ${{DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}}:/home/ubuntu/.ssh:ro
-      - ${{DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}}:/root/.ssh:ro
+{workflow_ssh_mounts.rstrip()}
     command: tail -f /dev/null
     working_dir: /opt/project
     shm_size: "2gb"

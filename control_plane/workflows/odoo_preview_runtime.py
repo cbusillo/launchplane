@@ -1095,6 +1095,7 @@ def execute_odoo_preview_dokploy_apply(
     expected_runtime_identity: RuntimeIdentity | None = None,
     propagate_domain_lookup_error: bool = False,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
+    qualify_existing_refresh: bool = False,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     if plan.status != "ready":
@@ -1138,6 +1139,7 @@ def execute_odoo_preview_dokploy_apply(
         provider_lease_check=provider_lease_check,
         expected_runtime_identity=expected_runtime_identity,
         integration_allowances=integration_allowances,
+        qualify_existing_refresh=qualify_existing_refresh,
     )
 
 
@@ -1519,6 +1521,7 @@ def _execute_refresh(
     provider_lease_check: Callable[[], None] | None,
     expected_runtime_identity: RuntimeIdentity | None,
     integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
+    qualify_existing_refresh: bool = False,
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     creating_compose = plan.compose_ref.startswith("${created.composeId:")
@@ -1538,6 +1541,8 @@ def _execute_refresh(
         provider_effect_attempted = True
 
     try:
+        if qualify_existing_refresh and creating_compose:
+            raise click.ClickException("Existing-preview qualification cannot create a target.")
         if creating_compose and not plan.template_compose_id:
             raise click.ClickException("Odoo preview compose create requires template_compose_id.")
         source_compose_id = plan.template_compose_id if creating_compose else plan.compose_ref
@@ -1572,8 +1577,28 @@ def _execute_refresh(
             domain_hosts=(plan.domain_host,),
             runtime_port=plan.runtime_port,
             publish_host_ports=False,
+            mount_workflow_ssh=False,
             domain_certificate_type=plan.domain_certificate_type,
         )
+
+        def qualify_resources() -> None:
+            if qualify_existing_refresh:
+                from control_plane.odoo_preview_resources import require_existing_preview_resources
+
+                if creating_compose:
+                    raise click.ClickException("Existing-preview refresh cannot create a target.")
+                require_existing_preview_resources(
+                    host=host,
+                    token=token,
+                    compose_id=compose_id,
+                    compose_name=plan.compose_name,
+                    context=plan.product,
+                    instance=plan.preview_slug,
+                    environment=request.environment_values,
+                    checkpoint=provider_lease_check or (lambda: None),
+                )
+
+        qualify_resources()
         checkpoint_provider_effect("compose_update")
         dokploy_compose.sync_dokploy_compose_raw_source(
             host=host,
@@ -1626,6 +1651,7 @@ def _execute_refresh(
             target_type="compose",
             target_id=compose_id,
         )
+        qualify_resources()
         checkpoint_provider_effect("deploy_trigger")
         deploy_triggered = True
         if provider_operation_title:

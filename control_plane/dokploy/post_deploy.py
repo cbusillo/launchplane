@@ -142,6 +142,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
         "testing_resources_ok",
+        "preview_resources_ok",
         TESTING_RESOURCES_INCOMPLETE_MARKER,
     }
 )
@@ -308,7 +309,7 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
-    if key == "testing_resources_binding_sha256":
+    if key in {"testing_resources_binding_sha256", "preview_resources_binding_sha256"}:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
     if key == "website_bootstrap_company_email_skip_reason":
         return value == ODOO_COMPANY_EMAIL_SKIP_REASON

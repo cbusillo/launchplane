@@ -6199,6 +6199,7 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneSecretRow
                 | LaunchplaneSecretVersionRow
                 | LaunchplaneSecretBindingRow
+                | LaunchplaneRuntimeKeySafetyPolicyRow
                 | LaunchplaneDisposableLaneSafetyRow
                 | LaunchplaneDisposableReplacementPreparationRow
                 | LaunchplaneDisposableTestingResourceAllocationRow,
@@ -7895,6 +7896,20 @@ class PostgresRecordStore(HumanSessionStore):
             finally:
                 self._disposable_authority_context.session = None
                 session.rollback()
+
+    @contextmanager
+    def serialize_existing_preview_refresh(self) -> Iterator[None]:
+        """Exclude first-record inserts, aliases, holds and config/evidence drift.
+
+        The preview reservation/executor is acquired first. This guard covers
+        the synchronous refresh only; lifecycle evidence commits after release.
+        SQLite is a rehearsal backend and cannot qualify this live path.
+        """
+        with self.serialize_disposable_testing_resources() as checkpoint:
+            session = self._disposable_authority_context.session
+            session.execute(text("LOCK TABLE launchplane_preview_records IN SHARE MODE"))
+            checkpoint()
+            yield
 
     @contextmanager
     def capture_disposable_resource_adoption(

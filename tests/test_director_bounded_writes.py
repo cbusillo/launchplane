@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -38,6 +39,13 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             database_url=f"sqlite+pysqlite:///{self.root / 'state.db'}"
         )
         self.store.ensure_schema()
+        # SQLite is only an HTTP rehearsal. Real exclusion is exercised with
+        # independent PostgreSQL connections in test_postgres_integration.
+        guard = patch.object(
+            self.store, "serialize_existing_preview_refresh", return_value=nullcontext()
+        )
+        guard.start()
+        self.addCleanup(guard.stop)
         self.addCleanup(self.store.close)
         self.profile = LaunchplaneProductProfileRecord.model_validate(
             _odoo_preview_profile_payload()
@@ -309,15 +317,14 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         execute.assert_called_once()
         self.assertEqual(self.store.list_promotion_records(), ())
 
-    async def test_unknown_protected_and_expired_preview_refuse_before_execution(self) -> None:
+    async def test_protected_preview_refuses_even_when_report_is_expired(self) -> None:
         with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
-            self.assertEqual((await self.preview_apply()).status_code, 409)
             for changes in (
                 {"usage": "in_use"},
                 {"data": "only_copy"},
                 {"production_resources": "shared"},
-                {"production_resources": "unknown"},
                 {
+                    "usage": "in_use",
                     "observed_at": datetime.now(timezone.utc) - timedelta(minutes=10),
                     "expires_at": datetime.now(timezone.utc) - timedelta(minutes=5),
                 },
@@ -326,6 +333,34 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                 result = await self.preview_apply()
                 self.assertEqual(result.status_code, 409, result.text)
             execute.assert_not_called()
+
+    async def test_refresh_does_not_require_invented_positive_usage_or_custody(self) -> None:
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result",
+            return_value={"status": "blocked"},
+        ) as execute:
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue(execute.call_args.kwargs["qualify_existing_refresh"])
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(
+                self.profile.product, self.preview.context, "pr-42"
+            )
+        )
+
+    async def test_refresh_rechecks_protected_use_after_first_provider_effect(self) -> None:
+        def execute(**kwargs: Any) -> Any:
+            kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+            self.safety(usage="in_use")
+            kwargs["provider_effect_checkpoint"]("fixture-second-effect")
+            self.fail("The second effect must not run")
+
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute):
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 409, response.text)
+        # A refusal after an effect retains uncertainty; it cannot release the
+        # reservation as though the first effect never happened.
+        self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
 
     async def test_recorded_stable_lane_collision_cannot_be_used_as_a_preview(self) -> None:
         collided = self.profile.model_copy(
