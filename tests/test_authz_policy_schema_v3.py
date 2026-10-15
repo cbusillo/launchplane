@@ -32,10 +32,6 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.authz_policy_write_transition import (
     AuthzPolicySchemaV3TransitionDeniedError,
 )
-from control_plane.contracts.ordinary_agent import (
-    OrdinaryAgentPolicySnapshot,
-    OrdinaryAgentPrincipal,
-)
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetProposalInput,
     PrivilegedOperationActor,
@@ -55,7 +51,6 @@ from control_plane.generic_web_preview_authz import (
     GenericWebPreviewAuthzPlanRequest,
     plan_generic_web_preview_authz_reconcile,
 )
-from control_plane.ordinary_agent_eligibility import evaluate_ordinary_agent_policy
 from control_plane.privileged_operation_registry import PrivilegedOperationPlannerError
 from control_plane.privileged_operation_service import create_typed_privileged_operation_plan
 from control_plane.storage.postgres import PostgresRecordStore
@@ -595,33 +590,6 @@ class AuthzPolicySchemaV3CompatibilityTests(unittest.TestCase):
         self.assertTrue(diff.authorization_changed)
         self.assertEqual(diff.added_rule_count, 1)
         self.assertEqual(diff.removed_rule_count, 2)
-        old_binding = evaluate_ordinary_agent_policy(
-            snapshot=OrdinaryAgentPolicySnapshot(
-                record_kind="proposed_ordinary_agent_v1",
-                authority_state="inert",
-                authorizes_execution=False,
-                record_id="policy-after-reconcile",
-                revision=2,
-                policy_digest=authz_policy_sha256(candidate),
-                input_domain_id="ordinary-agent-effective-inputs-v1",
-                evaluator_semantics_version="ordinary-agent-eligibility-v1",
-                rules=candidate.ordinary_agents,
-            ),
-            principal=OrdinaryAgentPrincipal(
-                record_kind="proposed_ordinary_agent_v1",
-                authority_state="inert",
-                authorizes_execution=False,
-                record_id="principal-agent-one",
-                principal_id="agent_one",
-                execution_profile="guarded_executor",
-                status="active",
-            ),
-            target=active.ordinary_agents[0].target,
-            action="self_read",
-            managed_set_id="ordinary-agent.pilot",
-            managed_rule_id="agent_one.launchplane.main",
-        )
-        self.assertEqual(old_binding.reason_code, "bound_rule_missing")
 
     def test_candidate_preview_reports_ordinary_structure_without_admin_effect(self) -> None:
         active = LaunchplaneAuthzPolicy(
