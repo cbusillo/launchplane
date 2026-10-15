@@ -68,10 +68,16 @@ def read_drill_recent_signins(
     database = environment.get("ODOO_DB_NAME", "")
     history = history_generation or generation
     history_database = history_database or database
-    # Imported production sign-ins predate completion of this testing copy.
+    # Preparation precedes any possible testing use. Completion is too late:
+    # people can sign in after web opens but before final health is recorded.
+    prepared = datetime.fromisoformat(history.prepared_at.replace("Z", "+00:00"))
     completed = datetime.fromisoformat(history.completed_at.replace("Z", "+00:00"))
-    if completed.utcoffset() is None or completed.timestamp() > now:
-        raise ValueError("Testing copy completion has no timezone.")
+    if (
+        prepared.utcoffset() is None
+        or completed.utcoffset() is None
+        or not prepared <= completed <= datetime.fromtimestamp(now, timezone.utc)
+    ):
+        raise ValueError("Testing copy timestamps are unreadable.")
     frames: list[dict[str, object]] = []
     inspect_native_testing_receiver(
         host=host,
@@ -91,7 +97,7 @@ def read_drill_recent_signins(
             "usage_new_database": generation.drill_database,
             "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
             "usage_since": max(
-                completed,
+                prepared,
                 datetime.fromtimestamp(now, timezone.utc)
                 - timedelta(seconds=DRILL_RECENT_USE_SECONDS),
             ).isoformat(),

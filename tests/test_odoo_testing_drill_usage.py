@@ -13,7 +13,12 @@ from tests.test_odoo_testing_restore import generation
 class DrillUsageReadTests(unittest.TestCase):
     def setUp(self) -> None:
         self.gen = generation().model_copy(
-            update={"completed_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()}
+            update={
+                "prepared_at": (
+                    datetime.now(timezone.utc) - timedelta(days=2, hours=1)
+                ).isoformat(),
+                "completed_at": (datetime.now(timezone.utc) - timedelta(days=2)).isoformat(),
+            }
         )
         self.selection = SimpleNamespace(
             identity=SimpleNamespace(
@@ -90,7 +95,10 @@ class DrillUsageReadTests(unittest.TestCase):
     def test_production_history_is_excluded_and_reclaim_reads_original_served_copy(self) -> None:
         now = datetime.now(timezone.utc)
         history = self.gen.model_copy(
-            update={"completed_at": (now - timedelta(hours=1)).isoformat()}
+            update={
+                "prepared_at": (now - timedelta(hours=2)).isoformat(),
+                "completed_at": (now - timedelta(hours=1)).isoformat(),
+            }
         )
         current = history.model_copy(update={"completed_at": "", "drill_database": "new_database"})
         self.store.list_runtime_environment_records.return_value[0].env["ODOO_DB_NAME"] = (
@@ -112,8 +120,33 @@ class DrillUsageReadTests(unittest.TestCase):
         self.assertEqual(spec["database_name"], "original_database")
         self.assertEqual(
             datetime.fromisoformat(spec["usage_since"]),
-            datetime.fromisoformat(history.completed_at),
+            datetime.fromisoformat(history.prepared_at),
         )
+
+    def test_signin_before_final_health_completion_still_protects_the_lane(self) -> None:
+        now = datetime.now(timezone.utc)
+        history = self.gen.model_copy(
+            update={
+                "prepared_at": (now - timedelta(hours=2)).isoformat(),
+                "completed_at": (now - timedelta(hours=1)).isoformat(),
+            }
+        )
+        signed_in = now - timedelta(minutes=90)
+
+        def read(**kwargs: object) -> None:
+            spec = kwargs["spec"]
+            assert isinstance(spec, dict)
+            receive = kwargs["receive"]
+            assert callable(receive)
+            receive(
+                {
+                    "type": "complete",
+                    "recent_signins": signed_in >= datetime.fromisoformat(spec["usage_since"]),
+                }
+            )
+
+        self.inspect.side_effect = read
+        self.assertTrue(read_drill_recent_signins(self.store, history, now.timestamp()))
 
     def test_target_or_runtime_change_refuses_the_history(self) -> None:
         self.store.read_dokploy_target_id_record.return_value.target_id = "foreign-target"

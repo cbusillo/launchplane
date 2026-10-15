@@ -784,16 +784,20 @@ with `late_completion`; the original deadline failure remains alertable.
 Admission requires a completed qualified fresh testing generation. Under Director
 decision Q347, the service reads successful-login history (`res_users_log`) on
 that exact testing database over the preceding 24 hours, starting no earlier
-than completion of the testing copy, and the existing staff
+than preparation of the testing copy, and the existing staff
 hold. Every account counts, including staff, Client, portal and administrator
 accounts; no maintained account list or current-use registry is required. The
-read excludes inherited production logins, uses a read-only SQL transaction,
+read excludes logins older than copy preparation, uses a read-only SQL transaction,
 creates no Odoo login, and returns only a
 boolean. Recent sign-ins, a hold or an unreadable check skip the daily slot with
 a value-free reason on the lane's drill evidence. Missing tables/databases,
 runtime mismatch, provider refusal, incomplete reads and unavailable credentials
 cannot mean idle. This is the agreed recent-use check, not proof that an old
 browser session has ended; staff should hold the lane before testing.
+Preparation is the earliest existing safe boundary: a testing sign-in before
+final health completion still counts. Production logins captured after preparation
+can also cause a conservative skip; no later timestamp is used to erase that
+uncertainty or testing activity.
 The same-product restore policy, existing lane-local credential separation,
 exclusive context/target ownership, actual storage/network inspection and
 pre-registry sanitization remain mandatory. The same bounded receiver inspection
