@@ -139,6 +139,7 @@ from control_plane.contracts.disposable_lane import (
     DisposableTestingResourcePreparation,
 )
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+from control_plane.contracts.odoo_testing_source import NativeTestingCopyCapture
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
@@ -3735,6 +3736,12 @@ class LaunchplaneFreshOdooTestingGenerationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneNativeTestingCopyCaptureRow(Base):
+    __tablename__ = "launchplane_native_testing_copy_captures"
+    generation_binding_sha256: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneTestingActivationRow(Base):
     __tablename__ = "launchplane_testing_activations"
     product: Mapped[str] = mapped_column(String, primary_key=True)
@@ -6001,7 +6008,11 @@ class PostgresRecordStore(HumanSessionStore):
 
     @staticmethod
     def _payload_dict(model: BaseModel) -> PayloadDict:
-        return model.model_dump(mode="json", exclude_none=True)
+        payload = model.model_dump(mode="json", exclude_none=True)
+        if isinstance(model, FreshOdooTestingGeneration) and model.source_mode == "ssh":
+            payload.pop("source_mode", None)
+            payload.pop("source_binding_sha256", None)
+        return payload
 
     @staticmethod
     def _read_payload(*, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:
@@ -10434,6 +10445,47 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
             return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
+
+    def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneNativeTestingCopyCaptureRow, binding)
+            return NativeTestingCopyCapture.model_validate(row.payload) if row else None
+
+    def write_native_testing_copy_capture(self, record: NativeTestingCopyCapture) -> None:
+        from control_plane.odoo_testing_restore import generation_binding
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            generation_row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (record.product, record.context),
+                with_for_update=True,
+            )
+            if generation_row is None:
+                raise ValueError("Native capture requires its recorded generation.")
+            generation = FreshOdooTestingGeneration.model_validate(generation_row.payload)
+            if (
+                generation.source_mode != "container-export"
+                or generation.completed_at
+                or generation_binding(generation) != record.generation_binding_sha256
+                or generation.source_binding_sha256 != record.source_binding_sha256
+            ):
+                raise ValueError("Native capture differs from the active generation.")
+            row = session.get(
+                LaunchplaneNativeTestingCopyCaptureRow, record.generation_binding_sha256
+            )
+            if row is not None:
+                if NativeTestingCopyCapture.model_validate(row.payload) != record:
+                    raise ValueError("Native capture receipts are immutable; do not recapture.")
+                return
+            session.add(
+                LaunchplaneNativeTestingCopyCaptureRow(
+                    generation_binding_sha256=record.generation_binding_sha256,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
 
     def read_testing_activation(self, product: str, context: str) -> dict[str, Any] | None:
         with self._session_factory() as session:
