@@ -653,6 +653,33 @@ class ActivationTests(unittest.TestCase):
         ):
             self.assertEqual(self.run_activation().response_status_code, 202)
 
+    def test_retired_volume_setting_cannot_be_resurrected_by_activation(self) -> None:
+        from control_plane.testing_activation import preparation_resources
+
+        (row,) = self.store.list_runtime_environment_records(
+            scope="instance", context_name=self.context, instance_name="testing"
+        )
+        env = dict(row.env)
+        key = self.request.volume_keys["database"]
+        env.pop(key)
+        self.store.write_runtime_environment_record(
+            row.model_copy(
+                update={
+                    "schema_version": 2,
+                    "env": env,
+                    "retired_provider_keys": (key,),
+                }
+            )
+        )
+        resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
+        with patch(
+            "control_plane.runtime_environments.control_plane_secrets.resolve_site_secret_values",
+            return_value={"DB_PASSWORD": "safe-test-password"},
+        ):
+            with self.assertRaises(ValueError):
+                resolve_activation_runtime(self.store, self.root, self.planned_record, resources)
+        self.assertEqual(self.writes, [])
+
     def test_lost_configuration_reply_adopts_only_the_original_complete_render(self) -> None:
         original = self.provider
 

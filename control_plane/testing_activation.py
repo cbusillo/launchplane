@@ -198,6 +198,8 @@ def runtime_values(
         target_environment_override={},
     )
     values = dict(environment.values)
+    if set(record.request.volume_keys.values()) & environment.retired_keys:
+        raise ValueError("Choose non-retired lane settings for the allocated volumes.")
     if (
         set((*record.request.volume_keys.values(), *record.request.port_keys))
         & environment.secret_keys

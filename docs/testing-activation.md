@@ -19,6 +19,8 @@ staging interlock. Legacy reason prose never supplies that intent. An absent or
 foreign hold, known staff use, a production alias, changed allocation or unsafe
 carried key refuses activation. The original hold is copied unchanged to the new
 recipient and retained in immutable old-target custody; its purpose is not relabeled.
+Choose existing, unretired lane setting keys for the volume roles; activation
+refuses a retired key rather than reviving a setting that runtime sync removes.
 
 The service reads the product's Compose source and local includes from one
 immutable repository commit through its existing source reader, verifies that
