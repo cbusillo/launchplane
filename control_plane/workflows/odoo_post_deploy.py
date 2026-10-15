@@ -33,7 +33,10 @@ from control_plane.dokploy.connection_isolation import (
     run_connection_isolation,
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
-from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+from control_plane.odoo_testing_restore import (
+    FreshOdooTestingGeneration,
+    fresh_testing_override_record,
+)
 from control_plane.contracts.odoo_testing_source import NativeOdooTestingSource
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
@@ -343,6 +346,8 @@ def execute_odoo_post_deploy(
         else (),
         updated_at=utc_now_timestamp(),
     )
+    if fresh_testing_generation is not None:
+        rendering_record = fresh_testing_override_record(rendering_record, fresh_testing_generation)
 
     try:
         accepted_settings: OdooWebsiteSettingsIntent | None = None
