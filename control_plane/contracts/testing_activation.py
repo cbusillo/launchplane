@@ -18,6 +18,7 @@ class TestingActivationRefusalCode(StrEnum):
     AUTHORITY_CHANGED = "testing_activation_authority_changed"
     RECEIPT_UNAVAILABLE = "testing_activation_receipt_unavailable"
     RECIPIENT_UNQUALIFIED = "testing_activation_recipient_unqualified"
+    CARRIED_KEYS_UNVERIFIED = "testing_activation_carried_keys_unverified"
 
 
 class TestingActivationRefusal(ValueError):

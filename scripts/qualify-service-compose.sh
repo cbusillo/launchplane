@@ -72,7 +72,8 @@ DOCKER_IMAGE_REFERENCE="$image" LAUNCHPLANE_COMPOSE_EXTERNAL_NETWORK=unused-fixt
   jq --arg image "$image" --arg postgres_image "$postgres_image" --arg env_file "$fixture_dir/.env" '
     {services: (.services | with_entries(select(.key == "launchplane" or
       .key == "launchplane-odoo-workers" or .key == "launchplane-verireel-workers" or
-      .key == "launchplane-browser") |
+      .key == "launchplane-browser" or .key == "launchplane-merge-train-workers" or
+      .key == "launchplane-privileged-operation-workers") |
       .value.image = $image | .value.pull_policy = "never" | .value.restart = "no" |
       .value.deploy.replicas = 1 |
       .value.networks = ["qualification"] |
@@ -93,6 +94,46 @@ mv "$fixture_dir/compose.next.json" "$fixture_dir/compose.json"
 jq --arg prefix "$project" '.volumes |= with_entries(.value = {name: ($prefix + "-" + .key)})' \
   "$fixture_dir/compose.json" >"$fixture_dir/compose.next.json"
 mv "$fixture_dir/compose.next.json" "$fixture_dir/compose.json"
+
+check_private_copy_custody() {
+  local mode="$1" service copy_marker_sha256
+  run_interruptible "${compose[@]}" exec -T -e QUALIFICATION_COPY_MODE="$mode" launchplane /app/.venv/bin/python - <<'PY' >"$fixture_dir/copy-marker.sha256"
+import hashlib,os
+from pathlib import Path
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CACHE_DIRECTORY
+from control_plane.odoo_testing_native_source import require_private_copy_mount
+root=Path(os.environ['LAUNCHPLANE_STATE_DIR'])/NATIVE_TESTING_COPY_CACHE_DIRECTORY
+require_private_copy_mount(root)
+marker=root/'.qualification-copy-custody'
+if os.environ['QUALIFICATION_COPY_MODE']=='create':
+    root.mkdir(parents=True,exist_ok=True)
+    marker.write_bytes(b'qualification-only-copy-custody')
+print(hashlib.sha256(marker.read_bytes()).hexdigest())
+PY
+  copy_marker_sha256="$(cat "$fixture_dir/copy-marker.sha256")"
+  for service in launchplane-odoo-workers launchplane-verireel-workers; do
+    run_interruptible "${compose[@]}" exec -T -e QUALIFICATION_COPY_SERVICE="$service" \
+      -e QUALIFICATION_COPY_SHA256="$copy_marker_sha256" "$service" /app/.venv/bin/python - <<'PY'
+import hashlib,os
+from pathlib import Path
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CACHE_DIRECTORY
+marker=Path(os.environ['LAUNCHPLANE_STATE_DIR'])/NATIVE_TESTING_COPY_CACHE_DIRECTORY/'.qualification-copy-custody'
+if os.environ['QUALIFICATION_COPY_SERVICE']=='launchplane-odoo-workers':
+    assert hashlib.sha256(marker.read_bytes()).hexdigest()==os.environ['QUALIFICATION_COPY_SHA256']
+else:
+    assert not marker.exists(), 'Unrelated worker can read the Odoo copy volume'
+PY
+  done
+  for service in launchplane-merge-train-workers launchplane-privileged-operation-workers; do
+    run_interruptible "${compose[@]}" run --rm --no-deps -T "$service" /app/.venv/bin/python - <<'PY'
+import os
+from pathlib import Path
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CACHE_DIRECTORY
+marker=Path(os.environ['LAUNCHPLANE_STATE_DIR'])/NATIVE_TESTING_COPY_CACHE_DIRECTORY/'.qualification-copy-custody'
+assert not marker.exists(), 'Unrelated worker can read the Odoo copy volume'
+PY
+  done
+}
 
 check_workers() {
   local service container_id worker_ip worker_started_at
@@ -163,6 +204,7 @@ PY
 
 run_interruptible "${compose[@]}" up --detach --no-build --pull never --wait --wait-timeout 120
 check_workers
+check_private_copy_custody create
 check_testing_browser
 before="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
@@ -189,6 +231,7 @@ after="$("${compose[@]}" ps --quiet "${services[@]}" | sort)"
 test -n "$after"
 test -z "$(comm -12 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))"
 check_workers
+check_private_copy_custody verify
 check_testing_browser
 run_interruptible "${compose[@]}" exec -T launchplane /app/.venv/bin/python - <<'PY'
 import json
