@@ -264,7 +264,6 @@ from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     ProductContextOwnershipError,
     ProductAuthorityBundle,
-    SecretRecordConflictError,
     RuntimeEnvironmentConflictError,
     RuntimeEnvironmentWrite,
 )
@@ -2342,9 +2341,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(store.list_runtime_environment_records(), (runtime,))
 
-    def test_adopted_secret_insert_loses_to_a_record_written_after_the_absence_check(
-        self,
-    ) -> None:
+    def test_direct_secret_writer_waits_for_atomic_adoption_after_absence_check(self) -> None:
         with _store_for_fresh_head_database() as store:
             recorded = SecretRecord(
                 secret_id="secret-adopted",
@@ -2358,28 +2355,37 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                 updated_at="2026-10-03T00:00:00Z",
                 updated_by="other-writer",
             )
-            database_url = store.database_url
+            other = PostgresRecordStore(database_url=store.database_url)
+            self.addCleanup(other.close)
+            reached_lock = threading.Event()
+            original_lock = other._lock_product_authority_bundle_write
+            futures = []
+            with ThreadPoolExecutor(max_workers=1) as workers:
 
-            class _RacingStore(PostgresRecordStore):
-                def _after_product_authority_bundle_step(self, step_name: str) -> None:
-                    # Another writer commits the same secret after the absence check,
-                    # outside the bundle lock, as a direct secret write does.
+                def lock(session: Any) -> None:
+                    reached_lock.set()
+                    original_lock(session)
+
+                def after_step(step_name: str) -> None:
                     if step_name == "write_secret_version":
-                        other_store = PostgresRecordStore(database_url=database_url)
-                        try:
-                            other_store.write_secret_record(recorded)
-                        finally:
-                            other_store.close()
+                        future = workers.submit(other.write_secret_record, recorded)
+                        futures.append(future)
+                        self.assertTrue(reached_lock.wait(10))
+                        with self.assertRaises(TimeoutError):
+                            future.result(timeout=0.1)
 
-            racing_store = _RacingStore(database_url=database_url)
-            try:
-                with self.assertRaises(SecretRecordConflictError):
-                    racing_store.write_product_authority_bundle(
+                with (
+                    patch.object(other, "_lock_product_authority_bundle_write", side_effect=lock),
+                    patch.object(
+                        store, "_after_product_authority_bundle_step", side_effect=after_step
+                    ),
+                ):
+                    store.write_product_authority_bundle(
                         ProductAuthorityBundle(
                             secret_versions=(
                                 SecretVersion(
                                     version_id="version-adopted",
-                                    secret_id="secret-adopted",
+                                    secret_id=recorded.secret_id,
                                     created_at="2026-10-03T00:00:01Z",
                                     key_id="test-key",
                                     ciphertext="ciphertext",
@@ -2393,12 +2399,15 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                                     }
                                 ),
                             ),
-                            absent_secret_ids=("secret-adopted",),
+                            absent_secret_ids=(recorded.secret_id,),
                         )
                     )
-            finally:
-                racing_store.close()
-            self.assertEqual(store.read_secret_record("secret-adopted"), recorded)
+                    for future in futures:
+                        future.result(timeout=10)
+            self.assertEqual(store.read_secret_record(recorded.secret_id), recorded)
+            self.assertEqual(
+                store.read_secret_version("version-adopted").secret_id, recorded.secret_id
+            )
 
     def test_historical_preflight_scopes_database_history_before_limits(self) -> None:
         with TemporaryDirectory() as directory, _store_for_fresh_head_database() as store:
