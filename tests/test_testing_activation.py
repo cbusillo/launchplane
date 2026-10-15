@@ -200,6 +200,7 @@ class ActivationTests(unittest.TestCase):
                 {"domainId": "retained-origin", "host": retained_origin}
             ]
         self.writes: list[tuple[str, Any]] = []
+        self.materialized: dict[str, str] = {}
         self.projects: list[dict[str, Any]] = []
         self.inspections: list[bool] = []
         self.enterContext(
@@ -389,9 +390,10 @@ class ActivationTests(unittest.TestCase):
         payload = self.payloads[kwargs["compose_id"]]
         from control_plane.dokploy.api import parse_dokploy_env_text
 
-        return json.dumps(
-            interpolate(json.loads(payload["composeFile"]), parse_dokploy_env_text(payload["env"]))
-        )
+        source = self.materialized.get(kwargs["compose_id"])
+        if source is None:
+            return "null\n"
+        return json.dumps(interpolate(json.loads(source), parse_dokploy_env_text(payload["env"])))
 
     def provider(self, **kwargs: Any) -> Any:
         path, body = kwargs["path"], kwargs.get("payload")
@@ -429,6 +431,9 @@ class ActivationTests(unittest.TestCase):
         if path == "/api/compose.update":
             self.payloads[body["composeId"]].update(body)
             return {}
+        if path == "/api/compose.fetchSourceType":
+            self.materialized[body["composeId"]] = self.payloads[body["composeId"]]["composeFile"]
+            return "raw"
         self.fail(f"Unexpected provider effect: {path}")
 
     def run_activation(self, key: str = "activate") -> Any:
@@ -831,6 +836,105 @@ class ActivationTests(unittest.TestCase):
             self.preparation.original, self.store.list_held_provider_target_reservations()
         )
 
+    def check_lost_materialization(self, *, persisted: bool) -> None:
+        original = self.provider
+        attempts: list[str] = []
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        old_payloads = deepcopy(self.payloads)
+
+        def lost(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.fetchSourceType":
+                record = self.adapter.current()
+                self.assertEqual(record.phase, "materialize_new_recipient")
+                self.assertFalse(record.published)
+                attempts.append(kwargs["payload"]["composeId"])
+                if persisted:
+                    original(**kwargs)
+                raise OSError("Uncertain raw-source fetch reply")
+            return original(**kwargs)
+
+        with patch("control_plane.testing_activation.api.dokploy_request", side_effect=lost):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+            record = self.adapter.current()
+            self.assertEqual(attempts, [record.target_id])
+            writes = deepcopy(self.writes)
+            self.assertEqual(self.run_activation().response_status_code, 202 if persisted else 409)
+            self.assertEqual(attempts, [record.target_id])
+            self.assertEqual(self.writes, writes)
+        self.assertEqual(self.adapter.current().published, persisted)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            production,
+        )
+        for target_id, payload in old_payloads.items():
+            self.assertEqual(self.payloads[target_id], payload)
+        self.assertIn(
+            self.preparation.original, self.store.list_held_provider_target_reservations()
+        )
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+
+    def test_lost_materialization_reply_adopts_actual_render_without_redispatch(self) -> None:
+        self.check_lost_materialization(persisted=True)
+
+    def test_unknown_absent_materialization_is_never_redispatched(self) -> None:
+        self.check_lost_materialization(persisted=False)
+
+    def test_configured_recipient_drift_refuses_materialization_and_preserves_production(
+        self,
+    ) -> None:
+        original = self.provider
+
+        def lost_update(**kwargs: Any) -> Any:
+            value = original(**kwargs)
+            if kwargs["path"] == "/api/compose.update":
+                raise OSError("Legacy interruption after provider configuration")
+            return value
+
+        with patch("control_plane.testing_activation.api.dokploy_request", side_effect=lost_update):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        record = self.adapter.current()
+        payload = deepcopy(self.payloads[record.target_id])
+        writes = deepcopy(self.writes)
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        for drift in (
+            {"appName": "production-recipient"},
+            {"serverId": "foreign-server"},
+            {"environmentId": "foreign-environment"},
+            {"deployments": [{"status": "running"}]},
+            {"domains": [{"host": "production.example.invalid"}]},
+            {"sourceType": "github"},
+            {"autoDeploy": True},
+            {"env": payload["env"] + "\nPRODUCTION_PASSWORD=private-fixture"},
+        ):
+            with self.subTest(drift=next(iter(drift))):
+                self.payloads[record.target_id] = {**deepcopy(payload), **drift}
+                self.assertEqual(self.run_activation().response_status_code, 409)
+                self.assertEqual(self.writes, writes)
+                self.assertEqual(self.materialized, {})
+                self.assertFalse(self.adapter.current().published)
+                self.assertEqual(
+                    self.store.read_dokploy_target_record(
+                        context_name=self.context, instance_name="prod"
+                    ),
+                    production,
+                )
+                self.preparation.assert_retained()
+        self.payloads[record.target_id] = payload
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            [
+                body["composeId"]
+                for path, body in self.writes
+                if path == "/api/compose.fetchSourceType"
+            ],
+            [record.target_id],
+        )
+        self.assertEqual(sum(path == "/api/compose.update" for path, _ in self.writes), 1)
+
     def test_unsafe_or_production_equal_carried_key_refuses_without_provider_writes(self) -> None:
         from control_plane.contracts.secret_record import SecretBinding, SecretRecord
         from control_plane.contracts.runtime_key_safety_policy import (
@@ -1202,6 +1306,7 @@ class ActivationTests(unittest.TestCase):
         self.assertFalse(record.published)
         self.assertEqual(record.phase, "configure_new_recipient")
         payload = deepcopy(self.payloads[record.target_id])
+        self.materialized[record.target_id] = payload["composeFile"]
         converted = json.loads(self.converted(compose_id=record.target_id))
         unsafe_network = deepcopy(converted)
         unsafe_network["networks"] = {"default": {"external": True}}

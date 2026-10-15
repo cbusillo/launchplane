@@ -782,6 +782,11 @@ class TestingActivationAdapter:
                 "The actual provider render is malformed.",
                 code=TestingActivationRefusalCode.RECIPIENT_RENDER_UNVERIFIED,
             ) from error
+        if actual is None:
+            raise TestingActivationRefusal(
+                "The configured raw source has not been materialized.",
+                code=TestingActivationRefusalCode.RECIPIENT_SOURCE_UNMATERIALIZED,
+            )
         if isinstance(actual, dict) and isinstance(actual.get("services"), dict):
             for service_name, service in actual["services"].items():
                 if not isinstance(service, dict):
@@ -845,6 +850,31 @@ class TestingActivationAdapter:
                 "Actual provider render differs from the reviewed source and values.",
                 code=TestingActivationRefusalCode.RECIPIENT_RENDER_CHANGED,
             )
+
+    def materialize_source(
+        self, record: TestingActivationRecord, checkpoint: Callable[[str], None]
+    ) -> TestingActivationRecord:
+        # Dokploy converts the host file, not its configured raw-source record.
+        # Only the first undispatched fetch may write this unused recipient's
+        # code directory. Unknown fetches recover by actual render, never replay.
+        self.unused_recipient(record)
+        try:
+            self.verify_provider(record)
+        except TestingActivationRefusal as error:
+            if error.code != TestingActivationRefusalCode.RECIPIENT_SOURCE_UNMATERIALIZED:
+                raise
+            record = self.save(record, phase="materialize_new_recipient")
+            checkpoint(record.phase)
+            host, token = source.read_dokploy_config(control_plane_root=self.root)
+            api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/compose.fetchSourceType",
+                method="POST",
+                payload={"composeId": record.target_id},
+            )
+            self.verify_provider(record)
+        return record
 
     def unused_recipient(self, record: TestingActivationRecord) -> dict[str, Any]:
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -1082,12 +1112,20 @@ class TestingActivationAdapter:
                 self.require_unchanged(record)
                 if not record.published:
                     record = self.recover_placement(record)
-                    if record.phase != "configure_new_recipient":
+                    if record.phase not in {"configure_new_recipient", "materialize_new_recipient"}:
                         return ProviderObservation("absent", retry_safe=True)
                     try:
                         self.verify_provider(record)
-                    except ValueError:
+                    except ValueError as error:
+                        if record.phase == "materialize_new_recipient":
+                            return ProviderObservation("unknown")
                         fresh = self.unused_recipient(record)
+                        if (
+                            isinstance(error, TestingActivationRefusal)
+                            and error.code
+                            == TestingActivationRefusalCode.RECIPIENT_SOURCE_UNMATERIALIZED
+                        ):
+                            return ProviderObservation("absent", retry_safe=True)
                         if (
                             self.recipient_configuration_sha256(fresh)
                             != record.before_configuration_sha256
@@ -1281,14 +1319,21 @@ class TestingActivationAdapter:
                     raise TestingActivationRefusal(
                         "Fresh recipient has unexpected identity or environment."
                     )
+                configured = False
                 if record.phase == "configure_new_recipient":
                     if (
                         self.recipient_configuration_sha256(fresh)
                         != record.before_configuration_sha256
                     ):
-                        raise TestingActivationRefusal(
-                            "Uncertain recipient configuration changed; preserve it."
-                        )
+                        try:
+                            self.verify_provider(record)
+                        except TestingActivationRefusal as error:
+                            if (
+                                error.code
+                                != TestingActivationRefusalCode.RECIPIENT_SOURCE_UNMATERIALIZED
+                            ):
+                                raise
+                        configured = True
                 else:
                     if fresh.get("env") not in {None, ""}:
                         raise TestingActivationRefusal(
@@ -1300,29 +1345,30 @@ class TestingActivationAdapter:
                         before_configuration_sha256=self.recipient_configuration_sha256(fresh),
                     )
                 values = runtime_values(self.store, self.root, record, resources)
-                rendered_source(record, values, resources)
-                template = json.loads(record.compose_source)
-                for volume in template["volumes"].values():
-                    volume["external"] = True
-                record = self.save(record, phase="configure_new_recipient")
-                checkpoint(record.phase)
-                api.dokploy_request(
-                    host=host,
-                    token=token,
-                    path="/api/compose.update",
-                    method="POST",
-                    payload={
-                        "composeId": record.target_id,
-                        "name": record.namespace,
-                        "environmentId": record.environment_id,
-                        "sourceType": "raw",
-                        "composePath": "docker-compose.yml",
-                        "autoDeploy": False,
-                        "composeFile": json.dumps(template),
-                        "env": api.serialize_dokploy_env_text(values),
-                    },
-                )
-                self.verify_provider(record)
+                if not configured:
+                    rendered_source(record, values, resources)
+                    template = json.loads(record.compose_source)
+                    for volume in template["volumes"].values():
+                        volume["external"] = True
+                    record = self.save(record, phase="configure_new_recipient")
+                    checkpoint(record.phase)
+                    api.dokploy_request(
+                        host=host,
+                        token=token,
+                        path="/api/compose.update",
+                        method="POST",
+                        payload={
+                            "composeId": record.target_id,
+                            "name": record.namespace,
+                            "environmentId": record.environment_id,
+                            "sourceType": "raw",
+                            "composePath": "docker-compose.yml",
+                            "autoDeploy": False,
+                            "composeFile": json.dumps(template),
+                            "env": api.serialize_dokploy_env_text(values),
+                        },
+                    )
+                record = self.materialize_source(record, checkpoint)
                 inspect_new_resources(self.root, resources, ports_for(record, values), checkpoint)
                 published = self.publish(record, resources, checkpoint)
                 return ProviderMutationOutcome(

@@ -49,7 +49,15 @@ configured bindings and available to bind. Nothing inspects production data
 contents or mounts production storage. Host storage and port proofs must both
 survive the shared bounded schedule-log parser; absent, malformed or false proof
 keeps activation and hold lift refused. The new provider source and environment
-are read back, then its actual converted Compose is interpolated with those
+are read back before its raw source is materialized through the provider's
+source-fetch operation. This writes only the owned, unused recipient's code
+directory; it does not deploy containers or alter volumes or ports. The service
+records that dispatch before issuing it. A missing converted file permits only
+the first undispatched fetch, with exact configured source/environment, original
+placement and unused-recipient checks. An uncertain fetch is never repeated;
+the original key can adopt its actual qualified render if the file appears.
+An existing incompatible render remains fenced rather than being overwritten.
+The actual converted Compose is then interpolated with those
 same managed values and checked against the reviewed source. It can use only
 the two qualified volumes, explicit independent ports and its private Compose
 network. Host mounts, host capabilities, external networks, routing labels,
@@ -67,9 +75,10 @@ its custody receipt commit atomically, with the unchanged hold still set.
 Keep the original key after interruption. `receipt` reads its immutable completed
 result; `readback` checks the current published recipient. An interrupted
 configuration can also be diagnosed before publication. In the recorded
-`configure_new_recipient` phase, `readback` checks that caller's persisted
-recipient and reports a closed identity, options, source, environment, labels
-or render qualification category. It returns no provider values or exception
+`configure_new_recipient` or `materialize_new_recipient` phase, `readback` checks
+that caller's persisted recipient and reports a closed identity, options, source, environment, labels
+or render qualification category, including a missing materialized source.
+It returns no provider values or exception
 text, recovers no placement and performs no host inspection, publication,
 reservation adoption or retry. Even a passing provider check still refuses an
 unpublished recipient; it is not proof of separation or permission to lift a hold.
