@@ -982,7 +982,21 @@ def register_dokploy_inventory_read_routes(
                 code="invalid_inventory_page",
                 message=str(error),
             ) from error
-        except (InventoryUnavailable, click.ClickException) as error:
+        except InventoryUnavailable as error:
+            # Fixed local reasons only; never expose provider exception text.
+            code = {
+                "read_budget": "dokploy_inventory_read_budget",
+                "page_target_limit": "dokploy_inventory_page_target_limit",
+                "snapshot_limit": "dokploy_inventory_snapshot_limit",
+                "incomplete_collections": "dokploy_inventory_incomplete_collections",
+            }.get(str(error), "dokploy_inventory_unavailable")
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code=code,
+                message="Complete Dokploy inventory evidence is unavailable; no partial page returned.",
+            ) from error
+        except click.ClickException as error:
             raise common.http_error(
                 status_code=503,
                 trace_id=trace_id,

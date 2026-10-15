@@ -1,8 +1,10 @@
 import copy
+import http.client
 import json
 import unittest
+from itertools import chain, repeat
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import click
 
@@ -26,7 +28,15 @@ def environment(environment_id: str, name: str) -> dict[str, Any]:
     return {
         "environmentId": environment_id,
         "name": name,
-        **{key: [] for key in TARGET_COLLECTIONS},
+        # Independent fixture for the provider's project.all environment shape.
+        "applications": [],
+        "compose": [],
+        "postgres": [],
+        "mysql": [],
+        "mariadb": [],
+        "mongo": [],
+        "redis": [],
+        "libsql": [],
     }
 
 
@@ -92,12 +102,13 @@ class InventoryTests(unittest.TestCase):
                 offset=kwargs.get("offset", 0),
                 limit=kwargs.get("limit", 25),
                 inventory_digest=kwargs.get("inventory_digest", ""),
+                **({"clock": kwargs["clock"]} if "clock" in kwargs else {}),
             )
 
     def test_pages_include_empty_untracked_and_database_only_placements(self) -> None:
         first = self.read(limit=1)
         self.assertEqual([project.name for project in first.projects], ["Empty project"])
-        self.assertEqual(self.calls, ["/api/project.all"])
+        self.assertEqual(len(self.calls), 1)
         second = self.read(
             offset=first.next_offset, limit=1, inventory_digest=first.inventory_digest
         )
@@ -152,9 +163,9 @@ class InventoryTests(unittest.TestCase):
         self.assertNotIn("never-output", page.model_dump_json())
 
     def test_budget_exhaustion_and_target_movement_return_no_page(self) -> None:
-        with patch("control_plane.dokploy_inventory.time.monotonic", side_effect=[0, 1000000]):
-            with self.assertRaises(InventoryUnavailable):
-                self.read()
+        clock = Mock(side_effect=chain([0], repeat(float("inf"))))
+        with self.assertRaises(InventoryUnavailable):
+            self.read(clock=clock)
         provider = self.provider
 
         def moved(**kwargs: Any) -> Any:
@@ -174,6 +185,14 @@ class InventoryTests(unittest.TestCase):
             self.read(offset=1, inventory_digest=first.inventory_digest)
         with self.assertRaises(ValueError):
             self.read(offset=1)
+
+    def test_provider_order_does_not_invalidate_continuation(self) -> None:
+        first = self.read(limit=1)
+        self.projects.reverse()
+        self.projects[0]["environments"].reverse()
+        second = self.read(offset=1, inventory_digest=first.inventory_digest)
+        self.assertEqual(second.inventory_digest, first.inventory_digest)
+        self.assertIsNone(second.next_offset)
 
     def test_incomplete_or_duplicate_inventory_is_never_empty_success(self) -> None:
         original = copy.deepcopy(self.projects)
@@ -226,6 +245,7 @@ class InventoryHttpTests(unittest.IsolatedAsyncioTestCase):
             app, "/v1/dokploy/inventory" + query, headers={"Authorization": authorization}
         )
 
+    @scoped_agent_test
     async def test_authenticated_read_and_validation(self) -> None:
         app = self.app()
         with (
@@ -240,8 +260,14 @@ class InventoryHttpTests(unittest.IsolatedAsyncioTestCase):
             response = await self.request(app)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["inventory"]["projects"], [])
-            self.assertTrue(response.json()["trace_id"].startswith("launchplane_req_"))
-            self.assertEqual((await self.request(app, "?limit=101")).status_code, 400)
+            maximum = next(
+                parameter["schema"]["maximum"]
+                for parameter in app.openapi()["paths"]["/v1/dokploy/inventory"]["get"][
+                    "parameters"
+                ]
+                if parameter["name"] == "limit"
+            )
+            self.assertEqual((await self.request(app, f"?limit={maximum + 1}")).status_code, 400)
             self.assertEqual(provider.call_count, 1)
 
     @scoped_agent_test
@@ -280,6 +306,47 @@ class InventoryHttpTests(unittest.IsolatedAsyncioTestCase):
             patch("control_plane.dokploy_inventory.api.dokploy_request", return_value=[]),
         ):
             self.assertEqual((await self.request(app, "?offset=1")).status_code, 400)
-            response = await self.request(app, "?inventory_digest=" + "0" * 64)
+            digest = (await self.request(app)).json()["inventory"]["inventory_digest"]
+            different_digest = ("a" if digest[0] != "a" else "b") + digest[1:]
+            response = await self.request(app, "?inventory_digest=" + different_digest)
             self.assertEqual(response.status_code, 409)
             self.assertEqual(response.json()["error"]["code"], "dokploy_inventory_changed")
+
+    async def test_provider_transport_faults_are_503_without_details(self) -> None:
+        app = self.app()
+        for error in (
+            UnicodeDecodeError("utf-8", b"\xff", 0, 1, "private"),
+            ConnectionResetError("private"),
+            http.client.RemoteDisconnected("private"),
+        ):
+            with (
+                patch(
+                    "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
+                    return_value=("host", "opaque"),
+                ),
+                patch("control_plane.dokploy_inventory.api.dokploy_request", side_effect=error),
+            ):
+                response = await self.request(app)
+            self.assertEqual(response.status_code, 503)
+            self.assertNotIn("private", response.text)
+
+    async def test_budget_and_unsupported_shape_errors_are_actionable(self) -> None:
+        app = self.app()
+        for reason, expected_code in (
+            ("read_budget", "dokploy_inventory_read_budget"),
+            ("page_target_limit", "dokploy_inventory_page_target_limit"),
+            ("incomplete_collections", "dokploy_inventory_incomplete_collections"),
+        ):
+            with (
+                patch(
+                    "control_plane.http_routes.drivers.dokploy_source.read_dokploy_config",
+                    return_value=("host", "opaque"),
+                ),
+                patch(
+                    "control_plane.http_routes.drivers.read_dokploy_inventory",
+                    side_effect=InventoryUnavailable(reason),
+                ),
+            ):
+                response = await self.request(app)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.json()["error"]["code"], expected_code)

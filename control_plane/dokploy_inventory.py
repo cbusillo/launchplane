@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Literal
 
 import click
@@ -107,9 +108,15 @@ def _items(value: object) -> list[object]:
 
 
 def _read(
-    *, host: str, token: str, path: str, deadline: float, query: dict[str, str | int] | None = None
+    *,
+    host: str,
+    token: str,
+    path: str,
+    deadline: float,
+    clock: Callable[[], float],
+    query: dict[str, str | int] | None = None,
 ) -> object:
-    remaining = deadline - time.monotonic()
+    remaining = deadline - clock()
     if remaining <= 0:
         raise InventoryUnavailable("read_budget")
     try:
@@ -121,15 +128,23 @@ def _read(
             method="GET",
             timeout_seconds=min(10, remaining),
         )
-    except click.ClickException as error:
+    except (click.ClickException, OSError, ValueError, http.client.HTTPException) as error:
         raise InventoryUnavailable("provider_read_failed") from error
 
 
 def read_dokploy_inventory(
-    *, host: str, token: str, offset: int, limit: int, inventory_digest: str = ""
+    *,
+    host: str,
+    token: str,
+    offset: int,
+    limit: int,
+    inventory_digest: str = "",
+    clock: Callable[[], float] = time.monotonic,
 ) -> InventoryPage:
-    deadline = time.monotonic() + 25
-    raw_projects = _items(_read(host=host, token=token, path="/api/project.all", deadline=deadline))
+    deadline = clock() + 25
+    raw_projects = _items(
+        _read(host=host, token=token, path="/api/project.all", deadline=deadline, clock=clock)
+    )
     if len(raw_projects) > MAX_PROJECTS:
         raise InventoryUnavailable("snapshot_limit")
     projects: list[InventoryProject] = []
@@ -220,6 +235,7 @@ def read_dokploy_inventory(
                         host=host,
                         token=token,
                         deadline=deadline,
+                        clock=clock,
                         path=f"/api/{target.category}.one",
                         query={id_field: target.target_id},
                     )
@@ -242,6 +258,7 @@ def read_dokploy_inventory(
                             host=host,
                             token=token,
                             deadline=deadline,
+                            clock=clock,
                             path="/api/server.one",
                             query={"serverId": server_id},
                         )
