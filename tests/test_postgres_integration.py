@@ -1361,7 +1361,7 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                     before = repair(cursor, apply=False)
                     self.assertIn("customer_sms/res_company", before)
                     self.assertIn("iap/iap_account", before)
-                    self.assertIn("carrier/usps_rest_api_secret", before)
+                    self.assertIn("carrier/usps_api_secret", before)
                     self.assertEqual(repair(cursor, apply=True), [])
                     self.assertEqual(repair(cursor, apply=False), [])
                     cursor.execute(

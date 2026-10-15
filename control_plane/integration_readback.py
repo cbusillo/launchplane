@@ -263,6 +263,7 @@ import psycopg2
 
 database_name = sys.argv[1]
 spec = json.loads(base64.b64decode(sys.argv[2]))
+report_only = len(sys.argv) > 3 and sys.argv[3] == "dry-run"
 allowed_integrations = set(spec["allowed_integrations"])
 if spec["connection_isolation_required"] and os.environ.get("PLATFORM_INSTANCE", "").strip().lower() in {"prod", "production"}:
     raise SystemExit("Non-production readback refuses a production runner")
@@ -357,6 +358,8 @@ if refused:
             + " db=" + database_name,
             file=sys.stderr,
         )
+    if report_only:
+        raise SystemExit(0)
     raise SystemExit(
         "Non-production lane holds integration settings with no allowance: " + ", ".join(refused)
     )

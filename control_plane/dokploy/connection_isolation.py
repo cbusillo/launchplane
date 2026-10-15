@@ -53,10 +53,8 @@ if [ "$mode" = apply ]; then
 fi
 docker exec -i "$runner" python3 - "$database" {shlex.quote(instance)} "$mode" <<'PY'
 {CONNECTION_ISOLATION_PROGRAM}PY
-if [ "$mode" != dry-run ]; then
-    docker exec -i "$runner" python3 - "$database" {shlex.quote(readback_spec)} <<'PY'
+docker exec -i "$runner" python3 - "$database" {shlex.quote(readback_spec)} "$mode" <<'PY'
 {INTEGRATION_READBACK_PROGRAM}PY
-fi
 if [ "$mode" = apply ]; then
     # Release only the actual current database and payload after full readback.
     payload=$(docker exec "$runner" sh -c 'printf %s "${{ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64-}}"')

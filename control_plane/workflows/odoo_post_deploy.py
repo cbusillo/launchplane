@@ -206,13 +206,23 @@ def execute_odoo_post_deploy(
             request=request,
         )
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-        evidence = run_connection_isolation(
-            host=host,
-            token=token,
-            target_definition=target,
-            mode=request.connection_isolation,
-            reviewed_plan_sha256=request.reviewed_plan_sha256,
-        )
+        try:
+            evidence = run_connection_isolation(
+                host=host,
+                token=token,
+                target_definition=target,
+                mode=request.connection_isolation,
+                reviewed_plan_sha256=request.reviewed_plan_sha256,
+            )
+        except dokploy_post_deploy.OdooPostDeployReadbackFailure as error:
+            return OdooPostDeployResult(
+                context=request.context,
+                instance=request.instance,
+                phase=request.phase,
+                post_deploy_status="fail",
+                override_evidence=error.evidence,
+                error_message=str(error),
+            )
         return OdooPostDeployResult(
             context=request.context,
             instance=request.instance,

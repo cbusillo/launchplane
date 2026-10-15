@@ -30,12 +30,15 @@ def main() -> int:
     if args.mode == "apply":
         if not args.reviewed_dry_run or not args.idempotency_key or not args.evidence_file:
             parser.error("Apply requires reviewed dry-run evidence and a stable idempotency key.")
-        reviewed = json.loads(args.evidence_file.read_text())
-        if reviewed["request"] != {
-            key: getattr(args, key) for key in ("product", "context", "instance", "reason")
-        }:
-            parser.error("The dry-run evidence belongs to another lane.")
-        reviewed_digest = reviewed["evidence"]["connection_isolation_plan_sha256"]
+        try:
+            reviewed = json.loads(args.evidence_file.read_text())
+            if reviewed["mode"] != "dry-run" or reviewed["request"] != {
+                key: getattr(args, key) for key in ("product", "context", "instance", "reason")
+            }:
+                parser.error("The receipt is not this lane's dry-run evidence.")
+            reviewed_digest = reviewed["evidence"]["connection_isolation_plan_sha256"]
+        except (ValueError, KeyError, TypeError, OSError):
+            parser.error("Invalid dry-run evidence file.")
     payload = OdooPostDeployEnvelope(
         product=args.product,
         post_deploy=OdooPostDeployRequest(
@@ -86,7 +89,10 @@ def main() -> int:
             "evidence": safe,
             "trace_id": transport["public_trace_id"](response["trace_id"]),
         }
-        if result["post_deploy_status"] != "pass" or safe.get("connection_isolation_ok") not in {
+        if result["post_deploy_status"] == "fail":
+            print(json.dumps({"status": "fail", **receipt}))
+            return 1
+        if safe.get("connection_isolation_ok") not in {
             "true",
             "false",
         }:

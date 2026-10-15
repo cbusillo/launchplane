@@ -430,15 +430,29 @@ def run_manual_data_schedule(
     )
     if before_provider_mutation is not None:
         before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
-    completed_schedule_deployment_key = api.deployment_key_from_wait_result(
-        api.trigger_dokploy_schedule_and_wait(
+    try:
+        completed_schedule_deployment_key = api.deployment_key_from_wait_result(
+            api.trigger_dokploy_schedule_and_wait(
+                host=host,
+                token=token,
+                schedule_id=schedule_id,
+                before_key=api.deployment_key(latest_schedule_deployment),
+                execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
+            )
+        )
+    except api.DokployDeploymentFailed as error:
+        evidence = _read_odoo_post_deploy_log_markers(
             host=host,
             token=token,
             schedule_id=schedule_id,
-            before_key=api.deployment_key(latest_schedule_deployment),
-            execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
+            schedule_deployment_key=error.deployment_id,
+            deployment_id=error.deployment_id,
+            deployment=error.deployment,
         )
-    )
+        raise OdooPostDeployReadbackFailure(
+            "Odoo data workflow failed: " + integration_readback_refusal_detail(evidence),
+            evidence=evidence,
+        ) from None
     if not completed_schedule_deployment_key:
         raise click.ClickException("Dokploy schedule deployment completed without a deployment id.")
     completed_schedule_deployment = api.latest_deployment_for_schedule(

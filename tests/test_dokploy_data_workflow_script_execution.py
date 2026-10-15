@@ -524,6 +524,19 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertFalse(run.web_restarted)
         self.assertFalse((self.root / "readback-passed").exists())
         self.assertNotIn(PRODUCTION_VALUE, run.stdout + run.stderr)
+        dry_run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="dry-run",
+                readback_spec=policy.encoded_spec(),
+            ),
+            FAKE_ODOO_DB=_fake_database({"printnode.api_key": PRODUCTION_VALUE}),
+        )
+        self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+        self.assertIn("printnode/printnode.api_key", dry_run.stdout)
+        self.assertFalse(dry_run.web_restarted)
 
     def setUp(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()

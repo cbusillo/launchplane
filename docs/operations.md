@@ -2821,10 +2821,17 @@ release work. It operates on the current tracked target and database. No SQL,
 credentials, carrier requests, notification probes, staff-account changes,
 addon upgrades, or restore inputs are accepted.
 
-Use `uv run python scripts/repair-odoo-copy-connections.py dry-run --product P
---context C --instance testing --reason "Repair copied carrier/SMS connections" --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py
---evidence-file <private-new-file>` to inspect the actual copy without changing
-it. The service uses its existing disabled manual data-workflow schedule to
+Inspect the actual copy without changing it:
+
+```bash
+uv run python scripts/repair-odoo-copy-connections.py dry-run \
+  --product PRODUCT --context CONTEXT --instance testing \
+  --reason "Repair copied carrier/SMS connections" \
+  --operator-helper /path/to/installed/launchplane-write-action.py \
+  --evidence-file /private/path/to/new-receipt.json
+```
+
+The service uses its existing disabled manual data-workflow schedule to
 return boolean verdicts and setting names only. Review that receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding

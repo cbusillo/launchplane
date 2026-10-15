@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import io
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -43,13 +44,14 @@ def seed(connection: Any) -> None:
     connection.execute("INSERT INTO iap_account VALUES ('copied-sms-key')")
     connection.execute(
         "CREATE TABLE delivery_carrier (delivery_type TEXT, active BOOLEAN, prod_environment BOOLEAN, "
-        "usps_rest_api_key TEXT, usps_rest_api_secret TEXT, usps_rest_account_number TEXT)"
+        "usps_api_key TEXT, usps_api_secret TEXT, usps_eps_account_number TEXT, "
+        "usps_access_token TEXT, usps_payment_token TEXT, ups_access_token TEXT)"
     )
     connection.execute(
-        "INSERT INTO delivery_carrier VALUES ('usps_rest', true, false, 'key', 'secret', 'account')"
+        "INSERT INTO delivery_carrier VALUES ('usps_rest', true, false, 'key', 'secret', 'account', 'access', 'payment', 'ups-access')"
     )
     connection.execute(
-        "INSERT INTO delivery_carrier VALUES ('fixed', true, false, NULL, NULL, NULL)"
+        "INSERT INTO delivery_carrier VALUES ('fixed', true, false, NULL, NULL, NULL, NULL, NULL, NULL)"
     )
     connection.execute(
         "INSERT INTO ir_config_parameter VALUES ('shopify.api_token', 'development-store-key')"
@@ -58,6 +60,91 @@ def seed(connection: Any) -> None:
 
 
 class ConnectionIsolationTests(unittest.TestCase):
+    def test_failed_schedule_returns_value_free_findings(self) -> None:
+        from control_plane.dokploy import api, post_deploy
+        from control_plane.dokploy.source import DokployTargetDefinition
+
+        target = DokployTargetDefinition(
+            context="example", instance="testing", target_type="compose", target_id="fixture"
+        )
+        with (
+            patch.object(
+                api, "upsert_dokploy_schedule", return_value={"scheduleId": "schedule-fixture"}
+            ),
+            patch.object(api, "latest_deployment_for_schedule", return_value=None),
+            patch.object(
+                api,
+                "trigger_dokploy_schedule_and_wait",
+                side_effect=api.DokployDeploymentFailed(
+                    deployment_id="failed-fixture",
+                    deployment_status="error",
+                    message_prefix="failure",
+                ),
+            ),
+            patch.object(
+                post_deploy,
+                "_read_odoo_post_deploy_log_markers",
+                return_value={
+                    "integration_readback_ok": "false",
+                    "integration_readback_refused": "printnode/printnode.api_key",
+                    "password": "must-not-leak",
+                },
+            ),
+        ):
+            with self.assertRaises(post_deploy.OdooPostDeployReadbackFailure) as raised:
+                post_deploy.run_manual_data_schedule(
+                    host="fixture",
+                    token="fixture",
+                    target_definition=target,
+                    schedule_lookup_id="fixture",
+                    schedule_type="server",
+                    schedule_name="fixture",
+                    schedule_app_name="fixture",
+                    schedule_payload={},
+                    resolved_schedule_execution_timeout_seconds=30,
+                )
+        self.assertIn("printnode/printnode.api_key", str(raised.exception))
+        self.assertNotIn("password", raised.exception.evidence)
+
+    def test_malformed_or_non_dry_run_receipt_is_rejected_before_transport(self) -> None:
+        import json
+        import runpy
+
+        script = runpy.run_path(
+            "scripts/repair-odoo-copy-connections.py", run_name="repair_client_test"
+        )
+        with TemporaryDirectory() as directory:
+            evidence = Path(directory) / "receipt.json"
+            for contents in ("{invalid", json.dumps({"mode": "apply"})):
+                evidence.write_text(contents)
+                argv = [
+                    "repair",
+                    "apply",
+                    "--product",
+                    "example",
+                    "--context",
+                    "example",
+                    "--instance",
+                    "testing",
+                    "--reason",
+                    "repair copy",
+                    "--operator-helper",
+                    "absent",
+                    "--reviewed-dry-run",
+                    "--idempotency-key",
+                    "fixture",
+                    "--evidence-file",
+                    str(evidence),
+                ]
+                with (
+                    self.subTest(contents=contents),
+                    patch("sys.argv", argv),
+                    patch("sys.stderr", new_callable=io.StringIO),
+                    self.assertRaises(SystemExit) as raised,
+                ):
+                    script["main"]()
+                self.assertEqual(raised.exception.code, 2)
+
     def test_changed_plan_refuses_before_schedule_or_database_mutation(self) -> None:
         from control_plane.dokploy.connection_isolation import run_connection_isolation
         from control_plane.dokploy.source import DokployTargetDefinition
@@ -112,7 +199,7 @@ class ConnectionIsolationTests(unittest.TestCase):
         )
         self.assertIsNone(
             connection.execute(
-                "SELECT usps_rest_api_secret FROM delivery_carrier WHERE delivery_type='usps_rest'"
+                "SELECT usps_api_secret FROM delivery_carrier WHERE delivery_type='usps_rest'"
             ).fetchone()[0]
         )
         self.assertEqual(
