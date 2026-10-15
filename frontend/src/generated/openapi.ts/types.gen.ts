@@ -1763,6 +1763,7 @@ export type OdooInstanceOverrideRecord = {
     source_label: string;
     updated_at: string;
     website_bootstrap: OdooWebsiteBootstrapPayload | null;
+    website_settings?: OdooWebsiteSettingsIntent | null;
 };
 
 export type OdooMaintenanceReceipt = {
@@ -1783,6 +1784,8 @@ export type OdooOverrideApplyResult = {
     attempted: boolean;
     detail: string;
     status: 'skipped' | 'pending' | 'pass' | 'fail';
+    website_settings?: OdooWebsiteSettingsIntent | null;
+    website_settings_verified?: boolean;
 };
 
 export type OdooOverrideValue = {
@@ -2007,6 +2010,21 @@ export type OdooWebsiteBootstrapRoute = {
     name: string;
     published: boolean;
     url: string;
+};
+
+export type OdooWebsiteSettings = {
+    block_third_party_domains: boolean | null;
+    cookies_bar: boolean | null;
+    google_analytics_key: string;
+    operation: 'apply' | 'disable_collection';
+    public_indexing_enabled: boolean;
+    public_origin: string;
+    website_id: number;
+};
+
+export type OdooWebsiteSettingsIntent = {
+    artifact_id: string;
+    settings: OdooWebsiteSettings;
 };
 
 export type OrdinaryAgentDeliveryActivationExecutionEvidence = {
@@ -4361,10 +4379,12 @@ export type ReleaseChecklist = {
     owner_github_id: string;
     product: string;
     production: ReleaseVersion;
+    production_website_settings?: OdooWebsiteSettingsIntent | null;
     repository: string;
     shared_sources?: Array<SharedSourceReview>;
     testing_url: string;
     untracked_commits: Array<string>;
+    website_settings?: OdooWebsiteSettingsIntent | null;
 };
 
 export type ReleaseDatabaseCompatibility = {
@@ -4502,6 +4522,7 @@ export type ReleaseVersion = {
     artifact_id: string;
     shared_addons_digest: string;
     source_commit: string;
+    website_settings_sha256?: string;
 };
 
 export type RepoProductMapping = {
