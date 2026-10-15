@@ -169,6 +169,7 @@ async function performJsonRequest<T>(
   signal?: AbortSignal,
   csrfToken = "",
   idempotencyKey = "",
+  verificationRetries = 0,
 ): Promise<T> {
   const headers: HeadersInit = {
     Accept: "application/json",
@@ -205,6 +206,12 @@ async function performJsonRequest<T>(
       "error" in errorPayload && errorPayload.error
         ? (errorPayload.error.code ?? "")
         : "";
+    if (method === "GET" && response.status === 503 &&
+        errorCode === "identity_verification_pending" && verificationRetries < 40 && !signal?.aborted) {
+      await new Promise<void>(resolve => setTimeout(resolve, 1000));
+      signal?.throwIfAborted();
+      return performJsonRequest<T>(path, method, body, signal, csrfToken, idempotencyKey, verificationRetries + 1);
+    }
     if (method === "GET" && response.status === 401 &&
         errorCode === "authentication_required" && !signal?.aborted) {
       sessionExpiryListeners.forEach(listener => listener());
@@ -264,8 +271,18 @@ export function readAuthSession(
   );
 }
 
-export function logout(): Promise<LogoutPayload> {
-  return requestJson<LogoutPayload>("/auth/logout", "POST");
+export async function logout(): Promise<LogoutPayload> {
+  try {
+    return await requestJson<LogoutPayload>("/auth/logout", "POST");
+  } catch (error) {
+    // An authentication-required preflight means the server session already
+    // ended. Complete local sign-out without sending or replaying a write.
+    if (error instanceof LaunchplaneApiError && error.statusCode === 401 &&
+        error.code === "authentication_required") {
+      return { status: "ok", trace_id: error.traceId };
+    }
+    throw error;
+  }
 }
 
 export function listProducts(

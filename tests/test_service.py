@@ -92,7 +92,9 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     LocalAdminPolicyRule,
 )
+from control_plane.service_human_credentials import GitHubOAuthCredential
 from control_plane.service_human_auth import (
+    GitHubOAuthLogin,
     GITHUB_EMAILS_URL,
     GITHUB_ORGS_URL,
     GITHUB_TEAMS_URL,
@@ -191,14 +193,21 @@ class _StubGitHubOAuthClient:
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
         is_product_owner: Callable[[int], bool] | None = None,
-    ) -> GitHubHumanIdentity:
+    ) -> GitHubOAuthLogin:
         self.code_verifier = code_verifier
         if code != "github-code":
             raise ValueError("unexpected code")
-        return self.identity
+        return GitHubOAuthLogin(self.identity, GitHubOAuthCredential("test-access-token"))
+
+    def revalidate(
+        self, credential: GitHubOAuthCredential, *, authz_policy: LaunchplaneAuthzPolicy
+    ) -> GitHubOAuthLogin:
+        return GitHubOAuthLogin(self.identity, credential)
 
 
 class _FakeGitHubResponse:
+    status_code = 200
+
     def __init__(self, payload: object):
         self._payload = payload
 
@@ -212,16 +221,23 @@ class _FakeOAuth2Session:
         self.requested_urls: list[str] = []
         self.token_request: dict[str, str] = {}
 
-    def fetch_token(self, url: str, *, code: str, code_verifier: str) -> None:
+    def fetch_token(
+        self, url: str, *, code: str, code_verifier: str, **kwargs: object
+    ) -> dict[str, str]:
         self.token_request = {
             "url": url,
             "code": code,
             "code_verifier": code_verifier,
         }
 
-    def get(self, url: str) -> _FakeGitHubResponse:
+        return {"access_token": "test-access-token", "token_type": "bearer"}
+
+    def close(self) -> None:
+        pass
+
+    def get(self, url: str, **kwargs: object) -> _FakeGitHubResponse:
         self.requested_urls.append(url)
-        return _FakeGitHubResponse(self.payloads[url])
+        return _FakeGitHubResponse(self.payloads[url.split("?", 1)[0]])
 
 
 class _FlakyEveryCodeNotificationStore:
@@ -1218,10 +1234,13 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_humans": []}),
             )
 
-        self.assertEqual(identity.login, "bootstrapper")
-        self.assertEqual(identity.email, "info@shinycomputers.com")
-        self.assertEqual(identity.role, "admin")
-        self.assertIn(GITHUB_EMAILS_URL, oauth_session.requested_urls)
+        human_identity = identity.identity
+        self.assertEqual(human_identity.login, "bootstrapper")
+        self.assertEqual(human_identity.email, "info@shinycomputers.com")
+        self.assertEqual(human_identity.role, "admin")
+        self.assertTrue(
+            any(url.split("?", 1)[0] == GITHUB_EMAILS_URL for url in oauth_session.requested_urls)
+        )
 
     def test_human_session_does_not_authorize_post_mutations(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
