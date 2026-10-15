@@ -15,9 +15,11 @@
     "preview": "vite preview --host 127.0.0.1",
     "check:openapi-drift": "node scripts/check-openapi-drift.mjs",
     "test": "node --experimental-strip-types --import ./tests/register-typescript.mjs --test tests/*.test.mjs",
-    "test:browser": "node scripts/prepare-browser-smoke.mjs && node --test tests/browser-support/*.test.mjs && playwright test && node scripts/assert-browser-smoke-artifacts.mjs",
+    "test:browser": "pnpm check:browser-timing && node scripts/prepare-browser-smoke.mjs && node --test tests/browser-support/*.test.mjs && playwright test && node scripts/assert-browser-smoke-artifacts.mjs",
     "typecheck": "tsc --noEmit",
-    "validate": "pnpm test && pnpm check:openapi-drift && pnpm build"
+    "validate": "pnpm check:browser-timing && pnpm test && pnpm check:openapi-drift && pnpm build",
+    "check:browser-timing": "node scripts/check-browser-timing.mjs && pnpm typecheck:browser-support",
+    "typecheck:browser-support": "tsc --project tsconfig.browser-support.json"
   },
   "dependencies": {
     "lucide-react": "1.51.0",

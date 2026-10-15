@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { setClockTime, waitForState, expect, test } from "./state";
 import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 function setDeadlines(value: unknown, deadline: number) {
@@ -21,8 +21,7 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
       return { product, detail, incidents, identity: module.fixtureIdentity };
     });
     const start = Date.parse(fixture.detail.provenance.refreshed_at);
-    await page.clock.install({ time: new Date(start - READ_REFRESH_INTERVAL_MS) });
-    await page.clock.pauseAt(new Date(start));
+    await setClockTime(page, start);
     setDeadlines(fixture.product, start + 10 * READ_REFRESH_INTERVAL_MS);
     setDeadlines(fixture.detail, start + 10 * READ_REFRESH_INTERVAL_MS);
     const summary = fixture.product.environments.find(lane => lane.environment === "testing")!;
@@ -78,7 +77,7 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
     await assertState(false);
     mode = "pending";
     await page.getByRole("button", { name: "Refresh current evidence" }).click();
-    await expect.poll(() => Boolean(releaseRead)).toBe(true);
+    await waitForState(() => Boolean(releaseRead)).toBe(true);
     await page.clock.runFor(2000);
     await assertState(true);
     if (environmentView) await expect(page.locator(".condition-tile").filter({ hasText: /^Runtime identity/i })).toHaveAttribute("data-tone", "pass");
@@ -96,7 +95,7 @@ for (const evidence of ["route", "tls"] as const) for (const environmentView of 
       document.dispatchEvent(new Event("visibilitychange"));
       window.dispatchEvent(new Event("focus"));
     });
-    await expect.poll(() => Boolean(releaseRead)).toBe(true);
+    await waitForState(() => Boolean(releaseRead)).toBe(true);
     await assertState(true);
     mode = "fresh";
     releaseRead!();

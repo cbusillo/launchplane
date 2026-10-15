@@ -21187,6 +21187,16 @@
           "production": {
             "$ref": "#/components/schemas/ArtifactIdentityManifest"
           },
+          "production_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "release_id": {
             "minLength": 1,
             "title": "Release Id",
@@ -21196,6 +21206,16 @@
             "pattern": "^[a-zA-Z0-9_-]+$",
             "title": "Route Id",
             "type": "string"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "writers": {
             "items": {
@@ -21311,6 +21331,16 @@
             "title": "Record Id",
             "type": "string"
           },
+          "rollback_pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicPauseRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "rollback_started_at": {
             "anyOf": [
               {
@@ -21322,6 +21352,16 @@
               }
             ],
             "title": "Rollback Started At"
+          },
+          "rollback_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "route": {
             "anyOf": [
@@ -21356,6 +21396,11 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "website_settings_attempted": {
+            "default": false,
+            "title": "Website Settings Attempted",
+            "type": "boolean"
           }
         },
         "required": [
@@ -21535,6 +21580,16 @@
             },
             "title": "Update Modules",
             "type": "array"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -23494,6 +23549,48 @@
           "settings"
         ],
         "title": "OdooWebsiteSettingsIntent",
+        "type": "object"
+      },
+      "OdooWebsiteSettingsReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "committed": {
+            "const": true,
+            "title": "Committed",
+            "type": "boolean"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "retained_startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Retained Startup Settings Sha256",
+            "type": "string"
+          },
+          "settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Settings Sha256",
+            "type": "string"
+          },
+          "startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Startup Settings Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding",
+          "image",
+          "settings_sha256",
+          "startup_settings_sha256",
+          "retained_startup_settings_sha256",
+          "committed"
+        ],
+        "title": "OdooWebsiteSettingsReceipt",
         "type": "object"
       },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {

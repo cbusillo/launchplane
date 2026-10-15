@@ -237,6 +237,75 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             self.assertIn("in-place rollback is refused", result.error_message)
             legacy.assert_not_called()
 
+    def test_hotfix_rejection_uses_cutover_snapshot_instead_of_rejected_production_snapshot(
+        self,
+    ) -> None:
+        from tempfile import TemporaryDirectory
+        from tests.test_odoo_cutover import cutover_store
+        from tests.test_odoo_cutover_website_settings import WebsiteProvider, snapshot
+        from tests.test_release_review import seed, decision
+        from control_plane.storage.filesystem import FilesystemRecordStore
+        from control_plane.workflows.odoo_cutover import execute_odoo_cutover
+        from control_plane.workflows.odoo_cutover_deployment import OdooCutoverApplyResult
+
+        with TemporaryDirectory() as directory:
+            provider = WebsiteProvider(Path(directory) / "site")
+            self.addCleanup(provider.engine.dispose)
+            plan = provider.cutover
+            provider.cutover = plan.model_copy(
+                update={"production_website_settings": snapshot(plan, production=True)}
+            )
+            cutover = execute_odoo_cutover(
+                provider.cutover, cutover_store(Path(directory)), provider, record_id="c" * 32
+            )
+            records = self._record_store()
+            records.read_deployment_record.return_value = _deployment_record().model_copy(
+                update={"odoo_cutover": cutover}
+            )
+            records.read_artifact_manifest.return_value = plan.production
+            seed_store = FilesystemRecordStore(Path(directory) / "review")
+            seed(seed_store)
+            rejected = decision(seed_store, outcome="changes_requested")
+            rejected = rejected.model_copy(
+                update={
+                    "product": plan.new.binding.product_id,
+                    "checklist": rejected.checklist.model_copy(
+                        update={
+                            "candidate": rejected.checklist.candidate.model_copy(
+                                update={"artifact_id": plan.candidate.artifact_id}
+                            ),
+                            "website_settings": plan.website_settings,
+                            "production_website_settings": plan.website_settings,
+                        }
+                    ),
+                }
+            )
+            with patch(
+                "control_plane.workflows.odoo_prod_rollback.execute_odoo_cutover_rollback_deployment",
+                return_value=OdooCutoverApplyResult(
+                    deployment_record_id="rolled",
+                    deploy_status="pass",
+                    post_deploy_status="pass",
+                    health_status="pass",
+                ),
+            ) as rollback:
+                result = execute_odoo_prod_rollback(
+                    control_plane_root=Path(directory),
+                    record_store=records,
+                    product=plan.new.binding.product_id,
+                    request=OdooProdRollbackRequest(context="opw"),
+                    cutover_provider=provider,
+                    release_decision=rejected,
+                )
+            self.assertEqual(result.rollback_status, "pass")
+            applied = rollback.call_args.kwargs["deployment"].odoo_cutover.plan
+            self.assertEqual(
+                applied.production_website_settings, provider.cutover.production_website_settings
+            )
+            self.assertNotEqual(
+                applied.production_website_settings, rejected.checklist.production_website_settings
+            )
+
     def test_recorded_database_cutover_cannot_redeploy_only_an_image(self) -> None:
         from tempfile import TemporaryDirectory
         from tests.test_odoo_cutover import IsolatedCutoverProvider, cutover_store

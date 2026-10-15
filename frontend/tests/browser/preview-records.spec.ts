@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { waitForState, expect, test, type Page } from "./state";
 import type { PreviewGenerationRecord, PreviewRecord, ProductReconcileRequestView } from "../../src/generated/openapi.ts";
 
 async function setup(page: Page) {
@@ -143,7 +143,7 @@ test("held cleanup remains visible while history is delayed or unavailable", asy
   fixture.delay();
   await page.goto(`/ui/products/${fixture.product.product}`);
   await page.getByRole("button", { name: /^Change #28/ }).click();
-  await expect.poll(fixture.delayed).toBe(true);
+  await waitForState(fixture.delayed).toBe(true);
   const evidence = page.locator("#selected-preview-evidence");
   try {
     await expect(evidence).toContainText("Retries held");
@@ -163,7 +163,7 @@ test("a late history response cannot replace a newly selected preview", async ({
   fixture.delay();
   await page.goto(`/ui/products/${fixture.product.product}`);
   await page.getByRole("button", { name: /^Change #28/ }).click();
-  await expect.poll(fixture.delayed).toBe(true);
+  await waitForState(fixture.delayed).toBe(true);
   await page.getByRole("button", { name: /^Change #45/ }).click();
   fixture.release();
   await expect(page.getByRole("region", { name: "Latest recorded generation" })).toContainText("2 · failed");

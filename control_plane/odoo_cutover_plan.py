@@ -12,6 +12,7 @@ from control_plane.contracts.prepared_public_site import PublicSiteBinding
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.release_compatibility import classify_release_database_compatibility
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 
 
 class CutoverAuthorityStore(Protocol):
@@ -30,6 +31,35 @@ def cutover_identity(product: str, context: str, instance: str, release_id: str)
     return hashlib.sha256(
         "\x00".join((product, context, instance, release_id)).encode()
     ).hexdigest()[:32]
+
+
+def rollback_pause_identity(record_id: str) -> str:
+    return record_id + "-rollback"
+
+
+def decision_bound_cutover_plan(
+    plan: OdooCutoverPlan, decision: ReleaseReviewDecisionRecord | None
+) -> OdooCutoverPlan:
+    """Bind snapshots before recovery comparison or provider construction."""
+    candidate = decision.checklist.website_settings if decision else None
+    production = decision.checklist.production_website_settings if decision else None
+    if decision is not None and (
+        decision.product != plan.new.binding.product_id
+        or decision.checklist.candidate.artifact_id != plan.candidate.artifact_id
+    ):
+        raise ValueError("release decision differs from the cutover product/artifact")
+    if plan.website_settings not in (None, candidate) or plan.production_website_settings not in (
+        None,
+        production,
+    ):
+        raise ValueError("two-slot website snapshots differ from the release decision")
+    return OdooCutoverPlan.model_validate(
+        {
+            **plan.model_dump(),
+            "website_settings": candidate,
+            "production_website_settings": production,
+        }
+    )
 
 
 def cutover_record_id(plan: OdooCutoverPlan) -> str:

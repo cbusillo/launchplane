@@ -122,6 +122,9 @@ class IsolatedCutoverProvider(WebsiteFixture):
             ),
         )
 
+    def preflight(self, plan: OdooCutoverPlan) -> None:
+        pass
+
     def prepare_candidate(self, plan: OdooCutoverPlan) -> None:
         self.actions.append("prepare")
         if self.target != plan.old:
@@ -179,6 +182,9 @@ class IsolatedCutoverProvider(WebsiteFixture):
             evidence_id="fixture-targeted-maintenance",
         )
         return self.maintenance_receipt
+
+    def website_settings(self, plan: OdooCutoverPlan, slot: OdooSlot, intent: Any) -> Any:
+        raise ValueError("fixture has no website settings capability")
 
     def readiness(self, plan: OdooCutoverPlan, slot: OdooSlot) -> OdooSlotReadiness:
         self.actions.append("readiness")
