@@ -11374,8 +11374,18 @@
       },
       "DokployTargetStaffTestingHold": {
         "additionalProperties": false,
-        "description": "Site staff are testing on this lane: event-driven deploys wait until it is lifted.",
+        "description": "A deployment interlock for staff testing or resource-isolation staging.",
         "properties": {
+          "purpose": {
+            "default": "staff_testing",
+            "enum": [
+              "staff_testing",
+              "isolation_staging"
+            ],
+            "title": "Purpose",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "reason": {
             "title": "Reason",
             "type": "string"

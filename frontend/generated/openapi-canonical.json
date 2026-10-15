@@ -5590,8 +5590,18 @@
       },
       "DokployTargetStaffTestingHold": {
         "additionalProperties": false,
-        "description": "Site staff are testing on this lane: event-driven deploys wait until it is lifted.",
+        "description": "A deployment interlock for staff testing or resource-isolation staging.",
         "properties": {
+          "purpose": {
+            "default": "staff_testing",
+            "enum": [
+              "staff_testing",
+              "isolation_staging"
+            ],
+            "title": "Purpose",
+            "type": "string",
+            "x-launchplane-optional-response": true
+          },
           "reason": {
             "title": "Reason",
             "type": "string"
@@ -71381,11 +71391,21 @@
                     "title": "Product",
                     "type": "string"
                   },
+                  "reviewed_binding_sha256": {
+                    "default": "",
+                    "title": "Reviewed Binding Sha256",
+                    "type": "string"
+                  },
                   "schema_version": {
                     "default": 1,
                     "minimum": 1,
                     "title": "Schema Version",
                     "type": "integer"
+                  },
+                  "separation_only": {
+                    "default": false,
+                    "title": "Separation Only",
+                    "type": "boolean"
                   }
                 },
                 "required": [
@@ -77247,6 +77267,15 @@
                   },
                   "product": {
                     "title": "Product",
+                    "type": "string"
+                  },
+                  "purpose": {
+                    "default": "staff_testing",
+                    "enum": [
+                      "staff_testing",
+                      "isolation_staging"
+                    ],
+                    "title": "Purpose",
                     "type": "string"
                   },
                   "reason": {
