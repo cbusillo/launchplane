@@ -3459,6 +3459,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
     def test_drill_restore_record_identifies_its_selected_database(self) -> None:
         from uuid import uuid4
         from tests.test_odoo_testing_restore import generation
+        from control_plane.testing_restore_prerequisite import incomplete_testing_restore
 
         fresh = generation().model_copy(
             update={
@@ -3481,10 +3482,40 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             test_instance="testing",
             fresh_generation=fresh,
         )
-        self.assertEqual(
-            store.deployment_records[-1].runtime_source["testing_drill_database"],
-            fresh.drill_database,
+        failed = store.deployment_records[-1]
+        assert failed.resolved_target is not None
+        selected = fresh.model_copy(
+            update={
+                "completed_at": failed.deploy.finished_at,
+                "target_id": failed.resolved_target.target_id,
+            }
         )
+        restored = selected.model_copy(update={"drill_database": ""})
+        with TemporaryDirectory() as directory:
+            records = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
+            )
+            try:
+                records.ensure_schema()
+                records.write_deployment_record(failed)
+                records.write_dokploy_target_id_record(
+                    store.read_dokploy_target_id_record(
+                        context_name=fresh.context, instance_name=fresh.instance
+                    )
+                )
+                self.assertEqual(
+                    incomplete_testing_restore(
+                        records, context=fresh.context, instance=fresh.instance, generation=selected
+                    ),
+                    failed,
+                )
+                self.assertIsNone(
+                    incomplete_testing_restore(
+                        records, context=fresh.context, instance=fresh.instance, generation=restored
+                    )
+                )
+            finally:
+                records.close()
 
     def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
         from tests.test_odoo_testing_restore import generation

@@ -4,6 +4,7 @@ from typing import Protocol
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.odoo_target_replacement_failures import TESTING_DRILL_DATABASE_KEY
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 
 
@@ -63,8 +64,8 @@ def incomplete_testing_restore(
         restores = [
             record
             for record in restores
-            if not record.runtime_source.get("testing_drill_database")
-            or record.runtime_source["testing_drill_database"] == generation.drill_database
+            if not record.runtime_source.get(TESTING_DRILL_DATABASE_KEY)
+            or record.runtime_source[TESTING_DRILL_DATABASE_KEY] == generation.drill_database
         ]
     if not restores:
         return None

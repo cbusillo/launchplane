@@ -50,6 +50,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     safe_error_detail_keys,
 )
 from control_plane.contracts.odoo_target_replacement_failures import (
+    TESTING_DRILL_DATABASE_KEY,
     OdooFreshTestingIntentRefusedError,
     DEPLOY_FAILED_CODE,
     OdooProviderEffectUncertainError,
@@ -2007,7 +2008,7 @@ def execute_odoo_stable_target_replacement_apply(
 
     runtime_source: dict[str, str] = {"data_source_mode": plan.data_source_mode}
     if generation is not None and generation.drill_database:
-        runtime_source["testing_drill_database"] = generation.drill_database
+        runtime_source[TESTING_DRILL_DATABASE_KEY] = generation.drill_database
     record_store.write_deployment_record(
         build_deployment_record(
             request=ship_request,

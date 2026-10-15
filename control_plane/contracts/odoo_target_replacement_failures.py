@@ -18,6 +18,7 @@ DEPLOY_BLOCKED_PREFIX = "deploy_blocked."
 DEPLOY_FAILED_CODE = "deploy_failed"
 _DEPLOY_FAILED_DESCRIPTION = "The deploy step failed."
 TESTING_RESTORE_REQUIRED_CODE = "testing_restore_required"
+TESTING_DRILL_DATABASE_KEY = "testing_drill_database"
 
 DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
     "backup_restore_proof_required": "The exact backup and restore proof is missing, invalid or changed.",

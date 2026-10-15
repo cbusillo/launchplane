@@ -13,6 +13,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetStaffTestingHold,
 )
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.odoo_target_replacement_failures import TESTING_DRILL_DATABASE_KEY
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
@@ -797,7 +798,7 @@ class TestingDrillTests(TestingDrillScenario):
                     ),
                     runtime_source={
                         "data_source_mode": operation.request.data_source_mode,
-                        "testing_drill_database": active.drill_database,
+                        TESTING_DRILL_DATABASE_KEY: active.drill_database,
                     },
                     deploy=DeploymentEvidence(
                         status="pending",
