@@ -191,6 +191,38 @@ authority does not authorize isolation apply. See the
 for reviewed plan binding, stable idempotency, independent readback and current
 evidence-producer limitations.
 
+### Reviewed never-live classification and preview execution
+
+The existing Director-agent identity can record a reviewed `unknown` to
+`prelaunch` classification through the production-use route for an active
+product whose recorded stable lanes are testing only. A live classification,
+production lane, historical context, production deployment or promotion history
+refuses this path. The full reviewed profile digest, atomic profile comparison,
+idempotency and audit receipt remain. Release-acceptance settings cannot change
+through this path. The request's reason records the reviewed product facts; it
+cannot assert resource isolation or remove a usage hold. The metadata correction
+never creates provider, backup, release or promotion authority.
+
+Odoo preview apply uses the same source-owned Director identity boundary as
+[testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
+including preview destruction. It requires the caller's exact service-issued
+plan, an existing uniquely owned preview, and current disposable-lane facts.
+Stable lanes cannot be substituted for a preview. The route checks the binding
+before preparing the durable operation, under its reservation, and immediately
+before the first provider effect. Expired or changed safety, actual use,
+only-copy data, shared production resources and unknown isolation stop execution.
+Existing scoped callers retain their explicit policy rules; they inherit no
+Director authority. Source-read permission for an import credential is still
+separate from preview execution.
+
+The current conservative collector cannot establish positive usage, custody or
+physical-isolation facts for an existing preview. Such a preview returns
+`disposable_lane_safety_unknown` until the authoritative producer tracked by
+#3611 supplies them or the operation preserves protected resources by
+construction. Neither a ready preview plan nor an agent-supplied assertion
+supplies those facts. This source correction removes the wrong grant refusal;
+it does not claim that an unqualified copy can run or that an import succeeded.
+
 ## Current Transitional Model
 
 The current service has a DB-backed managed-rule reconciliation endpoint with

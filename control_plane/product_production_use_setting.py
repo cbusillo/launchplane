@@ -6,6 +6,11 @@ from __future__ import annotations
 import hashlib
 import json
 from typing import Literal
+from collections.abc import Iterable
+
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.preview_record import PreviewRecord
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
@@ -122,3 +127,44 @@ def updated_product_production_use_profile(
         }
     )
     return LaunchplaneProductProfileRecord.model_validate(updated.model_dump(mode="json"))
+
+
+def require_never_live_classification(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    request: ProductProductionUseApplyRequest,
+    deployments: Iterable[DeploymentRecord],
+    promotions: Iterable[PromotionRecord],
+    previews: Iterable[PreviewRecord],
+) -> None:
+    """Bound the Director agent's metadata correction, never a live downgrade.
+
+    A product with production or historical lane ownership needs the existing
+    administrator path. Changing this fact grants no operational permission:
+    retirement and disposable writes still check actual resources and usage.
+    """
+    if (
+        request.production_use != "prelaunch"
+        or request.release_on_acceptance is not None
+        or profile.production_use not in {"unknown", "prelaunch"}
+        or profile.lifecycle_state != "active"
+        or not profile.lanes
+        or any(lane.instance != "testing" for lane in profile.lanes)
+        or profile.historical_contexts
+    ):
+        raise ValueError(
+            "Agent classification requires an active testing-only product without live or "
+            "historical lane ownership and cannot change release acceptance."
+        )
+    preview_lanes = {
+        (preview.context, profile.preview.slug_template.format(number=preview.anchor_pr_number))
+        for preview in previews
+        if preview.context == profile.preview.context
+        and preview.anchor_repo in {profile.repository, profile.repository.partition("/")[2]}
+    }
+    testing_lanes = {(lane.context, lane.instance) for lane in profile.lanes}
+    if any(
+        (record.context, record.instance) not in testing_lanes | preview_lanes
+        for record in deployments
+    ) or any(True for _ in promotions):
+        raise ValueError("Recorded production or promotion history prevents agent classification.")

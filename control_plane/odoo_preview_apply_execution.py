@@ -238,9 +238,18 @@ class OdooPreviewProviderMutationAdapter:
             except Exception as error:
                 raise ProviderMutationRejectedError(error) from error
 
+        effect_started = False
+
         def checkpoint_effect(phase: str) -> None:
+            nonlocal effect_started
             self.execution_check()
+            if not effect_started and self._pre_mutation_guard is not None:
+                try:
+                    self._pre_mutation_guard()
+                except Exception as error:
+                    raise ProviderMutationRejectedError(error) from error
             lease.checkpoint_effect(phase)
+            effect_started = True
 
         try:
             driver_result = self._execute_apply(
