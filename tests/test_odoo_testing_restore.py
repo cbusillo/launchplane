@@ -1,5 +1,5 @@
 import base64
-from contextlib import redirect_stdout
+from contextlib import closing, redirect_stdout
 import io
 import json
 import os
@@ -111,7 +111,7 @@ class TestingCredentialProofTests(unittest.TestCase):
 
         self.assertEqual(keys(narrowed, "prod"), keys(profile, "prod"))
         self.assertIn("ODOO_ADMIN_PASSWORD", keys(narrowed, "testing"))
-        self.assertNotIn("ODOO_KEY", keys(narrowed, "testing"))
+        self.assertFalse(keys(narrowed, "testing").intersection(FRESH_TESTING_OMITTED_SETTINGS))
         self.assertEqual(narrowed.lanes, profile.lanes)
 
     def test_queue_and_completion_receipts_do_not_change_generation_identity(self) -> None:
@@ -152,15 +152,17 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             "ssh_key_path": "/existing/read-only-identity",
             "ssh_directory": "/existing/ssh",
             "runner": "fixture runner",
-            "workflow_environment": {},
+            "workflow_environment": {"ODOO_UPDATE_MODULES": "website"},
             "readback_program": "fixture readback",
             "readback_spec": "fixture-spec",
+            "copy_binding_sha256": self.gen.bootstrap_plan_sha256,
         }
         self.containers: dict[str, dict[str, Any]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
         self.calls: list[list[str]] = []
         self.sanitized = True
         self.existing_database = False
+        self.resume_verified = False
         self.gate_payload = "payload-fixture"
         self.gate_hash = ""
         for suffix in ("data", "logs", "db"):
@@ -187,6 +189,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                         "PLATFORM_INSTANCE=testing",
                         "ODOO_DB_HOST=database",
                         "ODOO_DB_NAME=" + self.database,
+                        "ODOO_MAX_CRON_THREADS=0",
                     ],
                 },
                 "HostConfig": {"PortBindings": {}},
@@ -196,6 +199,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 ],
                 "NetworkSettings": {"Networks": {"testing-data": {}}},
             }
+
+        self.containers["web"]["NetworkSettings"]["Networks"]["dokploy-network"] = {}
 
     def command(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
         self.calls.append(command)
@@ -219,7 +224,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 result = b"1000"
             elif kwargs.get("input") == b"fixture runner":
                 result = (
-                    b"testing_copy_pre_registry_sanitized=true\ntesting_copy_sanitized=true\n"
+                    b"testing_copy_pre_registry_sanitized=true\ntesting_copy_sanitized=true\nodoo_module_update_completed=true\nodoo_module_update_modules_configured=true\n"
                     if self.sanitized
                     else b"private-error-value"
                 )
@@ -239,6 +244,14 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 ):
                     exec(command[-1], {})
                     self.gate_hash = write.call_args.args[0]
+        if (
+            kwargs.get("input") == b"fixture runner"
+            and self.existing_database
+            and not self.resume_verified
+        ):
+            return subprocess.CompletedProcess(
+                command, 1, stdout=b"", stderr=b"private partial copy"
+            )
         return subprocess.CompletedProcess(command, 0, stdout=result, stderr=b"")
 
     def run_program(self) -> tuple[int, str]:
@@ -293,6 +306,15 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 if fault == "existing":
                     self.assertFalse(any(call[0] == "ssh" for call in self.calls))
 
+    def test_verified_existing_copy_resumes_without_another_production_capture(self) -> None:
+        self.existing_database = True
+        self.resume_verified = True
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
+        self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
+        self.assertIn(["docker", "start", "web"], self.calls)
+
     def test_published_port_or_host_credential_mount_refuses_before_source_read(self) -> None:
         self.containers["web"]["HostConfig"]["PortBindings"] = {"8069/tcp": [{"HostPort": "18069"}]}
         status, _ = self.run_program()
@@ -319,10 +341,16 @@ class TestingCopyBoundaryTests(unittest.TestCase):
     def test_failed_isolation_commit_never_reaches_registry_and_drops_only_fresh_copy(self) -> None:
         self.boundary_case("rollback")
 
-    def test_credential_reuse_is_refused_before_registry(self) -> None:
-        self.boundary_case("reuse")
+    def test_failed_full_integration_readback_is_refused_before_registry(self) -> None:
+        self.boundary_case("readback")
 
-    def boundary_case(self, fault: str) -> None:
+    def test_completed_source_copy_can_resume_without_overwriting_data(self) -> None:
+        self.boundary_case("normal", phase="resume")
+
+    def test_resume_rejects_a_copy_from_another_generation_without_dropping_it(self) -> None:
+        self.boundary_case("foreign-witness", phase="resume")
+
+    def boundary_case(self, fault: str, *, phase: str = "fresh") -> None:
         import sqlite3
         from types import ModuleType, SimpleNamespace
         from control_plane.odoo_testing_restore import TESTING_COPY_RUNNER
@@ -340,6 +368,14 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 INSERT INTO website VALUES ('live-analytics');
                 INSERT INTO ir_config_parameter VALUES ('google_analytics.client_secret', 'live-secret');
             """)
+            if phase == "resume":
+                connection.execute(
+                    "INSERT INTO ir_config_parameter VALUES (?, ?)",
+                    (
+                        "launchplane.testing_copy.restore_complete",
+                        "foreign-copy" if fault == "foreign-witness" else "fixture-copy-binding",
+                    ),
+                )
             connection.commit()
             self.addCleanup(connection.close)
 
@@ -374,7 +410,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     self.conn.close()
 
             def isolated() -> None:
-                with sqlite3.connect(database) as observer:
+                with closing(sqlite3.connect(database)) as observer:
                     self.assertIsNone(
                         observer.execute("SELECT google_analytics_key FROM website").fetchone()[0]
                     )
@@ -391,7 +427,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     )
 
             class NativeRunner:
-                def __init__(self, settings: object, *_: object):
+                def __init__(self, settings: Any, *_: object):
                     self.local = settings
 
                 def acquire_data_workflow_lock(self) -> None:
@@ -401,7 +437,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     events.append("unlock")
 
                 def connect_to_db(self) -> Connection:
-                    return self.local.db_conn
+                    return self.local.db_conn  # type: ignore[no-any-return]
 
                 def _connect_with_retry(self, _: str) -> Connection:
                     return Connection(sqlite3.connect(database))
@@ -425,6 +461,12 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     self.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
                     isolated()
 
+                def module_update_witnesses(self, modules: list[str]) -> dict[str, str]:
+                    return {name: "after" if "registry" in events else "before" for name in modules}
+
+                def _module_states_by_name(self) -> dict[str, str]:
+                    return {"website": "installed"}
+
                 def assert_core_schema_healthy(self) -> None:
                     events.append("schema")
 
@@ -437,17 +479,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     self.local.db_conn.rollback()
                     events.append("drop-fresh")
 
-            class Crypt:
-                def __init__(self, **_: object):
-                    pass
-
-                def verify(self, candidate: str, encoded: str) -> bool:
-                    return (
-                        candidate == "production-password"
-                        and encoded == "encoded-production-password"
-                    )
-
-            artifact = ModuleType("run_odoo_data_workflows")
+            artifact: Any = ModuleType("run_odoo_data_workflows")
             artifact.LocalServerSettings = lambda: SimpleNamespace(
                 host="database",
                 db_name="fresh",
@@ -455,7 +487,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 db_conn=Connection(connection, writer=True),
             )
             artifact.OdooDataWorkflowRunner = NativeRunner
-            artifact.CryptContext = Crypt
+            (Path(directory) / "fixture.dump").write_bytes(b"fixture verified dump")
             output = io.StringIO()
             with (
                 patch.dict(sys.modules, {artifact.__name__: artifact}),
@@ -464,13 +496,33 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                     {
                         "PLATFORM_INSTANCE": "testing",
                         "ODOO_KEY": "",
-                        "ODOO_ADMIN_PASSWORD": "production-password"
-                        if fault == "reuse"
-                        else "testing-password",
+                        "ODOO_ADMIN_PASSWORD": "testing-password",
+                        "ODOO_UPDATE_MODULES": "website",
                     },
                 ),
-                patch.object(sys, "argv", ["runner", "fixture.dump", "fresh"]),
-                patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0)),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "runner",
+                        str(Path(directory) / "fixture.dump"),
+                        "fresh",
+                        "fixture-spec",
+                        base64.b64encode(b"fixture readback").decode(),
+                        phase,
+                        "fixture-copy-binding",
+                    ],
+                ),
+                patch(
+                    "subprocess.run",
+                    return_value=subprocess.CompletedProcess(
+                        [],
+                        0,
+                        stdout=b"integration_readback_ok=false"
+                        if fault == "readback"
+                        else b"integration_readback_ok=true",
+                    ),
+                ),
                 redirect_stdout(output),
             ):
                 if fault == "normal":
@@ -484,7 +536,12 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 isolated()
             else:
                 self.assertNotIn("registry", events)
-                self.assertIn("drop-fresh", events)
+                if phase == "fresh":
+                    self.assertIn("drop-fresh", events)
+                else:
+                    self.assertNotIn("drop-fresh", events)
                 self.assertNotIn("testing_copy_sanitized=true", output.getvalue())
+            if phase == "resume":
+                self.assertNotIn("restore-fresh", events)
             self.assertEqual(events[0], "lock")
             self.assertEqual(events[-1], "unlock")

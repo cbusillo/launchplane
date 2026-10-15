@@ -555,8 +555,15 @@ def reconcile_testing_target(
     from control_plane.odoo_testing_restore import read_current_testing_generation
 
     generation = read_current_testing_generation(
-        record_store, product=profile.product, context=lane.context, instance="testing"
+        record_store,
+        product=profile.product,
+        context=lane.context,
+        instance="testing",
+        bootstrap_preparation=True,
     )
+    if generation is not None and not generation.reconcile_requested_at:
+        plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
+        return ReconcileOutcome(plan)
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
         replacement=OdooStableTargetReplacementApplyRequest(

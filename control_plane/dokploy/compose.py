@@ -153,6 +153,12 @@ def render_odoo_raw_compose_file(
     web_networks = "    networks: [testing-data]" if isolated_testing and not domain_hosts else ""
     private_network = "    networks: [testing-data]" if isolated_testing else ""
     testing_networks = "  testing-data:\n    internal: true\n" if isolated_testing else ""
+    web_extra_hosts = (
+        ""
+        if isolated_testing
+        else '    extra_hosts:\n      - "host.docker.internal:host-gateway"\n'
+    )
+    cron_threads = '"0"' if isolated_testing else "${ODOO_MAX_CRON_THREADS:-2}"
     extra_secrets = (
         "" if isolated_testing else "secrets:\n  github_token:\n    environment: GITHUB_TOKEN\n"
     )
@@ -180,7 +186,7 @@ x-odoo-env: &odoo-env
   ODOO_ADMIN_LOGIN: ${{ODOO_ADMIN_LOGIN:-}}
   ODOO_ADMIN_PASSWORD: ${{ODOO_ADMIN_PASSWORD:-}}
   ODOO_DB_MAXCONN: ${{ODOO_DB_MAXCONN:-44}}
-  ODOO_MAX_CRON_THREADS: ${{ODOO_MAX_CRON_THREADS:-2}}
+  ODOO_MAX_CRON_THREADS: {cron_threads}
   ODOO_WORKERS: ${{ODOO_WORKERS:-6}}
   ODOO_LIMIT_TIME_CPU: ${{ODOO_LIMIT_TIME_CPU:-600}}
   ODOO_LIMIT_TIME_REAL: ${{ODOO_LIMIT_TIME_REAL:-1800}}
@@ -225,8 +231,7 @@ services:
         curl -fsS http://127.0.0.1:${{ODOO_HTTP_PORT:-8069}}/web/health || exit 1
       retries: 5
       start_period: 20s
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+{web_extra_hosts.rstrip()}
 {web_route_labels}
 
   database:

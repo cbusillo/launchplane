@@ -34,6 +34,7 @@ class FreshOdooTestingGeneration(BaseModel):
     bootstrap_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     certificate_type: Literal["none", "letsencrypt"] = "none"
+    omitted_runtime_keys: tuple[str, ...] = ()
     prepared_at: str
     completed_at: str = ""
     reconcile_requested_at: str = ""
@@ -44,13 +45,14 @@ class FreshOdooTestingGeneration(BaseModel):
 # connection rules run in that same transaction boundary and again after hooks.
 # A missing boundary is an unsupported artifact, never permission to run it.
 TESTING_COPY_RUNNER = (
-    """import logging
+    """import base64
+import logging
 import os
 from pathlib import Path
 import subprocess
 import sys
 sys.path.insert(0, '/volumes/scripts')
-from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner, CryptContext
+from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner
 """
     + connection_isolation_library()
     + r"""
@@ -72,19 +74,6 @@ class CopyRunner(OdooDataWorkflowRunner):
         return subprocess.Popen(["true"])
 
     def prepare_credentials_before_registry(self, *args, **kwargs):
-        if not getattr(self, "_copy_credentials_compared", False):
-            self.connect_to_db()
-            context = CryptContext(schemes=["pbkdf2_sha512", "pbkdf2_sha256"])
-            candidates = [os.environ[key] for key in ("ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD") if os.environ.get(key)]
-            with self.local.db_conn.cursor() as cursor:
-                for table, column in (("res_users", "password"), ("res_users_apikeys", "key")):
-                    if column not in isolation_columns(cursor, table):
-                        continue
-                    cursor.execute('SELECT "' + column + '" FROM "' + table + '" WHERE coalesce("' + column + '", \'\') <> \'\'')
-                    for (encoded,) in cursor.fetchall():
-                        if any(context.verify(candidate, encoded) for candidate in candidates):
-                            raise RuntimeError("Testing credential matches source authentication material")
-            self._copy_credentials_compared = True
         super().prepare_credentials_before_registry(*args, **kwargs)
         self.connect_to_db()
         with self.local.db_conn.cursor() as cursor:
@@ -101,6 +90,13 @@ class CopyRunner(OdooDataWorkflowRunner):
             observer.rollback()
         finally:
             observer.close()
+        # The shared SQL-only integration readback checks all supported families,
+        # including instance overrides reapplied by the native credential pass.
+        checked = subprocess.run(["python3", "-", self.local.db_name, sys.argv[3]],
+            input=base64.b64decode(sys.argv[4]), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=False)
+        if checked.returncode or b"integration_readback_ok=true" not in checked.stdout.splitlines():
+            raise RuntimeError("Testing copy pre-registry integration readback failed")
         print("testing_copy_pre_registry_sanitized=true", flush=True)
 
 
@@ -114,20 +110,43 @@ runner.acquire_data_workflow_lock()
 restored = False
 try:
     dump = Path(sys.argv[1])
-    subprocess.run(["pg_restore", "--file=/dev/null", str(dump)], check=True,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    # Launchplane owns the first boundary ordering. No inherited restore wrapper
-    # can load a registry before the copy's SQL-only credential/connection pass.
-    runner.overwrite_database(dump)
-    restored = True
+    copy_marker = "launchplane.testing_copy.restore_complete"
+    if sys.argv[5] == "fresh":
+        subprocess.run(["pg_restore", "--file=/dev/null", str(dump)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        runner.overwrite_database(dump)
+        restored = True
+        dump.unlink()
+        runner.connect_to_db()
+        with runner.local.db_conn.cursor() as cursor:
+            cursor.execute("INSERT INTO ir_config_parameter (key, value) VALUES (%s, %s) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value", (copy_marker, sys.argv[6]))
+        runner.local.db_conn.commit()
+    elif sys.argv[5] == "resume":
+        runner.connect_to_db()
+        with runner.local.db_conn.cursor() as cursor:
+            cursor.execute("SELECT value FROM ir_config_parameter WHERE key = %s", (copy_marker,))
+            if cursor.fetchone() != (sys.argv[6],):
+                raise RuntimeError("Existing copy lacks this generation's completed restore witness")
+    else:
+        raise RuntimeError("Unknown fresh testing restore phase")
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
+    modules = [name.strip() for name in (os.environ.get("ODOO_UPDATE_MODULES") or "").split(",") if name.strip()]
+    if not modules or "AUTO" in modules:
+        raise RuntimeError("Fresh copy needs exact declared module intent")
+    before = runner.module_update_witnesses(modules)
     runner._prepare_restored_database(runner._resolve_filestore_owner(), do_sanitize=True)
+    states = runner._module_states_by_name()
+    after = runner.module_update_witnesses(modules)
+    if any(states.get(name) != "installed" or not after.get(name) or before.get(name) == after[name] for name in modules) or any(state in {"to install", "to upgrade", "to remove"} for state in states.values()):
+        raise RuntimeError("Fresh copy lacks completed module update witnesses")
+    print("odoo_module_update_completed=true", flush=True)
+    print("odoo_module_update_modules_configured=true", flush=True)
     runner.assert_core_schema_healthy()
     runner.ensure_gpt_users()
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
     print("testing_copy_sanitized=true", flush=True)
 except BaseException:
-    if restored:
+    if restored and sys.argv[5] == "fresh":
         runner._drop_database_after_failed_restore()
     raise
 finally:
@@ -175,6 +194,19 @@ def build_fresh_testing_restore_script(
         "source": json.loads(base64.b64decode(encoded_restore_source(source_environment))),
         "readback_spec": readback_spec,
         "readback_program": readback_program,
+        "copy_binding_sha256": __import__("hashlib")
+        .sha256(
+            (
+                generation_binding(generation)
+                + "\n"
+                + image_reference
+                + "\n"
+                + database_name
+                + "\n"
+                + workflow_environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "")
+            ).encode()
+        )
+        .hexdigest(),
         "runner": TESTING_COPY_RUNNER,
         "workflow_environment": workflow_environment,
         "ssh_key_path": source_environment.get("DATA_WORKFLOW_SSH_KEY", ""),
@@ -234,6 +266,8 @@ def main():
         raise RuntimeError("Testing compose identity changed")
     if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}", database):
         raise RuntimeError("Testing database identity is invalid")
+    if not str(spec["workflow_environment"].get("ODOO_UPDATE_MODULES", "")).strip():
+        raise RuntimeError("Testing restore has no declared module update intent")
     volumes = {namespace + "-data", namespace + "-db", namespace + "-logs"}
     containers = {}
     all_containers = []
@@ -264,6 +298,10 @@ def main():
             environment = dict(item.split("=", 1) for item in configuration.get("Env", []) if "=" in item)
             if environment.get("PLATFORM_INSTANCE") != "testing" or environment.get("ODOO_DB_HOST") != "database" or environment.get("ODOO_DB_NAME") != database:
                 raise RuntimeError("Testing database endpoint is not local")
+            if environment.get("ODOO_MAX_CRON_THREADS") != "0":
+                raise RuntimeError("Fresh testing must have no cron workers")
+            if container.get("HostConfig", {}).get("ExtraHosts"):
+                raise RuntimeError("Fresh testing has host gateway aliases")
             if any(environment.get(key) for key in ("GITHUB_TOKEN", "GH_TOKEN", "SSH_AUTH_SOCK", "DATA_WORKFLOW_SSH_KEY", "ODOO_KEY", "ODOO_SMTP_PASSWORD")):
                 raise RuntimeError("Testing holds an execution credential")
         if service != "web":
@@ -273,6 +311,9 @@ def main():
             network = one_inspection(next(iter(networks)))
             if network.get("Internal") is not True:
                 raise RuntimeError("Testing data network has outbound access")
+    data_networks = set(containers["database"][1]["NetworkSettings"]["Networks"])
+    if set(containers["script-runner"][1]["NetworkSettings"]["Networks"]) != data_networks or set(containers["web"][1]["NetworkSettings"]["Networks"]) != data_networks | {"dokploy-network"}:
+        raise RuntimeError("Fresh testing has unexpected network reach")
     for container in all_containers:
         if container in [item[1] for item in containers.values()]:
             continue
@@ -299,7 +340,7 @@ def main():
         for mount in container.get("Mounts", []):
             if mount.get("Type") != "bind":
                 continue
-            source_path = Path(mount["Source"]).resolve(strict=True)
+            source_path = Path(mount["Source"]).resolve(strict=False)
             if any(source_path == path or source_path.is_relative_to(path)
                    or (mount.get("RW", True) and path.is_relative_to(source_path))
                    for path in paths):
@@ -308,74 +349,91 @@ def main():
     web = containers["web"][0]
     docker("stop", web)
     print("testing_copy_runtime_isolated=true", flush=True)
-    docker("exec", runner, "python3", "-c", "import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert callable(getattr(R,'prepare_credentials_before_registry',None))")
+    docker("exec", runner, "python3", "-c", "import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert all(callable(getattr(R,name,None)) for name in ('prepare_credentials_before_registry','_prepare_restored_database','module_update_witnesses','_module_states_by_name'))")
     present = docker("exec", "-i", containers["database"][0], "sh", "-c",
         'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
         "_", database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
-    if present != "0":
-        raise RuntimeError("Fresh restore cannot overwrite an existing testing database")
-    source = spec["source"]
-    for key in ("ODOO_UPSTREAM_HOST", "ODOO_UPSTREAM_USER", "ODOO_UPSTREAM_DB_USER", "ODOO_UPSTREAM_DB_NAME"):
-        if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", source[key]):
-            raise RuntimeError("Unsupported restore source coordinate")
-    path = source["ODOO_UPSTREAM_FILESTORE_PATH"]
-    if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path):
-        raise RuntimeError("Unsupported restore source filestore")
-    destination = source["ODOO_UPSTREAM_USER"] + "@" + source["ODOO_UPSTREAM_HOST"]
-    ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
-    for key in ("ssh_key_path", "ssh_directory"):
-        if spec[key] and (not spec[key].startswith("/") or not re.fullmatch(r"[A-Za-z0-9_./-]+", spec[key]) or ".." in Path(spec[key]).parts):
-            raise RuntimeError("Unsupported existing host SSH location")
-    if spec["ssh_key_path"]:
-        ssh.extend(["-i", spec["ssh_key_path"]])
-    if spec["ssh_directory"]:
-        ssh.extend(["-o", "UserKnownHostsFile=" + spec["ssh_directory"].rstrip("/") + "/known_hosts"])
-    # The host's existing identity is used only by these two fixed source reads.
-    # No key, agent socket or SSH directory enters an application container.
-    remote = shlex.join(["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]])
-    staging = Path(tempfile.mkdtemp(prefix=namespace + "-copy-"))
-    dump = staging / "database.dump"
-    with dump.open("xb") as output:
-        command([*ssh, destination, remote], stdout=output)
-    filestore = staging / "filestore"
-    filestore.mkdir()
-    command(["rsync", "-a", "--safe-links", "--no-devices", "--no-specials", "--protect-args",
-        "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
-    docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
-    docker("cp", str(filestore) + "/.", runner + ":/volumes/data/filestore/" + database)
-    dump_path = "/tmp/" + namespace + "-database.dump"
-    docker("cp", str(dump), runner + ":" + dump_path)
-    docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
-    uid = docker("exec", runner, "id", "-u").decode().strip()
-    gid = docker("exec", runner, "id", "-g").decode().strip()
-    if not uid.isdigit() or not gid.isdigit():
-        raise RuntimeError("Testing workflow identity is unavailable")
-    docker("exec", "-u", "root", runner, "chown", "-R", uid + ":" + gid, "/volumes/data", "/volumes/logs")
-    workflow = spec["workflow_environment"]
-    environment = {**{key: value for key, value in workflow.items() if not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))}, "ODOO_FILESTORE_PATH": "/volumes/data/filestore", "ODOO_FILESTORE_OWNER": uid + ":" + gid, "ENV_OVERRIDE_DISABLE_CRON": "true", "ODOO_RESTORE_KEPT_INTEGRATIONS": ""}
-    arguments = ["exec", "-i", "-u", "root"]
-    for key, value in environment.items():
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
-            raise RuntimeError("Invalid workflow environment key")
-        arguments.extend(["-e", key + "=" + value])
-    output = docker(*arguments, runner, "python3", "-", dump_path, database, stdin=spec["runner"].encode()).decode()
-    if "testing_copy_sanitized=true" not in output.splitlines() or "testing_copy_pre_registry_sanitized=true" not in output.splitlines():
-        raise RuntimeError("Testing copy lacks sanitization proof")
-    readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
-    if "integration_readback_ok=true" not in readback.splitlines():
-        raise RuntimeError("Testing copy integration readback did not pass")
-    # Emit only the established value-free protocol markers, never runner logs.
-    for line in output.splitlines():
-        if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
-            print(line)
-    marker = "/volumes/data/.launchplane_integration_readback_passed"
-    docker("exec", runner, "python3", "-c",
-        "import hashlib,os;from pathlib import Path;Path(" + repr(marker) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
-    docker("exec", "-u", "root", runner, "rm", "-f", dump_path)
-    shutil.rmtree(staging)
-    docker("start", web)
-    for marker in ("testing_copy_pre_registry_sanitized", "testing_copy_sanitized", "integration_readback_ok", "odoo_module_update_completed", "odoo_module_update_image_match", "odoo_module_update_modules_configured", "odoo_restore_completed"):
-        print(marker + "=true")
+    if present not in {"0", "1"}:
+        raise RuntimeError("Fresh testing database inventory is ambiguous")
+    resume = present == "1"
+    staging = None
+    try:
+        dump_path = "/tmp/" + namespace + "-database.dump"
+        if not resume:
+            source = spec["source"]
+            for key in ("ODOO_UPSTREAM_HOST", "ODOO_UPSTREAM_USER", "ODOO_UPSTREAM_DB_USER", "ODOO_UPSTREAM_DB_NAME"):
+                if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", source[key]):
+                    raise RuntimeError("Unsupported restore source coordinate")
+            path = source["ODOO_UPSTREAM_FILESTORE_PATH"]
+            if not path.startswith("/") or ".." in Path(path).parts or not re.fullmatch(r"[A-Za-z0-9_./-]+", path):
+                raise RuntimeError("Unsupported restore source filestore")
+            destination = source["ODOO_UPSTREAM_USER"] + "@" + source["ODOO_UPSTREAM_HOST"]
+            ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+            for key in ("ssh_key_path", "ssh_directory"):
+                if spec[key] and (not spec[key].startswith("/") or not re.fullmatch(r"[A-Za-z0-9_./-]+", spec[key]) or ".." in Path(spec[key]).parts):
+                    raise RuntimeError("Unsupported existing host SSH location")
+            ssh_directory = Path(spec["ssh_directory"] or "/home/ubuntu/.ssh")
+            key_path = spec["ssh_key_path"]
+            if not key_path:
+                key_path = next((str(ssh_directory / name) for name in ("id_ed25519", "id_ecdsa", "id_rsa", "id_dsa") if (ssh_directory / name).is_file()), "")
+            if not key_path:
+                raise RuntimeError("Existing supported restore identity is unavailable")
+            ssh.extend(["-i", key_path, "-o", "IdentitiesOnly=yes", "-o", "UserKnownHostsFile=" + str(ssh_directory / "known_hosts")])
+            # The host's existing identity is used only by these two fixed source reads.
+            # No key, agent socket or SSH directory enters an application container.
+            remote = shlex.join(["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]])
+            staging = Path(tempfile.mkdtemp(prefix=namespace + "-copy-"))
+            dump = staging / "database.dump"
+            with dump.open("xb") as output:
+                command([*ssh, destination, remote], stdout=output)
+            filestore = staging / "filestore"
+            filestore.mkdir()
+            command(["rsync", "-a", "--safe-links", "--no-devices", "--no-specials", "--protect-args",
+                "-e", shlex.join(ssh), destination + ":" + path.rstrip("/") + "/", str(filestore) + "/"])
+            docker("exec", "-u", "root", runner, "mkdir", "-p", "/volumes/data/filestore/" + database)
+            docker("cp", str(filestore) + "/.", runner + ":/volumes/data/filestore/" + database)
+            docker("cp", str(dump), runner + ":" + dump_path)
+            docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
+        uid = docker("exec", runner, "id", "-u").decode().strip()
+        gid = docker("exec", runner, "id", "-g").decode().strip()
+        if not uid.isdigit() or not gid.isdigit():
+            raise RuntimeError("Testing workflow identity is unavailable")
+        docker("exec", "-u", "root", runner, "chown", "-R", uid + ":" + gid, "/volumes/data", "/volumes/logs")
+        if not resume:
+            docker("exec", "-u", "root", runner, "chown", uid + ":" + gid, dump_path)
+        workflow = spec["workflow_environment"]
+        environment = {**{key: value for key, value in workflow.items() if not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))}, "ODOO_FILESTORE_PATH": "/volumes/data/filestore", "ODOO_FILESTORE_OWNER": uid + ":" + gid, "ENV_OVERRIDE_DISABLE_CRON": "true", "ODOO_RESTORE_KEPT_INTEGRATIONS": ""}
+        arguments = ["exec", "-i"]
+        for key, value in environment.items():
+            if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+                raise RuntimeError("Invalid workflow environment key")
+            arguments.extend(["-e", key + "=" + value])
+        output = docker(*arguments, runner, "python3", "-", dump_path, database, spec["readback_spec"],
+            base64.b64encode(spec["readback_program"].encode()).decode(), "resume" if resume else "fresh",
+            spec["copy_binding_sha256"], stdin=spec["runner"].encode()).decode()
+        markers = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+        if any(markers.get(key) != "true" for key in ("testing_copy_sanitized", "testing_copy_pre_registry_sanitized", "odoo_module_update_completed", "odoo_module_update_modules_configured")):
+            raise RuntimeError("Testing copy lacks sanitization or module update proof")
+        readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
+        if "integration_readback_ok=true" not in readback.splitlines():
+            raise RuntimeError("Testing copy integration readback did not pass")
+        # Emit only the established value-free protocol markers, never runner logs.
+        for line in output.splitlines():
+            if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
+                print(line)
+        marker = "/volumes/data/.launchplane_integration_readback_passed"
+        docker("exec", runner, "python3", "-c",
+            "import hashlib,os;from pathlib import Path;Path(" + repr(marker) + ").write_text(hashlib.sha256((os.environ['ODOO_DB_NAME']+'\\n'+os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','')).encode()).hexdigest())")
+        docker("exec", "-u", "root", runner, "rm", "-f", dump_path)
+        docker("start", web)
+        for marker in ("testing_copy_pre_registry_sanitized", "testing_copy_sanitized", "integration_readback_ok", "odoo_module_update_image_match", "odoo_restore_completed"):
+            print(marker + "=true")
+    finally:
+        try:
+            docker("exec", "-u", "root", runner, "rm", "-f", dump_path)
+        finally:
+            if staging is not None:
+                shutil.rmtree(staging)
 
 
 try:
@@ -394,6 +452,7 @@ def read_current_testing_generation(
     product: str,
     context: str,
     instance: str,
+    bootstrap_preparation: bool = False,
 ) -> FreshOdooTestingGeneration | None:
     if instance != "testing":
         return None
@@ -405,6 +464,8 @@ def read_current_testing_generation(
         return None
     if not isinstance(generation, FreshOdooTestingGeneration):
         raise ValueError("Fresh testing generation is unreadable.")
+    if not bootstrap_preparation and not generation.reconcile_requested_at:
+        raise ValueError("Fresh testing bootstrap has not committed its queue receipt.")
     target_id = getattr(store, "read_dokploy_target_id_record")(
         context_name=context, instance_name="testing"
     )
@@ -461,6 +522,24 @@ def read_current_testing_generation(
             "testing",
         ):
             raise ValueError("Fresh testing target aliases another lane.")
+    for other in getattr(store, "list_physical_provider_target_records")():
+        if (
+            other.provider_id == "dokploy"
+            and other.target_id == generation.target_id
+            and (other.context, other.instance) != (context, "testing")
+        ):
+            raise ValueError("Fresh testing provider target aliases another lane.")
+    from control_plane.contracts.product_profile_record import (
+        is_exclusive_product_context,
+        product_context_owner_map,
+    )
+
+    if not is_exclusive_product_context(
+        context=context,
+        product=product,
+        owners=product_context_owner_map(getattr(store, "list_product_profile_records")()),
+    ):
+        raise ValueError("Fresh testing context ownership changed.")
     return generation
 
 

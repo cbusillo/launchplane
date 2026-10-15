@@ -96,6 +96,7 @@ from tests.test_every_code_feedback_resume_storage import (
     T0 as FEEDBACK_T0,
     T1 as FEEDBACK_T1,
 )
+from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenario
 from tests.test_ordinary_agent_qualification_storage import QualificationStorageScenario
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
@@ -10743,3 +10744,23 @@ class RealPostgresPreviewReservationRecoveryTests(
 
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapScenario):
+    def setUp(self) -> None:
+        self.seed(self.enterContext(_head_postgres_database()))
+
+    def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
+        self.scenario("normal")
+
+    def test_lost_route_receipt_adopts_actual_route_without_another_write(self) -> None:
+        self.scenario("route-receipt")
+
+    def test_crash_after_supersession_resumes_only_original_generation_queue(self) -> None:
+        self.scenario("queue")
+
+    def test_lost_queue_reply_is_observed_without_requeue(self) -> None:
+        self.scenario("queue-commit")
+
+    def test_crash_after_route_metadata_resumes_supersession_without_nested_lock(self) -> None:
+        self.scenario("fence")

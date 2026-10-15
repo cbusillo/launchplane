@@ -149,6 +149,10 @@ def bootstrap_plan(
             *(key for key in bindings if key not in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS),
         }
     )
+    if generation is not None:
+        if omitted.difference(generation.omitted_runtime_keys):
+            raise ValueError("Fresh testing credential delivery changed after review.")
+        omitted = frozenset(generation.omitted_runtime_keys)
     bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
     safety = evaluate_runtime_key_safety_for_live_target_sync(
         record_store=store,
@@ -329,6 +333,13 @@ class TestingReplacementBootstrapAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        generation, operation, plan = self._prepare(provider_operation_key, lease)
+        lease.assert_current()
+        return self._finish(generation, operation, plan)
+
+    def _prepare(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> tuple[FreshOdooTestingGeneration, object, TestingReplacementBootstrapPlan]:
         with self.store.testing_replacement_execution_lock(self.request.operation_id) as old_check:
             if old_check is None:
                 raise ValueError("The retained executor is active.")
@@ -384,7 +395,7 @@ class TestingReplacementBootstrapAdapter:
                 self._require_domains(existing_generation)
                 check()
                 self._publish_safety(existing_generation, allocation.retained_target_id)
-                return self._finish(existing_generation, operation, plan)
+                return existing_generation, operation, plan
             generation = existing_generation or FreshOdooTestingGeneration(
                 product=self.product,
                 context=self.request.context,
@@ -396,6 +407,7 @@ class TestingReplacementBootstrapAdapter:
                 bootstrap_plan_sha256=plan.plan_sha256,
                 request_sha256=bootstrap_request_sha256(self.request),
                 certificate_type=self.request.certificate_type,
+                omitted_runtime_keys=plan.omitted_runtime_keys,
                 prepared_at=utc_now_timestamp(),
             )
             self.store.write_fresh_odoo_testing_generation(generation)
@@ -429,6 +441,7 @@ class TestingReplacementBootstrapAdapter:
             updated_target = target.model_copy(
                 update={
                     "domains": (generation.domain_host,),
+                    "pending_public_host_effects": (),
                     "source_type": "raw",
                     "updated_at": utc_now_timestamp(),
                 }
@@ -542,14 +555,18 @@ class TestingReplacementBootstrapAdapter:
             old_check()
             lease.assert_current()
             self._publish_safety(generation, allocation.retained_target_id)
-        return self._finish(generation, operation, plan)
+        return generation, operation, plan
 
     def _publish_safety(
         self, generation: FreshOdooTestingGeneration, retained_target_id: str
     ) -> None:
         with self.store.serialize_disposable_testing_resources():
             read_current_testing_generation(
-                self.store, product=self.product, context=self.request.context, instance="testing"
+                self.store,
+                product=self.product,
+                context=self.request.context,
+                instance="testing",
+                bootstrap_preparation=True,
             )
             profile = self.store.read_product_profile_record(self.product)
             target = self.store.read_dokploy_target_record(

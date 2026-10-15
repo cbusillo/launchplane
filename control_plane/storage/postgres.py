@@ -10621,6 +10621,8 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ValueError("Fresh testing generation completion is immutable.")
                 if previous.reconcile_requested_at != record.reconcile_requested_at:
                     raise ValueError("Only the atomic testing queue can record its receipt.")
+            elif record.reconcile_requested_at or record.completed_at:
+                raise ValueError("A fresh generation cannot begin with completion receipts.")
             session.merge(
                 LaunchplaneFreshOdooTestingGenerationRow(
                     product=record.product,
@@ -10652,6 +10654,20 @@ class PostgresRecordStore(HumanSessionStore):
                 raise ValueError("Fresh testing supersession is incomplete.")
             if current.reconcile_requested_at:
                 return
+            from control_plane.odoo_testing_restore import read_current_testing_generation
+
+            outer = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                read_current_testing_generation(
+                    self,
+                    product=generation.product,
+                    context=generation.context,
+                    instance="testing",
+                    bootstrap_preparation=True,
+                )
+            finally:
+                self._disposable_authority_context.session = outer
             target = ProductReconcileTarget(product=generation.product, target_kind="testing")
             self._lock_landing_authority(
                 session, f"launchplane:product-reconcile:{target.target_key}"
@@ -10867,6 +10883,7 @@ class PostgresRecordStore(HumanSessionStore):
                             product=expected.product,
                             context=expected.context,
                             instance="testing",
+                            bootstrap_preparation=True,
                         )
                     except (ValueError, FileNotFoundError):
                         return False

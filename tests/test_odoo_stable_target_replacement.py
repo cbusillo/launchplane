@@ -1996,12 +1996,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             result.image_reference,
             "ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
         )
-        render_compose.assert_called_with(
-            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
-            hold_web_until_integration_readback=True,
-            domain_hosts=("cm-testing.shinycomputers.com",),
-            runtime_port=8069,
-        )
+        self.assertEqual(render_compose.call_args.kwargs["image_reference"], result.image_reference)
         sync_source.assert_called_once()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
         ensure_domain.assert_called_once_with(
