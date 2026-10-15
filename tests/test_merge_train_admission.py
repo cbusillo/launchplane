@@ -1550,7 +1550,7 @@ def _idle_run_record(*, recorded_at: str, mutate: bool = False) -> MergeTrainRun
         repository="cbusillo/sellyouroutboard",
         base_branch="main",
         base_sha="base-main",
-        pull_requests=(_pull_request(42).model_copy(update={"labels": (), "label_actors": {}}),),
+        pull_requests=(_pull_request(42).model_copy(update={"labels": (), "label_actors": ()}),),
     )
     noop_client = _NoopClient()
     return build_merge_train_run_record(
