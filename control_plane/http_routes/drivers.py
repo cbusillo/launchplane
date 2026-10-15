@@ -562,9 +562,12 @@ def register_operation_status_read_routes(
             control_plane_root,
             diagnostics=recovery_diagnostics,
         )
+        execution_result = (
+            operation.execution_failure.result if operation.execution_failure else operation.result
+        )
         if full_record:
             status_view = odoo_stable_target_replacement_operation_status_payload(operation)
-            result = operation.result.model_dump(mode="json") if operation.result else None
+            result = execution_result.model_dump(mode="json") if execution_result else None
         else:
             status_view = operation_status_read_view(
                 operation,
@@ -572,11 +575,7 @@ def register_operation_status_read_routes(
                     operation_id=operation.operation_id.strip()
                 ),
             )
-            result = operation_result_read_view(
-                operation.execution_failure.result
-                if operation.execution_failure
-                else operation.result
-            )
+            result = operation_result_read_view(execution_result)
         if operation.status == "reconciliation_required" and service_testing_operation(operation):
             # Both authorized views preserve the same fixed public observations.
             description = (

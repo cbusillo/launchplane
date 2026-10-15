@@ -3423,6 +3423,39 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 finally:
                     store.close()
 
+        # Completion comes from the real apply record writer as well; optional
+        # override evidence is not a prerequisite for resuming ordinary deploys.
+        _, _, _, completed = self._apply_upstream_restore(
+            override_record=None,
+            test_instance="testing",
+            post_deploy_results=(
+                OdooPostDeployResult(
+                    context="opw",
+                    instance="testing",
+                    phase="restore",
+                    post_deploy_status="pass",
+                ),
+            ),
+        )
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
+            )
+            try:
+                store.ensure_schema()
+                for record in completed.deployment_records:
+                    store.write_deployment_record(record)
+                store.write_dokploy_target_id_record(
+                    completed.read_dokploy_target_id_record(
+                        context_name="opw", instance_name="testing"
+                    )
+                )
+                self.assertIsNone(
+                    incomplete_testing_restore(store, context="opw", instance="testing")
+                )
+            finally:
+                store.close()
+
     def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
         from tests.test_odoo_testing_restore import generation
 

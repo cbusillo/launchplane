@@ -229,6 +229,37 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             public_result = operation_result_read_view(cancelled.execution_failure.result)
             assert public_result is not None
             self.assertEqual(public_result["post_deploy_status"], result.post_deploy_status)
+            import asyncio
+            from control_plane.http_app import create_launchplane_fastapi_app
+            from tests.http_app_test_support import (
+                _asgi_get,
+                _odoo_operation_status_identity,
+                _odoo_operation_status_policy,
+            )
+            from tests.support.auth import _StubVerifier
+
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_target_replacement_apply.execute",
+                    products=(operation.product,),
+                    contexts=(operation.context,),
+                    instances=(operation.instance,),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: store,
+            )
+            response = asyncio.run(
+                _asgi_get(
+                    app,
+                    f"/v1/drivers/odoo/target-replacement/operations/{operation.operation_id}",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(
+                response.json()["result"]["post_deploy_status"], result.post_deploy_status
+            )
 
     def test_new_isolated_target_supersedes_a_journalless_testing_fence_without_past_effect_proof(
         self,
