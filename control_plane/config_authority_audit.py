@@ -1922,9 +1922,11 @@ def _scan_source_text(
     parser = _parser_name(source_file.path)
     candidates: list[tuple[int, str, object]] = []
     coverage_gaps: list[CoverageGap] = []
-    python_context: dict[str, object] = {}
+    python_allow_reasons: dict[str, object] = {}
     if parser == "python_ast":
-        parsed_candidates, parse_error = _python_candidates(text, allow_context=python_context)
+        parsed_candidates, parse_error = _python_candidates(
+            text, allow_context=python_allow_reasons
+        )
         candidates.extend(parsed_candidates)
         if parse_error:
             coverage_gaps.append(
@@ -1964,7 +1966,7 @@ def _scan_source_text(
         path=source_file.relative_path,
         candidates=candidates,
     )
-    allow_context = {**allow_context, **python_context}
+    allow_context = {**allow_context, **python_allow_reasons}
     if repository_package:
         allow_context = {**allow_context, "repository_package": repository_package}
     if (
