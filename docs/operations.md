@@ -2297,6 +2297,8 @@ re-encryption apply unless the Director approves the exact new plan digest. If
 automatic compensation is rejected or fails, require manual admin follow-up
 and a clean legacy-only dry-run baseline before proceeding.
 
+### Dokploy domain authority
+
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact
 tracked target type and target ID, a comma-separated tuple of bare DNS hosts,
@@ -2310,7 +2312,7 @@ preserves all target metadata except `domains`, `updated_at`, and
 `source_label` on the canonical provider-target projection so downstream
 projection checks remain consistent.
 
-For source-owned domain-authority planning, `GET /v1/dokploy-targets/inspect`
+For domain-authority dry runs, `GET /v1/dokploy-targets/inspect`
 continues to expose complete empty/canonical evidence privately. When the stored
 provider evidence cannot be safely exposed, it instead supplies
 `provider_target_record.comparison_fingerprint`, a keyed commitment to the full

@@ -13,6 +13,11 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord, D
 from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
 )
+from control_plane.dokploy_target_comparison import (
+    provider_target_comparison_fingerprint,
+    require_provider_target_expectation,
+)
+from control_plane.workflows.dokploy_target_adoption import repair_dokploy_target_domain_authority
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -52,6 +57,74 @@ def _repair_body(observed: dict[str, Any]) -> dict[str, Any]:
 
 
 class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
+    def test_fingerprint_binds_lane_and_workflow_refuses_apply(self) -> None:
+        with (
+            TemporaryDirectory() as directory,
+            patch.dict(
+                os.environ, {LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "synthetic-key"}, clear=True
+            ),
+        ):
+            database_url = _sqlite_database_url(Path(directory) / "db.sqlite3")
+            _seed_dokploy_target_inspect_records(database_url)
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            current = store.read_provider_target_record(
+                context_name="cm_website", instance_name="prod"
+            )
+            target = store.read_dokploy_target_record(
+                context_name=current.context, instance_name=current.instance
+            )
+            target_id = store.read_dokploy_target_id_record(
+                context_name=current.context, instance_name=current.instance
+            )
+            expected = current.to_deployed_target_reference().model_copy(
+                update={"provider_evidence": {}}
+            )
+            fingerprint = provider_target_comparison_fingerprint(current)
+            require_provider_target_expectation(
+                current=current,
+                expected=expected,
+                fingerprint=fingerprint,
+                target=target,
+                target_id=target_id,
+            )
+            # The full reference is identical in the other lane; only the lane changes.
+            for changes in ({"context": "another-context"}, {"instance": "testing"}):
+                with self.subTest(changes=changes), self.assertRaises(ValueError):
+                    require_provider_target_expectation(
+                        current=current.model_copy(update=changes),
+                        expected=expected,
+                        fingerprint=fingerprint,
+                        target=target,
+                        target_id=target_id,
+                    )
+            with patch(
+                "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup"
+            ) as fetch:
+                with self.assertRaises(ValueError):
+                    repair_dokploy_target_domain_authority(
+                        record_store=store,
+                        host="https://provider.synthetic.invalid",
+                        token="synthetic-token",
+                        context=current.context,
+                        instance=current.instance,
+                        target_type="compose",
+                        target_id=current.target_id,
+                        domains=("new.synthetic.invalid",),
+                        expected_current_provider_target=expected,
+                        expected_current_provider_target_fingerprint=fingerprint,
+                        apply=True,
+                        fetch_target_payload=fetch,
+                        fetch_target_domains=fetch,
+                    )
+                fetch.assert_not_called()
+            self.assertEqual(
+                store.read_provider_target_record(
+                    context_name=current.context, instance_name=current.instance
+                ),
+                current,
+            )
+
     async def test_inspected_authority_plans_without_writes_and_rejects_drift(self) -> None:
         cases: tuple[tuple[DokployTargetType, str, bool], ...] = (
             ("application", "Synthetic", False),
@@ -415,7 +488,9 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                                     json={**body, **changes},
                                     headers=headers,
                                 )
-                                self.assertIn(denied.status_code, (400, 403), denied.text)
+                                self.assertEqual(
+                                    denied.status_code, 403 if lane_scoped else 400, denied.text
+                                )
                                 fetch_domains.assert_not_called()
                             for changes in (
                                 {"provider_evidence": {"private_payload": "changed"}},
@@ -427,7 +502,9 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                                 stale = await client.post(
                                     "/v1/dokploy-targets/setup", json=body, headers=headers
                                 )
-                                self.assertIn(stale.status_code, (400, 403), stale.text)
+                                self.assertEqual(
+                                    stale.status_code, 403 if lane_scoped else 400, stale.text
+                                )
                                 fetch_domains.assert_not_called()
                             store.write_provider_target_record(authority)
                             with patch.dict(
@@ -437,7 +514,9 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                                 rotated = await client.post(
                                     "/v1/dokploy-targets/setup", json=body, headers=headers
                                 )
-                                self.assertIn(rotated.status_code, (400, 403), rotated.text)
+                                self.assertEqual(
+                                    rotated.status_code, 403 if lane_scoped else 400, rotated.text
+                                )
                                 fetch_domains.assert_not_called()
                             live_target["composeId"] = "drifted-provider-target"
                             identity_drift = await client.post(
