@@ -65,6 +65,13 @@ unclassified credentials and unqualified external `*_HOST`/`*_URL` environment
 endpoints refuse it. Application code remains responsible for the behavior of
 its declared read-only source integration.
 
+Dokploy can add an unused `dokploy-network: {external: true}` root declaration
+to a domainless render. Qualification ignores only that exact provider-added
+declaration when the reviewed source did not declare it and no service joins
+it. Joining it, aliasing it, changing its options or declaring another external
+network still refuses activation. The actual service/resource comparison
+otherwise remains exact.
+
 Use `dry-run` with a fresh `--evidence-file`, inspect the public result, then
 `apply --reviewed-dry-run --idempotency-key ORIGINAL` against that saved review.
 The request's `instance` accepts only `testing`. The client supplies no target,
@@ -76,8 +83,9 @@ Keep the original key after interruption. `receipt` reads its immutable complete
 result; `readback` checks the current published recipient. An interrupted
 configuration can also be diagnosed before publication. In the recorded
 `configure_new_recipient` or `materialize_new_recipient` phase, `readback` checks
-that caller's persisted recipient and reports a closed identity, options, source, environment, labels
-or render qualification category, including a missing materialized source.
+that caller's persisted recipient and reports a closed identity, options,
+source, environment, labels or render qualification category, including a
+missing materialized source.
 It returns no provider values or exception
 text, recovers no placement and performs no host inspection, publication,
 reservation adoption or retry. Even a passing provider check still refuses an

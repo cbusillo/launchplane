@@ -827,6 +827,25 @@ class TestingActivationAdapter:
                     )
         try:
             actual = interpolate(actual, values)
+            # Dokploy adds this root declaration even without domains. Ignore only
+            # that exact unused declaration; attachments and aliases remain fenced.
+            if isinstance(actual, dict) and isinstance(actual.get("services"), dict):
+                networks = actual.get("networks")
+                provider_network = "dokploy-network"
+                if (
+                    not payload.get("domains")
+                    and isinstance(networks, dict)
+                    and networks.get(provider_network) == {"external": True}
+                    and provider_network not in expected.get("networks", {})
+                    and all(
+                        isinstance(service.get("networks", []), (list, dict))
+                        and provider_network not in service.get("networks", [])
+                        for service in actual["services"].values()
+                    )
+                ):
+                    networks.pop(provider_network)
+                    if not networks and "networks" not in expected:
+                        actual.pop("networks")
             qualify_compose(
                 actual,
                 volumes=set(resources.volumes.values()),
@@ -863,8 +882,8 @@ class TestingActivationAdapter:
         except TestingActivationRefusal as error:
             if error.code != TestingActivationRefusalCode.RECIPIENT_SOURCE_UNMATERIALIZED:
                 raise
+            checkpoint("materialize_new_recipient")
             record = self.save(record, phase="materialize_new_recipient")
-            checkpoint(record.phase)
             host, token = source.read_dokploy_config(control_plane_root=self.root)
             api.dokploy_request(
                 host=host,

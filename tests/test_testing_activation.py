@@ -387,13 +387,12 @@ class ActivationTests(unittest.TestCase):
         self.inspections.append(any(path == "/api/compose.update" for path, _ in self.writes))
 
     def converted(self, **kwargs: Any) -> str:
-        payload = self.payloads[kwargs["compose_id"]]
-        from control_plane.dokploy.api import parse_dokploy_env_text
-
         source = self.materialized.get(kwargs["compose_id"])
         if source is None:
             return "null\n"
-        return json.dumps(interpolate(json.loads(source), parse_dokploy_env_text(payload["env"])))
+        document = json.loads(source)
+        document.setdefault("networks", {})["dokploy-network"] = {"external": True}
+        return json.dumps(document)
 
     def provider(self, **kwargs: Any) -> Any:
         path, body = kwargs["path"], kwargs.get("payload")
@@ -847,7 +846,6 @@ class ActivationTests(unittest.TestCase):
         def lost(**kwargs: Any) -> Any:
             if kwargs["path"] == "/api/compose.fetchSourceType":
                 record = self.adapter.current()
-                self.assertEqual(record.phase, "materialize_new_recipient")
                 self.assertFalse(record.published)
                 attempts.append(kwargs["payload"]["composeId"])
                 if persisted:
@@ -880,6 +878,27 @@ class ActivationTests(unittest.TestCase):
 
     def test_unknown_absent_materialization_is_never_redispatched(self) -> None:
         self.check_lost_materialization(persisted=False)
+
+    def test_refused_pre_fetch_checkpoint_can_resume_without_false_dispatch(self) -> None:
+        original = self.store.checkpoint_mutation_provider_effect
+
+        def refused(**kwargs: Any) -> Any:
+            if any(path == "/api/compose.update" for path, _ in self.writes):
+                raise OSError("Checkpoint refused before first source fetch")
+            return original(**kwargs)
+
+        with patch.object(self.store, "checkpoint_mutation_provider_effect", side_effect=refused):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertEqual(self.materialized, {})
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            [
+                body["composeId"]
+                for path, body in self.writes
+                if path == "/api/compose.fetchSourceType"
+            ],
+            [self.adapter.current().target_id],
+        )
 
     def test_configured_recipient_drift_refuses_materialization_and_preserves_production(
         self,
@@ -924,6 +943,14 @@ class ActivationTests(unittest.TestCase):
                 )
                 self.preparation.assert_retained()
         self.payloads[record.target_id] = payload
+        unsafe = json.loads(payload["composeFile"])
+        unsafe["volumes"]["database"]["name"] = "production-db"
+        self.materialized[record.target_id] = json.dumps(unsafe)
+        self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertEqual(self.writes, writes)
+        self.assertFalse(self.adapter.current().published)
+        self.preparation.assert_retained()
+        self.materialized.clear()
         self.assertEqual(self.run_activation().response_status_code, 202)
         self.assertEqual(
             [
@@ -1288,6 +1315,63 @@ class ActivationTests(unittest.TestCase):
         readback = asyncio.run(post({**draft, "mode": "readback"}))
         self.assertEqual(readback.status_code, 409, readback.text)
 
+    def test_missing_source_readback_after_unknown_materialization_has_no_effects(self) -> None:
+        import asyncio
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.service_auth import LaunchplaneAuthzPolicy
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+
+        original = self.provider
+        private = "private-source-fetch-sentinel"
+
+        def unknown(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.fetchSourceType":
+                raise OSError(private)
+            return original(**kwargs)
+
+        with patch("control_plane.testing_activation.api.dokploy_request", side_effect=unknown):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        record = self.adapter.current()
+        writes, inspections = deepcopy(self.writes), list(self.inspections)
+        fences = self.store.list_held_provider_target_reservations()
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        response = asyncio.run(
+            request(
+                app,
+                "POST",
+                ROUTE.format(product=self.product),
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload=self.request.model_copy(
+                    update={"mode": "readback", "reviewed_plan_sha256": ""}
+                ).model_dump(mode="json"),
+            )
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"],
+            TestingActivationRefusalCode.RECIPIENT_SOURCE_UNMATERIALIZED.value,
+        )
+        self.assertNotIn(private, response.text)
+        self.assertEqual(self.adapter.current(), record)
+        self.assertEqual(self.writes, writes)
+        self.assertEqual(self.inspections, inspections)
+        self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
+            production,
+        )
+        self.preparation.assert_retained()
+
     def test_unpublished_readback_diagnoses_qualification_without_effects_or_publication(
         self,
     ) -> None:
@@ -1318,6 +1402,18 @@ class ActivationTests(unittest.TestCase):
         malformed_mounts["services"]["web"]["volumes"] = 5
         malformed_environment = deepcopy(converted)
         malformed_environment["services"]["web"]["environment"] = [1]
+        joined_network = deepcopy(converted)
+        joined_network["services"]["web"]["networks"] = ["dokploy-network"]
+        interpolated_network = deepcopy(converted)
+        interpolated_network["services"]["web"]["networks"] = [
+            "${ROUTING_NETWORK:-dokploy-network}"
+        ]
+        aliased_network = deepcopy(converted)
+        aliased_network["networks"]["default"] = {"name": "dokploy-network"}
+        changed_network = deepcopy(converted)
+        changed_network["networks"]["dokploy-network"]["name"] = "foreign-network"
+        foreign_network = deepcopy(converted)
+        foreign_network["networks"]["foreign-network"] = {"external": True}
         code = TestingActivationRefusalCode
         cases: tuple[tuple[dict[str, Any], Any, TestingActivationRefusalCode], ...] = (
             ({"appName": private}, None, code.RECIPIENT_IDENTITY_UNVERIFIED),
@@ -1330,6 +1426,12 @@ class ActivationTests(unittest.TestCase):
             ),
             ({}, routed, code.RECIPIENT_LABELS_UNVERIFIED),
             ({}, unsafe_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, joined_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, interpolated_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, aliased_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, changed_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, foreign_network, code.RECIPIENT_RENDER_UNVERIFIED),
+            ({}, "null", code.RECIPIENT_SOURCE_UNMATERIALIZED),
             ({}, "services: [" + private, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, {"services": {"web": private}}, code.RECIPIENT_RENDER_UNVERIFIED),
             ({}, malformed_mounts, code.RECIPIENT_RENDER_UNVERIFIED),
