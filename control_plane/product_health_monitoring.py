@@ -206,6 +206,7 @@ def build_product_health_monitoring_plan(
         lane=lane,
         check=candidate_check,
         resolved_url=resolved_url,
+        validate_dns_scope=request.expected_dns_targets is not None,
     )
     # Dry-run must reject the same full-profile conflicts as apply.
     updated_product_health_monitoring_profile(
@@ -303,6 +304,7 @@ def updated_product_health_monitoring_profile(
         lane=lane,
         check=candidate_check,
         resolved_url=resolved_url,
+        validate_dns_scope=request.expected_dns_targets is not None,
     )
     updated_lane = lane.model_copy(update={"health_monitoring": candidate_policy})
     updated_lanes = tuple(
@@ -437,6 +439,7 @@ def _validate_resolved_target(
     lane: ProductLaneProfile,
     check: ProductLaneHealthCheck,
     resolved_url: str,
+    validate_dns_scope: bool,
 ) -> None:
     if not check.enabled:
         return
@@ -452,7 +455,9 @@ def _validate_resolved_target(
             "Enabled public HTTP health monitoring requires an existing lane-owned URL."
         )
     target_hosts = {_url_host(lane.base_url), _url_host(resolved_url)}
-    if any(target.public_name not in target_hosts for target in check.expected_dns_targets):
+    if validate_dns_scope and any(
+        target.public_name not in target_hosts for target in check.expected_dns_targets
+    ):
         raise ProductHealthMonitoringTargetError(
             "DNS expectations must name a host probed by this public HTTP check."
         )

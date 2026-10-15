@@ -51,7 +51,7 @@ def build_public_dns_diagnostics(
                 instance_name=lane.instance,
                 check_kind="public_http",
                 check_name=check.name,
-                limit=1,
+                limit=50,
             )
             if callable(reader)
             else ()
@@ -143,7 +143,7 @@ def _project_dns(
             refreshed_at=record.observed_at,
             stale_after=stale_after,
             freshness_status="verified" if fresh else "stale",
-            detail="Independent public A/AAAA comparison; exact answer-set equality is required.",
+            detail="Monitor resolver A/AAAA comparison with explicit expectations; exact answer-set equality is required.",
         )
     return PublicDnsDiagnostic(
         check_name=check_name,

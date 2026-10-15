@@ -1,17 +1,28 @@
 from __future__ import annotations
 
-from ipaddress import ip_address
+from ipaddress import IPv6Address, ip_address
 import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.public_network import is_public_address
 
 
 def public_dns_addresses(values: tuple[str, ...]) -> tuple[str, ...]:
-    addresses = tuple(sorted({str(ip_address(value.strip())) for value in values}))
-    if any(
-        not ip_address(value).is_global or ip_address(value).is_multicast for value in addresses
-    ):
+    parsed = (ip_address(value.strip()) for value in values)
+    addresses = tuple(
+        sorted(
+            {
+                str(
+                    address.ipv4_mapped
+                    if isinstance(address, IPv6Address) and address.ipv4_mapped
+                    else address
+                )
+                for address in parsed
+            }
+        )
+    )
+    if any(not is_public_address(ip_address(value)) for value in addresses):
         raise ValueError("DNS expectations require public unicast IP addresses")
     return addresses
 

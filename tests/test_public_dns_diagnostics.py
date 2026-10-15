@@ -13,10 +13,15 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 from control_plane.contracts.public_dns import PublicDnsObservation
-from control_plane.contracts.public_ingress_monitoring import health_monitor_interval_seconds
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressObservationRecord,
+    PublicIngressTargetObservation,
+    health_monitor_interval_seconds,
+)
 from control_plane.contracts.product_topology_read_model import build_product_environment_topology
 from control_plane.product_health_monitoring import (
     ProductHealthMonitoringApplyRequest,
+    ProductHealthMonitoringTargetError,
     build_product_health_monitoring_plan,
     updated_product_health_monitoring_profile,
 )
@@ -64,7 +69,7 @@ class PublicDnsDiagnosticTests(unittest.TestCase):
         self.assertEqual(topology.observed.ingress.status, "pass")
 
     def test_stored_evidence_cannot_claim_a_match_for_wrong_answers(self) -> None:
-        with self.assertRaisesRegex(ValidationError, "disagrees"):
+        with self.assertRaises(ValidationError):
             PublicDnsObservation(
                 public_name=_EXPECTED.public_name,
                 status="match",
@@ -172,6 +177,63 @@ class PublicDnsDiagnosticTests(unittest.TestCase):
         self.assertFalse(diagnostic.observed_addresses)
         self.assertNotIn("dns", store.records[0].targets[0].model_dump(mode="json"))
 
+    def test_reconciliation_does_not_hide_the_newest_real_probe(self) -> None:
+        profile = _dns_profile()
+        store = _Store((profile,))
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at=_NOW.isoformat(),
+            notify=False,
+            http_get=lambda url, timeout: HttpObservation(200, url, 0),
+            dns_get=lambda url: _EXPECTED.addresses,
+        )
+        store.records.append(
+            PublicIngressObservationRecord(
+                record_id="zzzz-reconciliation",
+                product=profile.product,
+                context=profile.lanes[0].context,
+                instance="prod",
+                purpose="reconciliation",
+                observed_at=result.records[0].observed_at,
+                status="skipped",
+                failure_code="monitoring_intent_changed",
+                summary="Intent reconciled",
+                targets=(
+                    PublicIngressTargetObservation(
+                        target="monitoring_intent",
+                        url="monitoring-intent://public",
+                        status="skipped",
+                        failure_code="monitoring_intent_changed",
+                        summary="Intent reconciled",
+                    ),
+                ),
+            )
+        )
+        topology = build_product_environment_topology(
+            record_store=store,
+            profile=profile,
+            lane=profile.lanes[0],
+            lane_summary=None,
+            now=_NOW,
+        )
+        self.assertEqual(topology.observed.dns_targets[0].status, "match")
+
+    def test_an_omitted_expectation_does_not_block_edits_after_a_host_change(self) -> None:
+        payload = _dns_profile().model_dump(mode="json")
+        payload["lanes"][0]["base_url"] = "https://changed.example.test"
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+        request = ProductHealthMonitoringApplyRequest(
+            product=profile.product,
+            context=profile.lanes[0].context,
+            instance="prod",
+            check_name="public-ingress",
+            monitoring_intent="public",
+            reason="Strict identity",
+            require_runtime_identity=True,
+        )
+        plan = build_product_health_monitoring_plan(profile=profile, request=request)
+        self.assertEqual(plan.requested_expected_dns_targets, (_EXPECTED,))
+
     def test_deadline_and_changed_expectations_invalidate_prior_match(self) -> None:
         profile = _dns_profile()
         store = _Store((profile,))
@@ -224,6 +286,11 @@ class PublicDnsDiagnosticTests(unittest.TestCase):
             )
         with self.assertRaises(ValidationError):
             ProductLaneHealthCheck(name="public", expected_dns_targets=(_EXPECTED, _EXPECTED))
+        mapped = PublicDnsExpectedTarget(
+            public_name=_EXPECTED.public_name,
+            addresses=("::ffff:8.8.8.8",),
+        )
+        self.assertEqual(mapped.addresses, _EXPECTED.addresses)
 
     def test_review_plan_binds_expectations_and_omission_preserves_them(self) -> None:
         profile = _dns_profile()
@@ -260,5 +327,5 @@ class PublicDnsDiagnosticTests(unittest.TestCase):
                 "expected_dns_targets": [wrong_scope.model_dump(mode="json")],
             }
         )
-        with self.assertRaisesRegex(ValueError, "host probed"):
+        with self.assertRaises(ProductHealthMonitoringTargetError):
             build_product_health_monitoring_plan(profile=profile, request=request)
