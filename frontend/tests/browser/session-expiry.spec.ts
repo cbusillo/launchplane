@@ -140,19 +140,25 @@ test("pending identity verification recovers initial load without another sign-i
     const module = await import(modulePath);
     return { products: module.productsForFixture("products"), identity: module.fixtureIdentity };
   });
-  let sessionReads = 0;
+  let verificationPending = true;
+  let evidenceReads = 0;
   await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "authorization_denied" } } }));
   await page.route("**/v1/auth/session", route => {
-    sessionReads++;
-    return route.fulfill(sessionReads === 1
+    // Development remounts can issue more than one initial session read.
+    return route.fulfill(verificationPending
       ? { status: 503, json: { error: { code: "identity_verification_pending", message: "Verification in progress" } } }
       : { json: { status: "ok", csrf_token: "fixture", identity: fixture.identity } });
   });
-  await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: fixture.products } }));
+  await page.route("**/v1/products", route => {
+    evidenceReads++;
+    return route.fulfill({ json: { status: "ok", products: fixture.products } });
+  });
   await page.goto("/ui/products");
   await expect(page.locator(".session-card h1")).toBeVisible();
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
+  expect(evidenceReads).toBe(0);
   await page.screenshot({ path: `../tmp/browser-smoke/session-renewal-pending-${testInfo.project.name}.png`, fullPage: true });
+  verificationPending = false;
   await page.clock.runFor(60_000);
   await expect(page.locator(".product-directory-row").first()).toBeVisible();
   await page.getByRole("button", { name: "Refresh current evidence" }).click();
