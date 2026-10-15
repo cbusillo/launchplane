@@ -37,6 +37,7 @@ from control_plane.integration_readback import (
     web_held_until_integration_readback,
 )
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
@@ -137,6 +138,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "odoo_restore_completed",
         "odoo_restore_failure_logged",
         INTEGRATION_READBACK_OK_MARKER,
+        "connection_isolation_ok",
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
@@ -392,6 +394,87 @@ def resolve_data_workflow_execution_timeout_seconds(
     return deploy_timeout_seconds
 
 
+def run_manual_data_schedule(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    schedule_lookup_id: str,
+    schedule_type: str,
+    schedule_name: str,
+    schedule_app_name: str,
+    schedule_payload: api.JsonObject,
+    resolved_schedule_execution_timeout_seconds: int,
+    before_provider_mutation: Callable[[str], None] | None = None,
+) -> dict[str, str]:
+    if before_provider_mutation is not None:
+        before_provider_mutation("post_deploy_schedule_upsert")
+    schedule = api.upsert_dokploy_schedule(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        schedule_name=schedule_name,
+        app_name=schedule_app_name,
+        schedule_payload=schedule_payload,
+    )
+    schedule_id = api.schedule_key(schedule)
+    if not schedule_id:
+        raise click.ClickException(
+            f"Dokploy schedule {schedule_name!r} for {target_definition.context}/{target_definition.instance} did not expose a schedule id."
+        )
+    if before_provider_mutation is not None:
+        before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+    try:
+        completed_schedule_deployment_key = api.deployment_key_from_wait_result(
+            api.run_dokploy_schedule(
+                host=host,
+                token=token,
+                schedule_id=schedule_id,
+                timeout_seconds=resolved_schedule_execution_timeout_seconds,
+            )
+        )
+    except api.DokployScheduleExecutionFailed as error:
+        if error.cause != "remote_command_exit" or not error.deployment_id:
+            raise
+        evidence = _read_odoo_post_deploy_log_markers(
+            host=host,
+            token=token,
+            schedule_id=schedule_id,
+            schedule_deployment_key=error.deployment_id,
+            deployment_id=error.deployment_id,
+        )
+        raise OdooPostDeployReadbackFailure(
+            "Odoo data workflow failed (deployment="
+            + error.deployment_id
+            + ")"
+            + (
+                ": " + integration_readback_refusal_detail(evidence)
+                if evidence.get("integration_readback_refused")
+                else "."
+            ),
+            evidence=evidence,
+        ) from None
+    if not completed_schedule_deployment_key:
+        raise click.ClickException("Dokploy schedule deployment completed without a deployment id.")
+    completed_schedule_deployment = api.latest_deployment_for_schedule(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+    )
+    if api.deployment_key(completed_schedule_deployment) != completed_schedule_deployment_key:
+        completed_schedule_deployment = None
+    evidence = _read_odoo_post_deploy_log_markers(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+        schedule_deployment_key=completed_schedule_deployment_key,
+        deployment_id=completed_schedule_deployment_key,
+        deployment=completed_schedule_deployment,
+    )
+    return evidence
+
+
 def run_compose_post_deploy_update(
     *,
     host: str,
@@ -645,54 +728,17 @@ def run_compose_post_deploy_update(
         "enabled": False,
         "timezone": "UTC",
     }
-    if before_provider_mutation is not None:
-        before_provider_mutation("post_deploy_schedule_upsert")
-    schedule = api.upsert_dokploy_schedule(
+    evidence = run_manual_data_schedule(
         host=host,
         token=token,
-        target_id=schedule_lookup_id,
+        target_definition=target_definition,
+        schedule_lookup_id=schedule_lookup_id,
         schedule_type=schedule_type,
         schedule_name=schedule_name,
-        app_name=schedule_app_name,
+        schedule_app_name=schedule_app_name,
         schedule_payload=schedule_payload,
-    )
-    schedule_id = api.schedule_key(schedule)
-    if not schedule_id:
-        raise click.ClickException(
-            f"Dokploy schedule {schedule_name!r} for {target_definition.context}/{target_definition.instance} did not expose a schedule id."
-        )
-    latest_schedule_deployment = api.latest_deployment_for_schedule(
-        host=host,
-        token=token,
-        schedule_id=schedule_id,
-    )
-    if before_provider_mutation is not None:
-        before_provider_mutation(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
-    completed_schedule_deployment_key = api.deployment_key_from_wait_result(
-        api.trigger_dokploy_schedule_and_wait(
-            host=host,
-            token=token,
-            schedule_id=schedule_id,
-            before_key=api.deployment_key(latest_schedule_deployment),
-            execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
-        )
-    )
-    if not completed_schedule_deployment_key:
-        raise click.ClickException("Dokploy schedule deployment completed without a deployment id.")
-    completed_schedule_deployment = api.latest_deployment_for_schedule(
-        host=host,
-        token=token,
-        schedule_id=schedule_id,
-    )
-    if api.deployment_key(completed_schedule_deployment) != completed_schedule_deployment_key:
-        completed_schedule_deployment = None
-    evidence = _read_odoo_post_deploy_log_markers(
-        host=host,
-        token=token,
-        schedule_id=schedule_id,
-        schedule_deployment_key=completed_schedule_deployment_key,
-        deployment_id=completed_schedule_deployment_key,
-        deployment=completed_schedule_deployment,
+        resolved_schedule_execution_timeout_seconds=resolved_schedule_execution_timeout_seconds,
+        before_provider_mutation=before_provider_mutation,
     )
     if run_destructive_restore:
         require_odoo_restore_readback_evidence(evidence)
@@ -2572,6 +2618,14 @@ enforce_integration_readback() {{
     readback_succeeded=1
 }}
 
+neutralize_copy_connections() {{
+    if [ "{int(hold_web_until_integration_readback)}" != "1" ]; then
+        return 0
+    fi
+    docker exec -i "${{script_runner_container_id}}" python3 - "${{database_name}}" copy apply <<'PY'
+{CONNECTION_ISOLATION_PROGRAM}PY
+}}
+
 exit_trap() {{
     local exit_status="$?"
     trap - EXIT
@@ -2781,7 +2835,12 @@ if [ "{int(probe_company_email_contract)}" = "1" ]; then
 {ODOO_COMPANY_EMAIL_CONTRACT_PROGRAM}PY
 fi
 
-if ! enforce_integration_readback; then
+neutralization_status=0
+neutralize_copy_connections || neutralization_status=$?
+readback_status=0
+enforce_integration_readback || readback_status=$?
+if [ "$neutralization_status" -ne 0 ] || [ "$readback_status" -ne 0 ]; then
+    echo "integration_readback_ok=false"
     web_restart_blocked=1
     exit 1
 fi
