@@ -111,6 +111,12 @@ from control_plane.notifications import (
 )
 from control_plane.outbound_http import PublicHttpDestinationError
 from control_plane.outbound_http import PublicTlsProbeResult
+from control_plane.outbound_http import resolve_public_http_destination
+from control_plane.contracts.public_dns import (
+    PublicDnsExpectedTarget,
+    PublicDnsObservation,
+    public_dns_addresses,
+)
 from control_plane.outbound_http import probe_public_tls
 from control_plane.contracts.product_topology_read_model import product_lane_public_domains
 from control_plane.outbound_http import request_private_http
@@ -254,6 +260,7 @@ class PublicIngressMonitorTarget:
     incident_eligible: bool
     expected_runtime_identity: RuntimeIdentity | None
     require_runtime_identity: bool
+    expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = ()
     provider: str = ""
     provider_check: str = ""
     private_endpoint_key: str = ""
@@ -357,6 +364,7 @@ class _PlannedIncidentTransition:
 
 HttpGet = Callable[[str, int], HttpObservation]
 TlsGet = Callable[[str, int], PublicTlsProbeResult]
+DnsGet = Callable[[str], tuple[str, ...]]
 
 
 def discover_public_ingress_monitor_targets(
@@ -610,6 +618,7 @@ def _health_check_monitor_target(
             instance_name=lane.instance,
         ),
         require_runtime_identity=check.require_runtime_identity,
+        expected_dns_targets=check.expected_dns_targets,
         recovery_observation_threshold=check.recovery_observation_threshold,
         provider=check.provider,
         provider_check=check.provider_check,
@@ -718,6 +727,7 @@ def run_public_ingress_monitor_once(
     http_get: HttpGet | None = None,
     private_http_get: HttpGet | None = None,
     tls_get: TlsGet | None = None,
+    dns_get: DnsGet | None = None,
     notification_drivers: PublicIngressNotificationDrivers | None = None,
     runtime_identity_confirmation_delay_seconds: float = 0,
     sleep: Callable[[float], None] = time.sleep,
@@ -755,6 +765,7 @@ def run_public_ingress_monitor_once(
             timeout_seconds=timeout_seconds,
             http_get=(private_get if target.check_kind == "private_http" else public_get),
             tls_get=tls_probe,
+            dns_get=dns_get,
         )
 
     if max_concurrent_probes < 1:
@@ -2314,20 +2325,33 @@ def check_public_ingress_target(
     timeout_seconds: int,
     http_get: HttpGet,
     tls_get: TlsGet,
+    dns_get: DnsGet | None = None,
 ) -> PublicIngressObservationRecord:
     target_observations: list[PublicIngressTargetObservation] = []
     for target_kind, url in _target_urls(target):
-        target_observations.append(
-            _check_url(
-                target_kind=target_kind,
-                url=url,
-                timeout_seconds=timeout_seconds,
-                target=target,
-                http_get=http_get,
-                tls_get=tls_get,
-                checked_at=checked_at,
-            )
+        url_observation = _check_url(
+            target_kind=target_kind,
+            url=url,
+            timeout_seconds=timeout_seconds,
+            target=target,
+            http_get=http_get,
+            tls_get=tls_get,
+            checked_at=checked_at,
         )
+        if target.check_kind == "public_http":
+            expectation = next(
+                (
+                    item
+                    for item in target.expected_dns_targets
+                    if item.public_name == urlsplit(url).hostname
+                ),
+                None,
+            )
+            if expectation is not None:
+                url_observation = url_observation.model_copy(
+                    update={"dns": _observe_dns(url=url, expectation=expectation, dns_get=dns_get)}
+                )
+        target_observations.append(url_observation)
     status, failure_code = _record_status(target_observations)
     summary = _record_summary(target=target, status=status, observations=target_observations)
     observation = PublicIngressObservationRecord(
@@ -2415,6 +2439,44 @@ def fetch_private_health_url(url: str, timeout_seconds: int) -> HttpObservation:
         final_url=response.final_url,
         redirect_count=response.redirect_count,
         payload=payload,
+    )
+
+
+def _observe_dns(
+    *,
+    url: str,
+    expectation: PublicDnsExpectedTarget,
+    dns_get: DnsGet | None,
+) -> PublicDnsObservation:
+    try:
+        addresses = public_dns_addresses(
+            dns_get(url)
+            if dns_get is not None
+            else tuple(
+                str(address.ip) for address in resolve_public_http_destination(url).addresses
+            )
+        )
+        if not addresses:
+            raise PublicHttpDestinationError("dns_failure", "No public DNS answers.")
+    except PublicHttpDestinationError as error:
+        return PublicDnsObservation(
+            public_name=expectation.public_name,
+            status="unavailable",
+            expected_addresses=expectation.addresses,
+            failure_code=error.code,
+        )
+    except Exception:
+        return PublicDnsObservation(
+            public_name=expectation.public_name,
+            status="unavailable",
+            expected_addresses=expectation.addresses,
+            failure_code="unknown_error",
+        )
+    return PublicDnsObservation(
+        public_name=expectation.public_name,
+        status="match" if addresses == expectation.addresses else "mismatch",
+        expected_addresses=expectation.addresses,
+        observed_addresses=addresses,
     )
 
 

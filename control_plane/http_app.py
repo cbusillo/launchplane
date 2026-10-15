@@ -223,6 +223,7 @@ from control_plane.http_routes import (
     register_agent_context_read_routes,
     register_deployment_promotion_read_routes,
     register_dokploy_target_inspect_read_routes,
+    register_dokploy_inventory_read_routes,
     register_driver_descriptor_read_routes,
     register_evidence_write_routes,
     register_engineering_review_decision_routes,
@@ -13225,6 +13226,9 @@ def create_launchplane_fastapi_app(
             payload = response.model_dump(mode="json", exclude_none=True)
             if isinstance(payload.get("result"), dict):
                 payload["result"].pop("current_private_endpoint_key", None)
+                if "expected_dns_targets" not in raw_payload:
+                    payload["result"].pop("current_expected_dns_targets", None)
+                    payload["result"].pop("requested_expected_dns_targets", None)
             return JSONResponse(status_code=202, content=payload)
 
         try:
@@ -27013,6 +27017,7 @@ def create_launchplane_fastapi_app(
         },
     )
 
+    register_dokploy_inventory_read_routes(app, dependencies=driver_read_route_dependencies)
     register_dokploy_target_inspect_read_routes(
         app,
         dependencies=driver_read_route_dependencies,

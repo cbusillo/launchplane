@@ -3,6 +3,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -37,13 +38,26 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                 record_store_factory=lambda: store,
             )
             for creating in (False, True):
-                store.write_product_profile_record(_product_health_monitoring_profile())
+                profile_payload = _product_health_monitoring_profile().model_dump(mode="json")
+                profile_payload["lanes"][0]["health_monitoring"]["checks"][0][
+                    "expected_dns_targets"
+                ] = [
+                    {
+                        "public_name": "cm-testing.example.com",
+                        "addresses": ["8.8.8.8"],
+                    }
+                ]
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile_payload)
+                )
                 payload = _product_health_monitoring_payload()
                 if creating:
                     payload["check_name"] = "new-health-check"
                 plan = await _post_product_health_monitoring(app, payload)
                 self.assertEqual(plan.status_code, 202)
                 self.assertNotIn("current_private_endpoint_key", plan.json()["result"])
+                self.assertNotIn("current_expected_dns_targets", plan.json()["result"])
+                self.assertNotIn("requested_expected_dns_targets", plan.json()["result"])
                 applied = {
                     **payload,
                     "mode": "apply",
@@ -55,6 +69,8 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(response.status_code, 202)
                     self.assertNotIn("current_private_endpoint_key", response.json()["result"])
+                    self.assertNotIn("current_expected_dns_targets", response.json()["result"])
+                    self.assertNotIn("requested_expected_dns_targets", response.json()["result"])
                     if creating:
                         for field in (
                             "current_check_kind",
@@ -132,6 +148,13 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
             )
             path = "/v1/product-profiles/health-monitoring/apply"
             payload = _product_health_monitoring_payload()
+            expected_addresses = ("8.8.8.8",)
+            payload["expected_dns_targets"] = [
+                {
+                    "public_name": "cm-testing.example.com",
+                    "addresses": list(expected_addresses),
+                }
+            ]
             rejected = await request(
                 app,
                 "POST",
@@ -154,11 +177,36 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                 original.lanes[0].health_monitoring.checks[0].private_endpoint_key,
             )
             self.assertEqual(store.read_product_profile_record(original.product), original)
+            self.assertEqual(
+                plan.json()["result"]["requested_expected_dns_targets"],
+                payload["expected_dns_targets"],
+            )
             apply_payload = {
                 **payload,
                 "mode": "apply",
                 "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
             }
+            changed_payload = {
+                **apply_payload,
+                "expected_dns_targets": [
+                    {
+                        "public_name": "cm-testing.example.com",
+                        "addresses": ["1.1.1.1"],
+                    }
+                ],
+            }
+            changed_response = await request(
+                app,
+                "POST",
+                path,
+                payload=changed_payload,
+                headers={
+                    **_browser_mutation_headers(manager, session),
+                    "Idempotency-Key": "changed-dns",
+                },
+            )
+            self.assertEqual(changed_response.status_code, 409)
+            self.assertEqual(store.read_product_profile_record(original.product), original)
             responses = []
             for _ in range(2):
                 responses.append(
@@ -178,6 +226,10 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(responses[1].json()["replayed"])
             saved = store.read_product_profile_record(original.product)
             self.assertTrue(saved.lanes[0].health_monitoring.checks[0].require_runtime_identity)
+            self.assertEqual(
+                saved.lanes[0].health_monitoring.checks[0].expected_dns_targets[0].addresses,
+                expected_addresses,
+            )
             self.assertEqual(saved.lanes[0].health_url, original.lanes[0].health_url)
             self.assertEqual(saved.lanes[1:], original.lanes[1:])
             store.close()

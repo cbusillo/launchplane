@@ -1,6 +1,7 @@
 from control_plane.http_routes.drivers import (
     DriverReadRouteDependencies,
     register_dokploy_target_inspect_read_routes,
+    register_dokploy_inventory_read_routes,
     register_driver_descriptor_read_routes,
     register_operation_status_read_routes,
     register_tracked_target_log_read_routes,
@@ -165,6 +166,7 @@ __all__ = (
     "register_agent_context_read_routes",
     "register_deployment_promotion_read_routes",
     "register_dokploy_target_inspect_read_routes",
+    "register_dokploy_inventory_read_routes",
     "register_driver_descriptor_read_routes",
     "register_evidence_write_routes",
     "register_every_code_feedback_read_routes",
