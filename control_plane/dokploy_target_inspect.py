@@ -429,9 +429,9 @@ def inspect_dokploy_target(
                     provider_target_record.provider_evidence
                 )
             else:
-                # Keep identity/runtime inspection available when a complete safe
-                # planner input cannot be projected. The planner reports the missing
-                # comparison capability rather than weakening its authority check.
+                # Commit to the hidden reference without exposing its evidence.
+                # Missing key configuration leaves identity/runtime reads available;
+                # the planner then reports the precise comparison prerequisite.
                 try:
                     provider_target_summary["comparison_fingerprint"] = (
                         provider_target_comparison_fingerprint(provider_target_record)

@@ -14,6 +14,7 @@ from control_plane.contracts.privileged_operation_worker_heartbeat import (
     PrivilegedOperationWorkerHeartbeatRecord,
 )
 from control_plane.dokploy_target_comparison import (
+    DokployTargetComparisonEvidenceUnavailableError,
     provider_target_comparison_fingerprint,
     require_provider_target_expectation,
 )
@@ -98,6 +99,17 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                         target=target,
                         target_id=target_id,
                     )
+            with patch.dict(os.environ, {}, clear=True), self.assertRaises(ValueError) as refused:
+                require_provider_target_expectation(
+                    current=current,
+                    expected=expected.model_copy(update={"target_id": "stale-target"}),
+                    fingerprint=fingerprint,
+                    target=target,
+                    target_id=target_id,
+                )
+            self.assertNotIsInstance(
+                refused.exception, DokployTargetComparisonEvidenceUnavailableError
+            )
             with patch(
                 "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup"
             ) as fetch:
@@ -532,12 +544,17 @@ class DokployDomainAuthorityPlanningTests(unittest.IsolatedAsyncioTestCase):
                                 )
                                 self.assertEqual(mismatch.status_code, 400, mismatch.text)
                             fetch_domains.return_value = ({"host": "new.synthetic.invalid"},)
+                            fetch_domains.reset_mock()
                             denied_apply = await client.post(
                                 "/v1/dokploy-targets/setup",
                                 json={**body, "mode": "apply"},
                                 headers=headers,
                             )
-                            self.assertGreaterEqual(denied_apply.status_code, 400)
+                            self.assertEqual(denied_apply.status_code, 400, denied_apply.text)
+                            self.assertEqual(
+                                denied_apply.json()["error"]["code"], "invalid_request"
+                            )
+                            fetch_domains.assert_not_called()
                         # A caller that already has the complete private expectation
                         # retains the existing full-comparison path; no record repair
                         # or new grant is required by this source change.

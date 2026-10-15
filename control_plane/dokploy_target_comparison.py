@@ -45,21 +45,19 @@ def require_provider_target_expectation(
 ) -> None:
     reference = current.to_deployed_target_reference()
     if fingerprint:
-        try:
-            current_fingerprint = provider_target_comparison_fingerprint(current)
-        except click.ClickException as error:
-            raise DokployTargetComparisonEvidenceUnavailableError() from error
         # A fingerprint never excuses stale visible identity or conflicting evidence.
-        if (
-            expected.model_copy(update={"provider_evidence": reference.provider_evidence})
-            == reference
-            and (
-                not expected.provider_evidence
-                or expected.provider_evidence == reference.provider_evidence
-            )
-            and hmac.compare_digest(fingerprint.encode(), current_fingerprint.encode())
+        if expected.model_copy(
+            update={"provider_evidence": reference.provider_evidence}
+        ) == reference and (
+            not expected.provider_evidence
+            or expected.provider_evidence == reference.provider_evidence
         ):
-            return
+            try:
+                current_fingerprint = provider_target_comparison_fingerprint(current)
+            except click.ClickException as error:
+                raise DokployTargetComparisonEvidenceUnavailableError() from error
+            if hmac.compare_digest(fingerprint.encode(), current_fingerprint.encode()):
+                return
     elif reference == expected:
         return
     elif (
