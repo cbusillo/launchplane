@@ -23301,7 +23301,11 @@ def create_launchplane_fastapi_app(
             adapter_type = NoTargetProductRetirementAdapter
 
         def disposable_retirement_checkpoint(phase: str) -> None:
-            if phase != "finalize_no_target" and not phase.startswith(("delete_", "preview:")):
+            if phase not in {
+                "preflight",
+                "finalize_authority",
+                "finalize_no_target",
+            } and not phase.startswith(("delete_", "preview:")):
                 return
             require_disposable_lane(
                 cast(DisposableLaneStore, retirement_store),
@@ -23310,7 +23314,9 @@ def create_launchplane_fastapi_app(
                 instance=retirement_request.instance,
                 retirement=True,
             )
-            if phase.startswith("delete_") and plan_record.provider_observation.state == "present":
+            if (
+                phase == "preflight" or phase.startswith("delete_")
+            ) and plan_record.provider_observation.state == "present":
                 control_plane_product_retirement.require_unmounted_retirement_application(
                     control_plane_root=resolved_control_plane_root,
                     target_id=plan_record.provider_observation.target_id,
@@ -23320,9 +23326,8 @@ def create_launchplane_fastapi_app(
                     preview_plan.preview.preview_id
                 )
                 if (
-                    phase.startswith(f"preview:{preview.preview_id}:")
-                    and preview.state != "destroyed"
-                ):
+                    phase == "preflight" or phase.startswith(f"preview:{preview.preview_id}:")
+                ) and preview.state != "destroyed":
                     current = retirement_store.read_product_profile_record(
                         retirement_request.product
                     )

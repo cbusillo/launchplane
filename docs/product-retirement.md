@@ -120,7 +120,7 @@ binding changes: age cannot make known users, needed data or sharing disappear.
 Resolve their underlying source before clearing them. Missing or unknown
 observations do not override the product's explicit prelaunch classification;
 they are neither positive facts nor a way to qualify runtime sync or rebuild.
-An owner answer on the operational issue supplies missing human knowledge;
+The Director's answer on the operational issue supplies missing human knowledge;
 the existing reviewed production-use surface records classification. A reply
 does not waive resource, ownership, executor, review or recovery checks.
 

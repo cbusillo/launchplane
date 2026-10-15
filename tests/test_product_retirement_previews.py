@@ -621,6 +621,43 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertFalse(self.deleted)
 
+    async def test_mounted_testing_app_is_checked_before_any_preview_delete(self) -> None:
+        self.use_director_identity()
+        payload = await self.director_plan()
+        self.apps["testing-app"]["mounts"] = [{"volumeName": "needed-testing-data"}]
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product).lifecycle_state, "active"
+        )
+
+    async def test_later_mounted_preview_is_checked_before_earlier_preview_delete(self) -> None:
+        self.apps["preview-1"] = {
+            **self.apps["preview-6"],
+            "applicationId": "preview-1",
+            "name": "example-site-pr-1",
+            "appName": "example-site-pr-1-abc",
+        }
+        self.use_director_identity()
+        payload = await self.director_plan()
+        self.apps["preview-6"]["mounts"] = [{"volumeName": "needed-preview-data"}]
+        response = await request(
+            self.app,
+            "POST",
+            "/v1/product-retirement",
+            headers=self.director_headers,
+            payload=payload,
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.deleted)
+
     async def test_staff_testing_hold_blocks_retirement_without_observations(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 
@@ -709,6 +746,57 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.read_secret_record(secret.secret_id), secret)
         self.assertIn(binding, self.store.list_secret_bindings())
 
+    async def test_already_absent_app_rechecks_secret_consumers_before_finalization(self) -> None:
+        from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+
+        self.use_director_identity()
+        secret = SecretRecord(
+            secret_id="fixture-late-consumer",
+            scope="context_instance",
+            integration="runtime_environment",
+            name="API_TOKEN",
+            context=self.profile.lanes[0].context,
+            instance="testing",
+            current_version_id="fixture-version",
+            created_at=self.profile.updated_at,
+            updated_at=self.profile.updated_at,
+        )
+        self.store.write_secret_record(secret)
+        payload = await self.director_plan()
+        self.apps.pop("testing-app")
+        binding = SecretBinding(
+            binding_id="fixture-late-production-binding",
+            secret_id=secret.secret_id,
+            integration=secret.integration,
+            binding_key=secret.name,
+            context="another-product",
+            instance="prod",
+            created_at=secret.created_at,
+            updated_at=secret.updated_at,
+        )
+
+        def delete_then_add_consumer(**kwargs: Any) -> None:
+            self.delete_resource(**kwargs)
+            self.store.write_secret_binding(binding)
+
+        with patch(
+            "control_plane.workflows.preview_resource_destroy._delete_preview_resource",
+            side_effect=delete_then_add_consumer,
+        ):
+            response = await request(
+                self.app,
+                "POST",
+                "/v1/product-retirement",
+                headers=self.director_headers,
+                payload=payload,
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(self.store.read_secret_record(secret.secret_id), secret)
+        self.assertIn(binding, self.store.list_secret_bindings())
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product).lifecycle_state, "retiring"
+        )
+
     async def test_usage_hold_before_testing_delete_retains_a_visible_fence_and_receipt(
         self,
     ) -> None:
@@ -738,12 +826,12 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
             )
         self.record_retirement_safety()
         payload = await self.director_plan()
-        calls = 0
 
         def hold(*args: Any, **kwargs: Any) -> str:
-            nonlocal calls
-            calls += 1
-            if calls > 1:
+            if (
+                self.store.read_product_profile_record(self.profile.product).lifecycle_state
+                == "retiring"
+            ):
                 record_safety(
                     self.store,
                     self.profile.product,

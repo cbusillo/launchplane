@@ -679,6 +679,8 @@ class DokployProductRetirementAdapter:
             _require_single_lane_retirement_profile(
                 self._record_store.read_product_profile_record(self._request.product)
             )
+            if self._disposable_checkpoint is not None:
+                self._disposable_checkpoint("preflight")
             self._write_started_record(provider_operation_key)
             if self._lifecycle_before_value in {"retiring", "retired"}:
                 # Restore the existing retirement checkpoint before retry validation.
@@ -1100,6 +1102,8 @@ class DokployProductRetirementAdapter:
         return profile
 
     def _finalize_authority(self, provider_operation_key: str) -> None:
+        if self._disposable_checkpoint is not None:
+            self._disposable_checkpoint("finalize_authority")
         if self._request.include_previews:
             from control_plane.product_retirement_previews import verify_retired_previews
 
