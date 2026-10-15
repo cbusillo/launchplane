@@ -453,6 +453,7 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   const title = PROFILE_FIELD_TITLES[field];
   // The release switch shares the production-use route, which also takes the classification.
   const [productionUse, setProductionUse] = useState<ProductionUse>("unknown");
+  const [needsBootstrapConfirmation, setNeedsBootstrapConfirmation] = useState(false);
   const storageKey = `launchplane:product-profile-draft:${product}:${field}`;
   const [reviewed, setReviewed] = useState<ReviewedProfileField | null>(() => recoverProfileFieldDraft(storageKey));
   const [current, setCurrent] = useState<string | null>(null);
@@ -465,11 +466,14 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
   async function readValue(signal?: AbortSignal): Promise<{ value: string; suggested: string }> {
     if (fixtureMode) {
       const fixtures = await loadDevFixtures();
+      setNeedsBootstrapConfirmation(false);
       setProductionUse(fixtures.productProfileFieldForFixture(fixtureMode, product, "production").value as ProductionUse);
       return fixtures.productProfileFieldForFixture(fixtureMode, product, field);
     }
     const { profile } = await readProductProfile(product, signal);
     setProductionUse(profile.production_use);
+    setNeedsBootstrapConfirmation(profile.production_use === "prelaunch" &&
+      profile.production_use_authority === "director_agent");
     if (field === "release") {
       // A held product's profile omits the switch.
       const release = profile.release_on_acceptance ?? "held";
@@ -582,6 +586,9 @@ function ProductProfileFieldPanel({ product, fixtureMode, field }: {
             : "An explicitly confirmed prelaunch product is exempt from release review. Unknown and live require review."}</p>
       </div></header>
       <p>Current: {current === null ? "Reading profile…" : current || "Not set"}</p>
+      {field === "production" && needsBootstrapConfirmation ? <p>
+        The agent recorded never-live facts only. Production still requires review. To confirm an initial production setup, select Prelaunch and review a new dry run.
+      </p> : null}
       <fieldset disabled={locked || current === null} aria-label={`Change ${title.toLowerCase()}`}>
         <div className="product-config-field"><label htmlFor={`product-${field}-value`}>{title}</label>
           {field === "image" ? <input id={`product-${field}-value`} type="text" value={value} onChange={(event) => setValue(event.target.value)} spellCheck={false} autoCapitalize="none" />

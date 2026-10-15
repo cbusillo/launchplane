@@ -75,8 +75,18 @@ class ProductProductionUseHttpTests(unittest.IsolatedAsyncioTestCase):
                 update={"production_use": "prelaunch", "production_use_authority": "director_agent"}
             )
             store.write_product_profile_record(original)
+            payload = original.model_dump(mode="json")
+            payload.pop("production_use_authority")
+            response = await _asgi_request(
+                _app(store),
+                "POST",
+                "/v1/product-profiles",
+                headers={"Authorization": "Bearer valid-token"},
+                payload=payload,
+            )
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(store.read_product_profile_record(_PRODUCT), original)
             for change in (
-                {},
                 {"production_use_authority": "explicit"},
                 {"production_use": "live"},
             ):

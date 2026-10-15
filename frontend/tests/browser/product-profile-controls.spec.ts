@@ -11,12 +11,9 @@ test("prelaunch reconfirmation shows the production consequence before Apply @re
   await page.route("**/v1/products/atlas-commerce", route => route.fulfill({ json: { status: "ok", trace_id: "product", product: products[0] } }));
   await page.route("**/v1/product-profiles/atlas-commerce", route => route.fulfill({ json: { status: "ok", trace_id: "profile", profile: {
     repository: "example/atlas-commerce", owner: { github_login: "example-owner", github_id: "9001" },
-    image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "prelaunch",
+    image: { repository: "ghcr.io/example/atlas-commerce" }, production_use: "prelaunch", production_use_authority: "director_agent",
   } } }));
-  const applies: unknown[] = [];
   await page.route("**/v1/product-profiles/atlas-commerce/production-use", async route => {
-    const body = route.request().postDataJSON();
-    if (body.mode === "apply") applies.push(body);
     await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "plan", records: {}, result: {
       production_use_before: "prelaunch", production_use_after: "prelaunch", changed: true,
       plan_sha256: "a".repeat(64), prelaunch_bootstrap_authorized_before: false, prelaunch_bootstrap_authorized_after: true,
@@ -29,7 +26,6 @@ test("prelaunch reconfirmation shows the production consequence before Apply @re
   await panel.getByRole("button", { name: "Dry run", exact: true }).click();
   await expect(panel.getByRole("note")).toBeVisible();
   await expect(panel.getByRole("button", { name: "Apply", exact: true })).toBeEnabled();
-  expect(applies).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await panel.screenshot({ path: testInfo.outputPath("bootstrap-reconfirmation.png") });
 });

@@ -12865,6 +12865,10 @@ def create_launchplane_fastapi_app(
             existing_profile = profile_store.read_product_profile_record(profile.product)
         except (FileNotFoundError, KeyError):
             existing_profile = None
+        if existing_profile is not None and "production_use_authority" not in raw_payload:
+            profile = profile.model_copy(
+                update={"production_use_authority": existing_profile.production_use_authority}
+            )
         if existing_profile is not None and (
             profile.production_use != existing_profile.production_use
             or profile.production_use_authority != existing_profile.production_use_authority
