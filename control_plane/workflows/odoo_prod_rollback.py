@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -373,6 +375,7 @@ def execute_odoo_prod_rollback(
     hold_uncertain_effects: bool = False,
     cutover_provider: OdooCutoverProvider | None = None,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooProdRollbackResult:
     """Roll prod back; a queued rollback passes the ``target`` it fixed at enqueue."""
 
@@ -499,6 +502,10 @@ def execute_odoo_prod_rollback(
                 provider_effect_checkpoint=before_provider_effect,
                 hold_uncertain_effects=hold_uncertain_effects,
                 rollback=True,
+                release_website_settings=release_decision.checklist.production_website_settings
+                if release_decision is not None
+                else None,
+                release_operation=True,
             )
         deployment_record = typed_record_store.read_deployment_record(
             replacement_result.deployment_record_id

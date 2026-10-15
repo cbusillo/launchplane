@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.artifact_release_compatibility import ReleaseDatabaseCompatibility
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 
 
 class ReleaseVersion(BaseModel):
@@ -12,6 +13,11 @@ class ReleaseVersion(BaseModel):
     artifact_id: str = Field(min_length=1)
     source_commit: str = Field(pattern=r"^[0-9a-f]{40}$")
     shared_addons_digest: str = ""
+    website_settings_sha256: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ReleaseReviewItem(BaseModel):
@@ -58,6 +64,16 @@ class ReleaseChecklist(BaseModel):
     items: tuple[ReleaseReviewItem, ...]
     untracked_commits: tuple[str, ...] = ()
     additional_changes: tuple[str, ...] = ()
+    website_settings: OdooWebsiteSettingsIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    production_website_settings: OdooWebsiteSettingsIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Preserve the serialized shape and digest of historical website-only decisions.
     shared_sources: tuple[SharedSourceReview, ...] = Field(
         default=(),
@@ -72,6 +88,17 @@ class ReleaseChecklist(BaseModel):
 
     @model_validator(mode="after")
     def validate_database_compatibility(self) -> "ReleaseChecklist":
+        for settings, version in (
+            (self.website_settings, self.candidate),
+            (self.production_website_settings, self.production),
+        ):
+            if (settings is None) != (not version.website_settings_sha256):
+                raise ValueError("Website settings snapshot and digest must be present together.")
+            if settings is not None and (
+                settings.artifact_id != version.artifact_id
+                or settings.settings.digest != version.website_settings_sha256
+            ):
+                raise ValueError("Website settings must match the reviewed artifact and digest.")
         compatibility = self.database_compatibility
         if compatibility is not None and (
             compatibility.production_artifact_id != self.production.artifact_id

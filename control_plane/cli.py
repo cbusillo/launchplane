@@ -2668,9 +2668,12 @@ def _write_odoo_instance_override_apply_result(
                 status=status,
                 applied_at=now if status in {"pass", "fail"} else "",
                 detail=detail,
+                website_settings=record.last_apply.website_settings,
+                website_settings_verified=record.last_apply.website_settings_verified,
             ),
             updated_at=now,
             source_label="odoo-post-deploy-driver",
+            preserve_website_settings=True,
         )
     finally:
         postgres_store.close()

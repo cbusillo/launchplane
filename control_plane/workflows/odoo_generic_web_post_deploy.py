@@ -48,6 +48,7 @@ def execute_odoo_generic_web_post_deploy(
         control_plane_root=control_plane_root,
         record_store=record_store,
         request=OdooPostDeployRequest(context=context.context, instance=context.instance),
+        artifact_id=context.artifact_id,
         provider_effect_checkpoint=guard.checkpoint_effect,
         provider_operation_title=guard.deployment_title,
     )
