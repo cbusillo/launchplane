@@ -837,6 +837,9 @@ from control_plane.service_auth import (
     effective_administrator_quorum,
 )
 from control_plane.service_human_auth import (
+    GitHubOAuthLoginClient,
+    GitHubIdentityUnavailable,
+    HumanSessionUpdateBusy,
     BROWSER_CSRF_HEADER_NAME,
     HumanSessionManager,
     LaunchplaneHumanSession,
@@ -1369,21 +1372,6 @@ class PreviewDesiredStateWriteStore(Protocol):
         self,
         record: PreviewDesiredStateRecord,
     ) -> object: ...
-
-
-class GitHubOAuthLoginClient(Protocol):
-    def authorization_url(
-        self, *, state: str, code_challenge: str, reauthenticate: bool = False
-    ) -> str: ...
-
-    def fetch_identity(
-        self,
-        *,
-        code: str,
-        code_verifier: str,
-        authz_policy: LaunchplaneAuthzPolicy,
-        is_product_owner: Callable[[int], bool] | None = None,
-    ) -> GitHubHumanIdentity: ...
 
 
 class OAuthLoginStateRepository(Protocol):
@@ -4631,6 +4619,7 @@ def create_launchplane_fastapi_app(
         session = human_session_manager.read_cookie(cookie_header, allow_owner=allow_owner)
         if session is None:
             return None
+        original_expires_at = session.expires_at
         if session.identity.role == "owner":
             # An Owner session stays confined: it is re-checked only for current
             # ownership and never picks up a policy role mid-session. A later
@@ -4640,28 +4629,40 @@ def create_launchplane_fastapi_app(
                 return None
             session = owner_checked
         elif enforce_human_policy_revalidation:
+            try:
+                session = human_session_manager.refresh_authorization_claims(
+                    session,
+                    client=github_oauth_client,
+                    authz_policy=resolved_authz_policy_runtime.policy,
+                )
+            except HumanSessionUpdateBusy:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=next_trace_id(),
+                    code="identity_verification_pending",
+                    message="GitHub identity verification is in progress. Retry this read shortly.",
+                    headers={"Cache-Control": "no-store"},
+                ) from None
+            if session is None:
+                return None
             if not human_session_manager.authorization_claims_are_current(session):
                 human_session_manager.revoke(session)
                 return None
-            current_role = human_session_manager.authorized_role(
-                identity=session.identity,
-                authz_policy=resolved_authz_policy_runtime.policy,
-            )
-            if current_role == "admin":
-                resolved_role: Literal["read_only", "admin", "owner"] = "admin"
-            elif current_role == "read_only":
-                resolved_role = "read_only"
-            else:
-                return None
-            if resolved_role != session.identity.role:
-                session = replace(
-                    session,
-                    identity=replace(session.identity, role=resolved_role),
-                )
         renewed_session = human_session_manager.renew_if_needed(session)
         if renewed_session is None:
             return None
-        return renewed_session, renewed_session.expires_at != session.expires_at
+        if enforce_human_policy_revalidation and renewed_session.identity.role != "owner":
+            current_role = human_session_manager.authorized_role(
+                identity=renewed_session.identity,
+                authz_policy=resolved_authz_policy_runtime.policy,
+            )
+            if current_role not in {"admin", "read_only"}:
+                human_session_manager.revoke(renewed_session)
+                return None
+            renewed_session = replace(
+                renewed_session, identity=replace(renewed_session.identity, role=current_role)
+            )
+        return renewed_session, renewed_session.expires_at != original_expires_at
 
     def read_human_session_identity(
         *,
@@ -4873,7 +4874,7 @@ def create_launchplane_fastapi_app(
                 "GitHub OAuth callback is missing a valid code or state.",
             )
         try:
-            human_identity = github_oauth_client.fetch_identity(
+            login = github_oauth_client.fetch_identity(
                 code=callback_code,
                 code_verifier=login_state.code_verifier,
                 authz_policy=resolved_authz_policy_runtime.policy,
@@ -4890,13 +4891,29 @@ def create_launchplane_fastapi_app(
                     ),
                 ).model_dump(mode="json"),
             )
-        except (OSError, RequestException, RuntimeError, ValueError):
-            _LOGGER.exception("GitHub OAuth callback failed", extra={"trace_id": trace_id})
+        except (OSError, RequestException, GitHubIdentityUnavailable):
+            return JSONResponse(
+                status_code=503,
+                content=LaunchplaneErrorResponse(
+                    trace_id=trace_id,
+                    error=LaunchplaneErrorDetail(
+                        code="oauth_provider_unavailable",
+                        message="GitHub sign-in is temporarily unavailable.",
+                    ),
+                ).model_dump(mode="json"),
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as error:
+            # OAuth errors may carry token responses. Emit only trace and type.
+            _LOGGER.error(
+                "GitHub OAuth callback failed",
+                extra={"trace_id": trace_id, "failure_type": type(error).__name__},
+            )
             return reject_invalid_github_oauth_callback(
                 trace_id,
                 "GitHub OAuth callback could not be completed.",
             )
-        session = human_session_manager.issue(human_identity)
+        session = human_session_manager.issue(login.identity, login.credential)
         return RedirectResponse(
             url=login_state.return_to,
             status_code=302,
@@ -4943,10 +4960,19 @@ def create_launchplane_fastapi_app(
     ) -> AuthLogoutResponse:
         trace_id = next_trace_id()
         if human_session_manager is not None:
-            session_result = read_human_session(cookie_header=cookie, allow_owner=True)
-            if session_result is not None:
-                session, _was_renewed = session_result
-                consume_browser_mutation_request(request=request, session=session)
+            session = human_session_manager.read_cookie_without_renewal(cookie, allow_owner=True)
+            if session is not None:
+                try:
+                    consume_browser_mutation_request(request=request, session=session)
+                except HTTPException:
+                    # A concurrent failed refresh may have revoked the row
+                    # while CSRF consumption waited. An ended session can be
+                    # cleared; a live session still requires valid CSRF proof.
+                    if (
+                        human_session_manager.read_cookie_without_renewal(cookie, allow_owner=True)
+                        is not None
+                    ):
+                        raise
             human_session_manager.delete_cookie_session(cookie)
             clear_cookie = human_session_manager.clear_cookie_header()
         else:
@@ -8877,10 +8903,51 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
         )
+        from control_plane.testing_activation import require_activation_hold_lift
+
+        if hold_request.activation_plan_sha256 and not director_agent_identity(identity):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Activation continuation requires the original Director agent.",
+            )
+        activated_interlock = director_agent_identity(identity) and bool(
+            hold_request.activation_plan_sha256
+        )
+
+        async def verify_activation_interlock() -> None:
+            if not activated_interlock:
+                return
+            try:
+                await run_in_worker_thread(
+                    lambda: require_activation_hold_lift(
+                        record_store,
+                        hold_request,
+                        launchplane_identity_actor(identity),
+                        resolved_control_plane_root,
+                        inspect_provider=hold_request.mode == "apply",
+                    )
+                )
+            except (
+                ValueError,
+                FileNotFoundError,
+                RuntimeError,
+                OSError,
+                click.ClickException,
+            ) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="testing_activation_unverified",
+                    message="The original activation interlock is not safe to lift.",
+                ) from error
+
         if (
             isinstance(identity, LocalOperatorIdentity)
             and not hold_request.hold
             and (hold_request.mode == "apply" or not director_agent_identity(identity))
+            and not activated_interlock
         ):
             # Lifting a hold requests a testing reconcile, which can deploy.
             raise _launchplane_http_error(
@@ -8904,6 +8971,7 @@ def create_launchplane_fastapi_app(
             "instance": hold_request.instance,
         }
         if hold_request.mode == "dry-run":
+            await verify_activation_interlock()
             try:
                 plan, _replacement = control_plane_testing_lane_hold.build_testing_hold_plan(
                     record_store=typed_store, request=hold_request, actor=actor
@@ -8942,22 +9010,37 @@ def create_launchplane_fastapi_app(
         )
         if replay_response is not None:
             return replay_response
+        await verify_activation_interlock()
         try:
-            applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
-                record_store=typed_store,
-                request=hold_request,
-                actor=actor,
-                required_context_owner=(
-                    (hold_request.product, hold_request.context)
-                    if isinstance(identity, LocalOperatorIdentity)
-                    else None
-                ),
-                required_product_config_target=(
-                    hold_request.product,
-                    hold_request.context,
-                    hold_request.instance,
-                ),
-            )
+            with (
+                record_store.serialize_disposable_testing_resources()
+                if activated_interlock and isinstance(record_store, PostgresRecordStore)
+                else nullcontext()
+            ):
+                if activated_interlock:
+                    require_activation_hold_lift(
+                        record_store,
+                        hold_request,
+                        actor,
+                        resolved_control_plane_root,
+                        inspect_provider=False,
+                    )
+                applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
+                    record_store=typed_store,
+                    request=hold_request,
+                    actor=actor,
+                    required_context_owner=(
+                        (hold_request.product, hold_request.context)
+                        if isinstance(identity, LocalOperatorIdentity)
+                        else None
+                    ),
+                    required_product_config_target=(
+                        hold_request.product,
+                        hold_request.context,
+                        hold_request.instance,
+                    ),
+                    activation_verified=activated_interlock,
+                )
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
@@ -8982,6 +9065,15 @@ def create_launchplane_fastapi_app(
         except control_plane_testing_lane_hold.TestingHoldStale as error:
             raise _launchplane_http_error(
                 status_code=409, trace_id=trace_id, code="stale", message=str(error)
+            ) from error
+        except ValueError as error:
+            if not activated_interlock:
+                raise
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="testing_activation_unverified",
+                message="The original activation interlock is not safe to lift.",
             ) from error
         response = accepted_evidence_response(
             trace_id=trace_id, records=records, result=applied_plan.model_dump(mode="json")
@@ -29200,6 +29292,16 @@ def create_launchplane_fastapi_app(
     )
 
     register_testing_separation_resource_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        actor=launchplane_identity_actor,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
+    from control_plane.http_routes.testing_activation import register_testing_activation_routes
+
+    register_testing_activation_routes(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,

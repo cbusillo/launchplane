@@ -8,7 +8,7 @@ from uuid import uuid4
 
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager, nullcontext, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from functools import wraps
 import hashlib
@@ -546,7 +546,11 @@ from control_plane.service_auth import (
     effective_administrator_quorum,
     strict_immutable_github_human_administrator_ids,
 )
-from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
+from control_plane.service_human_auth import (
+    HumanSessionStore,
+    HumanSessionUpdateBusy,
+    LaunchplaneHumanSession,
+)
 from control_plane.storage import landing_authority
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
@@ -3728,6 +3732,13 @@ class LaunchplaneFreshOdooTestingGenerationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneTestingActivationRow(Base):
+    __tablename__ = "launchplane_testing_activations"
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneProductProfileRow(Base):
     __tablename__ = "launchplane_product_profiles"
     __table_args__ = (
@@ -5532,6 +5543,10 @@ def _human_session_payload(session: LaunchplaneHumanSession) -> PayloadDict:
         "created_at": session.created_at.isoformat(),
         "expires_at": session.expires_at.isoformat(),
         "csrf_generation": session.csrf_generation,
+        "claims_verified_at": session.claims_verified_at.isoformat()
+        if session.claims_verified_at
+        else None,
+        "oauth_credential": session.oauth_credential,
         "identity": {
             "login": session.identity.login,
             "github_id": session.identity.github_id,
@@ -5570,6 +5585,12 @@ def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession
         created_at=datetime.fromisoformat(str(payload.get("created_at") or "")),
         expires_at=datetime.fromisoformat(str(payload.get("expires_at") or "")),
         csrf_generation=csrf_generation,
+        claims_verified_at=(
+            datetime.fromisoformat(str(payload["claims_verified_at"]))
+            if payload.get("claims_verified_at")
+            else None
+        ),
+        oauth_credential=str(payload.get("oauth_credential") or ""),
         identity=GitHubHumanIdentity(
             login=str(identity_payload.get("login") or ""),
             github_id=int(identity_payload.get("github_id") or 0),
@@ -10411,6 +10432,72 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
             return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
 
+    def read_testing_activation(self, product: str, context: str) -> dict[str, Any] | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneTestingActivationRow, (product, context))
+            return dict(row.payload) if row else None
+
+    def write_testing_activation(
+        self,
+        *,
+        expected: dict[str, Any] | None,
+        replacement: dict[str, Any],
+        bundle: ProductAuthorityBundle | None = None,
+    ) -> None:
+        """CAS custody and lane publication in one authority transaction."""
+        from control_plane.contracts.testing_activation import TestingActivationRecord
+
+        record = TestingActivationRecord.model_validate(replacement)
+        with self._session_factory() as session:
+            if bundle is not None:
+                self._write_product_authority_bundle(bundle, write_session=session, commit=False)
+            else:
+                self._begin_serialized_write(session)
+                self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneTestingActivationRow,
+                (record.product, record.context),
+                with_for_update=True,
+            )
+            if (TestingActivationRecord.model_validate(row.payload) if row else None) != (
+                TestingActivationRecord.model_validate(expected) if expected is not None else None
+            ):
+                raise ValueError("Testing activation custody changed.")
+            if expected is not None:
+                previous = TestingActivationRecord.model_validate(expected)
+                mutable = {
+                    "project_id",
+                    "environment_id",
+                    "target_id",
+                    "app_name",
+                    "before_configuration_sha256",
+                    "phase",
+                    "published",
+                    "qualified_at",
+                    "published_target",
+                }
+                if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
+                    raise ValueError("Testing activation identities are immutable.")
+                for key in (
+                    "project_id",
+                    "environment_id",
+                    "target_id",
+                    "app_name",
+                    "before_configuration_sha256",
+                ):
+                    if getattr(previous, key) and getattr(previous, key) != getattr(record, key):
+                        raise ValueError("Testing activation placement is immutable.")
+                if previous.published and not record.published:
+                    raise ValueError("Testing activation publication cannot be undone.")
+            session.merge(
+                LaunchplaneTestingActivationRow(
+                    product=record.product,
+                    context=record.context,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+
     def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -13402,6 +13489,67 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
         return tuple(affected_operation_ids)
 
+    def delete_expired_sessions(self, now: datetime) -> None:
+        with self._session_factory() as session:
+            # Issuance stores UTC ISO timestamps. Skip any expired row whose
+            # worker still owns it; a later login/refresh will collect it.
+            expired = (
+                select(LaunchplaneHumanSessionRow.session_id)
+                .where(
+                    LaunchplaneHumanSessionRow.expires_at
+                    <= now.astimezone(timezone.utc).isoformat()
+                )
+                .with_for_update(skip_locked=True)
+            )
+            session.execute(
+                delete(LaunchplaneHumanSessionRow).where(
+                    LaunchplaneHumanSessionRow.session_id.in_(expired)
+                )
+            )
+            session.commit()
+
+    def update_session(
+        self,
+        session_id: str,
+        update: Callable[[LaunchplaneHumanSession], LaunchplaneHumanSession | None],
+        *,
+        skip_locked: bool = False,
+    ) -> LaunchplaneHumanSession | None:
+        # A refresh token is single-use. Serialize the provider exchange and
+        # durable replacement across workers; never upsert a deleted session.
+        statement = (
+            select(LaunchplaneHumanSessionRow)
+            .where(LaunchplaneHumanSessionRow.session_id == session_id)
+            .with_for_update(skip_locked=skip_locked)
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                if (
+                    skip_locked
+                    and session.scalar(
+                        select(LaunchplaneHumanSessionRow.session_id).where(
+                            LaunchplaneHumanSessionRow.session_id == session_id
+                        )
+                    )
+                    is not None
+                ):
+                    raise HumanSessionUpdateBusy()
+                return None
+            current = _human_session_from_payload(row.payload)
+            updated = update(current) if current.expires_at > datetime.now(timezone.utc) else None
+            if updated is None:
+                session.delete(row)
+            elif updated != current:
+                row.login = updated.identity.login
+                row.github_id = updated.identity.github_id
+                row.role = updated.identity.role
+                row.created_at = updated.created_at.isoformat()
+                row.expires_at = updated.expires_at.isoformat()
+                row.payload = _human_session_payload(updated)
+            session.commit()
+            return updated
+
     def write_session(self, session: LaunchplaneHumanSession) -> None:
         self._write_row(
             LaunchplaneHumanSessionRow(
@@ -13479,12 +13627,11 @@ class PostgresRecordStore(HumanSessionStore):
                 return False
             if current_session.csrf_generation != expected_generation:
                 return False
-            row.login = human_session.identity.login
-            row.github_id = human_session.identity.github_id
-            row.role = human_session.identity.role
-            row.created_at = human_session.created_at.isoformat()
-            row.expires_at = human_session.expires_at.isoformat()
-            row.payload = _human_session_payload(human_session)
+            # CSRF consumption must not restore the credential/claims snapshot
+            # read before a concurrent provider refresh.
+            row.payload = _human_session_payload(
+                replace(current_session, csrf_generation=human_session.csrf_generation)
+            )
             session.commit()
         return True
 

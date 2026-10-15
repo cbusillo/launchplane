@@ -129,7 +129,9 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     agent_authz_audit,
 )
+from control_plane.service_human_credentials import GitHubOAuthCredential
 from control_plane.service_human_auth import (
+    GitHubOAuthLogin,
     GitHubOAuthConfig,
     HumanSessionManager,
     LaunchplaneHumanSession,
@@ -4665,14 +4667,19 @@ class _StubFastApiGitHubOAuthClient:
         code_verifier: str,
         authz_policy: LaunchplaneAuthzPolicy,
         is_product_owner: Callable[[int], bool] | None = None,
-    ) -> GitHubHumanIdentity:
+    ) -> GitHubOAuthLogin:
         del authz_policy
         self.code_verifier = code_verifier
         if self.permission_error:
             raise PermissionError("not authorized")
         if self.fail_fetch or code != "github-code":
             raise ValueError("unexpected code")
-        return self.identity
+        return GitHubOAuthLogin(self.identity, GitHubOAuthCredential("test-access-token"))
+
+    def revalidate(
+        self, credential: GitHubOAuthCredential, *, authz_policy: LaunchplaneAuthzPolicy
+    ) -> GitHubOAuthLogin:
+        return GitHubOAuthLogin(self.identity, credential)
 
 
 class _MissingProductReadStore:

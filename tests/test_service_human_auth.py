@@ -26,6 +26,8 @@ from control_plane.service_human_auth import (
 
 
 class _FakeGitHubResponse:
+    status_code = 200
+
     def __init__(self, payload: object) -> None:
         self._payload = payload
 
@@ -43,11 +45,15 @@ class _FakeOAuthSession:
         self.authorization_kwargs = kwargs
         return "https://github.example/authorize", str(kwargs["state"])
 
-    def fetch_token(self, *_args: object, **_kwargs: object) -> None:
+    def fetch_token(self, *_args: object, **_kwargs: object) -> dict[str, str]:
         self.token_fetched = True
+        return {"access_token": "test-access-token", "token_type": "bearer"}
 
-    def get(self, url: str) -> _FakeGitHubResponse:
-        return _FakeGitHubResponse(self._payloads[url])
+    def close(self) -> None:
+        pass
+
+    def get(self, url: str, **kwargs: object) -> _FakeGitHubResponse:
+        return _FakeGitHubResponse(self._payloads[url.split("?", 1)[0]])
 
 
 def _config(*, session_secret: str = "session-secret") -> GitHubOAuthConfig:
@@ -93,7 +99,7 @@ def _oauth_session() -> _FakeOAuthSession:
             },
             GITHUB_ORGS_URL: [],
             GITHUB_TEAMS_URL: [],
-            GITHUB_EMAILS_URL: [],
+            GITHUB_EMAILS_URL: [{"email": "alice@example.com", "verified": True, "primary": True}],
         }
     )
 
@@ -197,7 +203,7 @@ class HumanSessionManagerTests(unittest.TestCase):
                 authz_policy=policy,
             )
 
-        self.assertEqual(identity.role, "admin")
+        self.assertEqual(identity.identity.role, "admin")
 
     def test_oauth_db_policy_admin_retires_bootstrap_admin(self) -> None:
         oauth_session = _oauth_session()

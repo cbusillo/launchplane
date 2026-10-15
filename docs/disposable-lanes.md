@@ -223,6 +223,12 @@ work happened or permit apply while required physical isolation is unknown.
 
 ## Independent storage under a retained generic-web hold and deploy fence
 
+The [complete activation continuation](testing-activation.md) consumes this
+original allocation on a fresh recipient, retaining the old target, unchanged
+hold and historical fence. Its exact-receipt hold continuation is the bounded
+exception to the ordinary Director-agent staging-lift refusal described above.
+It proves separation before requesting normal testing reconciliation.
+
 `POST /v1/products/{product}/testing-separation-resources` provides preparation
 when the old testing recipient cannot be changed. It accepts only the exact
 owned generic-web testing context, a reason, mode and reviewed plan digest.
