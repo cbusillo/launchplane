@@ -29338,6 +29338,16 @@ def create_launchplane_fastapi_app(
         root=resolved_control_plane_root,
         run_provider_mutation=run_provider_mutation,
     )
+    from control_plane.http_routes.production_recipient import register_production_recipient_routes
+
+    register_production_recipient_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        actor=launchplane_identity_actor,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
     register_testing_replacement_resource_routes(
         app,
         dependencies=read_route_dependencies,
