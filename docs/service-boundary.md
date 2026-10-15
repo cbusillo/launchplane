@@ -2690,7 +2690,11 @@ requires `dokploy_target.inspect` authz for product/context `launchplane`, reads
 Dokploy through Launchplane-managed secrets, and returns a redacted identity
 summary only: target ids, names, project/environment/server identity, domain
 summaries, source metadata, and environment key names/counts. It must not return
-raw provider payloads or environment values. For a tracked target, its
+raw provider payloads or environment values. A tracked target's `public_hosts`
+returns its stored product-config hostname intent separately from origin `domains`
+and the provider's observed domain summaries. Compare those lists before HTTP
+Host/runtime qualification; provider routes alone do not establish managed intent.
+For a tracked target, its
 `provider_target_record` includes the complete stored `provider_evidence` for
 the domain-authority planner's expected-current reference when it is empty or
 exactly matches canonical Dokploy metadata derived from the tracked target and
