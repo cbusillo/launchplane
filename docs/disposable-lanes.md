@@ -643,6 +643,15 @@ ambiguous or failed published captures merely because time has elapsed. Default
 SSH generations retain their previous stored field shape; this does not promise
 that older images can interpret native generations or newer schema migrations.
 
+Replacement planning preflights the fresh generation's effective restore overrides
+against the strict integration policy. Integration or analytics settings, connection
+fence replacements, and Shopify actions other than clear block the plan with a
+fixed, value-free description. Use sanitized overrides to continue. Execution
+rechecks the intent before replacement effects and before post-deploy environment
+or schedule writes; drift records `deploy_blocked.fresh_testing_intent_invalid`
+instead of an unexpected failure. Completed generations and production keep their
+ordinary deployment paths.
+
 The service compares the existing local testing passwords with the supported
 production source's managed versions internally, without returning or retaining
 plaintext or password hashes. Missing versions or overlap refuse preparation;
