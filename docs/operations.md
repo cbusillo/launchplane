@@ -962,6 +962,8 @@ Current implementation scope:
 - `POST /v1/product-onboarding/apply`
 - `POST /v1/product-profiles/stable-lane-repair/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
+- `GET /v1/health-alert-drills` and `POST /v1/health-alert-drills` —
+  [current routing and isolated Discord test alerts](health-alert-drills.md)
 - `POST /v1/every-code/notification-policies/apply`
 - `POST /v1/public-ingress/notification-policies/apply`
 - `POST /v1/previews/lifecycle-plan`
@@ -1899,6 +1901,47 @@ not lane-owned text config. The initial notification destinations are GitHub
 issues, email, and Discord; each is selected by DB-backed policy and evidenced
 by delivery-attempt records. The DB-backed monitor commits enabled destinations'
 material-event deliveries in the same transaction as the observation and incident.
+
+Production delivery has separate `production-delivery-*` provider incidents.
+Rejected production deploy/promotion requests record a bounded reason code and
+the caller's trace even when refusal precedes deployment-record creation.
+The service's independent delivery-monitor thread checks terminal deployment,
+promotion and queued Odoo release failures once per minute, including products
+without HTTP health checks. As with other incidents, existing matching
+notification policies select the Discord destination; no credential or new
+destination is created by monitoring. Check-scoped HTTP-only policies do not
+match provider incidents. Confirm the product's existing Director notification
+policy covers provider incidents when qualifying notification delivery. The
+route must have passed its existing product-scope authorization check; ordinary
+in-progress retries and idempotency-protocol errors do not open delivery incidents.
+
+The same monitor compares each Live product's recorded default branch with
+production through the existing read-only source adapter. A durable pending
+source receipt raises attention after one hour (`PRODUCTION_DELIVERY_LAG_SECONDS`),
+including missing/failed builds, testing qualification, held Client acceptance,
+backup refusals and stalled promotion. New merges and service restarts do not
+reset an outstanding deadline. The source's recorded merge-commit time starts the
+deadline when available, otherwise first observation does. Source-read failure
+opens separate monitoring-unavailable attention and cannot resolve a delivery
+incident. A later verified source read resolves only that monitoring incident.
+Explicit lifecycle retirement resolves automatic delivery monitoring; prelaunch
+products have no automatic production deadline. This is notification evidence,
+never acceptance or a release gate.
+
+Exact replays of an unresolved candidate retain its original reason and trace and
+reuse the incident/outbox. A different failure stage updates that incident, and
+the existing policy controls reminders. Healthy checks of the old artifact cannot clear it.
+A later successful delivery clears only the matching candidate. Production-lag
+attention clears when production reaches the observed default-branch source.
+Unidentified requests retain their request identity rather than borrowing a
+testing artifact, especially for rollback; they require matching recovery
+evidence and are never cleared by an unrelated promotion. Unexpected Client
+release failures before a step record exists also create delivery attention.
+Runtime-health observations stay independent. Inspect the product environment's
+incident detail for material events, delivery attempts and outbox state; transport
+recovery does not resolve a delivery failure. Existing outbox retry and
+unknown-send rules below apply. File-backed rehearsals retain evidence; automatic
+durable notification delivery runs through the service's DB-backed outbox.
 The outbox worker sends email and Discord as well as GitHub notifications, so a
 healthy probe after recovery does not need to manufacture another resolution
 for delivery to resume. Each delivery keeps the original event and rendered body;
@@ -2297,6 +2340,8 @@ re-encryption apply unless the Director approves the exact new plan digest. If
 automatic compensation is rejected or fails, require manual admin follow-up
 and a clean legacy-only dry-run baseline before proceeding.
 
+### Dokploy domain authority
+
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact
 tracked target type and target ID, a comma-separated tuple of bare DNS hosts,
@@ -2309,6 +2354,28 @@ preserves all target metadata except `domains`, `updated_at`, and
 `source_label`. The same atomic write advances only `updated_at` and
 `source_label` on the canonical provider-target projection so downstream
 projection checks remain consistent.
+
+For domain-authority dry runs, `GET /v1/dokploy-targets/inspect`
+continues to expose complete empty/canonical evidence privately. When the stored
+provider evidence cannot be safely exposed, it instead supplies
+`provider_target_record.comparison_fingerprint`, a keyed commitment to the full
+reference plus its context and instance. Send it as
+`expected_current_provider_target_fingerprint` with the visible
+`expected_current_provider_target` and the exact observed domains to the setup
+route in dry-run mode. Both inspection and this dry-run response omit arbitrary
+stored evidence. The fingerprint supplies comparison evidence only; authorization,
+exclusive lane ownership, visible target identity, live provider identity and the
+exact domain set are still checked. Neither read nor plan writes records.
+
+Fingerprint comparison uses the existing managed-secret key ring, with its own
+purpose. If that bootstrap configuration is unavailable, ordinary inspection
+still works and the plan reports `dokploy_target_comparison_evidence_unavailable`
+with its trace. Repeat inspection after configuration is available. Authority
+drift, a different lane, or key rotation invalidates the fingerprint; inspect
+again rather than retrying an old expectation. Fingerprints are accepted only
+for domain-authority dry runs. Apply retains the complete private reference and
+its existing credential, confirmation and idempotency gates. Keep fingerprints
+and private comparison input out of public helper receipts.
 
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:
@@ -3909,6 +3976,10 @@ structured attestation with a provider inspection timestamp between the fence
 and cancellation request, the observed provider state, an evidence reference,
 and explicit `safe_to_release=true`; running work returns
 `409 operation_not_pending`.
+Held service-owned testing replacements instead return
+`409 service_testing_recovery_required`; use [worker recovery or isolated
+testing-generation replacement](event-driven-deploys.md#stranded-odoo-testing-replacements),
+which does not accept a caller attestation in place of its safety checks.
 
 Runtime identity is a driver-owned breadcrumb, not tenant config. Launchplane
 injects `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`, `LAUNCHPLANE_DEPLOYMENT_RECORD_ID`,
@@ -4565,3 +4636,62 @@ preview without `fishbowl_source` is again source-free, including on a new PR
 head. Reselect the source explicitly when new-head import proof is needed.
 There is no production
 or stable-lane rollback because neither was changed.
+
+### Testing import diagnostics
+
+`GET /v1/products/{product}/environments/testing/odoo-import-diagnostics`
+requires the existing `operations.read` authorization for the selected
+product and testing instance. It accepts no query parameters, SQL, endpoints,
+usernames or credentials. The response is `Cache-Control: no-store`.
+
+The read resolves the product's current testing lane and verifies its running
+Odoo container, immutable artifact and runtime identity. Through that verified
+origin it reads only the fixed cm_data, RepairShopr and Fishbowl import parameter
+keys. Comparisons with current lane runtime authority and the selected managed
+password stay inside Launchplane; the response contains presence and agreement
+categories only. Missing, ambiguous, unsafe or undecryptable bindings never
+select a personal/writer fallback. A source needs an exact testing binding
+classified `testing` or `non_prod`, or `shared_safe` with read-only sharing evidence, and its
+existing `read_only_source` allowance. Classification alone proves no privilege.
+
+Retired password keys are excluded by the same binding selector used for lane
+delivery. Non-secret agreement remains visible when a password binding is refused.
+A source is probed only when its managed host and port agree with the applied
+Odoo parameters; changing runtime intent cannot send a password to an unapplied
+endpoint. A password mismatch for the same applied source account also leaves
+grants unknown without attempting a login.
+
+Each source's selected managed connection is independently inspected using
+`SHOW GRANTS`, without reading customer tables or trying a write. Connections
+require verified TLS. Only the configured `SSL_CERT_FILE` and `SSL_CERT_DIR`
+trust paths are inherited by the child; service secrets and other environment
+variables are excluded. A separate process bounds each attempt, including DNS,
+to ten seconds and discards stderr. Repeated unqualified probes have a 60-second
+cooldown in each service process/replica; concurrent requests for that credential return unknown.
+At most four source probes run concurrently per process. Successful grant results
+are never cached. Retry a cooled-down unknown after the interval; no read can
+guarantee that source authentication does not update its own audit/failure counters.
+Odoo authentication can also produce Odoo login audit records; the read does not
+write business records.
+Only SELECT, SHOW VIEW, SHOW DATABASES and
+USAGE are accepted; grant options or other privileges are unsafe. Role grants,
+partial revokes, unrecognized syntax and incomplete results stay unknown.
+Applicable roles are not expanded by this version. This follows the
+[MySQL SHOW GRANTS contract](https://dev.mysql.com/doc/refman/8.0/en/show-grants.html).
+
+`managed_connection_grants` describes the account MySQL selected for the
+connection from Launchplane, not a connection originating in Odoo. MySQL can
+select different host-qualified accounts for those two origins, so
+`applied_connection_grants` remains unknown. Even matching applied parameters
+and a read-only managed observation do not establish the runtime account's
+effective privileges or complete credential qualification. Do not use this
+read as authorization to run an importer or as proof that testing holds no
+production-capable key. No production credential is decrypted or tested.
+
+The service rechecks lane authority, binding/version selection, the same
+container and applied parameters after source I/O. Changes discard the evidence.
+Unavailable runtime reads return a fixed unknown result; individual source
+failures do not hide other source observations. Responses, errors and logs
+contain no passwords, hashes, host/account values or raw grant rows. This read
+changes no configuration, binding, account, grants, runtime, source data or
+business data, and invokes no importer, deployment or synchronization.

@@ -1,6 +1,7 @@
 """Exact source-control change comparisons used when carrying decisions across base merges."""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 import re
 from typing import Final
 from urllib.parse import quote
@@ -9,6 +10,41 @@ _COMPARE_FILE_LIMIT: Final = 300
 _HUNK_HEADER: Final = re.compile(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$", re.MULTILINE)
 SourceControlRead = Callable[[str], object]
 ChangeFingerprint = tuple[tuple[str, str, str, str, str, str], ...]
+
+
+@dataclass(frozen=True)
+class SourceRevision:
+    commit: str
+    committed_at: str
+
+
+def read_branch_revision(
+    *, repository: str, branch: str, read: SourceControlRead
+) -> SourceRevision | None:
+    source = _object(read(f"/repos/{_path(repository)}/commits/{quote(branch, safe='')}"))
+    commit = _text(source.get("sha"))
+    if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+        return None
+    committer = _object(_object(source.get("commit")).get("committer"))
+    return SourceRevision(commit=commit, committed_at=_text(committer.get("date")))
+
+
+def revision_contains(
+    *, repository: str, ancestor: str, head: str, read: SourceControlRead
+) -> bool | None:
+    if ancestor == head:
+        return True
+    comparison = _object(
+        read(
+            f"/repos/{_path(repository)}/compare/{quote(ancestor, safe='')}...{quote(head, safe='')}"
+        )
+    )
+    status = comparison.get("status")
+    if status in {"ahead", "identical"}:
+        return True
+    if status in {"behind", "diverged"}:
+        return False
+    return None
 
 
 def change_fingerprint(

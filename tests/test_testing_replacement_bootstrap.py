@@ -1,6 +1,7 @@
 """Fresh generation continuation against real record transactions and fake provider IO."""
 
 from pathlib import Path
+from datetime import datetime, timedelta
 from typing import Any
 import unittest
 from unittest.mock import Mock, patch
@@ -307,6 +308,504 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
 
 
 class FreshTestingBootstrapPrerequisiteScenario(FreshTestingBootstrapScenario):
+    def first_execution_result_transition(self) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooInstanceOverrideRecord,
+            OdooConfigParameterOverride,
+            OdooOverrideValue,
+        )
+        from control_plane.dokploy import api
+        from control_plane.testing_replacement_recovery import (
+            current_binding_fingerprint,
+            guard_testing_replacement,
+            testing_replacement_recovery_read,
+            recover_stranded_testing_replacements,
+        )
+        from control_plane.odoo_testing_restore import fresh_testing_authority_sha256
+        from control_plane.workflows.odoo_post_deploy import (
+            _write_odoo_instance_override_apply_result,
+        )
+        from tests.test_testing_replacement_recovery import stamp
+        from tests.test_product_reconcile import _inventory
+        from control_plane.contracts.secret_record import SecretRecord, SecretVersion
+        from control_plane.contracts.odoo_website_settings import (
+            OdooWebsiteSettings,
+            OdooWebsiteSettingsIntent,
+        )
+        from control_plane.odoo_instance_overrides import (
+            render_post_deploy_payload,
+        )
+        from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
+
+        self.patches()
+        self.review()
+        self.apply()
+        self.store.write_repository_inventory_record(_inventory(repository=self.profile.repository))
+        original = self.store.read_odoo_stable_target_replacement_operation_record(
+            self.fixture.operation.operation_id
+        )
+        override = OdooInstanceOverrideRecord(
+            context=self.fixture.context,
+            instance="testing",
+            updated_at=stamp(),
+            config_parameters=(
+                OdooConfigParameterOverride(
+                    key="fixture.setting",
+                    value=OdooOverrideValue(source="literal", value="initial"),
+                ),
+                OdooConfigParameterOverride(
+                    key=WEBSITE_INDEXING_PARAMETER,
+                    value=OdooOverrideValue(source="literal", value="0"),
+                ),
+            ),
+        )
+        self.store.write_odoo_instance_override_record(override)
+        secret = SecretRecord(
+            secret_id="fixture-local",
+            scope="context_instance",
+            integration="runtime_environment",
+            name="fixture",
+            context=override.context,
+            instance="testing",
+            current_version_id="fixture-v1",
+            created_at=stamp(),
+            updated_at=stamp(),
+        )
+        for version in (secret.current_version_id, "fixture-v2"):
+            self.store.write_secret_version(
+                SecretVersion(
+                    version_id=version,
+                    secret_id=secret.secret_id,
+                    ciphertext="opaque-fixture-ciphertext",
+                    created_at=stamp(),
+                )
+            )
+        self.store.write_secret_record(secret)
+        operation = original.model_copy(
+            update={
+                "operation_id": "fresh-first-execution",
+                "idempotency_key": "first-execution-key",
+                "status": "running",
+                "phase": "running",
+                "started_at": stamp(),
+                "updated_at": stamp(),
+                "lease_owner": "worker",
+                "lease_expires_at": stamp(600),
+                "attempt": 1,
+                "disposable_supersession": None,
+                "request": original.request.model_copy(
+                    update={"data_source_mode": "upstream_restore"}
+                ),
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(operation)
+        with (
+            guard_testing_replacement(
+                self.store, operation, "worker", lambda _: None
+            ) as checkpoint,
+            patch.object(api, "_dokploy_request", return_value={}),
+        ):
+            api.dokploy_request(
+                host="https://provider.invalid",
+                token="fixture",
+                path="/api/compose.update",
+                method="POST",
+                payload={"composeId": self.resources.target_id},
+            )
+            before = self.store.read_odoo_stable_target_replacement_operation_record(
+                operation.operation_id
+            )
+            assert before.recovery_journal is not None
+            # Preserve the exact old full-record fingerprint to prove an old
+            # journal cannot acquire the new meaning after its result changes.
+            generation = self.store.read_fresh_odoo_testing_generation(
+                self.profile.product, self.fixture.context
+            )
+            assert generation is not None
+            legacy = before.model_copy(
+                update={
+                    "recovery_journal": before.recovery_journal.model_copy(
+                        update={
+                            "target_fingerprint": fresh_testing_authority_sha256(
+                                self.store, generation, include_override_results=True
+                            )
+                        }
+                    )
+                }
+            )
+            _write_odoo_instance_override_apply_result(
+                record_store=self.store,
+                record=override,
+                status="fail",
+                detail="Native testing copy integrity or recovery is unverified.",
+            )
+            checkpoint("post_deploy_result_published")
+        current = self.store.read_odoo_stable_target_replacement_operation_record(
+            operation.operation_id
+        )
+        assert current.recovery_journal is not None
+        self.assertEqual(
+            current_binding_fingerprint(self.store, current),
+            current.recovery_journal.target_fingerprint,
+        )
+        assert legacy.recovery_journal is not None
+        self.assertNotEqual(
+            current_binding_fingerprint(self.store, legacy),
+            legacy.recovery_journal.target_fingerprint,
+        )
+        held = current.model_copy(
+            update={
+                "status": "reconciliation_required",
+                "lease_owner": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+                "finished_at": "",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(held)
+        for field, value in (("reason", "changed request"), ("source_mode", "container-export")):
+            with self.subTest(request_field=field), self.assertRaises(ValueError):
+                changed_adapter = self.adapter()
+                changed_adapter.request = self.request.model_copy(update={field: value})
+                changed_adapter.readback()
+        # A new executing generation must not invalidate the original bootstrap
+        # receipt, and reading it must not requeue, recapture or repeat a route.
+        with patch.object(
+            self.store,
+            "retained_disposable_hostnames",
+            return_value=frozenset({generation.domain_host}),
+        ):
+            with self.assertRaises(ValueError):
+                bootstrap_plan(self.store, self.profile.product, self.request)
+            self.assertTrue(self.adapter().readback()["applied"])
+        self.assertEqual(self.route_writes, 1)
+        with patch(
+            "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+            return_value={"state": "quiescent_safe_to_retry"},
+        ):
+            readback = testing_replacement_recovery_read(self.store, held, self.fixture.root)
+            self.assertEqual(readback["status"], "eligible", readback)
+        baseline_override = self.store.read_odoo_instance_override_record(
+            context_name=override.context, instance_name="testing"
+        )
+        changed = baseline_override.model_copy(deep=True)
+        changed.config_parameters[0].value.value = "changed-intent"
+        history_changed = baseline_override.model_copy(
+            update={
+                "last_apply": baseline_override.last_apply.model_copy(
+                    update={
+                        "website_settings": OdooWebsiteSettingsIntent(
+                            artifact_id="fixture-artifact",
+                            settings=OdooWebsiteSettings(
+                                website_id=1, public_origin="https://fixture.invalid"
+                            ),
+                        )
+                    }
+                )
+            }
+        )
+        self.assertNotEqual(
+            render_post_deploy_payload(baseline_override),
+            render_post_deploy_payload(history_changed),
+        )
+        profile = self.store.read_product_profile_record(self.profile.product)
+        runtime = self.store.list_runtime_environment_records(
+            scope="context", context_name=override.context
+        )[0]
+        target = self.store.read_dokploy_target_record(
+            context_name=override.context, instance_name="testing"
+        )
+        changes: tuple[tuple[Any, Any, Any], ...] = (
+            (self.store.write_odoo_instance_override_record, changed, baseline_override),
+            (self.store.write_odoo_instance_override_record, history_changed, baseline_override),
+            (
+                self.store.write_product_profile_record,
+                profile.model_copy(update={"display_name": "changed product"}),
+                profile,
+            ),
+            (
+                self.store.write_runtime_environment_record,
+                runtime.model_copy(
+                    update={"env": {**runtime.env, "ODOO_UPSTREAM_DB_NAME": "different-source"}}
+                ),
+                runtime,
+            ),
+            (
+                self.store.write_dokploy_target_record,
+                target.model_copy(
+                    update={"env": {**target.env, "ODOO_DATA_VOLUME": "different-storage"}}
+                ),
+                target,
+            ),
+            (
+                self.store.write_secret_record,
+                secret.model_copy(update={"current_version_id": "fixture-v2"}),
+                secret,
+            ),
+        )
+        for write, replacement, baseline in changes:
+            with self.subTest(record=type(baseline).__name__):
+                write(replacement)
+                with patch(
+                    "control_plane.testing_replacement_recovery.inspect_testing_replacement"
+                ) as inspect:
+                    refusal = testing_replacement_recovery_read(self.store, held, self.fixture.root)
+                    self.assertEqual(refusal["status"], "refused", refusal)
+                    inspect.assert_not_called()
+                write(baseline)
+        legacy_held = held.model_copy(update={"recovery_journal": legacy.recovery_journal})
+        self.store.write_odoo_stable_target_replacement_operation_record(legacy_held)
+        with patch(
+            "control_plane.testing_replacement_recovery.inspect_testing_replacement"
+        ) as inspect:
+            self.assertEqual(
+                testing_replacement_recovery_read(self.store, legacy_held, self.fixture.root)[
+                    "reason"
+                ],
+                "recovery_binding_changed",
+            )
+            inspect.assert_not_called()
+        self.store.write_odoo_stable_target_replacement_operation_record(held)
+        # Exercise the real store's final authority check and publication, not
+        # just the read-time eligibility classification.
+        assert legacy.recovery_journal is not None
+        retried = held.model_copy(
+            update={
+                "status": "running",
+                "phase": "running",
+                "attempt": held.attempt + 1,
+                "lease_owner": "worker",
+                "lease_expires_at": stamp(600),
+                "recovery_journal": legacy.recovery_journal,
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(retried)
+        with guard_testing_replacement(self.store, retried, "worker", lambda _: None) as checkpoint:
+            checkpoint("new_attempt")
+            _write_odoo_instance_override_apply_result(
+                record_store=self.store,
+                record=baseline_override,
+                status="pass",
+                detail="fixture recovered",
+            )
+            checkpoint("new_attempt_result")
+        retried = self.store.read_odoo_stable_target_replacement_operation_record(held.operation_id)
+        held = retried.model_copy(
+            update={
+                "status": "reconciliation_required",
+                "lease_owner": "",
+                "lease_expires_at": "",
+                "heartbeat_at": "",
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(held)
+        cancel = self.store.cancel_pending_odoo_stable_target_replacement_operation_record
+
+        def rotate_before_commit(*args: Any, **kwargs: Any) -> bool:
+            self.store.write_secret_record(
+                secret.model_copy(update={"current_version_id": "fixture-v2"})
+            )
+            return cancel(*args, **kwargs)
+
+        with (
+            patch.object(
+                self.store,
+                "cancel_pending_odoo_stable_target_replacement_operation_record",
+                side_effect=rotate_before_commit,
+            ),
+            patch(
+                "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+                return_value={"state": "quiescent_safe_to_retry"},
+            ),
+        ):
+            self.assertEqual(
+                recover_stranded_testing_replacements(self.store, self.fixture.root), ()
+            )
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(held.operation_id), held
+        )
+        self.store.write_secret_record(secret)
+        from sqlalchemy.engine import make_url
+        from sqlalchemy.exc import DBAPIError
+        from psycopg.errors import LockNotAvailable
+
+        peer = PostgresRecordStore(
+            database_url=make_url(self.store.database_url)
+            .update_query_dict({"options": "-c lock_timeout=100ms"})
+            .render_as_string(hide_password=False)
+        )
+        self.addCleanup(peer.close)
+        excluded: list[bool] = []
+        fingerprint = current_binding_fingerprint
+
+        def check_writer_exclusion(store: Any, record: Any) -> str:
+            if getattr(store._disposable_authority_context, "session", None) is not None:
+                with self.assertRaises(DBAPIError) as blocked:
+                    peer.write_secret_record(
+                        secret.model_copy(update={"current_version_id": "fixture-v2"})
+                    )
+                self.assertIsInstance(blocked.exception.orig, LockNotAvailable)
+                excluded.append(True)
+            return fingerprint(store, record)
+
+        with (
+            patch(
+                "control_plane.testing_replacement_recovery.inspect_testing_replacement",
+                return_value={"state": "quiescent_safe_to_retry"},
+            ),
+            patch(
+                "control_plane.testing_replacement_recovery.current_binding_fingerprint",
+                side_effect=check_writer_exclusion,
+            ),
+        ):
+            self.assertEqual(
+                recover_stranded_testing_replacements(self.store, self.fixture.root),
+                (held.operation_id,),
+            )
+        self.assertTrue(excluded)
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(
+                held.operation_id
+            ).status,
+            "cancelled",
+        )
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(
+                self.profile.product, self.fixture.context
+            ),
+            generation,
+        )
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.fixture.context, instance_name="prod"
+            ),
+            self.production_before,
+        )
+
+    def native_capture_custody(self) -> None:
+        from control_plane.odoo_testing_native_source import native_testing_source_authority
+        from control_plane.contracts.odoo_testing_source import (
+            NativeOdooTestingSource,
+            NativeTestingCopyCapture,
+            NativeTestingCopyArtifact,
+        )
+        from control_plane.odoo_testing_restore import generation_binding
+
+        self.patches()
+        source_context = next(
+            lane.context for lane in self.profile.lanes if lane.instance == "prod"
+        )
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=source_context,
+                instance="prod",
+                env={
+                    "ODOO_DB_NAME": "source_database",
+                    "ODOO_FILESTORE_PATH": "/volumes/data/filestore",
+                },
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.request = self.request.model_copy(update={"source_mode": "container-export"})
+        self.review()
+        self.apply()
+        generation = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        assert generation is not None
+        authority = native_testing_source_authority(
+            self.store,
+            profile=self.store.read_product_profile_record(self.profile.product),
+            testing_context=self.fixture.context,
+        )
+        self.assertEqual(authority.binding_sha256, generation.source_binding_sha256)
+        # An unrelated production setting or bookkeeping update does not change
+        # the exact database/filestore/target that this read was reviewed for.
+        source_runtime = next(
+            row
+            for row in self.store.list_runtime_environment_records(context_name=source_context)
+            if row.scope == "instance" and row.instance == "prod"
+        )
+        self.store.write_runtime_environment_record(
+            source_runtime.model_copy(
+                update={
+                    "env": {**source_runtime.env, "UNRELATED_SETTING": "fixture-update"},
+                    "updated_at": (
+                        datetime.fromisoformat(source_runtime.updated_at) + timedelta(seconds=1)
+                    ).isoformat(),
+                }
+            )
+        )
+        self.assertEqual(
+            native_testing_source_authority(
+                self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                testing_context=self.fixture.context,
+            ).binding_sha256,
+            authority.binding_sha256,
+        )
+        observed = NativeOdooTestingSource(
+            **authority.model_dump(mode="json"),
+            server_id="source",
+            compose_project="source-project",
+            database_container="a" * 64,
+            web_container="b" * 64,
+            database_image="sha256:" + "c" * 64,
+            web_image="sha256:" + "d" * 64,
+        )
+        capture = NativeTestingCopyCapture(
+            product=generation.product,
+            context=generation.context,
+            generation_binding_sha256=generation_binding(generation),
+            source_binding_sha256=authority.binding_sha256,
+            capture_id="e" * 32,
+            database=NativeTestingCopyArtifact(size=10, sha256="f" * 64),
+            filestore=NativeTestingCopyArtifact(size=20, sha256="a" * 64),
+            captured_at="fixture",
+            source_observation=observed,
+        )
+        self.store.write_native_testing_copy_capture(capture)
+        self.store.write_native_testing_copy_capture(capture)
+        self.assertEqual(
+            self.store.read_native_testing_copy_capture(generation_binding(generation)), capture
+        )
+        with self.assertRaises(ValueError):
+            self.store.write_native_testing_copy_capture(
+                capture.model_copy(update={"capture_id": "d" * 32})
+            )
+        with self.assertRaises(ValueError):
+            self.store.write_native_testing_copy_capture(
+                capture.model_copy(update={"generation_binding_sha256": "b" * 64})
+            )
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=source_context, instance_name="prod"
+            ),
+            self.production_before,
+        )
+
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=source_context,
+                instance="prod",
+                env={"ODOO_DB_NAME": "later_production_database"},
+                updated_at="2026-01-02T00:00:00Z",
+            )
+        )
+        self.assertNotEqual(
+            native_testing_source_authority(
+                self.store,
+                profile=self.store.read_product_profile_record(self.profile.product),
+                testing_context=self.fixture.context,
+            ).binding_sha256,
+            capture.source_binding_sha256,
+        )
+        self.assertEqual(
+            self.adapter().readback()["source_binding_sha256"], capture.source_binding_sha256
+        )
+
     def credential_comparison_failure(self) -> None:
         self.patches()
         for dependency, failure, expected in (

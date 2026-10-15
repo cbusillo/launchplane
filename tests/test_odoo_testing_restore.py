@@ -10,10 +10,12 @@ import sys
 from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
+import yaml
 from unittest.mock import Mock, patch
 from control_plane.dokploy.compose import (
     ODOO_DATABASE_DATA_DIRECTORY,
     ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
+    render_odoo_raw_compose_file,
     _odoo_web_command,
 )
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
@@ -296,7 +298,11 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         output = io.StringIO()
         status = 0
         with (
-            patch.object(sys, "argv", ["copy", encoded]),
+            patch.object(
+                sys,
+                "argv",
+                ["copy", encoded] + (["fixture:"] if self.spec.get("inspection_only") else []),
+            ),
             patch("subprocess.run", side_effect=self.command),
             patch("tempfile.gettempdir", return_value=str(self.root)),
             redirect_stdout(output),
@@ -306,6 +312,38 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             except SystemExit as error:
                 status = int(error.code or 0)
         return status, output.getvalue()
+
+    def test_old_copy_cleanup_failure_leaves_new_copy_running(self) -> None:
+        previous = "lp_drill_" + "b" * 32
+        self.spec["generation"].update(
+            discard_drill_database=previous, discard_copy_binding="c" * 64
+        )
+        command = self.command
+
+        def refuse_cleanup(
+            arguments: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            if previous in arguments:
+                return subprocess.CompletedProcess(
+                    arguments, 1, stdout=b"", stderr=b"private cleanup error"
+                )
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=refuse_cleanup):
+            code, output = self.run_program()
+        self.assertEqual(code, 0, output)
+        self.assertIn(["docker", "start", "web"], self.calls)
+        self.assertNotIn("private cleanup error", output)
+
+    def test_failed_new_copy_never_disposes_prior_drill(self) -> None:
+        previous_drill = "lp_drill_" + "b" * 32
+        self.spec["generation"].update(
+            discard_drill_database=previous_drill, discard_copy_binding="c" * 64
+        )
+        self.sanitized = False
+        code, _ = self.run_program()
+        self.assertNotEqual(code, 0)
+        self.assertFalse(any(previous_drill in call for call in self.calls))
 
     def test_read_only_capture_never_copies_identity_and_web_starts_after_sanitization(
         self,
@@ -365,6 +403,216 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         status, _output = self.run_program()
         self.assertNotEqual(status, 0)
         self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
+
+    def test_native_receiver_inspection_uses_isolation_guard_without_effects(self) -> None:
+        self.spec["inspection_only"] = True
+        self.spec["generation"]["source_mode"] = "container-export"
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertEqual(len(frames), 1)
+        self.assertFalse(frames[0]["resume"])
+        self.assertEqual(frames[0]["runner"], self.containers["script-runner"]["Id"])
+        self.assertFalse(
+            any(
+                call[0] in {"ssh", "rsync"}
+                or call[:2] in (["docker", "stop"], ["docker", "start"], ["docker", "cp"])
+                or "rm" in call
+                for call in self.calls
+            )
+        )
+
+    def test_drill_usage_reads_successful_logins_without_starting_or_restoring(self) -> None:
+        from datetime import datetime, timezone
+
+        self.spec.update(
+            inspection_only=True,
+            usage_only=True,
+            usage_since=datetime.now(timezone.utc).isoformat(),
+        )
+        self.existing_database = True
+        command = self.command
+        for used in (True, False):
+            with self.subTest(used=used):
+                self.calls.clear()
+
+                def database_read(arguments: list[str], **kwargs: Any) -> Any:
+                    query = kwargs.get("input") or b""
+                    if b"ir_config_parameter" in query:
+                        result = self.spec["copy_binding_sha256"].encode()
+                    elif b"res_users_log" in query:
+                        result = b"t" if used else b"f"
+                    else:
+                        return command(arguments, **kwargs)
+                    self.calls.append(arguments)
+                    return subprocess.CompletedProcess(arguments, 0, stdout=result, stderr=b"")
+
+                with patch.object(self, "command", side_effect=database_read):
+                    status, output = self.run_program()
+                self.assertEqual(status, 0, output)
+                frames = [
+                    json.loads(line.removeprefix("fixture:"))
+                    for line in output.splitlines()
+                    if line.startswith("fixture:")
+                ]
+                self.assertEqual(frames, [{"type": "complete", "recent_signins": used}])
+                self.assertFalse(
+                    any(
+                        call[:2] in (["docker", "stop"], ["docker", "start"], ["docker", "cp"])
+                        or "rm" in call
+                        or call[0] in {"ssh", "rsync"}
+                        for call in self.calls
+                    )
+                )
+
+    def test_drill_usage_without_database_is_unreadable(self) -> None:
+        from datetime import datetime, timezone
+
+        self.spec.update(
+            inspection_only=True,
+            usage_only=True,
+            usage_since=datetime.now(timezone.utc).isoformat(),
+        )
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+
+    def test_reclaim_preserves_a_new_copy_that_has_started_serving(self) -> None:
+        from datetime import datetime, timezone
+
+        new_database = "lp_drill_" + "d" * 32
+        self.spec.update(
+            inspection_only=True,
+            usage_only=True,
+            usage_reclaim=True,
+            usage_new_database=new_database,
+            usage_database_names=[self.database, new_database],
+            usage_since=datetime.now(timezone.utc).isoformat(),
+        )
+        self.existing_database = True
+        command = self.command
+        for running, opened in ((True, False), (False, True), (False, False)):
+            with self.subTest(running=running, opened=opened):
+                self.containers["web"]["State"] = {"Running": running}
+                for service in ("web", "script-runner"):
+                    self.containers[service]["Config"]["Env"] = [
+                        item
+                        if not item.startswith("ODOO_DB_NAME=")
+                        else "ODOO_DB_NAME=" + new_database
+                        for item in self.containers[service]["Config"]["Env"]
+                    ]
+
+                def read(arguments: list[str], **kwargs: Any) -> Any:
+                    query = kwargs.get("input") or b""
+                    if b"ir_config_parameter" in query:
+                        result = self.spec["copy_binding_sha256"].encode()
+                    elif b"res_users_log" in query:
+                        result = b"f"
+                    elif arguments[-1] == self.spec["web_gate_path"]:
+                        result = str(opened).encode()
+                    else:
+                        return command(arguments, **kwargs)
+                    return subprocess.CompletedProcess(arguments, 0, stdout=result, stderr=b"")
+
+                with patch.object(self, "command", side_effect=read):
+                    status, output = self.run_program()
+                self.assertEqual(status, 0, output)
+                frame = json.loads(output.strip().removeprefix("fixture:"))
+                self.assertEqual(
+                    frame,
+                    {"type": "complete", "new_copy_serving": True}
+                    if opened
+                    else {"type": "complete", "recent_signins": False},
+                )
+        self.assertFalse(
+            any(call[:2] in (["docker", "stop"], ["docker", "start"]) for call in self.calls)
+        )
+
+    def test_provider_converted_testing_networks_pass_the_receiver_guard(self) -> None:
+        """Execute the guard on the renderer's graph plus Dokploy's domain injection."""
+        composition = yaml.safe_load(
+            render_odoo_raw_compose_file(
+                image_reference=self.spec["image_reference"],
+                hold_web_until_integration_readback=True,
+                domain_hosts=(self.gen.domain_host,),
+                publish_host_ports=False,
+                mount_workflow_ssh=False,
+                isolated_testing=True,
+            )
+        )
+        for service, container in self.containers.items():
+            networks = composition["services"][service]["networks"]
+            container["NetworkSettings"]["Networks"] = dict.fromkeys(networks, {})
+        # The installed provider preserves explicit networks and appends these
+        # two names when a domain routes to web (Dokploy upstream #4499).
+        self.containers["web"]["NetworkSettings"]["Networks"].update(
+            {"default": {}, "dokploy-network": {}}
+        )
+        command = self.command
+
+        def provider_command(arguments: list[str], **kwargs: Any) -> Any:
+            if arguments[:2] == ["docker", "inspect"] and arguments[2] in composition["networks"]:
+                return subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    stdout=json.dumps(
+                        [{"Internal": composition["networks"][arguments[2]].get("internal", False)}]
+                    ).encode(),
+                )
+            return command(arguments, **kwargs)
+
+        self.spec["inspection_only"] = True
+        with patch.object(self, "command", side_effect=provider_command):
+            status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertFalse(any(call[:2] == ["docker", "start"] for call in self.calls))
+
+    def test_native_receiver_refuses_shared_storage_before_inspection_success(self) -> None:
+        self.spec["inspection_only"] = True
+        self.containers["other"] = {
+            "Id": "other",
+            "Config": {},
+            "Mounts": [{"Name": self.gen.namespace + "-data"}],
+        }
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertFalse(any(frame.get("type") == "complete" for frame in frames))
+
+    def test_native_receiver_refuses_existing_database_without_generation_witness(self) -> None:
+        self.spec["inspection_only"] = True
+        self.existing_database = True
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertNotIn(["docker", "stop", "web"], self.calls)
+
+    def test_native_restore_consumes_receipt_and_never_selects_ssh_fallback(self) -> None:
+        self.spec["generation"].update(
+            source_mode="container-export", source_binding_sha256="f" * 64
+        )
+        self.spec["source"] = {}
+        self.spec["native_capture"] = {
+            "capture_id": "a" * 32,
+            "generation_binding_sha256": self.spec["copy_binding_sha256"],
+            "source_binding_sha256": "f" * 64,
+        }
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
+        self.assertIn(["docker", "start", "web"], self.calls)
+        self.calls.clear()
+        self.spec["native_capture"] = None
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0, output)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
+        self.assertNotIn(["docker", "start", "web"], self.calls)
 
     def test_website_exclusion_is_required_before_web_start(self) -> None:
         status, output = self.run_program()

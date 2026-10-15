@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 import type { MergeTrainControllerStatusResponse } from "../../src/generated/openapi.ts";
 
 test("landing progress uses total stored entries through refresh", async ({ page }, testInfo) => {

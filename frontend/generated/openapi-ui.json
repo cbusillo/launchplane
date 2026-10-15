@@ -18947,6 +18947,16 @@
           "production": {
             "$ref": "#/components/schemas/ArtifactIdentityManifest"
           },
+          "production_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "release_id": {
             "minLength": 1,
             "title": "Release Id",
@@ -18956,6 +18966,16 @@
             "pattern": "^[a-zA-Z0-9_-]+$",
             "title": "Route Id",
             "type": "string"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "writers": {
             "items": {
@@ -18972,8 +18992,10 @@
           "new",
           "old",
           "production",
+          "production_website_settings",
           "release_id",
           "route_id",
+          "website_settings",
           "writers"
         ],
         "title": "OdooCutoverPlan",
@@ -19071,6 +19093,16 @@
             "title": "Record Id",
             "type": "string"
           },
+          "rollback_pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicPauseRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "rollback_started_at": {
             "anyOf": [
               {
@@ -19082,6 +19114,16 @@
               }
             ],
             "title": "Rollback Started At"
+          },
+          "rollback_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "route": {
             "anyOf": [
@@ -19116,6 +19158,11 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "website_settings_attempted": {
+            "default": false,
+            "title": "Website Settings Attempted",
+            "type": "boolean"
           }
         },
         "required": [
@@ -19131,10 +19178,13 @@
           "public_site",
           "readiness",
           "record_id",
+          "rollback_pause",
           "rollback_started_at",
+          "rollback_website_settings",
           "route",
           "step",
-          "updated_at"
+          "updated_at",
+          "website_settings_attempted"
         ],
         "title": "OdooCutoverRecord",
         "type": "object"
@@ -19290,6 +19340,16 @@
             },
             "title": "Update Modules",
             "type": "array"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -19302,7 +19362,8 @@
           "install_modules",
           "module_readback",
           "release_id",
-          "update_modules"
+          "update_modules",
+          "website_settings"
         ],
         "title": "OdooMaintenanceReceipt",
         "type": "object"
@@ -20462,6 +20523,61 @@
         "title": "OdooSlotReadiness",
         "type": "object"
       },
+      "OdooTestingDrillEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "alert_delivered": {
+            "default": false,
+            "title": "Alert Delivered",
+            "type": "boolean"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "operation_id": {
+            "default": "",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step": {
+            "default": "",
+            "title": "Step",
+            "type": "string"
+          },
+          "trace": {
+            "default": "",
+            "title": "Trace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "alert_delivered",
+          "deployment_record_id",
+          "observed_at",
+          "operation_id",
+          "status",
+          "step",
+          "trace"
+        ],
+        "title": "OdooTestingDrillEvidence",
+        "type": "object"
+      },
       "OdooWebsiteBootstrapPayload": {
         "additionalProperties": false,
         "properties": {
@@ -20667,6 +20783,48 @@
           "settings"
         ],
         "title": "OdooWebsiteSettingsIntent",
+        "type": "object"
+      },
+      "OdooWebsiteSettingsReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "committed": {
+            "const": true,
+            "title": "Committed",
+            "type": "boolean"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "retained_startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Retained Startup Settings Sha256",
+            "type": "string"
+          },
+          "settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Settings Sha256",
+            "type": "string"
+          },
+          "startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Startup Settings Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding",
+          "committed",
+          "image",
+          "retained_startup_settings_sha256",
+          "settings_sha256",
+          "startup_settings_sha256"
+        ],
+        "title": "OdooWebsiteSettingsReceipt",
         "type": "object"
       },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {
@@ -26246,6 +26404,17 @@
           "target": {
             "$ref": "#/components/schemas/ProductTargetSummary"
           },
+          "testing_rebuild_drill": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooTestingDrillEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "topology": {
             "$ref": "#/components/schemas/ProductEnvironmentTopology"
           },
@@ -27546,6 +27715,7 @@
           },
           "failure_code": {
             "enum": [
+              "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
               "dns_failure",
@@ -27734,6 +27904,7 @@
             "anyOf": [
               {
                 "enum": [
+                  "production_delivery_failed",
                   "connection_timeout",
                   "deploy_fence_held",
                   "dns_failure",
@@ -27990,6 +28161,7 @@
           },
           "failure_code": {
             "enum": [
+              "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
               "dns_failure",
@@ -28381,6 +28553,12 @@
           },
           "odoo_stable_bootstrap": {
             "$ref": "#/components/schemas/ProductOdooStableBootstrapPolicy"
+          },
+          "odoo_testing_drill_enabled": {
+            "default": false,
+            "title": "Odoo Testing Drill Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [

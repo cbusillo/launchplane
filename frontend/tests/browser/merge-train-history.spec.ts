@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 import type {
   GitHubHumanIdentityResponse,
   MergeTrainControllerStatusResponse,

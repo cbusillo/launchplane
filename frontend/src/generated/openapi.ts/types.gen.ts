@@ -1728,8 +1728,10 @@ export type OdooCutoverPlan = {
     new: OdooSlot;
     old: OdooSlot;
     production: ArtifactIdentityManifest;
+    production_website_settings: OdooWebsiteSettingsIntent | null;
     release_id: string;
     route_id: string;
+    website_settings: OdooWebsiteSettingsIntent | null;
     writers: Array<WriterTarget>;
 };
 
@@ -1746,10 +1748,13 @@ export type OdooCutoverRecord = {
     public_site: PreparedPublicSite | null;
     readiness: OdooSlotReadiness | null;
     record_id: string;
+    rollback_pause: PublicPauseRecord | null;
     rollback_started_at: string | null;
+    rollback_website_settings: OdooWebsiteSettingsReceipt | null;
     route: OdooRouteObservation | null;
     step: 'preparing' | 'prepared' | 'pausing' | 'backing_up' | 'maintaining' | 'ready' | 'switching' | 'resuming' | 'draining' | 'complete' | 'rolling_back' | 'rolled_back';
     updated_at: string;
+    website_settings_attempted: boolean;
 };
 
 export type OdooInstanceOverrideRecord = {
@@ -1777,6 +1782,7 @@ export type OdooMaintenanceReceipt = {
     module_readback: true;
     release_id: string;
     update_modules: Array<string>;
+    website_settings: OdooWebsiteSettingsReceipt | null;
 };
 
 export type OdooOverrideApplyResult = {
@@ -1985,6 +1991,16 @@ export type OdooSlotReadiness = {
     slot_id: string;
 };
 
+export type OdooTestingDrillEvidence = {
+    alert_delivered: boolean;
+    deployment_record_id: string;
+    observed_at: string;
+    operation_id: string;
+    status: 'queued' | 'pass' | 'fail' | 'skipped';
+    step: string;
+    trace: string;
+};
+
 export type OdooWebsiteBootstrapPayload = {
     canonical_url: string;
     company_email: string;
@@ -2025,6 +2041,15 @@ export type OdooWebsiteSettings = {
 export type OdooWebsiteSettingsIntent = {
     artifact_id: string;
     settings: OdooWebsiteSettings;
+};
+
+export type OdooWebsiteSettingsReceipt = {
+    binding: PublicSiteBinding;
+    committed: true;
+    image: string;
+    retained_startup_settings_sha256: string;
+    settings_sha256: string;
+    startup_settings_sha256: string;
 };
 
 export type OrdinaryAgentDeliveryActivationExecutionEvidence = {
@@ -2989,6 +3014,7 @@ export type ProductEnvironmentDetail = {
     runtime_settings: Array<ProductRuntimeSettingSummary>;
     schema_version: number;
     target: ProductTargetSummary;
+    testing_rebuild_drill?: OdooTestingDrillEvidence | null;
     topology: ProductEnvironmentTopology;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
     warnings: Array<string>;
@@ -3199,7 +3225,7 @@ export type ProductIncidentEventSummary = {
 export type ProductIncidentMaterialEvidence = {
     affected_targets: Array<'base_url' | 'health_url' | 'private_health_url' | 'monitoring_intent' | 'provider' | 'tls_domain'>;
     check_kind: 'public_http' | 'private_http' | 'provider' | 'tls';
-    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     route_authority_kind: string;
     runtime_identity_mismatched_fields: Array<string>;
@@ -3222,7 +3248,7 @@ export type ProductIncidentNotificationAttemptSummary = {
 };
 
 export type ProductIncidentObservationSummary = {
-    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
+    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
     incident_event_id: string;
     material_fingerprint_sha256: string;
     notification_sent: boolean;
@@ -3264,7 +3290,7 @@ export type ProductIncidentSummary = {
     context: string;
     display_name: string;
     environment: string;
-    failure_code: 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     incident_id: string;
     instance: string;
@@ -3320,6 +3346,7 @@ export type ProductLaneProfile = {
     odoo_data_policy: ProductOdooLaneDataPolicy;
     odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy;
     odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy;
+    odoo_testing_drill_enabled?: boolean;
 };
 
 export type ProductManagedSecretConfigStatusItem = {

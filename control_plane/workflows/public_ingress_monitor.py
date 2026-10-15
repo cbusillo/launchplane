@@ -399,14 +399,7 @@ def discover_public_ingress_monitor_targets(
     for profile in product_profiles:
         for lane in profile.lanes:
             for check in lane.health_monitoring.checks:
-                if not check.enabled or not product_lane_monitoring_probe_effective(
-                    monitoring_intent=lane.health_monitoring.monitoring_intent,
-                    check_kind=check.kind,
-                ):
-                    continue
-                if check.kind == "public_http" and not _profile_uses_generic_web(profile):
-                    continue
-                target = _health_check_monitor_target(
+                target = effective_health_check_monitor_target(
                     profile=profile,
                     lane=lane,
                     check=check,
@@ -555,6 +548,28 @@ def _deploy_fence_monitor_target(
         provider=DEPLOY_FENCE_PROVIDER,
         provider_check=DEPLOY_FENCE_CHECK_NAME,
         deploy_fence=fence,
+    )
+
+
+def effective_health_check_monitor_target(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    check: ProductLaneHealthCheck,
+    record_store: object,
+) -> PublicIngressMonitorTarget | None:
+    if (
+        not profile.is_active
+        or not check.enabled
+        or not product_lane_monitoring_probe_effective(
+            monitoring_intent=lane.health_monitoring.monitoring_intent, check_kind=check.kind
+        )
+    ):
+        return None
+    if check.kind == "public_http" and not _profile_uses_generic_web(profile):
+        return None
+    return _health_check_monitor_target(
+        profile=profile, lane=lane, check=check, record_store=record_store
     )
 
 
@@ -1105,6 +1120,9 @@ def _monitoring_reconciliation_observations(
                 status="open",
             )
             for incident in open_incidents:
+                # Delivery has its own recovery evidence; HTTP target retirement cannot resolve it.
+                if incident.check_name.startswith("production-delivery-"):
+                    continue
                 target_key = _incident_target_key(incident)
                 monitored = monitored_check_identity(incident.check_name)
                 if monitored is not None:
@@ -3254,6 +3272,7 @@ class PublicIngressNotificationDriverSet:
         observation: PublicIngressObservationRecord,
         previous_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = (),
         notification_body: str = "",
+        drill: bool = False,
     ) -> PublicIngressNotificationDelivery:
         try:
             if destination.kind == "github_issue":
@@ -3283,6 +3302,7 @@ class PublicIngressNotificationDriverSet:
                     observation=observation,
                     discord_sender=self.discord_sender,
                     notification_body=notification_body,
+                    drill=drill,
                     secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
                 )
         except Exception as error:  # noqa: BLE001 - delivery failures are recorded per destination.
@@ -3318,28 +3338,34 @@ def public_ingress_managed_secret_resolver(
     record_store: control_plane_secrets.SecretReadStore,
 ) -> Callable[[str, PublicIngressIncidentRecord], str]:
     def resolve(secret_id: str, incident: PublicIngressIncidentRecord) -> str:
-        normalized_secret_id = secret_id.strip()
-        if not normalized_secret_id:
-            return ""
-        try:
-            record = record_store.read_secret_record(normalized_secret_id)
-        except Exception:  # noqa: BLE001 - delivery records capture missing secrets per destination.
-            return ""
+        return managed_notification_secret_value(
+            record_store, secret_id, incident.context, incident.instance
+        )
+
+    return resolve
+
+
+def managed_notification_secret_value(
+    record_store: control_plane_secrets.SecretReadStore,
+    secret_id: str,
+    context: str,
+    instance: str,
+) -> str:
+    """Existing alert destinations resolve only managed secrets applicable to their lane."""
+    if not secret_id.strip():
+        return ""
+    try:
+        record = record_store.read_secret_record(secret_id.strip())
         if record.status != control_plane_secrets.SECRET_STATUS_CONFIGURED:
             return ""
         if not control_plane_secrets._scope_matches_record(
-            record,
-            context_name=incident.context,
-            instance_name=incident.instance,
+            record, context_name=context, instance_name=instance
         ):
             return ""
-        try:
-            version = record_store.read_secret_version(record.current_version_id)
-            return control_plane_secrets._decrypt_secret_value(version.ciphertext, version.key_id)
-        except Exception:  # noqa: BLE001 - delivery records capture unreadable secrets per destination.
-            return ""
-
-    return resolve
+        version = record_store.read_secret_version(record.current_version_id)
+        return control_plane_secrets._decrypt_secret_value(version.ciphertext, version.key_id)
+    except Exception:  # noqa: BLE001 - delivery records capture unavailable secrets.
+        return ""
 
 
 def public_ingress_notification_drivers(
@@ -3823,6 +3849,7 @@ def _deliver_discord_notification(
     discord_sender: Callable[[str, dict[str, object]], object],
     secret_resolver: Callable[[str], str],
     notification_body: str = "",
+    drill: bool = False,
 ) -> PublicIngressNotificationDelivery:
     webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
     if not webhook_url:
@@ -3839,20 +3866,32 @@ def _deliver_discord_notification(
             error_message=f"Discord webhook URL is not public: {public_url_error}",
         )
     color = 0x2E7D32 if event == "resolved" else 0xC62828
+    title = (
+        "Production delivery"
+        if incident.check_name.startswith("production-delivery-")
+        else "Public ingress"
+    )
+    payload: dict[str, object] = {
+        "embeds": [
+            {
+                "title": (
+                    f"DRILL — health alert test: {incident.product}/{incident.instance}"
+                    if drill
+                    else f"{title} {event}: {incident.product}/{incident.instance}"
+                )[:256],
+                "description": notification_body
+                or public_ingress_incident_notification_body(
+                    event=event, incident=incident, observation=observation
+                ),
+                "color": 0x1565C0 if drill else color,
+            }
+        ]
+    }
+    if drill:
+        payload["allowed_mentions"] = {"parse": []}
     discord_sender(
         webhook_url,
-        {
-            "embeds": [
-                {
-                    "title": f"Public ingress {event}: {incident.product}/{incident.instance}",
-                    "description": notification_body
-                    or public_ingress_incident_notification_body(
-                        event=event, incident=incident, observation=observation
-                    ),
-                    "color": color,
-                }
-            ]
-        },
+        payload,
     )
     return PublicIngressNotificationDelivery(delivery_status="delivered", action="posted_discord")
 
@@ -3864,8 +3903,13 @@ def public_ingress_incident_notification_body(
     observation: PublicIngressObservationRecord,
     marker: str = "",
 ) -> str:
+    subject = (
+        "production delivery"
+        if incident.check_name.startswith("production-delivery-")
+        else "public ingress"
+    )
     lines = [
-        f"Launchplane public ingress incident {event}: {incident.product}/{incident.instance}",
+        f"Launchplane {subject} incident {event}: {incident.product}/{incident.instance}",
         "",
         f"- status: {incident.status}",
         f"- incident_id: {incident.incident_id}",

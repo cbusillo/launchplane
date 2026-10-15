@@ -24,6 +24,7 @@ class TestingReplacementRecoveryRead(BaseModel):
         "recovery_provider_evidence_incomplete",
         "recovery_operation_or_binding_changed",
         "recovery_evidence_unavailable",
+        "recovery_source_exceeds_bound",
     ]
     journal: Literal["present", "absent", "unknown"]
     attempt_matches: bool | None

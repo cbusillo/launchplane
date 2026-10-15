@@ -1,3 +1,7 @@
+from control_plane.dokploy_target_comparison import (
+    DokployTargetComparisonEvidenceUnavailableError,
+    require_provider_target_expectation,
+)
 from control_plane import odoo_website_settings as control_plane_odoo_website_settings
 from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
@@ -47,6 +51,7 @@ from control_plane.contracts.updater_proposal import (
 from control_plane.http_routes.updater_proposal import register_updater_proposal_route
 from control_plane.http_route_preparation import PreparedAPIRoute
 from control_plane.http_routes.support import run_in_worker_thread
+from control_plane.http_routes.health_alert_drill import register_health_alert_drill_routes
 from fastapi.exceptions import RequestValidationError
 from control_plane.github_request_timing import github_request_tally
 from control_plane.http_routes.owner_secret_inputs import (
@@ -87,9 +92,6 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
     require_empty_testing_target_creation,
-)
-from control_plane.workflows.dokploy_target_adoption import (
-    DokployTargetComparisonEvidenceUnavailableError,
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_public_hosts
@@ -863,6 +865,7 @@ from control_plane.storage.product_authority_bundle import (
     RuntimeEnvironmentConflictError,
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
+from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -4277,6 +4280,7 @@ def create_launchplane_fastapi_app(
     engineering_review_target_resolver: EngineeringReviewTargetResolver | None = None,
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
+    testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4355,6 +4359,8 @@ def create_launchplane_fastapi_app(
         try:
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
+            if testing_drill_scheduler is not None:
+                await run_in_threadpool(testing_drill_scheduler.start)
             startup_record_store = (
                 record_store_factory() if record_store_factory is not None else shared_record_store
             )
@@ -4364,6 +4370,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
+            if testing_drill_scheduler is not None:
+                await run_in_threadpool(testing_drill_scheduler.stop)
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.stop)
             if isinstance(shared_record_store, PostgresRecordStore):
@@ -4472,7 +4480,38 @@ def create_launchplane_fastapi_app(
     ) -> Response:
         clear_authz_evaluation()
         try:
-            response = cast(Response, await call_next(request))
+            try:
+                response = cast(Response, await call_next(request))
+            except Exception:
+                scope = getattr(request.state, "production_delivery_scope", None)
+                if scope is None or scope[2] != "prod":
+                    raise
+                trace_id = next_trace_id()
+                logging.exception("Production delivery crashed; trace_id=%s", trace_id)
+                from control_plane.production_delivery_monitor import (
+                    record_rejected_production_request,
+                )
+
+                try:
+                    await record_rejected_production_request(
+                        request,
+                        get_record_store(),
+                        reason="delivery_failed",
+                        trace_id=trace_id,
+                    )
+                except Exception:
+                    logging.exception(
+                        "Could not persist production delivery crash; trace_id=%s", trace_id
+                    )
+                return JSONResponse(
+                    status_code=500,
+                    content=LaunchplaneErrorResponse(
+                        trace_id=trace_id,
+                        error=LaunchplaneErrorDetail(
+                            code="delivery_failed", message="Production delivery failed."
+                        ),
+                    ).model_dump(mode="json"),
+                )
             if request.url.path == _AUTHZ_ACTIVATION_PREFLIGHT_ROUTE or (
                 request.url.path in _AUTHZ_NO_STORE_ROUTES
                 or request.url.path.startswith(_SOLO_ADMINISTRATION_CONFIRMATION_ROUTE)
@@ -5394,6 +5433,9 @@ def create_launchplane_fastapi_app(
         read_role_products=resolved_authz_policy_runtime.read_role_products,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
+    )
+    register_health_alert_drill_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_write_identity
     )
     privileged_operation_route_dependencies = PrivilegedOperationRouteDependencies(
         common=read_route_dependencies,
@@ -8904,6 +8946,10 @@ def create_launchplane_fastapi_app(
             denied_message=_TESTING_HOLD_DENIED_MESSAGE,
         )
         from control_plane.testing_activation import require_activation_hold_lift
+        from control_plane.contracts.testing_activation import (
+            TestingActivationRefusal,
+            TestingActivationRefusalCode,
+        )
 
         if hold_request.activation_plan_sha256 and not director_agent_identity(identity):
             raise _launchplane_http_error(
@@ -8939,7 +8985,11 @@ def create_launchplane_fastapi_app(
                 raise _launchplane_http_error(
                     status_code=409,
                     trace_id=trace_id,
-                    code="testing_activation_unverified",
+                    code=(
+                        error.public_code
+                        if isinstance(error, TestingActivationRefusal)
+                        else TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value
+                    ),
                     message="The original activation interlock is not safe to lift.",
                 ) from error
 
@@ -9072,7 +9122,11 @@ def create_launchplane_fastapi_app(
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,
-                code="testing_activation_unverified",
+                code=(
+                    error.public_code
+                    if isinstance(error, TestingActivationRefusal)
+                    else TestingActivationRefusalCode.DEPENDENCY_UNVERIFIED.value
+                ),
                 message="The original activation interlock is not safe to lift.",
             ) from error
         response = accepted_evidence_response(
@@ -9990,6 +10044,21 @@ def create_launchplane_fastapi_app(
             )
         cancelled_at = utc_now_timestamp()
         if operation.status == "reconciliation_required":
+            if read_method_name == "read_odoo_stable_target_replacement_operation_record":
+                from control_plane.testing_replacement_recovery import service_testing_operation
+
+                if service_testing_operation(operation):
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code="service_testing_recovery_required",
+                        message=(
+                            "Held service-owned testing replacements require worker recovery with "
+                            "execution exclusion and original-effect proof, or a verified isolated "
+                            "replacement generation. Read the operation's recovery classification; "
+                            "a caller attestation cannot release this fence."
+                        ),
+                    )
             reconciliation_attestation = cancellation_request.reconciliation_attestation
             if reconciliation_attestation is None:
                 raise _launchplane_http_error(
@@ -10545,6 +10614,14 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+        request.state.production_delivery_scope = (
+            apply_request.product,
+            lane.context,
+            lane.instance,
+        )
+        request.state.production_delivery_candidate = (
+            apply_request.replacement.artifact_id or apply_request.replacement.source_git_ref
+        )
         normalized_idempotency_key = idempotency_key.strip()
         if not normalized_idempotency_key:
             raise _launchplane_http_error(
@@ -10876,6 +10953,13 @@ def create_launchplane_fastapi_app(
                 ),
             )
 
+        request.state.production_delivery_scope = (
+            authorization_product,
+            promotion_request.promotion.context,
+            promotion_request.promotion.to_instance,
+        )
+        request.state.production_delivery_candidate = promotion_request.promotion.artifact_id
+
         (
             normalized_idempotency_key,
             payload_fingerprint,
@@ -11162,6 +11246,13 @@ def create_launchplane_fastapi_app(
                     " product/context."
                 ),
             )
+
+        request.state.production_delivery_scope = (
+            authorization_product,
+            run_request.run.context,
+            run_request.run.to_instance,
+        )
+        request.state.production_delivery_candidate = run_request.run.expected_artifact_id
 
         (
             normalized_idempotency_key,
@@ -14695,6 +14786,23 @@ def create_launchplane_fastapi_app(
                 lease_seconds=int(_DB_ONLY_MUTATION_LEASE.total_seconds()),
             ),
         )
+        if write_result.status == "history_busy":
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="production_history_busy",
+                message=(
+                    "Product authority or history is busy. No classification change was applied. "
+                    "Retry the same reviewed request with the same Idempotency-Key."
+                ),
+            )
+        if write_result.status == "history_conflict":
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Recorded production or promotion history prevents agent classification.",
+            )
         if write_result.status == "replayed":
             if write_result.idempotency_record is None:
                 raise RuntimeError("Replayed product production use write requires evidence.")
@@ -16705,6 +16813,7 @@ def create_launchplane_fastapi_app(
             )
         if (
             isinstance(identity, LocalOperatorIdentity)
+            and (product_config_request.mode == "apply" or not director_agent_identity(identity))
             and config_profile.production_use == "live"
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
@@ -25558,11 +25667,33 @@ def create_launchplane_fastapi_app(
                         context_name=setup_request.context,
                         instance_name=setup_request.instance,
                     )
-                    authorized = (
-                        authorized
-                        and tracked_provider.to_deployed_target_reference()
-                        == setup_request.expected_current_provider_target
-                    )
+                    if setup_request.operation == "repair-domain-authority" and authorized:
+                        try:
+                            require_provider_target_expectation(
+                                current=tracked_provider,
+                                expected=setup_request.expected_current_provider_target,
+                                fingerprint=setup_request.expected_current_provider_target_fingerprint,
+                                target=database_store.read_dokploy_target_record(
+                                    context_name=setup_request.context,
+                                    instance_name=setup_request.instance,
+                                ),
+                                target_id=tracked_id,
+                            )
+                        except DokployTargetComparisonEvidenceUnavailableError as error:
+                            raise _launchplane_http_error(
+                                status_code=400,
+                                trace_id=trace_id,
+                                code="dokploy_target_comparison_evidence_unavailable",
+                                message=str(error),
+                            ) from error
+                        except ValueError:
+                            authorized = False
+                    else:
+                        authorized = (
+                            authorized
+                            and tracked_provider.to_deployed_target_reference()
+                            == setup_request.expected_current_provider_target
+                        )
                 except FileNotFoundError:
                     authorized = False
         if not authorized:
@@ -29309,6 +29440,16 @@ def create_launchplane_fastapi_app(
         root=resolved_control_plane_root,
         run_provider_mutation=run_provider_mutation,
     )
+    from control_plane.http_routes.production_recipient import register_production_recipient_routes
+
+    register_production_recipient_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        actor=launchplane_identity_actor,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
     register_testing_replacement_resource_routes(
         app,
         dependencies=read_route_dependencies,
@@ -29492,6 +29633,14 @@ def create_launchplane_fastapi_app(
             records=records if isinstance(records, dict) else None,
             authz=authz if isinstance(authz, dict) else None,
         )
+        from control_plane.production_delivery_monitor import record_rejected_production_request
+
+        try:
+            await record_rejected_production_request(
+                request, get_record_store(), reason=code, trace_id=trace_id
+            )
+        except Exception:
+            logging.exception("Could not persist production delivery alert; trace_id=%s", trace_id)
         response = JSONResponse(
             status_code=http_error.status_code,
             content=payload.model_dump(mode="json", exclude_none=True),

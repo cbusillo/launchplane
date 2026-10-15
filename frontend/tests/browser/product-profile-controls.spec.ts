@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 test("prelaunch reconfirmation shows the production consequence before Apply @responsive", async ({ page }, testInfo) => {
   await page.goto("/ui/products/atlas-commerce?fixture=products");
@@ -215,7 +215,7 @@ for (const field of ["image", "production"] as const) {
       await panel.getByLabel("Change reason").fill("First read-only plan.");
       await panel.getByRole("button", { name: "Dry run", exact: true }).click();
       if (interruption === "lost") await expect(panel.getByRole("status")).toContainText("Dry run failed");
-      else await expect.poll(() => bodies.length).toBe(1);
+      else await waitForState(() => bodies.length).toBe(1);
       await page.reload();
       panel = page.getByRole("region", { name: title, exact: true });
       if (field === "production") await panel.getByLabel(title, { exact: true }).selectOption("live");

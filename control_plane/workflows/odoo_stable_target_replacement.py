@@ -6,7 +6,8 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from uuid import uuid4
-from typing import Literal, Protocol
+from typing import Literal, Protocol, cast
+from control_plane.storage.postgres import PostgresRecordStore
 
 import click
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,6 +17,13 @@ from control_plane.odoo_testing_restore import (
     read_current_testing_generation,
     fresh_testing_authority_sha256,
     fresh_testing_mode_refusal,
+    preflight_fresh_testing_intent,
+    fresh_testing_override_record,
+)
+from control_plane.odoo_testing_native_source import (
+    native_testing_source_authority,
+    resolve_native_testing_source,
+    recorded_native_testing_capture,
 )
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
@@ -42,6 +50,8 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     safe_error_detail_keys,
 )
 from control_plane.contracts.odoo_target_replacement_failures import (
+    TESTING_DRILL_DATABASE_KEY,
+    OdooFreshTestingIntentRefusedError,
     DEPLOY_FAILED_CODE,
     OdooProviderEffectUncertainError,
     OdooProviderSafetyRefusedError,
@@ -1154,6 +1164,31 @@ def _public_restore_website_intent_error(
     return ""
 
 
+def _preflight_fresh_restore_overrides(
+    *,
+    record_store: object,
+    record: OdooInstanceOverrideRecord | None,
+    modules: str,
+    protected_shopify_store_keys: tuple[str, ...],
+) -> None:
+    environment = (
+        control_plane_odoo_instance_overrides.build_post_deploy_environment(
+            record,
+            record_store=record_store,
+            workflow_intent="deploy",
+            protected_shopify_store_keys=protected_shopify_store_keys,
+        ).inline_environment
+        if record is not None and {"deploy", "restore"}.intersection(record.apply_on)
+        else {}
+    )
+    preflight_fresh_testing_intent(
+        modules=modules,
+        encoded_payload=environment.get(
+            control_plane_odoo_instance_overrides.ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
+        ),
+    )
+
+
 def _write_failed_deployment(
     *,
     record_store: OdooStableTargetReplacementStore,
@@ -1197,7 +1232,9 @@ def _deploy_step_failure(error: BaseException) -> RecordFailure:
         )
     if isinstance(error, LaneMovementRefused):
         return error.record_failure()
-    if isinstance(error, OdooTargetReplacementStageError):
+    if isinstance(error, OdooFreshTestingIntentRefusedError):
+        code = error.code
+    elif isinstance(error, OdooTargetReplacementStageError):
         code, keys = error.code, error.detail_keys
     elif isinstance(error, PlatformCredentialRefusedError):
         # The site resolver's own refusal, raised before anything is rendered.
@@ -1442,6 +1479,22 @@ def build_odoo_stable_target_replacement_plan(
                 "Fresh testing requires its recorded upstream restore policy.",
             )
         destructive_backup_required = False
+        if generation is not None and generation.source_mode == "container-export":
+            try:
+                if recorded_native_testing_capture(record_store, generation) is None and (
+                    native_testing_source_authority(
+                        cast(PostgresRecordStore, record_store),
+                        profile=profile,
+                        testing_context=lane.context,
+                    ).binding_sha256
+                    != generation.source_binding_sha256
+                ):
+                    raise ValueError("The reviewed native source changed.")
+            except (ValueError, FileNotFoundError):
+                block(
+                    "fresh_testing_authority_unverified",
+                    "The reviewed native source authority is unverified.",
+                )
     if destructive_backup_required:
         try:
             odoo_backup_paths_from_runtime(
@@ -1455,10 +1508,10 @@ def build_odoo_stable_target_replacement_plan(
             "allow_empty_data_required",
             "Odoo prelaunch rebuild requests must explicitly set allow_empty_data.",
         )
+    recorded_runtime_values: dict[str, str] = {}
     if isinstance(target_record, DokployTargetRecord) and isinstance(
         target_id_record, DokployTargetIdRecord
     ):
-        recorded_runtime_values: dict[str, str] = {}
         try:
             recorded_runtime_values = _resolve_recorded_runtime_values(
                 record_store=record_store,
@@ -1594,7 +1647,9 @@ def build_odoo_stable_target_replacement_plan(
                 domain_hosts=current_target.domain_hosts,
                 runtime_port=profile.runtime_port,
             )
-            if request.data_source_mode == "upstream_restore":
+            if request.data_source_mode == "upstream_restore" and not (
+                generation is not None and generation.source_mode == "container-export"
+            ):
                 for code, message, keys in _upstream_restore_blockers(
                     current_env=live_runtime_values,
                     resolved_runtime_values=recorded_runtime_values,
@@ -1688,6 +1743,27 @@ def build_odoo_stable_target_replacement_plan(
                     "Odoo target replacement requires artifact odoo_install_modules to declare required module(s): "
                     + ", ".join(missing_required_modules),
                 )
+            if fresh_bootstrap and isinstance(target_record, DokployTargetRecord):
+                try:
+                    _preflight_fresh_restore_overrides(
+                        record_store=record_store,
+                        record=_read_odoo_instance_override_record(
+                            record_store=record_store, context=lane.context, instance=lane.instance
+                        ),
+                        modules=merge_odoo_install_modules(
+                            LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+                            artifact_manifest.odoo_install_modules,
+                            recorded_runtime_values.get(ODOO_INSTALL_MODULES_ENV_KEY, ""),
+                        ),
+                        protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
+                    )
+                except click.ClickException as error:
+                    block(
+                        "compose_or_override_render_failed",
+                        str(error)
+                        if isinstance(error, OdooFreshTestingIntentRefusedError)
+                        else "Launchplane could not render the fresh testing restore overrides.",
+                    )
     if provider_only_keys:
         block(
             "provider_keys_unrecorded",
@@ -1930,6 +2006,9 @@ def execute_odoo_stable_target_replacement_apply(
                 "Odoo target replacement runtime identity verification has no health URL.",
             )
 
+    runtime_source: dict[str, str] = {"data_source_mode": plan.data_source_mode}
+    if generation is not None and generation.drill_database:
+        runtime_source[TESTING_DRILL_DATABASE_KEY] = generation.drill_database
     record_store.write_deployment_record(
         build_deployment_record(
             request=ship_request,
@@ -1939,6 +2018,7 @@ def execute_odoo_stable_target_replacement_apply(
             started_at=started_at,
             finished_at="",
             resolved_target=resolved_target,
+            runtime_source=runtime_source,
             runtime_identity=runtime_identity,
             destination_health=HealthcheckEvidence(status="pending")
             if request.verify_health
@@ -1956,7 +2036,6 @@ def execute_odoo_stable_target_replacement_apply(
         artifact_id=artifact_id,
         image_reference=image_reference,
     )
-    runtime_source: dict[str, str] = {}
     backup_record_id = ""
     verification_record_id = ""
     captured_proof: dict[str, str] = {}
@@ -2024,17 +2103,24 @@ def execute_odoo_stable_target_replacement_apply(
             "plan_not_ready.compose_or_override_render_failed",
             website_intent_error,
         )
-    normalized_override_record = _record_with_target_replacement_canonical(
-        record=odoo_override_record,
-        canonical_url=_target_origin_base_url(
-            lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+    normalized_override_record = (
+        fresh_testing_override_record(odoo_override_record, generation)
+        if generation is not None and not generation.completed_at
+        else _record_with_target_replacement_canonical(
+            record=odoo_override_record,
+            canonical_url=_target_origin_base_url(
+                lane=lane, domains=target_record.domains, public_hosts=target_record.public_hosts
+            )
+            if target_record.public_hosts
+            else base_url,
+            updated_at=started_at,
         )
-        if target_record.public_hosts
-        else base_url,
-        updated_at=started_at,
     )
+    # Fresh generations bind the recorded intent for recovery. Their canonical
+    # URL is a rendered lane value, not a persistent edit of that intent.
     if (
-        normalized_override_record is not None
+        (generation is None or generation.completed_at)
+        and normalized_override_record is not None
         and normalized_override_record is not odoo_override_record
     ):
         record_store.write_odoo_instance_override_record(
@@ -2087,7 +2173,35 @@ def execute_odoo_stable_target_replacement_apply(
         runtime_source["runtime_override_payload_rendered"] = "false"
 
     production_write_started = False
+    native_source = None
     try:
+        if (
+            generation is not None
+            and generation.source_mode == "container-export"
+            and not generation.completed_at
+        ):
+            # Source inspection/probe happens outside DB authority locks and before
+            # the first testing provider write. It never exports or changes source.
+            try:
+                captured_source = recorded_native_testing_capture(record_store, generation)
+                native_source = (
+                    captured_source.source_observation
+                    if captured_source is not None
+                    else resolve_native_testing_source(
+                        cast(PostgresRecordStore, record_store),
+                        root=control_plane_root,
+                        profile=profile,
+                        testing_context=plan.context,
+                        probe=True,
+                    )
+                )
+                if native_source.binding_sha256 != generation.source_binding_sha256:
+                    raise ValueError("The reviewed native copy source changed.")
+            except ValueError:
+                raise OdooTargetReplacementStageError(
+                    deploy_blocked_code("upstream_restore_blocked"),
+                    "The reviewed native source capability or identity is unverified.",
+                ) from None
         with _failure_stage(deploy_blocked_code("provider_target_unreadable")):
             host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
             target_payload = dokploy_api.fetch_dokploy_target_payload(
@@ -2097,6 +2211,12 @@ def execute_odoo_stable_target_replacement_apply(
                 target_id=target_id_record.target_id,
             )
         with _failure_stage(deploy_blocked_code("site_environment_unresolved")):
+            if generation is not None and generation.source_mode == "container-export":
+                from control_plane.dokploy.native_copy_stream import (
+                    require_registered_remote_server,
+                )
+
+                require_registered_remote_server(target_payload.get("serverId"))
             site_environment = control_plane_runtime_environments.resolve_site_runtime_environment(
                 control_plane_root=control_plane_root,
                 context_name=plan.context,
@@ -2105,6 +2225,17 @@ def execute_odoo_stable_target_replacement_apply(
         # The site's own environment is delivered whole, as live sync does: worker
         # credentials, global values and other sites' values never reach it.
         runtime_environment_values = dict(site_environment.values)
+        if generation is not None and not generation.completed_at:
+            _preflight_fresh_restore_overrides(
+                record_store=record_store,
+                record=normalized_override_record,
+                modules=merge_odoo_install_modules(
+                    LAUNCHPLANE_REQUIRED_ODOO_MODULES,
+                    artifact_manifest.odoo_install_modules,
+                    runtime_environment_values.get(ODOO_INSTALL_MODULES_ENV_KEY, ""),
+                ),
+                protected_shopify_store_keys=target_record.policies.shopify.protected_store_keys,
+            )
         fresh_restore_source_environment = (
             {
                 key: value
@@ -2257,7 +2388,9 @@ def execute_odoo_stable_target_replacement_apply(
                 + ", ".join(missing_compose_keys),
                 tuple(missing_compose_keys),
             )
-        if request.data_source_mode == "upstream_restore":
+        if request.data_source_mode == "upstream_restore" and not (
+            generation is not None and generation.source_mode == "container-export"
+        ):
             configuration_blockers = _upstream_restore_blockers(
                 current_env=current_env_map,
                 resolved_runtime_values=runtime_environment_values,
@@ -2730,6 +2863,7 @@ def execute_odoo_stable_target_replacement_apply(
                 and not generation.completed_at
                 else None,
                 fresh_restore_source_environment=fresh_restore_source_environment,
+                fresh_native_source=native_source,
             )
     except OdooProviderEffectUncertainError:
         runtime_source["provider_outcome"] = "uncertain"
@@ -2747,7 +2881,11 @@ def execute_odoo_stable_target_replacement_apply(
             destination_health=HealthcheckEvidence(status="skipped"),
         )
         raise
-    except (OdooTargetReplacementStageError, DurableOperationAuthorizationDeniedError) as error:
+    except (
+        OdooTargetReplacementStageError,
+        OdooFreshTestingIntentRefusedError,
+        DurableOperationAuthorizationDeniedError,
+    ) as error:
         _write_failed_deployment(
             record_store=record_store,
             ship_request=ship_request,
@@ -2792,6 +2930,7 @@ def execute_odoo_stable_target_replacement_apply(
             runtime_identity_injected=True,
             runtime_source=runtime_source,
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
+            error_code="post_deploy_failed",
         )
 
     if (

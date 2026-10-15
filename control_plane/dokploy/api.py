@@ -14,8 +14,10 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import click
+import hashlib
 
 from control_plane import runtime_platform_credentials
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
 
 
 DEFAULT_DOKPLOY_LOG_LINE_COUNT = 200
@@ -30,6 +32,8 @@ _DOKPLOY_SCHEDULE_OBSERVATION_INTERVAL_SECONDS = 10
 # a provider deployment to the trigger that started it.
 _DOKPLOY_SCHEDULE_START_CLOCK_SKEW_SECONDS = 120
 MAX_DOKPLOY_LOG_LINE_COUNT = 1000
+# Logical recovery effect; the fixed writer uses /terminal on its registered server.
+NATIVE_TESTING_CHUNK_UPLOAD_PATH = "/terminal/native-testing-chunk"
 _DOKPLOY_SCHEDULE_DIAGNOSTIC_LINE_COUNT = 20
 _MAX_DOKPLOY_ERROR_DETAIL_LENGTH = 2000
 _MAX_DOKPLOY_SCHEDULE_DIAGNOSTIC_LENGTH = 4000
@@ -1879,6 +1883,58 @@ def dokploy_request(
         query=query,
         timeout_seconds=timeout_seconds,
     )
+
+
+def upload_native_testing_chunk(
+    *,
+    host: str,
+    token: str,
+    server_id: str,
+    container_id: str,
+    filename: str,
+    content: bytes,
+) -> None:
+    """Upload a bounded chunk; only metadata enters the provider-effect journal.
+
+    Only the qualified receiver gets bytes over stdin. Host argv and temporary
+    files never carry raw chunks. The caller also verifies receiver readback.
+    """
+    if (
+        not re.fullmatch(r"[a-f0-9]{64}", container_id)
+        or not re.fullmatch(r"[a-zA-Z0-9_-]+", server_id)
+        or server_id == "local"
+        or not re.fullmatch(r"lp-native-[a-f0-9]{32}-(database|filestore)-[0-9]+", filename)
+        or not 0 < len(content) <= NATIVE_TESTING_COPY_CHUNK_BYTES
+    ):
+        raise ValueError("Native testing upload requires a bounded qualified receiver.")
+    path = NATIVE_TESTING_CHUNK_UPLOAD_PATH
+    metadata: JsonObject = {
+        "serverId": server_id,
+        "containerId": container_id,
+        "filename": filename,
+        "destinationPath": "/tmp/" + filename,
+        "size": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+    def send() -> JsonValue:
+        from control_plane.dokploy.native_copy_stream import write_native_testing_chunk
+
+        write_native_testing_chunk(
+            host=host,
+            token=token,
+            server_id=server_id,
+            container_id=container_id,
+            filename=filename,
+            content=content,
+        )
+        return {"uploaded": True}
+
+    observer = _mutation_observer.get()
+    if observer is None:
+        send()
+    else:
+        observer(host, path, metadata, send)
 
 
 def _dokploy_request(

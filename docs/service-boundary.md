@@ -2324,10 +2324,13 @@ Runtime settings need no declaration: a key the profile does not declare is the
 site's own setting. Because no declaration vouches for it, Launchplane refuses
 it with `runtime_setting_refused` when it is not an env key name, names a
 declared managed-secret binding, or looks like a credential by name or value.
-On a `live` product, the `local_operator` credential cannot record an
+On a `live` product, the `local_operator` credential cannot apply an
 undeclared setting (`live_product_requires_operator`), the same guard as
-declaring a key. `retired_provider_keys` adds keys to the lane's existing
-retirements and runs the product-config retirement checks: an exact lane, and
+declaring a key. The authenticated Director agent may dry-run those settings
+on testing, production or context scope; planning persists only its own review
+evidence and grants no apply authority. Other scoped callers retain their
+existing authorization and live-product guard. `retired_provider_keys` adds keys
+to the lane's existing retirements and runs the product-config retirement checks: an exact lane, and
 never a declared application or driver setting. Apply requires exact confirmation text
 `APPLY {product}/{environment}` in addition to the matching dry-run and stable
 idempotency key.
@@ -2761,19 +2764,13 @@ the domain-authority planner's expected-current reference when it is empty or
 exactly matches canonical Dokploy metadata derived from the tracked target and
 target-id records (currently the project name already exposed by inspection).
 Empty stored evidence is returned explicitly, without reconstructing missing
-metadata. Other stored evidence remains hidden and the section reports
-`comparison_evidence_status: unavailable`; identity and runtime-proof inspection
-remain available. If an otherwise matching planner expectation omits that hidden
-evidence, the planner returns HTTP 400
-`dokploy_target_comparison_evidence_unavailable` with a trace: this evidence shape
-requires an inspection-safe comparison capability before the supported helper
-can plan it. This is a missing comparison-input prerequisite, not a request to
-repair records or grant access. Callers that already possess a complete private
-expectation retain the existing comparison path. The private helper forwards
-available evidence and drops it from public receipts. The planner still compares
-the full current reference and rechecks live target identity and the exact domain
-set. Neither inspection nor a repair dry run writes records or grants apply
-authority. The manual `Dokploy Target Inspect`
+metadata. Other evidence stays hidden; the read supplies a keyed comparison
+fingerprint when the existing key-ring configuration is available. The
+[domain-authority comparison contract](operations.md#dokploy-domain-authority)
+describes private forwarding, dry-run-only scope, full-reference/lane drift
+checks, missing-input diagnostics and key rotation. Callers with a complete
+private expectation retain their existing path. Neither inspection nor a repair
+dry run writes records or grants apply authority. The manual `Dokploy Target Inspect`
 workflow is the supported shared and production caller when admins need
 provider evidence without mutating Dokploy or Launchplane records. A
 `local_operator` caller may also use its existing `driver.read` grant for product `launchplane`

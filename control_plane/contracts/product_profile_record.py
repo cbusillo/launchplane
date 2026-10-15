@@ -293,6 +293,11 @@ def product_lane_monitoring_incident_eligible(
 
 class ProductLaneProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    odoo_testing_drill_enabled: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     instance: str
     context: str
@@ -321,6 +326,8 @@ class ProductLaneProfile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductLaneProfile":
+        if self.odoo_testing_drill_enabled and self.instance != "testing":
+            raise ValueError("Odoo testing drills require the testing instance.")
         if not self.instance.strip():
             raise ValueError("product lane profile requires instance")
         if not self.context.strip():

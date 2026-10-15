@@ -5450,6 +5450,12 @@
               }
             ]
           },
+          "expected_current_provider_target_fingerprint": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Expected Current Provider Target Fingerprint",
+            "type": "string"
+          },
           "healthcheck_path": {
             "default": "",
             "title": "Healthcheck Path",
@@ -12561,6 +12567,226 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HealthAlertDrillEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "enabled_discord_destinations": {
+            "default": 0,
+            "title": "Enabled Discord Destinations",
+            "type": "integer"
+          },
+          "next_window_at": {
+            "title": "Next Window At",
+            "type": "string"
+          },
+          "rate_limited": {
+            "default": false,
+            "title": "Rate Limited",
+            "type": "boolean"
+          },
+          "receipt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HealthAlertDrillReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "routing": {
+            "enum": [
+              "enabled",
+              "missing",
+              "disabled",
+              "unavailable",
+              "unknown_check"
+            ],
+            "title": "Routing",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/HealthAlertDrillScope"
+          },
+          "window": {
+            "title": "Window",
+            "type": "integer"
+          },
+          "window_seconds": {
+            "default": 600,
+            "title": "Window Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "scope",
+          "routing",
+          "window",
+          "next_window_at"
+        ],
+        "title": "HealthAlertDrillEvidence",
+        "type": "object"
+      },
+      "HealthAlertDrillReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "attempted_at": {
+            "title": "Attempted At",
+            "type": "string"
+          },
+          "delivered_count": {
+            "default": 0,
+            "title": "Delivered Count",
+            "type": "integer"
+          },
+          "failed_count": {
+            "default": 0,
+            "title": "Failed Count",
+            "type": "integer"
+          },
+          "receipt_id": {
+            "title": "Receipt Id",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/HealthAlertDrillScope"
+          },
+          "status": {
+            "enum": [
+              "delivered",
+              "failed",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "unavailable_count": {
+            "default": 0,
+            "title": "Unavailable Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "receipt_id",
+          "scope",
+          "attempted_at",
+          "status"
+        ],
+        "title": "HealthAlertDrillReceipt",
+        "type": "object"
+      },
+      "HealthAlertDrillRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "check_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Check Name",
+            "type": "string"
+          },
+          "context": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "send"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "window": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Window"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "check_name"
+        ],
+        "title": "HealthAlertDrillRequest",
+        "type": "object"
+      },
+      "HealthAlertDrillResponse": {
+        "properties": {
+          "drill": {
+            "$ref": "#/components/schemas/HealthAlertDrillEvidence"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "drill"
+        ],
+        "title": "HealthAlertDrillResponse",
+        "type": "object"
+      },
+      "HealthAlertDrillScope": {
+        "additionalProperties": false,
+        "properties": {
+          "check_name": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Check Name",
+            "type": "string"
+          },
+          "context": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "check_name"
+        ],
+        "title": "HealthAlertDrillScope",
+        "type": "object"
+      },
       "HealthMonitorStatus": {
         "properties": {
           "activation": {
@@ -12882,6 +13108,44 @@
           "historical_completion_preflight"
         ],
         "title": "HistoricalCompletionPreflightResult",
+        "type": "object"
+      },
+      "ImportDiagnosticResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "const": false,
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "runtime": {
+            "default": "unknown",
+            "enum": [
+              "verified",
+              "unknown"
+            ],
+            "title": "Runtime",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceDiagnostic"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "values_redacted": {
+            "const": true,
+            "default": true,
+            "title": "Values Redacted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "title": "ImportDiagnosticResult",
         "type": "object"
       },
       "ImportOverrideEntry": {
@@ -21149,6 +21413,16 @@
           "production": {
             "$ref": "#/components/schemas/ArtifactIdentityManifest"
           },
+          "production_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "release_id": {
             "minLength": 1,
             "title": "Release Id",
@@ -21158,6 +21432,16 @@
             "pattern": "^[a-zA-Z0-9_-]+$",
             "title": "Route Id",
             "type": "string"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "writers": {
             "items": {
@@ -21273,6 +21557,16 @@
             "title": "Record Id",
             "type": "string"
           },
+          "rollback_pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicPauseRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "rollback_started_at": {
             "anyOf": [
               {
@@ -21284,6 +21578,16 @@
               }
             ],
             "title": "Rollback Started At"
+          },
+          "rollback_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "route": {
             "anyOf": [
@@ -21318,6 +21622,11 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "website_settings_attempted": {
+            "default": false,
+            "title": "Website Settings Attempted",
+            "type": "boolean"
           }
         },
         "required": [
@@ -21327,6 +21636,30 @@
           "updated_at"
         ],
         "title": "OdooCutoverRecord",
+        "type": "object"
+      },
+      "OdooImportDiagnosticResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ImportDiagnosticResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "OdooImportDiagnosticResponse",
         "type": "object"
       },
       "OdooInstanceOverrideRecord": {
@@ -21473,6 +21806,16 @@
             },
             "title": "Update Modules",
             "type": "array"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -23143,6 +23486,56 @@
         "title": "OdooStableTargetReplacementOperationStatusResponse",
         "type": "object"
       },
+      "OdooTestingDrillEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "alert_delivered": {
+            "default": false,
+            "title": "Alert Delivered",
+            "type": "boolean"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "operation_id": {
+            "default": "",
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "queued",
+              "pass",
+              "fail",
+              "skipped"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "step": {
+            "default": "",
+            "title": "Step",
+            "type": "string"
+          },
+          "trace": {
+            "default": "",
+            "title": "Trace",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "observed_at"
+        ],
+        "title": "OdooTestingDrillEvidence",
+        "type": "object"
+      },
       "OdooTestingRouteBindingRefreshEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -23432,6 +23825,48 @@
           "settings"
         ],
         "title": "OdooWebsiteSettingsIntent",
+        "type": "object"
+      },
+      "OdooWebsiteSettingsReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "committed": {
+            "const": true,
+            "title": "Committed",
+            "type": "boolean"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "retained_startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Retained Startup Settings Sha256",
+            "type": "string"
+          },
+          "settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Settings Sha256",
+            "type": "string"
+          },
+          "startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Startup Settings Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding",
+          "image",
+          "settings_sha256",
+          "startup_settings_sha256",
+          "retained_startup_settings_sha256",
+          "committed"
+        ],
+        "title": "OdooWebsiteSettingsReceipt",
         "type": "object"
       },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {
@@ -25783,6 +26218,44 @@
           "fields"
         ],
         "title": "OwnerSecretInputResponse",
+        "type": "object"
+      },
+      "ParameterAgreement": {
+        "additionalProperties": false,
+        "properties": {
+          "agreement": {
+            "enum": [
+              "match",
+              "mismatch",
+              "missing",
+              "unknown"
+            ],
+            "title": "Agreement",
+            "type": "string"
+          },
+          "applied_present": {
+            "title": "Applied Present",
+            "type": "boolean"
+          },
+          "field": {
+            "enum": [
+              "host",
+              "user",
+              "db",
+              "port",
+              "ssl_verify",
+              "password"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "applied_present",
+          "agreement"
+        ],
+        "title": "ParameterAgreement",
         "type": "object"
       },
       "PathCheckStep": {
@@ -30964,6 +31437,17 @@
           "target": {
             "$ref": "#/components/schemas/ProductTargetSummary"
           },
+          "testing_rebuild_drill": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooTestingDrillEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "topology": {
             "$ref": "#/components/schemas/ProductEnvironmentTopology"
           },
@@ -32149,6 +32633,7 @@
           },
           "failure_code": {
             "enum": [
+              "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
               "dns_failure",
@@ -32328,6 +32813,7 @@
             "anyOf": [
               {
                 "enum": [
+                  "production_delivery_failed",
                   "connection_timeout",
                   "deploy_fence_held",
                   "dns_failure",
@@ -32575,6 +33061,7 @@
           },
           "failure_code": {
             "enum": [
+              "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
               "dns_failure",
@@ -32942,6 +33429,12 @@
           },
           "odoo_stable_bootstrap": {
             "$ref": "#/components/schemas/ProductOdooStableBootstrapPolicy"
+          },
+          "odoo_testing_drill_enabled": {
+            "default": false,
+            "title": "Odoo Testing Drill Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -38358,6 +38851,99 @@
         "title": "ProductionIndependentBackupPolicy",
         "type": "object"
       },
+      "ProductionRecipientRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "application_service": {
+            "minLength": 1,
+            "title": "Application Service",
+            "type": "string"
+          },
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "database_service": {
+            "minLength": 1,
+            "title": "Database Service",
+            "type": "string"
+          },
+          "destination_server_id": {
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9_-]+$",
+            "title": "Destination Server Id",
+            "type": "string"
+          },
+          "instance": {
+            "const": "prod",
+            "default": "prod",
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback",
+              "receipt"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "ports": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Ports",
+            "type": "object"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "service_limits": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RecipientServiceLimits"
+            },
+            "title": "Service Limits",
+            "type": "object"
+          },
+          "source_commit": {
+            "pattern": "^[a-f0-9]{40}$",
+            "title": "Source Commit",
+            "type": "string"
+          },
+          "volume_keys": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Volume Keys",
+            "type": "object"
+          }
+        },
+        "required": [
+          "context",
+          "source_commit",
+          "destination_server_id",
+          "volume_keys",
+          "ports",
+          "application_service",
+          "database_service",
+          "service_limits",
+          "reason"
+        ],
+        "title": "ProductionRecipientRequest",
+        "type": "object"
+      },
       "PromotionEvidenceRequest": {
         "additionalProperties": false,
         "properties": {
@@ -39917,6 +40503,37 @@
           "recent_previews"
         ],
         "title": "RecentOperationsResponse",
+        "type": "object"
+      },
+      "RecipientServiceLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "command_memory_limits": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "const": "--innodb-buffer-pool-size"
+            },
+            "title": "Command Memory Limits",
+            "type": "object"
+          },
+          "cpus": {
+            "exclusiveMinimum": 0.0,
+            "title": "Cpus",
+            "type": "number"
+          },
+          "memory_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Memory Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cpus",
+          "memory_bytes"
+        ],
+        "title": "RecipientServiceLimits",
         "type": "object"
       },
       "RecordFailure": {
@@ -45565,6 +46182,58 @@
         "title": "SoloAdministrationConfirmationResponse",
         "type": "object"
       },
+      "SourceDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "applied_connection_grants": {
+            "const": "unknown",
+            "default": "unknown",
+            "title": "Applied Connection Grants",
+            "type": "string"
+          },
+          "binding": {
+            "default": "missing_or_unsafe",
+            "enum": [
+              "selected",
+              "missing_or_unsafe"
+            ],
+            "title": "Binding",
+            "type": "string"
+          },
+          "managed_connection_grants": {
+            "default": "unknown",
+            "enum": [
+              "read_only",
+              "unsafe",
+              "unknown"
+            ],
+            "title": "Managed Connection Grants",
+            "type": "string"
+          },
+          "parameters": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ParameterAgreement"
+            },
+            "title": "Parameters",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "cm_data",
+              "repairshopr",
+              "fishbowl"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "SourceDiagnostic",
+        "type": "object"
+      },
       "StoredRecordSnapshot": {
         "additionalProperties": false,
         "properties": {
@@ -47314,6 +47983,15 @@
             "pattern": "^(?:[a-f0-9]{64})?$",
             "title": "Reviewed Plan Sha256",
             "type": "string"
+          },
+          "source_mode": {
+            "default": "ssh",
+            "enum": [
+              "ssh",
+              "container-export"
+            ],
+            "title": "Source Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -47403,7 +48081,8 @@
               "recovery_inspection_before_fence",
               "recovery_provider_evidence_incomplete",
               "recovery_operation_or_binding_changed",
-              "recovery_evidence_unavailable"
+              "recovery_evidence_unavailable",
+              "recovery_source_exceeds_bound"
             ],
             "title": "Reason",
             "type": "string"
@@ -70718,6 +71397,245 @@
         "summary": "Read Launchplane service health"
       }
     },
+    "/v1/health-alert-drills": {
+      "get": {
+        "operationId": "read_health_alert_drill",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "check_name",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 1,
+              "title": "Check Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "window",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Window"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthAlertDrillResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read effective Discord routing and a drill receipt"
+      },
+      "post": {
+        "operationId": "run_health_alert_drill",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HealthAlertDrillRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthAlertDrillResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Dry-run or send a non-disruptive health alert drill"
+      }
+    },
     "/v1/ingress/canary-routes/apply": {
       "post": {
         "operationId": "apply_ingress_canary_route",
@@ -84635,6 +85553,134 @@
         "summary": "Plan or apply product environment config"
       }
     },
+    "/v1/products/{product}/environments/{environment}/odoo-import-diagnostics": {
+      "get": {
+        "operationId": "read_odoo_import_diagnostics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooImportDiagnosticResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read value-free Odoo testing import binding and source-grant evidence"
+      }
+    },
     "/v1/products/{product}/environments/{environment}/odoo-import-overrides/reconcile": {
       "get": {
         "operationId": "read_odoo_import_override_reconciliation",
@@ -86204,6 +87250,127 @@
           }
         },
         "summary": "Read original preview reservation classifications"
+      }
+    },
+    "/v1/products/{product}/production-recipient": {
+      "post": {
+        "operationId": "prepare_independent_production_recipient",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._-]+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProductionRecipientRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Prepare a fresh private production recipient without changing the serving binding"
       }
     },
     "/v1/products/{product}/secret-bindings": {

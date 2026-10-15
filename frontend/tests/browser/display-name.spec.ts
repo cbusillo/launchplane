@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale", "denied", "storage-failure"] as const) {
   test(`Display-name change ${outcome}: reviewed atomic request and recovery @responsive`, async ({ page }, testInfo) => {
@@ -90,7 +90,7 @@ for (const outcome of ["applied", "lost-response", "lost-response-stale", "stale
     if (outcome === "storage-failure") {
       await expect(panel.getByRole("alert")).toBeVisible(); expect(sent).toEqual([]); return;
     }
-    await expect.poll(() => sent.length).toBe(1);
+    await waitForState(() => sent.length).toBe(1);
     expect(sent[0].key).toBeTruthy();
     expect(sent[0].body).toEqual({ display_name: "Example Website", schema_version: 1, mode: "apply", reason: "Reason changed after review.", reviewed_plan_sha256: "a".repeat(64) });
     if (outcome === "stale") {

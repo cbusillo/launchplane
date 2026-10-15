@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 for (const outcome of ["completed", "uncertain", "reconcile", "denied", "narrow-admin"] as const) {
   test(`Product retirement ${outcome}`, { tag: "@responsive" }, async ({ page }, testInfo) => {
@@ -45,7 +45,7 @@ for (const outcome of ["completed", "uncertain", "reconcile", "denied", "narrow-
       await page.reload(); panel = page.getByRole("region", { name: "Retire product", exact: true });
       await expect(panel.getByLabel("Change reason")).toBeDisabled();
       await panel.getByRole("button", { name: "Resume original retirement" }).click();
-      await expect.poll(() => sent.length).toBe(2);
+      await waitForState(() => sent.length).toBe(2);
       expect(sent[1]).toEqual(sent[0]);
     }
     await expect(panel.getByRole("status")).toBeVisible();

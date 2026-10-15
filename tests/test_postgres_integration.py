@@ -8,6 +8,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from functools import partial
 import json
 import os
 from pathlib import Path
@@ -4379,6 +4380,41 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_evidence_window_is_reserved_once_across_database_connections(self) -> None:
+        from control_plane.health_alert_drill import DRILL_ROUTE
+
+        with _head_postgres_database() as url:
+            stores = [PostgresRecordStore(database_url=url) for _ in range(3)]
+            for store in stores:
+                self.addCleanup(store.close)
+            barrier = threading.Barrier(len(stores))
+            now = datetime.now(timezone.utc).isoformat()
+
+            def reserve(index: int) -> bool:
+                record = LaunchplaneIdempotencyRecord(
+                    record_id=f"receipt-{index}",
+                    scope="drill-evidence",
+                    route_path=DRILL_ROUTE,
+                    idempotency_key="same-lane-window",
+                    request_fingerprint="fixture",
+                    recorded_at=now,
+                    response_status_code=200,
+                    response_trace_id=f"trace-{index}",
+                    response_payload={"status": "unavailable"},
+                )
+                barrier.wait(timeout=10)
+                return stores[index].write_idempotency_record_once(record)
+
+            with ThreadPoolExecutor(max_workers=len(stores)) as workers:
+                outcomes = list(workers.map(reserve, range(len(stores))))
+            self.assertEqual(sum(outcomes), 1)
+            persisted = stores[0].read_idempotency_record(
+                scope="drill-evidence",
+                route_path=DRILL_ROUTE,
+                idempotency_key="same-lane-window",
+            )
+            self.assertIsNotNone(persisted)
+
     def test_human_refresh_serializes_across_workers_and_preserves_csrf_consumption(self) -> None:
         from control_plane.service_human_auth import (
             GitHubOAuthClient,
@@ -4670,9 +4706,251 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
             finally:
                 release.set()
                 event.remove(store._engine, "after_cursor_execute", pause_writer)
-            self.assertEqual(result.status, "changed")
+            self.assertEqual(result.status, "history_conflict")
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(store.read_deployment_record(history.record_id), history)
+
+    def test_never_live_history_contention_retries_through_public_writers(self) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.preview_record import PreviewRecord
+        from control_plane.contracts.promotion_record import (
+            ArtifactIdentityReference,
+            DeploymentEvidence,
+            PromotionRecord,
+        )
+        from control_plane.http_app import (
+            _PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+            create_launchplane_fastapi_app,
+            idempotency_scope,
+        )
+        from control_plane.service_auth import configured_local_operator_identity
+        from control_plane.storage.postgres import (
+            LaunchplaneDeploymentRow,
+            LaunchplanePromotionRow,
+            LaunchplanePreviewRow,
+            LaunchplaneProductProfileRow,
+            NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS,
+        )
+        from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+        from tests.support.http import request
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        for kind in (
+            "production",
+            "testing",
+            "promotion",
+            "preview",
+            "rolled_back",
+            "profile_write",
+            "profile_recovery",
+        ):
+            with self.subTest(writer=kind), _head_postgres_database() as url:
+                store = PostgresRecordStore(database_url=url)
+                self.addCleanup(store.close)
+                profile = LaunchplaneProductProfileRecord.model_validate(
+                    _odoo_preview_profile_payload()
+                )
+                store.write_product_profile_record(profile)
+                config = _local_operator_bearer_config()
+                store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id="classification-fixture-policy",
+                        source="test",
+                        updated_at=profile.updated_at,
+                        policy=LaunchplaneAuthzPolicy(),
+                    )
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_RejectingVerifier(),
+                    authz_policy=LaunchplaneAuthzPolicy(),
+                    bearer_identity_config=config,
+                    record_store_factory=lambda: store,
+                )
+                identity = configured_local_operator_identity(config)
+                assert identity is not None
+                route = f"/v1/product-profiles/{profile.product}/production-use"
+                headers = {"Authorization": "Bearer local-operator-token"}
+                payload: dict[str, Any] = {
+                    "production_use": "prelaunch",
+                    "reason": "Reviewed never-live fact.",
+                }
+                dry = asyncio.run(request(app, "POST", route, headers=headers, payload=payload))
+                self.assertEqual(dry.status_code, 202, dry.text)
+                payload.update(
+                    mode="apply", reviewed_plan_sha256=dry.json()["result"]["plan_sha256"]
+                )
+                key = "retry-classification"
+                headers["Idempotency-Key"] = key
+
+                def classify() -> Any:
+                    return asyncio.run(
+                        request(app, "POST", route, headers=headers, payload=payload)
+                    )
+
+                deploy = DeploymentEvidence(
+                    status="pass",
+                    deploy_mode="compose",
+                    target_name="fixture",
+                    target_type="compose",
+                )
+                write: Callable[[], None]
+                if kind == "profile_write":
+                    changed_profile = profile.model_copy(update={"display_name": "Changed"})
+                    write = partial(store.write_product_profile_record, changed_profile)
+                    table = LaunchplaneProductProfileRow.__tablename__
+                elif kind == "profile_recovery":
+                    reservation = store.reserve_mutation(
+                        scope="fixture-recovery",
+                        route_path="/fixture-recovery",
+                        idempotency_key="fixture-recovery",
+                        request_fingerprint="fixture",
+                        lease_owner="fixture",
+                        reconciliation_key="fixture",
+                    ).record
+                    assert reservation is not None
+                    held = store.mark_mutation_reconcile_required(
+                        reservation=reservation,
+                        reconciliation_key="fixture",
+                    ).record
+                    assert held is not None
+
+                    def write() -> None:
+                        adopted = store.adopt_reconciled_mutation(
+                            reservation=held,
+                            response_status_code=202,
+                            response_trace_id="fixture-adoption",
+                            response_payload={},
+                            expected_binding_evidence=(profile,),
+                        )
+                        self.assertEqual(adopted.status, "adopted")
+
+                    table = LaunchplaneProductProfileRow.__tablename__
+                elif kind == "promotion":
+                    promotion = PromotionRecord(
+                        record_id="held-promotion",
+                        context=profile.lanes[0].context,
+                        from_instance="testing",
+                        to_instance="prod",
+                        artifact_identity=ArtifactIdentityReference(artifact_id="fixture-artifact"),
+                        deploy=deploy,
+                    )
+                    write = partial(store.write_promotion_record, promotion)
+                    table = LaunchplanePromotionRow.__tablename__
+                elif kind == "preview":
+                    preview = PreviewRecord(
+                        preview_id="held-preview",
+                        context=profile.preview.context,
+                        anchor_repo=profile.repository.partition("/")[2],
+                        anchor_pr_number=42,
+                        anchor_pr_url=f"https://github.com/{profile.repository}/pull/42",
+                        preview_label="fixture",
+                        canonical_url="https://preview.example.test",
+                        state="active",
+                        created_at=profile.updated_at,
+                        updated_at=profile.updated_at,
+                        eligible_at=profile.updated_at,
+                    )
+                    write = partial(store.write_preview_record, preview)
+                    table = LaunchplanePreviewRow.__tablename__
+                else:
+                    deployment = DeploymentRecord(
+                        record_id="held-deployment",
+                        context=profile.lanes[0].context,
+                        instance="testing" if kind == "testing" else "prod",
+                        source_git_ref="fixture",
+                        deploy=deploy,
+                    )
+                    write = partial(store.write_deployment_record, deployment)
+                    table = LaunchplaneDeploymentRow.__tablename__
+                written, release = threading.Event(), threading.Event()
+
+                def pause_writer(
+                    _connection: Any,
+                    _cursor: Any,
+                    _sql: Any,
+                    _params: Any,
+                    context: Any,
+                    _many: Any,
+                ) -> None:
+                    statement = context.compiled.statement if context.compiled is not None else None
+                    holds_profile = (
+                        kind == "profile_recovery"
+                        and statement is not None
+                        and statement.is_select
+                        and statement._for_update_arg is not None
+                        and any(
+                            source.compare(LaunchplaneProductProfileRow.__table__)
+                            for source in statement.get_final_froms()
+                        )
+                    )
+                    holds_write = (
+                        (context.isinsert or context.isupdate)
+                        and statement is not None
+                        and statement.table.name == table
+                    )
+                    if holds_profile or holds_write:
+                        written.set()
+                        if not release.wait(6 * NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS):
+                            raise AssertionError("History writer was not resumed")
+                        if kind == "rolled_back":
+                            raise RuntimeError("Roll back the fixture writer")
+
+                event.listen(store._engine, "after_cursor_execute", pause_writer)
+                try:
+                    with ThreadPoolExecutor(max_workers=2) as workers:
+                        writer = workers.submit(write)
+                        try:
+                            self.assertTrue(written.wait(5))
+                            busy = workers.submit(classify).result(
+                                timeout=3 * NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS
+                            )
+                            self.assertEqual(busy.status_code, 409, busy.text)
+                            self.assertEqual(
+                                busy.json()["error"]["code"], "production_history_busy"
+                            )
+                            self.assertEqual(
+                                store.read_product_profile_record(profile.product), profile
+                            )
+                            self.assertIsNone(
+                                store.read_idempotency_record(
+                                    scope=idempotency_scope(identity),
+                                    route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+                                    idempotency_key=key,
+                                )
+                            )
+                        finally:
+                            release.set()
+                        if kind == "rolled_back":
+                            with self.assertRaisesRegex(RuntimeError, "fixture writer"):
+                                writer.result(timeout=5)
+                        else:
+                            writer.result(timeout=5)
+                finally:
+                    release.set()
+                    event.remove(store._engine, "after_cursor_execute", pause_writer)
+                retry = classify()
+                if kind == "profile_write":
+                    self.assertEqual(retry.status_code, 409, retry.text)
+                    self.assertEqual(retry.json()["error"]["code"], "stale")
+                    self.assertEqual(
+                        store.read_product_profile_record(profile.product), changed_profile
+                    )
+                elif kind in {"production", "promotion"}:
+                    self.assertEqual(retry.status_code, 403, retry.text)
+                    self.assertEqual(store.read_product_profile_record(profile.product), profile)
+                else:
+                    self.assertEqual(retry.status_code, 202, retry.text)
+                    current = store.read_product_profile_record(profile.product)
+                    self.assertEqual(current.production_use, "prelaunch")
+                    self.assertFalse(current.prelaunch_bootstrap_authorized)
+                    self.assertEqual(current.release_on_acceptance, profile.release_on_acceptance)
+                    replay = classify()
+                    self.assertEqual(replay.status_code, 202, replay.text)
+                    self.assertEqual(replay.json()["result"], retry.json()["result"])
+                    payload["reason"] = "Different request"
+                    conflict = classify()
+                    self.assertEqual(conflict.status_code, 409, conflict.text)
+                    self.assertEqual(conflict.json()["error"]["code"], "idempotency_key_reused")
 
     def test_expired_event_hold_blocks_only_while_its_execution_owner_is_present(self) -> None:
         from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
@@ -10084,6 +10362,14 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
     def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
         self.scenario("normal")
 
+    def test_first_execution_result_keeps_intent_binding_and_original_bootstrap_receipt(
+        self,
+    ) -> None:
+        self.first_execution_result_transition()
+
+    def test_native_capture_keeps_original_generation_source_and_immutable_receipt(self) -> None:
+        self.native_capture_custody()
+
     def test_credential_comparison_failure_precedes_source_or_writes(self) -> None:
         self.credential_comparison_failure()
 
@@ -10532,4 +10818,762 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         self.assertEqual(sum(path == "/api/compose.create" for path, _ in self.writes), 1)
         self.assertEqual(
             self.store.list_held_provider_target_reservations(), (self.preparation.original,)
+        )
+
+
+class RealPostgresProductionRecipientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests import test_production_recipient as recipients
+
+        self.fixture = recipients.ProductionRecipientTests()
+        database = _head_postgres_database()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_preparation_replay_and_uncertain_configuration_keep_old_production(self) -> None:
+        self.fixture.test_preparation_replay_readback_preserve_old_and_never_deploy_or_delete()
+
+    def test_lost_create_keeps_original_custody_and_excludes_a_new_key(self) -> None:
+        self.fixture.test_unknown_create_retains_custody_and_refuses_new_keys_without_redispatch()
+
+    def test_competing_preparation_cannot_dispatch_a_second_recipient(self) -> None:
+        from control_plane.production_recipient import ROUTE
+
+        fixture = self.fixture
+        second = PostgresRecordStore(database_url=fixture.database_url)
+        self.addCleanup(second.close)
+        other = replace(fixture.adapter, store=second, original_key="competing-key")
+        original = fixture.provider_write
+        outcomes = []
+
+        def write(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.create":
+                outcomes.append(
+                    run_durable_provider_operation(
+                        store=second,
+                        scope=fixture.adapter.scope,
+                        route_path=ROUTE.format(product=fixture.product),
+                        idempotency_key="competing-key",
+                        request_fingerprint="c" * 64,
+                        lease_owner="second-worker",
+                        response_trace_id="launchplane_req_competing",
+                        adapter=other,
+                    )
+                )
+            return original(**kwargs)
+
+        with patch("control_plane.production_recipient.api.dokploy_request", side_effect=write):
+            self.assertEqual(fixture.run_operation().response_status_code, 202)
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].response_status_code, 409)
+        self.assertEqual(fixture.effects.count("/api/compose.create"), 1)
+        fixture.assert_old_preserved()
+
+    def test_custody_snapshot_is_guarded_until_its_transaction_commits(self) -> None:
+        self.assert_authority_writer_exclusion("profile")
+
+    def test_promotion_inventory_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("promotion")
+
+    def test_promotion_recovery_inventory_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("recovery")
+
+    def test_secret_rotation_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("rotation")
+
+    def test_zero_effect_replan_retains_history_on_postgres(self) -> None:
+        self.fixture.test_zero_effect_drift_can_replan_with_retained_history_and_a_new_key()
+
+    def test_retry_read_failure_keeps_the_original_create_fence_on_postgres(self) -> None:
+        self.fixture.test_transient_read_on_reacquired_attempt_retains_the_original_create_fence()
+
+    def assert_authority_writer_exclusion(self, kind: str) -> None:
+        from control_plane.production_recipient import authority_snapshot
+        from control_plane.contracts.environment_inventory import EnvironmentInventory
+        from control_plane.contracts.promotion_record import PromotionRecord
+        from control_plane.contracts.secret_record import (
+            SecretRecord,
+            SecretBinding,
+            SecretVersion,
+            SecretAuditEvent,
+            SecretRotationWrite,
+        )
+
+        fixture = self.fixture
+        rotation = None
+        if kind == "rotation":
+            secret = SecretRecord(
+                secret_id="recipient-fixture-secret",
+                scope="context_instance",
+                integration="runtime_environment",
+                name="DB_PASSWORD",
+                context=fixture.context,
+                instance="prod",
+                current_version_id="old-fixture-version",
+                created_at=fixture.old.updated_at,
+                updated_at=fixture.old.updated_at,
+            )
+            fixture.store.write_secret_record(secret)
+            fixture.store.write_secret_binding(
+                SecretBinding(
+                    binding_id="recipient-fixture-binding",
+                    secret_id=secret.secret_id,
+                    integration=secret.integration,
+                    binding_key=secret.name,
+                    context=fixture.context,
+                    instance="prod",
+                    created_at=secret.created_at,
+                    updated_at=secret.updated_at,
+                )
+            )
+            rotated = secret.model_copy(update={"current_version_id": "new-fixture-version"})
+            rotation = SecretRotationWrite(
+                expected_current_version_id=secret.current_version_id,
+                record=rotated,
+                version=SecretVersion(
+                    version_id=rotated.current_version_id,
+                    secret_id=secret.secret_id,
+                    created_at=secret.created_at,
+                    ciphertext="fixture-ciphertext",
+                ),
+                audit_event=SecretAuditEvent(
+                    event_id="recipient-fixture-rotation",
+                    secret_id=secret.secret_id,
+                    event_type="rotated",
+                    recorded_at=secret.updated_at,
+                ),
+            )
+        inventory = EnvironmentInventory.model_validate(
+            {
+                "context": fixture.context,
+                "instance": "prod",
+                "source_git_ref": "old-ref",
+                "deploy": {
+                    "target_name": fixture.old.target_name,
+                    "target_type": "compose",
+                    "deploy_mode": "compose",
+                },
+                "updated_at": fixture.old.updated_at,
+                "deployment_record_id": "original-deploy",
+            }
+        )
+        if kind in {"promotion", "recovery"}:
+            fixture.store.write_environment_inventory(inventory)
+        original = fixture.adapter.current()
+        entered, release = threading.Event(), threading.Event()
+        url = make_url(fixture.database_url)
+        second = PostgresRecordStore(
+            database_url=url.set(
+                query={**url.query, "application_name": "lp3699-competing-writer"}
+            ).render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+
+        def read_snapshot(store: Any, product: str, context: str) -> Any:
+            snapshot = authority_snapshot(store, product, context)
+            if store is fixture.store:
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError("test snapshot barrier timed out")
+            return snapshot
+
+        changed = fixture.profile.model_copy(
+            update={"updated_at": fixture.profile.updated_at + "-changed"}
+        )
+        write: Callable[[], Any] = partial(second.write_product_profile_record, changed)
+        changed_inventory = inventory.model_copy(
+            update={"updated_at": inventory.updated_at + "-changed"}
+        )
+        if kind == "rotation":
+            assert rotation is not None
+            write = partial(second.write_secret_rotations, (rotation,))
+        elif kind == "promotion":
+            promotion = PromotionRecord.model_validate(
+                {
+                    "record_id": "fixture-promotion",
+                    "artifact_identity": {"artifact_id": "fixture-artifact"},
+                    "context": fixture.context,
+                    "from_instance": "stable",
+                    "to_instance": "prod",
+                    "deploy": inventory.deploy.model_dump(mode="json"),
+                }
+            )
+            write = partial(
+                second.write_promotion_evidence_records,
+                promotion_record=promotion,
+                inventory=changed_inventory,
+            )
+        elif kind == "recovery":
+            reservation = fixture.store.reserve_mutation(
+                scope="fixture-promotion",
+                route_path="/fixture-promotion-recovery",
+                idempotency_key="original-promotion",
+                request_fingerprint="f" * 64,
+                lease_owner="fixture-worker",
+                reconciliation_key="r" * 64,
+            ).record
+            assert reservation is not None
+            reconciled = fixture.store.mark_mutation_reconcile_required(
+                reservation=reservation, reconciliation_key=reservation.reconciliation_key
+            ).record
+            assert reconciled is not None
+            write = partial(
+                second.adopt_reconciled_mutation,
+                reservation=reconciled,
+                response_status_code=202,
+                response_trace_id="launchplane_req_recovery",
+                response_payload={},
+                expected_promotion_evidence=(inventory,),
+                promotion_recovery_inventory=changed_inventory,
+            )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            with patch(
+                "control_plane.production_recipient.authority_snapshot", side_effect=read_snapshot
+            ):
+                first = executor.submit(
+                    fixture.store.write_production_recipient,
+                    expected=None,
+                    replacement=original.model_dump(mode="json"),
+                )
+                self.assertTrue(entered.wait(5))
+                writer = executor.submit(write)
+                try:
+                    deadline = time.monotonic() + 5
+                    waiting = 0
+                    with fixture.store._engine.connect().execution_options(
+                        isolation_level="AUTOCOMMIT"
+                    ) as connection:
+                        while time.monotonic() < deadline:
+                            waiting = int(
+                                connection.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'lp3699-competing-writer' AND wait_event_type = 'Lock'"
+                                    )
+                                )
+                                or 0
+                            )
+                            if waiting:
+                                break
+                            time.sleep(0.01)
+                    self.assertGreater(
+                        waiting, 0, "The competing writer must reach a real PostgreSQL lock wait"
+                    )
+                    self.assertFalse(writer.done())
+                finally:
+                    release.set()
+                first.result(timeout=10)
+                writer.result(timeout=10)
+        with self.assertRaises(ValueError):
+            fixture.adapter.require_unchanged(original)
+        fixture.assert_old_preserved()
+
+
+class RealPostgresOdooTestingDrillTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.test_odoo_testing_drill import TestingDrillScenario
+
+        self.scenario = TestingDrillScenario()
+        self.addCleanup(self.scenario.doCleanups)
+        self.scenario.seed(self.enterContext(_head_postgres_database()))
+
+    def test_drill_login_history_query_on_real_postgres(self) -> None:
+        from datetime import timedelta
+        import re
+        import subprocess
+        from psycopg import sql
+        from tests.test_odoo_testing_restore import FreshTestingHostProgramTests
+
+        host = FreshTestingHostProgramTests()
+        host.setUp()
+        self.addCleanup(host.doCleanups)
+        now = datetime.now(timezone.utc)
+        since = now - timedelta(days=1)
+        host.spec.update(inspection_only=True, usage_only=True, usage_since=since.isoformat())
+        host.existing_database = True
+        engine = self.scenario.store._engine
+        with engine.begin() as connection:
+            connection.exec_driver_sql(
+                "CREATE TABLE res_users_log (id serial PRIMARY KEY, create_uid integer, create_date timestamp)"
+            )
+            connection.execute(
+                text("INSERT INTO res_users_log (create_uid, create_date) VALUES (44, :moment)"),
+                {"moment": (since - timedelta(seconds=1)).replace(tzinfo=None)},
+            )
+        command = host.command
+
+        def database_read(arguments: list[str], **kwargs: Any) -> Any:
+            query = kwargs.get("input") or b""
+            if b"ir_config_parameter" in query:
+                result = host.spec["copy_binding_sha256"].encode()
+            elif b"res_users_log" in query:
+                try:
+                    with engine.connect().execution_options(
+                        isolation_level="AUTOCOMMIT"
+                    ) as connection:
+                        raw = connection.connection.driver_connection
+                        assert raw is not None
+                        # Emulate psql's quoted-variable binding, independent of
+                        # the query's chosen cutoff variable name.
+                        program = re.sub(
+                            r":'[a-zA-Z_][a-zA-Z0-9_]*'",
+                            lambda match: sql.Literal(arguments[-1]).as_string(raw),
+                            query.decode(),
+                        )
+                        with raw.cursor() as cursor:
+                            cursor.execute(program)
+                            values = []
+                            while True:
+                                if cursor.description:
+                                    values.extend(cursor.fetchall())
+                                if not cursor.nextset():
+                                    break
+                        result = (
+                            b"t"
+                            if values == [(True,)]
+                            else b"f"
+                            if values == [(False,)]
+                            else b"invalid"
+                        )
+                except Exception:
+                    return subprocess.CompletedProcess(
+                        arguments, 1, stdout=b"", stderr=b"unavailable"
+                    )
+            else:
+                return command(arguments, **kwargs)
+            return subprocess.CompletedProcess(arguments, 0, stdout=result, stderr=b"")
+
+        with patch.object(host, "command", side_effect=database_read):
+            status, output = host.run_program()
+            self.assertEqual(status, 0, output)
+            self.assertEqual(
+                json.loads(output.strip().removeprefix("fixture:"))["recent_signins"], False
+            )
+            for account in (1, 44):
+                with self.subTest(account=account):
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "INSERT INTO res_users_log (create_uid, create_date) VALUES (:account, :moment)"
+                            ),
+                            {"account": account, "moment": since.replace(tzinfo=None)},
+                        )
+                    status, output = host.run_program()
+                    self.assertEqual(status, 0, output)
+                    self.assertEqual(
+                        json.loads(output.strip().removeprefix("fixture:"))["recent_signins"], True
+                    )
+                    with engine.begin() as connection:
+                        connection.execute(
+                            text(
+                                "DELETE FROM res_users_log WHERE create_uid = :account AND create_date >= :moment"
+                            ),
+                            {"account": account, "moment": since.replace(tzinfo=None)},
+                        )
+            with engine.begin() as connection:
+                connection.exec_driver_sql("DROP TABLE res_users_log")
+            status, output = host.run_program()
+            self.assertNotEqual(status, 0)
+
+    def test_replicas_admit_one_fresh_database_and_restore(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor
+        from control_plane.odoo_testing_drill import lane_key, DRILL_INTERVAL_SECONDS
+
+        scenario = self.scenario
+        key = f"{lane_key(scenario.profile.product, scenario.context)}:{int(scenario.now // DRILL_INTERVAL_SECONDS)}"
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(
+                    scenario.store.enqueue_odoo_testing_drill,
+                    scenario.profile.product,
+                    scenario.context,
+                    key,
+                    scenario.now,
+                )
+                for _ in range(2)
+            ]
+            for future in futures:
+                future.result(timeout=30)
+        self.assertEqual(scenario.evidence().status, "queued")
+        operations = scenario.store.list_odoo_stable_target_replacement_operation_records(
+            product=scenario.profile.product
+        )
+        self.assertEqual(
+            tuple(item.operation_id for item in operations), (scenario.evidence().operation_id,)
+        )
+
+    def test_alias_insert_during_login_read_completes_and_invalidates_admission(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        scenario = self.scenario
+        second = PostgresRecordStore(database_url=scenario.store.database_url)
+        self.addCleanup(second.close)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def collect(*args: Any, **kwargs: Any) -> bool:
+            entered.set()
+            if not release.wait(10):
+                raise TimeoutError("Fixture collector was not released")
+            return False
+
+        scenario.signins.side_effect = collect
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            admission = pool.submit(
+                scenario.store.enqueue_odoo_testing_drill,
+                scenario.profile.product,
+                scenario.context,
+                "fixture-login-race",
+                scenario.now,
+            )
+            self.assertTrue(entered.wait(5))
+            writer = pool.submit(
+                second.write_dokploy_target_id_record,
+                DokployTargetIdRecord(
+                    context="foreign-context",
+                    instance="testing",
+                    target_id=scenario.gen.target_id,
+                    updated_at=scenario.profile.updated_at,
+                ),
+            )
+            try:
+                writer.result(timeout=5)
+            finally:
+                release.set()
+            admission.result(timeout=10)
+        self.assertEqual(scenario.evidence().status, "fail")
+        self.assertFalse(scenario.evidence().operation_id)
+        self.assertEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+
+    def test_lost_admission_transaction_preserves_old_copy_and_runtime(self) -> None:
+        from control_plane.odoo_testing_drill import lane_key
+
+        scenario = self.scenario
+        key = lane_key(scenario.profile.product, scenario.context) + ":fixture-rollback"
+        with patch.object(
+            scenario.store, "_idempotency_row", side_effect=RuntimeError("fixture receipt failure")
+        ):
+            with self.assertRaises(RuntimeError):
+                scenario.store.enqueue_odoo_testing_drill(
+                    scenario.profile.product, scenario.context, key, scenario.now
+                )
+        self.assertEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+        self.assertEqual(
+            scenario.store.list_runtime_environment_records(
+                scope="instance", context_name=scenario.context, instance_name="testing"
+            ),
+            (scenario.runtime,),
+        )
+        self.assertFalse(
+            scenario.store.list_odoo_stable_target_replacement_operation_records(
+                product=scenario.profile.product
+            )
+        )
+        self.assertIsNone(scenario.evidence())
+
+    def test_activation_and_undelivered_notification_queries_use_real_postgres(self) -> None:
+        from control_plane.odoo_testing_drill import require_drill_checkpoint
+
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.activate()
+        require_drill_checkpoint(scenario.store, operation)
+        self.assertNotEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+        self.assertFalse(
+            scenario.store.list_pending_odoo_testing_drill_alerts(
+                scenario.profile.product, scenario.context
+            )
+        )
+
+    def test_activation_failure_rolls_back_selected_database_and_admission_receipt(self) -> None:
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        with patch.object(
+            scenario.store,
+            "_sync_idempotency_row",
+            side_effect=RuntimeError("fixture activation receipt failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                scenario.activate()
+        self.assertEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+        self.assertEqual(
+            scenario.store.list_runtime_environment_records(
+                scope="instance", context_name=scenario.context, instance_name="testing"
+            ),
+            (scenario.runtime,),
+        )
+
+    def test_guarded_pre_effect_refusal_restores_selection_atomically(self) -> None:
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.activate()
+        terminal = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": operation.updated_at,
+                "error_code": "fixture_preflight_refused",
+                "error_message": "Fixture preflight refused.",
+            }
+        )
+        with patch.object(
+            scenario.store,
+            "_sync_idempotency_row",
+            side_effect=RuntimeError("fixture receipt failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                scenario.store.complete_odoo_stable_target_replacement_operation_record(
+                    record=terminal,
+                    lease_owner=operation.lease_owner,
+                    restore_unstarted_drill=True,
+                )
+        self.assertNotEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+        self.assertTrue(
+            scenario.store.complete_odoo_stable_target_replacement_operation_record(
+                record=terminal,
+                lease_owner=operation.lease_owner,
+                restore_unstarted_drill=True,
+            )
+        )
+        self.assertEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+        self.assertEqual(
+            scenario.store.list_runtime_environment_records(
+                scope="instance", context_name=scenario.context, instance_name="testing"
+            ),
+            (scenario.runtime,),
+        )
+        self.assertEqual(scenario.operation().status, "fail")
+
+    def test_unstarted_rollback_preserves_intervening_runtime_settings(self) -> None:
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.activate()
+        runtime = scenario.store.list_runtime_environment_records(
+            scope="instance", context_name=scenario.context, instance_name="testing"
+        )[0]
+        changed = runtime.model_copy(
+            update={"env": {**runtime.env, "FIXTURE_NEW_SETTING": "retained"}}
+        )
+        scenario.store.write_runtime_environment_record(changed)
+        terminal = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": operation.updated_at,
+                "error_message": "Fixture preflight refusal.",
+            }
+        )
+        self.assertTrue(
+            scenario.store.complete_odoo_stable_target_replacement_operation_record(
+                record=terminal,
+                lease_owner=operation.lease_owner,
+                restore_unstarted_drill=True,
+            )
+        )
+        self.assertEqual(
+            scenario.store.list_runtime_environment_records(
+                scope="instance", context_name=scenario.context, instance_name="testing"
+            ),
+            (changed,),
+        )
+        self.assertNotEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+
+    def test_dispatched_effect_never_restores_previous_selection(self) -> None:
+        from control_plane.contracts.testing_replacement_recovery import (
+            TestingReplacementEffect,
+            TestingReplacementRecoveryJournal,
+        )
+
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.activate()
+        operation = operation.model_copy(
+            update={
+                "recovery_journal": TestingReplacementRecoveryJournal(
+                    attempt=operation.attempt,
+                    target_fingerprint="fixture-binding",
+                    target_id="fixture-target",
+                    effects=(
+                        TestingReplacementEffect(
+                            reference="fixture",
+                            path="/api/schedule.runManually",
+                            dispatched_at=operation.updated_at,
+                        ),
+                    ),
+                )
+            }
+        )
+        scenario.store.write_odoo_stable_target_replacement_operation_record(operation)
+        terminal = operation.model_copy(
+            update={"status": "fail", "phase": "failed", "finished_at": operation.updated_at}
+        )
+        self.assertTrue(
+            scenario.store.complete_odoo_stable_target_replacement_operation_record(
+                record=terminal,
+                lease_owner=operation.lease_owner,
+                restore_unstarted_drill=True,
+            )
+        )
+        self.assertNotEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+
+    def test_prior_drill_disposal_executes_sql_and_refuses_foreign_witness_or_open_connection(
+        self,
+    ) -> None:
+        import ast
+        import re
+        import shlex
+        from psycopg import sql
+        from control_plane.odoo_testing_restore import (
+            FRESH_TESTING_RESTORE_HOST_PROGRAM,
+            TESTING_COPY_COMPLETION_PARAMETER,
+        )
+
+        root_url = _postgres_root_database_url()
+        previous = "lp_drill_" + uuid4().hex
+        witness = uuid4().hex + uuid4().hex
+        root_engine = create_engine(root_url, isolation_level="AUTOCOMMIT")
+        with root_engine.connect() as connection:
+            connection.execute(text(f'CREATE DATABASE "{previous}"'))
+        self.addCleanup(root_engine.dispose)
+        self.addCleanup(_drop_postgres_database, root_url, previous)
+        previous_engine = create_engine(
+            _database_url(root_url, previous), isolation_level="AUTOCOMMIT"
+        )
+        with previous_engine.connect() as connection:
+            connection.execute(
+                text("CREATE TABLE ir_config_parameter (key text PRIMARY KEY, value text)")
+            )
+            connection.execute(
+                text("INSERT INTO ir_config_parameter VALUES (:key, 'foreign-copy')"),
+                {"key": TESTING_COPY_COMPLETION_PARAMETER},
+            )
+        previous_engine.dispose()
+        cleaned: list[str] = []
+
+        def docker(*arguments: str, stdin: bytes | None = None) -> bytes:
+            if stdin is None:
+                cleaned.append(arguments[-1])
+                return b""
+            command = shlex.split(arguments[arguments.index("-c") + 1])
+            database = command[command.index("-d") + 1]
+            database = arguments[-1] if database == "$1" else database
+            url = root_url if database == "postgres" else _database_url(root_url, database)
+            engine = create_engine(url, isolation_level="AUTOCOMMIT")
+            try:
+                with engine.connect() as connection:
+                    raw = connection.connection.driver_connection
+                    program = (
+                        stdin.decode()
+                        .replace(':"database_name"', sql.Identifier(arguments[-1]).as_string(raw))
+                        .replace(":'database_name'", sql.Literal(arguments[-1]).as_string(raw))
+                    )
+                    connection.exec_driver_sql("SET statement_timeout = '250ms'")
+                    result = connection.exec_driver_sql(program)
+                    value = result.scalar_one_or_none() if result.returns_rows else None
+                    return ("" if value is None else str(value)).encode()
+            finally:
+                engine.dispose()
+
+        tree = ast.parse(FRESH_TESTING_RESTORE_HOST_PROGRAM)
+        function = next(
+            node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == "discard_previous_drill"
+        )
+        namespace: dict[str, Any] = {"re": re, "docker": docker}
+        exec(
+            compile(ast.Module(body=[function], type_ignores=[]), "<drill-disposal>", "exec"),
+            namespace,
+        )
+        discard = namespace["discard_previous_drill"]
+        generation = {"discard_drill_database": previous, "discard_copy_binding": witness}
+        with self.assertRaises(RuntimeError):
+            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+        with previous_engine.connect() as connection:
+            connection.execute(
+                text("UPDATE ir_config_parameter SET value = :witness"), {"witness": witness}
+            )
+        previous_engine.dispose()
+        with previous_engine.connect():
+            with self.assertRaises(Exception):
+                discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+        previous_engine.dispose()
+        self.assertFalse(cleaned)
+        discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+        self.assertEqual(cleaned, [previous])
+        with root_engine.connect() as connection:
+            self.assertFalse(
+                connection.execute(
+                    text("SELECT EXISTS (SELECT 1 FROM pg_database WHERE datname = :name)"),
+                    {"name": previous},
+                ).scalar_one()
+            )
+
+    def test_scheduler_receipt_merge_keeps_worker_admission_under_real_row_lock(self) -> None:
+        from control_plane.odoo_testing_drill import (
+            DRILL_SCOPE,
+            DRILL_ROUTE,
+            require_drill_checkpoint,
+        )
+
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        before = scenario.store.read_idempotency_record(
+            scope=DRILL_SCOPE,
+            route_path=DRILL_ROUTE,
+            idempotency_key=scenario.operation().idempotency_key,
+        )
+        assert before is not None
+        operation = scenario.activate()
+        scenario.store.update_odoo_testing_drill_receipt(
+            operation.idempotency_key,
+            scenario.now,
+            {**before.response_payload, "status": "fail", "step": "fixture-late-observation"},
+        )
+        require_drill_checkpoint(scenario.store, operation)
+        self.assertTrue(
+            scenario.store.list_pending_odoo_testing_drill_alerts(
+                scenario.profile.product, scenario.context
+            )
         )

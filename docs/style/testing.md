@@ -301,10 +301,50 @@ option for a measured diagnostic comparison.
 Browser smoke runs in every CI run that needs fresh proof, including main pushes. The verified-tree
 shortcut above can reuse a previously successful tree; it does not selectively
 skip browser coverage. Keep that reuse rather than duplicating a full browser
-run for the same tree. For a clock-sensitive flake, install Playwright's clock
-before loading the page, pause at a safely future time, and await the rendered
-response state before advancing to the next read. Repeat the unchanged behavior
-assertions with `CI=true` to select the worker count from the Playwright config:
+run for the same tree.
+
+Every browser spec imports `test` and `expect` from `tests/browser/state.ts`.
+Its context fixture installs and pauses Playwright's clock before navigation,
+including subsequent tabs, so slow host scheduling cannot expire evidence or
+fire app timers between assertions. Persistent-profile tests use its
+`launchControlledProfile` helper for each new context. Use `setClockTime` for a fixture's
+recorded date and `page.clock.runFor` or `fastForward` to exercise timer-driven
+behavior. Do not install a running clock or pause it within a short host-time
+window in an individual test.
+
+Locator assertions wait for rendered app state. Use `waitForState` for a route
+handler's request count or release gate. Pass the page as its second argument
+when a development fixture intentionally delays completion: each probe advances
+the controlled clock until the requested state is observed. This form proves
+fixture completion; timer and freshness assertions advance a known interval
+explicitly, then await rendered state. Observe the rendered response before
+changing a fixture's mode or advancing to the next refresh; a request counter
+alone does not prove React consumed its response. Hold asynchronous fixtures
+behind an explicit release gate until the test observes the intermediate
+screen, rather than consuming one response and assuming only one request.
+Development remounts can read a session more than once.
+
+`pnpm --dir frontend check:browser-timing` rejects sleeps, timer aliases,
+test-specific timeouts/retries and unmanaged clock/context creation. Both
+frontend validation and browser smoke run this check. Shared Playwright
+failure deadlines live in `playwright-deadlines.mjs`: they bound a broken test,
+not successful synchronization. Do not add a sleep, retry or larger timeout
+to hide a flake.
+
+The server-isolation harness uses a watchdog derived from the shared server
+startup and test deadlines. Its peer wait includes the peer's cold server
+startup; it cannot assume both independent servers become ready together.
+Ordinary browser assertion, test and server deadlines are unchanged.
+
+Use Playwright's built-in repetition with zero retries to qualify the complete
+suite under representative sibling host load. Record the revision, worker
+count, load samples and pass/fail totals on the owning issue or PR. For example:
+
+```bash
+CI=true pnpm --dir frontend exec playwright test --repeat-each=5 --workers=4 --retries=0
+```
+
+Use a focused repetition for diagnosis:
 
 ```bash
 CI=true pnpm --dir frontend exec playwright test sidebar-freshness --repeat-each=30
