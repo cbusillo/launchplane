@@ -26676,6 +26676,30 @@ class PostgresRecordStore(HumanSessionStore):
             session.merge(row)
             session.commit()
 
+    def write_odoo_secret_transport_migration(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        expected_records: tuple[OdooInstanceOverrideRecord, ...],
+    ) -> None:
+        """Guard every legacy consumer before retiring a binding in the bundle."""
+
+        def guard(session: Any) -> None:
+            current = tuple(
+                OdooInstanceOverrideRecord.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneOdooInstanceOverrideRow).with_for_update()
+                ).all()
+            )
+
+            def route(record: OdooInstanceOverrideRecord) -> tuple[str, str]:
+                return record.context, record.instance
+
+            if sorted(current, key=route) != sorted(expected_records, key=route):
+                raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+
+        self._write_product_authority_bundle(bundle, guard_provider=guard)
+
     def update_odoo_instance_override_apply_result(
         self,
         *,

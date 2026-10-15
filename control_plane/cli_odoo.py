@@ -7,10 +7,10 @@ from pathlib import Path
 from typing import Literal, cast, get_args
 
 import click
+
+from control_plane.odoo_secret_transport import plan_odoo_secret_transport
 from pydantic import ValidationError
 
-from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
-from control_plane import secrets as control_plane_secrets
 from control_plane.cli_shared import (
     DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS,
     direct_db_mutation_acknowledgement_option as _direct_db_mutation_acknowledgement_option,
@@ -35,7 +35,6 @@ from control_plane.contracts.odoo_instance_override_record import (
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementRequest,
 )
-from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import is_secret_shaped_runtime_key
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
@@ -94,31 +93,6 @@ def _read_dokploy_config(*, control_plane_root: Path, database_url: str) -> tupl
     return _odoo_callbacks().read_dokploy_config(
         control_plane_root=control_plane_root, database_url=database_url
     )
-
-
-def _relabel_odoo_override_secret_binding(
-    *,
-    record_store: PostgresRecordStore,
-    binding: SecretBinding,
-    desired_binding_key: str,
-    apply_changes: bool,
-    source_label: str,
-) -> tuple[str, str]:
-    desired_binding_id = control_plane_secrets.expected_secret_binding_id(
-        secret_id=binding.secret_id, binding_key=desired_binding_key
-    )
-    action = "unchanged" if binding.binding_key == desired_binding_key else "pending"
-    if apply_changes:
-        result = control_plane_secrets.relabel_secret_binding(
-            record_store=record_store,
-            binding_id=binding.binding_id,
-            binding_key=desired_binding_key,
-            actor=source_label,
-            source_label=source_label,
-        )
-        desired_binding_id = result["binding_id"]
-        action = result["action"]
-    return desired_binding_id, action
 
 
 @click.group("odoo-backup-gates")
@@ -378,113 +352,27 @@ def _migrate_odoo_override_secret_transport_record(
     apply_changes: bool,
     source_label: str,
 ) -> tuple[OdooInstanceOverrideRecord, list[dict[str, str]]]:
-    binding_by_id = {binding.binding_id: binding for binding in record_store.list_secret_bindings()}
-    changes: list[dict[str, str]] = []
-    config_parameters: list[OdooConfigParameterOverride] = []
-    addon_settings: list[OdooAddonSettingOverride] = []
-
-    for override in record.config_parameters:
-        value = override.value
-        if value.source != "secret_binding":
-            config_parameters.append(override)
-            continue
-        desired_binding_key = control_plane_odoo_instance_overrides.config_parameter_secret_env_key(
-            override.key
-        )
-        binding = binding_by_id.get(value.secret_binding_id)
-        if binding is None:
-            raise click.ClickException(
-                f"Odoo override {record.context}/{record.instance} config parameter {override.key!r} "
-                f"references missing secret binding {value.secret_binding_id!r}."
-            )
-        desired_binding_id, action = _relabel_odoo_override_secret_binding(
-            record_store=record_store,
-            binding=binding,
-            desired_binding_key=desired_binding_key,
-            apply_changes=apply_changes,
+    records = record_store.list_odoo_instance_override_records()
+    try:
+        plan = plan_odoo_secret_transport(
+            record=record,
+            records=records,
+            bindings=record_store.list_secret_bindings(limit=None),
             source_label=source_label,
         )
-        changes.append(
-            {
-                "kind": "config_parameter",
-                "key": override.key,
-                "action": action,
-                "old_binding_id": value.secret_binding_id,
-                "new_binding_id": desired_binding_id,
-                "old_binding_key": binding.binding_key,
-                "new_binding_key": desired_binding_key,
-            }
-        )
-        config_parameters.append(
-            OdooConfigParameterOverride(
-                key=override.key,
-                value=OdooOverrideValue(
-                    source="secret_binding", secret_binding_id=desired_binding_id
-                ),
+        if apply_changes:
+            record_store.write_odoo_secret_transport_migration(
+                plan.bundle, expected_records=records
             )
-        )
-
-    for addon_override in record.addon_settings:
-        value = addon_override.value
-        if value.source != "secret_binding":
-            addon_settings.append(addon_override)
-            continue
-        desired_binding_key = control_plane_odoo_instance_overrides.addon_setting_secret_env_key(
-            addon_name=addon_override.addon, setting_name=addon_override.setting
-        )
-        binding = binding_by_id.get(value.secret_binding_id)
-        if binding is None:
-            raise click.ClickException(
-                f"Odoo override {record.context}/{record.instance} addon setting "
-                f"{addon_override.addon}.{addon_override.setting} references missing secret binding "
-                f"{value.secret_binding_id!r}."
-            )
-        desired_binding_id, action = _relabel_odoo_override_secret_binding(
-            record_store=record_store,
-            binding=binding,
-            desired_binding_key=desired_binding_key,
-            apply_changes=apply_changes,
-            source_label=source_label,
-        )
-        changes.append(
-            {
-                "kind": "addon_setting",
-                "key": f"{addon_override.addon}.{addon_override.setting}",
-                "action": action,
-                "old_binding_id": value.secret_binding_id,
-                "new_binding_id": desired_binding_id,
-                "old_binding_key": binding.binding_key,
-                "new_binding_key": desired_binding_key,
-            }
-        )
-        addon_settings.append(
-            OdooAddonSettingOverride(
-                addon=addon_override.addon,
-                setting=addon_override.setting,
-                value=OdooOverrideValue(
-                    source="secret_binding", secret_binding_id=desired_binding_id
-                ),
-            )
-        )
-
-    updated_record = record
-    if apply_changes and any(
-        change["old_binding_id"] != change["new_binding_id"] for change in changes
-    ):
-        updated_record = OdooInstanceOverrideRecord(
-            context=record.context,
-            instance=record.instance,
-            apply_on=record.apply_on,
-            config_parameters=tuple(config_parameters),
-            addon_settings=tuple(addon_settings),
-            website_bootstrap=record.website_bootstrap,
-            last_apply=record.last_apply,
-            website_settings=record.website_settings,
-            updated_at=utc_now_timestamp(),
-            source_label=source_label.strip() or "odoo-secret-transport-migration",
-        )
-        record_store.write_odoo_instance_override_record(updated_record)
-    return updated_record, changes
+    except OdooInstanceOverrideConflictError as error:
+        raise click.ClickException("Odoo overrides changed; re-run the migration.") from error
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    if apply_changes:
+        for change in plan.changes:
+            if change["action"] == "pending":
+                change["action"] = "relabelled"
+    return plan.record if apply_changes else record, plan.changes
 
 
 def _build_odoo_instance_override_record_with_apply_result(
