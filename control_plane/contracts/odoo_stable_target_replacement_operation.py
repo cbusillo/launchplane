@@ -57,6 +57,7 @@ ODOO_STABLE_TARGET_REPLACEMENT_TERMINAL_OPERATION_STATUSES: frozenset[
 # Env-key names, never values: safe to copy onto product-readable records. The same
 # rule as a deployment record's failure keys, so the two never disagree.
 ERROR_DETAIL_KEYS_MAX = ENV_KEY_NAMES_MAX
+TESTING_EXECUTION_FAILURE_KEY = "execution_failure_json"
 
 
 def safe_error_detail_keys(keys: Iterable[object]) -> tuple[str, ...]:
@@ -106,9 +107,6 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     heartbeat_at: str = ""
     attempt: int = Field(default=0, ge=0)
     result: OdooStableTargetReplacementApplyResult | None = None
-    execution_failure: OdooTargetReplacementExecutionFailure | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
     cancellation: DurableOperationCancellation | None = None
     error_code: str = ""
     error_message: str = ""
@@ -123,6 +121,19 @@ class OdooStableTargetReplacementOperationRecord(BaseModel):
     disposable_supersession: DisposableTestingSupersession | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
+
+    @property
+    def execution_failure(self) -> OdooTargetReplacementExecutionFailure | None:
+        # Existing journal storage is intentionally extensible. Older service
+        # images can still read this row after an emergency rollback.
+        encoded = (
+            self.recovery_journal.inspection.get(TESTING_EXECUTION_FAILURE_KEY)
+            if self.recovery_journal
+            else None
+        )
+        return (
+            OdooTargetReplacementExecutionFailure.model_validate_json(encoded) if encoded else None
+        )
 
     @model_validator(mode="after")
     def _validate_record(self) -> "OdooStableTargetReplacementOperationRecord":

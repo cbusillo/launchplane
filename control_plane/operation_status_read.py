@@ -55,9 +55,11 @@ def operation_status_read_view(operation: BaseModel, *, poll_url: str) -> dict[s
     }
     view["attempt"] = int(record.get("attempt") or 0)
     view.update(_safe_record_ids(record))
-    failure = record.get("execution_failure")
+    failure = getattr(operation, "execution_failure", None)
     error_source = (
-        failure if isinstance(failure, dict) and record.get("status") == "cancelled" else record
+        failure.model_dump(mode="json")
+        if isinstance(failure, BaseModel) and record.get("status") == "cancelled"
+        else record
     )
     view["error_code"] = safe_operation_error_code(str(error_source.get("error_code") or ""))
     # Launchplane's fixed description of the code; stored text is never copied.

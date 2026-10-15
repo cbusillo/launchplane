@@ -1954,6 +1954,7 @@ def execute_odoo_stable_target_replacement_apply(
                 "Odoo target replacement runtime identity verification has no health URL.",
             )
 
+    runtime_source: dict[str, str] = {"data_source_mode": plan.data_source_mode}
     record_store.write_deployment_record(
         build_deployment_record(
             request=ship_request,
@@ -1963,6 +1964,7 @@ def execute_odoo_stable_target_replacement_apply(
             started_at=started_at,
             finished_at="",
             resolved_target=resolved_target,
+            runtime_source=runtime_source,
             runtime_identity=runtime_identity,
             destination_health=HealthcheckEvidence(status="pending")
             if request.verify_health
@@ -1980,7 +1982,6 @@ def execute_odoo_stable_target_replacement_apply(
         artifact_id=artifact_id,
         image_reference=image_reference,
     )
-    runtime_source: dict[str, str] = {}
     backup_record_id = ""
     verification_record_id = ""
     captured_proof: dict[str, str] = {}

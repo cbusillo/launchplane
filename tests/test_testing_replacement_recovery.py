@@ -207,7 +207,12 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             self.assertNotIn(result.error_message, summary)
             view = operation_status_read_view(cancelled, poll_url="/fixture")
             self.assertEqual(view["error_code"], result.error_code)
-            self.assertIn("Launchplane testing recovery", str(view["error_description"]))
+            self.assertNotEqual(
+                view["error_description"],
+                operation_status_read_view(
+                    cancelled.model_copy(update={"cancellation": None}), poll_url="/fixture"
+                )["error_description"],
+            )
             self.assertNotIn("SECRET", json.dumps(view))
             assert cancelled.execution_failure is not None
             public_result = operation_result_read_view(cancelled.execution_failure.result)

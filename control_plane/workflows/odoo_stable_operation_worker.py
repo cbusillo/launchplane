@@ -60,6 +60,7 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
     OdooTargetReplacementExecutionFailure,
+    TESTING_EXECUTION_FAILURE_KEY,
     safe_error_detail_keys,
 )
 from control_plane.contracts.odoo_target_replacement_failures import (
@@ -2333,6 +2334,28 @@ def _execute_target_replacement_with_checkpoint(
             TestingRecoveryStore, record_store
         ).read_odoo_stable_target_replacement_operation_record(operation.operation_id)
         if current.recovery_journal is not None and current.recovery_journal.effects:
+            failure = OdooTargetReplacementExecutionFailure(
+                error_code=terminal_operation.error_code,
+                error_message=terminal_operation.error_message,
+                error_detail_keys=terminal_operation.error_detail_keys,
+                deployment_record_id=terminal_operation.deployment_record_id,
+                result=terminal_operation.result,
+            )
+            journal = current.recovery_journal.model_copy(
+                update={
+                    "inspection": {
+                        **current.recovery_journal.inspection,
+                        TESTING_EXECUTION_FAILURE_KEY: failure.model_dump_json(),
+                    }
+                }
+            )
+            # Commit evidence under the live executor's lease before the fence.
+            # Existing completion storage preserves the latest running journal.
+            if not record_store.complete_odoo_stable_target_replacement_operation_record(
+                record=current.model_copy(update={"recovery_journal": journal}),
+                lease_owner=lease_owner,
+            ):
+                return False
             terminal_operation = current.model_copy(
                 update={
                     "status": "reconciliation_required",
@@ -2344,18 +2367,6 @@ def _execute_target_replacement_with_checkpoint(
                     "result": None,
                     "cancellation": None,
                     "deployment_record_id": terminal_operation.deployment_record_id,
-                    "execution_failure": OdooTargetReplacementExecutionFailure(
-                        error_code=terminal_operation.error_code
-                        or (
-                            "driver_result_failed"
-                            if terminal_operation.result
-                            else "operation_failed"
-                        ),
-                        error_message=terminal_operation.error_message,
-                        error_detail_keys=terminal_operation.error_detail_keys,
-                        deployment_record_id=terminal_operation.deployment_record_id,
-                        result=terminal_operation.result,
-                    ),
                     "error_code": "operation_reconciliation_required",
                     "error_message": "Testing provider effects require proved-safe reconciliation before retry.",
                 }
