@@ -138,7 +138,10 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
     # State/health and unrelated containers do not change the reviewed resources.
     binding = {
         "containers": {
-            service: {key: item[key] for key in ("id", "image", "mounts", "ports", "environment")}
+            service: {
+                **{key: item[key] for key in ("id", "image", "ports", "environment")},
+                "mounts": sorted(item["mounts"], key=lambda mount: (mount["Destination"], mount.get("Name", ""))),
+            }
             for service, item in owned.items()
         },
         "network": {**network, "members": sorted(network["members"])},

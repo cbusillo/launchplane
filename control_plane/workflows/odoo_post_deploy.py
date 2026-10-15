@@ -62,8 +62,8 @@ class OdooPostDeployRequest(BaseModel):
     phase: OdooOverrideApplyPhase = "deploy"
     connection_isolation: OdooConnectionIsolationMode | None = None
     reviewed_dry_run: bool = False
-    reviewed_plan_sha256: str = ""
-    reviewed_resource_sha256: str = ""
+    reviewed_plan_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
+    reviewed_resource_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
     reason: str = Field(default="", max_length=500)
 
     @model_validator(mode="after")

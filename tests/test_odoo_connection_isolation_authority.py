@@ -247,6 +247,7 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
         with patch("control_plane.http_app.execute_odoo_post_deploy_result", side_effect=changed):
             response = await self.call("apply", key="changed-usage")
         self.assertEqual(response.status_code, 409, response.text)
+
         self.assertEqual(response.json()["error"]["code"], "disposable_lane_safety_unknown")
 
     async def test_keyed_readback_is_independent_and_never_replays_old_evidence(self) -> None:
@@ -407,6 +408,17 @@ class ConnectionIsolationAuthorityTests(unittest.IsolatedAsyncioTestCase):
         ):
             response = await self.call("apply", key="lease-lost")
         self.assertEqual(response.status_code, 409, response.text)
+
+        def recovered(**kwargs: Any) -> Any:
+            kwargs["before_connection_isolation_mutation"]()
+            return {}, {"post_deploy_status": "pass"}
+
+        with patch(
+            "control_plane.http_app.execute_odoo_post_deploy_result", side_effect=recovered
+        ) as execute_again:
+            response = await self.call("apply", key="lease-lost")
+        self.assertEqual(response.status_code, 202, response.text)
+        execute_again.assert_called_once()
 
     async def test_post_effect_transport_errors_are_unverified_and_retained(self) -> None:
         import click

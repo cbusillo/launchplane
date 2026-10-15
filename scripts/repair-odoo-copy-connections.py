@@ -83,6 +83,7 @@ def main() -> int:
                 "connection_isolation_plan_sha256",
                 "connection_isolation_resource_sha256",
                 "connection_isolation_resources_ok",
+                "connection_isolation_triggered",
                 "integration_readback_ok",
                 "integration_readback_refused",
                 "integration_readback_allowed",

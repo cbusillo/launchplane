@@ -75,7 +75,9 @@ def main(argv):
         return 0
     if command in ("volume", "network"):
         if argv[1] == "ls":
-            print("db\\nfilestore" if command == "volume" else "private-network")
+            for row in json.loads(os.environ["FAKE_RESOURCE_ROWS"]):
+                if row["kind"] == command:
+                    print(row["name"] if command == "volume" else row["id"])
         elif argv[1] == "inspect":
             rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
             for row in rows:
@@ -84,8 +86,8 @@ def main(argv):
         return 0
     if command == "inspect":
         template, container_id = argv[2], argv[3]
-        if '"kind":' in template:
-            kind = "environment" if '"kind":"environment"' in template else "container"
+        if '"kind"' in template:
+            kind = "environment" if '"environment"' in template else "container"
             rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
             if os.environ.get("FAKE_RESOURCE_CHANGED") == "1":
                 for row in rows:
@@ -530,21 +532,31 @@ def _render_post_deploy_script(
 
 @unittest.skipIf(BASH is None, "bash 4 or newer is required to run the rendered script")
 class DataWorkflowScriptExecutionTests(unittest.TestCase):
+    def test_apply_without_resource_review_never_dispatches_docker(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        policy = integration_readback_policy(
+            instance_name="testing",
+            policies=_policies(),
+            workflow_mode="maintenance",
+        )
+        run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+            )
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertEqual(run.docker_log, ())
+
     def test_resource_drift_refuses_before_web_stop_or_sql(self) -> None:
         from control_plane.dokploy.connection_isolation import isolation_script
 
-        snapshot, _ = resource_fixture()
-        namespace: dict[str, Any] = {}
-        from control_plane.connection_isolation_qualification import RESOURCE_QUALIFICATION_LIBRARY
-
-        exec(RESOURCE_QUALIFICATION_LIBRARY, namespace)
-        digest, _ = namespace["qualify_resources"](
-            snapshot,
-            "example-testing-app",
-            "example_testing",
-            "example",
-            self.runtime_identity,
-        )
         policy = integration_readback_policy(
             instance_name="testing",
             policies=_policies(allowed=("shopify",)),
@@ -559,7 +571,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 readback_spec=policy.encoded_spec(),
                 context="example",
                 runtime_identity=self.runtime_identity,
-                reviewed_resource_sha256=digest,
+                reviewed_resource_sha256=self.resource_digest,
             ),
             FAKE_RESOURCE_CHANGED="1",
         )
@@ -587,6 +599,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                         readback_spec=policy.encoded_spec(),
                         context="example",
                         runtime_identity=self.runtime_identity,
+                        reviewed_resource_sha256=self.resource_digest if mode == "apply" else "",
                     ),
                     FAKE_ODOO_DB=_fake_database({"shopify.api_token": "test-token"}),
                 )
@@ -602,6 +615,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
                 readback_spec=policy.encoded_spec(),
                 context="example",
                 runtime_identity=self.runtime_identity,
+                reviewed_resource_sha256=self.resource_digest,
             ),
             FAKE_ODOO_DB=_fake_database({"printnode.api_key": PRODUCTION_VALUE}),
         )
@@ -658,6 +672,17 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         assert BASH is not None
         self.bash = BASH
         resource_snapshot, self.runtime_identity = resource_fixture()
+        namespace: dict[str, Any] = {}
+        from control_plane.connection_isolation_qualification import RESOURCE_QUALIFICATION_LIBRARY
+
+        exec(RESOURCE_QUALIFICATION_LIBRARY, namespace)
+        self.resource_digest, _ = namespace["qualify_resources"](
+            resource_snapshot,
+            "example-testing-app",
+            "example_testing",
+            "example",
+            self.runtime_identity,
+        )
         resource_rows = inventory_rows(resource_snapshot)
         self.base_environment = {
             "FAKE_RESOURCE_ROWS": json.dumps(

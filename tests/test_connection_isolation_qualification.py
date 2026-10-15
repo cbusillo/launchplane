@@ -6,12 +6,17 @@ import subprocess
 import sys
 import unittest
 from typing import Any, cast
+import yaml
 
 from control_plane.connection_isolation_qualification import (
     RESOURCE_QUALIFICATION_LIBRARY,
     RESOURCE_QUALIFICATION_PROGRAM,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.dokploy.compose import (
+    ODOO_RAW_COMPOSE_REQUIRED_SERVICES,
+    render_odoo_raw_compose_file,
+)
 
 
 def resource_fixture() -> tuple[dict[str, Any], str]:
@@ -23,12 +28,18 @@ def resource_fixture() -> tuple[dict[str, Any], str]:
         artifact_id="artifact-fixture",
         source_git_ref="fixture-source",
     ).model_dump_json()
+    compose = yaml.safe_load(
+        render_odoo_raw_compose_file(
+            image_reference="fixture-image",
+            hold_web_until_integration_readback=True,
+        )
+    )
     environment = {
         "PLATFORM_INSTANCE": "testing",
         "PLATFORM_CONTEXT": "example",
         "ODOO_DB_NAME": "example_testing",
-        "ODOO_DB_HOST": "database",
-        "ODOO_DB_PORT": "5432",
+        "ODOO_DB_HOST": compose["x-odoo-env"]["ODOO_DB_HOST"],
+        "ODOO_DB_PORT": compose["x-odoo-env"]["ODOO_DB_PORT"],
         "LAUNCHPLANE_RUNTIME_IDENTITY_JSON": identity,
     }
 
@@ -41,7 +52,7 @@ def resource_fixture() -> tuple[dict[str, Any], str]:
             "RW": True,
         }
 
-    containers = [
+    containers: list[dict[str, Any]] = [
         {
             "id": f"{service}-id",
             "project": "example-testing-app",
@@ -55,8 +66,16 @@ def resource_fixture() -> tuple[dict[str, Any], str]:
             if service == "database"
             else [mount("filestore", "/var/lib/odoo")],
         }
-        for index, service in enumerate(("web", "database", "script-runner"), start=2)
+        for index, service in enumerate(ODOO_RAW_COMPOSE_REQUIRED_SERVICES, start=2)
     ]
+    for item in containers:
+        if item["service"] in {"web", "script-runner"}:
+            item["mounts"].append(mount("logs", "/volumes/logs"))
+        if item["service"] == "script-runner":
+            item["mounts"].extend(
+                {"Type": "bind", "Source": "/fixture/ssh", "RW": False, "Destination": path}
+                for path in ("/root/.ssh", "/home/ubuntu/.ssh")
+            )
     return {
         "containers": containers,
         "networks": [
@@ -73,7 +92,7 @@ def resource_fixture() -> tuple[dict[str, Any], str]:
                 "has_options": False,
                 "mountpoint": f"/volumes/{name}",
             }
-            for name in ("db", "filestore")
+            for name in ("db", "filestore", "logs")
         ],
     }, identity
 
@@ -126,6 +145,15 @@ class ResourceQualificationTests(unittest.TestCase):
         self.snapshot["containers"][0]["image"] = "replacement"
         self.snapshot["containers"][2]["image"] = "replacement"
         self.assertNotEqual(self.run_qualifier()[0], digest)
+
+    def test_docker_mount_and_inventory_order_does_not_change_the_review(self) -> None:
+        digest, _ = self.run_qualifier()
+        for item in self.snapshot["containers"]:
+            item["mounts"].reverse()
+        self.snapshot["containers"].reverse()
+        self.snapshot["volumes"].reverse()
+        self.snapshot["networks"][0]["members"].reverse()
+        self.assertEqual(self.run_qualifier()[0], digest)
 
     def test_database_identity_and_runtime_must_match(self) -> None:
         for key, value in (

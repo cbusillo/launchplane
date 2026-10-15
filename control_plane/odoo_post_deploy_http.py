@@ -65,6 +65,10 @@ class ConnectionIsolationApplyAdapter:
     ) -> ProviderObservation:
         if reconciliation_key != self.reviewed_plan_sha256:
             return ProviderObservation(outcome="unknown")
+        if not provider_effect_phase:
+            # The durable runner permits retry only when no effect-start time
+            # was stored; this adapter checkpoints before every provider write.
+            return ProviderObservation(outcome="absent")
         return self.observation(provider_operation_key, provider_effect_phase)
 
     def apply(

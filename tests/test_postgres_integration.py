@@ -7748,6 +7748,22 @@ def _run_integration_provider_operation(
 
 
 class RealPostgresProviderOperationTests(unittest.TestCase):
+    def test_connection_isolation_original_key_recovery_on_postgres(self) -> None:
+        from tests import test_odoo_connection_isolation_authority as fixtures
+
+        for scenario in (
+            "test_original_key_adopts_terminal_evidence_without_another_repair",
+            "test_lease_loss_before_dispatch_uses_runner_reconciliation",
+            "test_uncertain_apply_retains_fence_for_same_and_new_keys",
+        ):
+            with self.subTest(scenario=scenario), _store_for_fresh_head_database() as store:
+                with patch.object(fixtures, "PostgresRecordStore", return_value=store):
+                    case = fixtures.ConnectionIsolationAuthorityTests(scenario)
+                    try:
+                        case.debug()
+                    finally:
+                        case.doCleanups()
+
     def test_promotion_recovery_adoption_and_evidence_compare_on_postgres(self) -> None:
         from tests import test_generic_web_client_release as release_fixtures
         from tests.test_generic_web_promotion_recovery import PromotionRecoveryTests

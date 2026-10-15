@@ -90,6 +90,21 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
         self.logs.return_value = {"integration_readback_ok": "true"}
         self.assertEqual(self.observe().outcome, "unknown")
 
+    def test_long_unrelated_history_does_not_hide_the_original_operation(self) -> None:
+        self.dokploy_request.return_value = [
+            {"deploymentId": str(index), "status": "done"} for index in range(120)
+        ] + [{"deploymentId": "original", "status": "done"}]
+        self.logs.side_effect = lambda **kwargs: (
+            self.markers if kwargs["deployment_id"] == "original" else {}
+        )
+        self.assertTrue(self.observe().passed)
+        original_name = self.find_matching_dokploy_schedule.call_args.kwargs["app_name"]
+        self.operation = "different-operation"
+        self.observe()
+        self.assertNotEqual(
+            self.find_matching_dokploy_schedule.call_args.kwargs["app_name"], original_name
+        )
+
     def test_queued_active_missing_and_conflicting_evidence_stays_fenced(self) -> None:
         for deployments in (
             [],

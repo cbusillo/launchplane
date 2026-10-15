@@ -57839,11 +57839,13 @@
                       },
                       "reviewed_plan_sha256": {
                         "default": "",
+                        "pattern": "^(|[a-f0-9]{64})$",
                         "title": "Reviewed Plan Sha256",
                         "type": "string"
                       },
                       "reviewed_resource_sha256": {
                         "default": "",
+                        "pattern": "^(|[a-f0-9]{64})$",
                         "title": "Reviewed Resource Sha256",
                         "type": "string"
                       },

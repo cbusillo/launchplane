@@ -2819,7 +2819,7 @@ Dry-run and readback use the separate instance-scoped
 `odoo_connection_isolation.plan` and `odoo_connection_isolation.read` actions.
 The authenticated Director agent inherits these SQL observations without a
 post-deploy write grant. They run a fixed read-only program through a disabled
-manual provider schedule and hold the lane during the observation. A scoped
+manual provider schedule dedicated to observations and hold the lane during the observation. A scoped
 `agent.read` rule alone does not confer this provider-execution path. Existing
 post-deploy callers retain observation access.
 Every isolation mode accepts only the exact `testing` lane. Apply is a separate
@@ -2855,8 +2855,12 @@ uv run python scripts/repair-odoo-copy-connections.py dry-run \
   --evidence-file /private/path/to/new-receipt.json
 ```
 
-The service uses its existing disabled manual data-workflow schedule to
-return boolean verdicts and setting names only. Review that receipt, then use
+The service uses disabled manual connection-isolation schedules to return
+boolean verdicts and setting names only. Each apply key has its own schedule,
+separate from observations and ordinary data workflows, so later deployments
+cannot replace the original script or rotate its job out of shared history.
+Retain uncertain operation schedules and their logs as recovery evidence.
+Review the dry-run receipt, then use
 `apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
 <stable-key>`. Apply checks the reviewed target/database/runtime/program binding
 before dispatch and the receipt's `connection_isolation_resource_sha256` against
@@ -2872,7 +2876,9 @@ success only with qualified resources, isolation and complete integration
 readback. A terminal failed job settles failure, allowing a newly reviewed
 dry-run and new key. A reservation checkpointed only at disabled schedule upsert
 can settle as not triggered. Missing, queued, active, ambiguous or unverified
-trigger evidence keeps the fence. An independent readback cannot clear it.
+trigger evidence keeps the fence. A lease lost before any provider checkpoint
+can retry safely under the same key after current protections are rechecked.
+An independent readback cannot clear a triggered operation.
 Do not release reservations through direct database edits.
 
 Dry-run includes the complete integration readback, including settings outside

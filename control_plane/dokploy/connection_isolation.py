@@ -30,6 +30,22 @@ from control_plane.connection_isolation_qualification import (
 )
 
 
+CONNECTION_ISOLATION_SCHEDULE_NAME = "platform-odoo-connection-isolation"
+
+
+def isolation_schedule_app_name(context: str, instance: str, provider_operation_key: str) -> str:
+    base = post_deploy._build_dokploy_data_workflow_schedule_app_name(
+        context_name=context,
+        instance_name=instance,
+    )
+    suffix = (
+        hashlib.sha256(provider_operation_key.encode()).hexdigest()
+        if provider_operation_key
+        else "observe"
+    )
+    return f"{base}-isolation-{suffix}"
+
+
 def isolation_script(
     *,
     compose_app_name: str,
@@ -55,6 +71,9 @@ reviewed_resources={shlex.quote(reviewed_resource_sha256)}
 operation_digest={shlex.quote(operation_digest)}
 if [ -n "$operation_digest" ]; then
     printf 'connection_isolation_operation_sha256=%s\n' "$operation_digest"
+fi
+if [ "$mode" = apply ]; then
+    [[ "$reviewed_resources" =~ ^[a-f0-9]{{64}}$ ]] || exit 1
 fi
 resolve() {{
     local ids
@@ -105,6 +124,8 @@ def run_connection_isolation(
 ) -> dict[str, str]:
     if not web_held_until_integration_readback(target_definition.instance):
         raise ValueError("Connection isolation refuses production.")
+    if mode == "apply" and not provider_operation_key:
+        raise click.ClickException("Connection isolation apply requires its service operation key.")
     payload = api.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -162,11 +183,12 @@ def run_connection_isolation(
             target_payload=payload,
         )
     )
-    app_name = post_deploy._build_dokploy_data_workflow_schedule_app_name(
-        context_name=target_definition.context,
-        instance_name=target_definition.instance,
+    app_name = isolation_schedule_app_name(
+        target_definition.context,
+        target_definition.instance,
+        provider_operation_key if mode == "apply" else "",
     )
-    name = post_deploy.DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME
+    name = CONNECTION_ISOLATION_SCHEDULE_NAME
     existing = api.find_matching_dokploy_schedule(
         host=host,
         token=token,
@@ -273,10 +295,11 @@ def observe_connection_isolation_operation(
             token=token,
             target_id=lookup_id,
             schedule_type=schedule_type,
-            schedule_name=post_deploy.DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME,
-            app_name=post_deploy._build_dokploy_data_workflow_schedule_app_name(
-                context_name=target_definition.context,
-                instance_name=target_definition.instance,
+            schedule_name=CONNECTION_ISOLATION_SCHEDULE_NAME,
+            app_name=isolation_schedule_app_name(
+                target_definition.context,
+                target_definition.instance,
+                provider_operation_key,
             ),
         )
         schedule_id = api.schedule_key(schedule) if schedule else ""
@@ -298,7 +321,7 @@ def observe_connection_isolation_operation(
                 query={"id": schedule_id, "type": "schedule"},
             )
         )
-        if len(deployments) > 100 or any(
+        if any(
             api._deployment_status(item) in post_deploy.DOKPLOY_RUNNING_DEPLOYMENT_STATUSES
             for item in deployments
         ):
