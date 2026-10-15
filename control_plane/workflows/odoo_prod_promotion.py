@@ -16,6 +16,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
@@ -51,7 +52,7 @@ from control_plane.workflows.production_promotion_backup import (
 )
 
 
-class OdooProdPromotionStore(OdooStableTargetReplacementStore, Protocol):
+class OdooProdPromotionStore(OdooStableTargetReplacementStore, DeploymentStore, Protocol):
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
     def list_deployment_records(
         self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
@@ -189,22 +190,25 @@ def execute_odoo_prod_promotion(
                 # Existing approval/backup gates retain their original order for
                 # legacy records. Replacement still requires the real profile.
                 cutover_plan = None
-        if (
-            cutover_plan is not None
-            and release_decision is not None
-            and (
-                release_decision.checklist.website_settings is not None
-                or release_decision.checklist.production_website_settings is not None
-            )
-        ):
-            raise click.ClickException(
-                "Typed website settings require the stopped-web maintenance driver; two-slot settings receipt support is unavailable."
-            )
+        if cutover_plan is not None:
+            from control_plane.odoo_cutover_plan import decision_bound_cutover_plan
+
+            try:
+                cutover_plan = decision_bound_cutover_plan(cutover_plan, release_decision)
+                # Preserve a completed/uncertain attempt's audit even when a
+                # newly unavailable host capability refuses the replay.
+                recovery = persisted_cutover(record_store, cutover_plan)
+                if cutover_provider is None and cutover_provider_factory is not None:
+                    cutover_provider = cutover_provider_factory(cutover_plan)
+                if cutover_provider is None:
+                    raise ValueError("Two-slot provider/runtime binding is unavailable.")
+                cutover_provider.preflight(cutover_plan)
+            except ValueError as error:
+                raise click.ClickException(str(error)) from error
         if cutover_plan is not None:
             from control_plane.odoo_cutover_plan import cutover_record_id
 
             promotion_record_id = "promotion-cutover-" + cutover_record_id(cutover_plan)
-        recovery = persisted_cutover(record_store, cutover_plan)
         infrastructure_backup = require_production_promotion_backup(
             record_store=record_store,
             product=product,
@@ -259,8 +263,6 @@ def execute_odoo_prod_promotion(
             replacement_result: OdooCutoverApplyResult | OdooStableTargetReplacementApplyResult
             if cutover_plan is not None:
                 plan = cutover_plan
-                if cutover_provider is None and cutover_provider_factory is not None:
-                    cutover_provider = cutover_provider_factory(plan)
                 if cutover_provider is None:
                     raise click.ClickException(
                         "Two-slot provider/runtime binding is unavailable; refusing in-place fallback."
