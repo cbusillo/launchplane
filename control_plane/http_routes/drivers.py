@@ -24,6 +24,12 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
+from control_plane.dokploy_inventory import (
+    InventoryChanged,
+    InventoryResponse,
+    InventoryUnavailable,
+    read_dokploy_inventory,
+)
 from control_plane.dokploy_target_inspect import (
     DokployTargetInspectRequest,
     DokployTargetInspectStore,
@@ -919,6 +925,81 @@ def register_driver_descriptor_read_routes(
         responses={
             401: {"model": dependencies.error_response_model},
             403: {"model": dependencies.error_response_model},
+        },
+    )
+
+
+def register_dokploy_inventory_read_routes(
+    app: ApiRouteRegistrar, *, dependencies: DriverReadRouteDependencies
+) -> None:
+    common = dependencies.common
+
+    def read_inventory(
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=100)] = 25,
+        inventory_digest: Annotated[str, Query(pattern=r"^$|^[a-f0-9]{64}$")] = "",
+    ) -> InventoryResponse:
+        trace_id = common.next_trace_id()
+        # Fleet enumeration uses the existing global inspect boundary, never
+        # the context/instance-scoped driver.read fallback.
+        if not common.authorization_allows(
+            identity=identity,
+            action="dokploy_target.inspect",
+            product="launchplane",
+            context=LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=director_agent_identity(identity),
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot read the Dokploy inventory.",
+            )
+        try:
+            host, token = dokploy_source.read_dokploy_config(
+                control_plane_root=dependencies.control_plane_root,
+                database_url=dependencies.database_url,
+            )
+            inventory = read_dokploy_inventory(
+                host=host,
+                token=token,
+                offset=offset,
+                limit=limit,
+                inventory_digest=inventory_digest,
+            )
+        except InventoryChanged as error:
+            raise common.http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="dokploy_inventory_changed",
+                message="Visible inventory changed; restart enumeration from offset zero.",
+            ) from error
+        except ValueError as error:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_inventory_page",
+                message=str(error),
+            ) from error
+        except (InventoryUnavailable, click.ClickException) as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="dokploy_inventory_unavailable",
+                message="Complete Dokploy inventory evidence is unavailable; no partial page returned.",
+            ) from error
+        return InventoryResponse(trace_id=trace_id, inventory=inventory)
+
+    app.add_api_route(
+        "/v1/dokploy/inventory",
+        read_inventory,
+        methods=["GET"],
+        response_model=InventoryResponse,
+        operation_id="read_dokploy_inventory",
+        summary="Read value-free Dokploy project, environment and placement inventory",
+        responses={
+            code: {"model": common.error_response_model} for code in (400, 401, 403, 409, 503)
         },
     )
 
