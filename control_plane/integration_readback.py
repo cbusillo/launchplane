@@ -24,6 +24,7 @@ from typing import Literal
 from control_plane.contracts.dokploy_target_record import DokployTargetPolicies
 from control_plane.odoo_instance_overrides import shopify_store_handle
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.odoo_connection_isolation import connection_isolation_library
 
 IntegrationReadbackWorkflowMode = Literal["maintenance", "bootstrap", "restore"]
 
@@ -166,6 +167,7 @@ class IntegrationReadbackPolicy:
                 for family in self.families
             ],
             "allowed_integrations": list(self.allowed_integrations),
+            "connection_isolation_required": bool(self.families),
             "protected_shopify_store_handles": list(self.protected_shopify_store_handles),
         }
         return base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
@@ -250,7 +252,9 @@ _validate_catalog(INTEGRATION_FAMILIES)
 # query returns only key names, counts or booleans: values are compared inside
 # PostgreSQL. Table names and predicates come from the fixed catalog above, never
 # from records or admin input.
-INTEGRATION_READBACK_PROGRAM = """import base64
+INTEGRATION_READBACK_PROGRAM = (
+    connection_isolation_library()
+    + """import base64
 import json
 import os
 import sys
@@ -259,7 +263,10 @@ import psycopg2
 
 database_name = sys.argv[1]
 spec = json.loads(base64.b64decode(sys.argv[2]))
+report_only = len(sys.argv) > 3 and sys.argv[3] == "dry-run"
 allowed_integrations = set(spec["allowed_integrations"])
+if spec["connection_isolation_required"] and os.environ.get("PLATFORM_INSTANCE", "").strip().lower() in {"prod", "production"}:
+    raise SystemExit("Non-production readback refuses a production runner")
 
 # Trims every kind of whitespace, as Python's str.strip() does; btrim() trims only spaces.
 TRIMMED_VALUE_SQL = "regexp_replace(coalesce(value, ''), '^[[:space:]]+|[[:space:]]+$', '', 'g')"
@@ -311,6 +318,9 @@ connection = psycopg2.connect(
 )
 try:
     with connection.cursor() as cursor:
+        cursor.execute("SET TRANSACTION READ ONLY")
+        if spec["connection_isolation_required"]:
+            refused.extend(connection_isolation(cursor, apply=False))
         handles = spec["protected_shopify_store_handles"]
         if handles:
             checked += 1
@@ -348,8 +358,11 @@ if refused:
             + " db=" + database_name,
             file=sys.stderr,
         )
+    if report_only:
+        raise SystemExit(0)
     raise SystemExit(
         "Non-production lane holds integration settings with no allowance: " + ", ".join(refused)
     )
 print("integration_readback_ok=true")
 """
+)

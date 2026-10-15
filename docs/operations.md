@@ -2811,6 +2811,60 @@ context only, and `context_instance` has both context and instance.
 
 ## Odoo Instance Override Contracts
 
+### Repair copied carrier and customer SMS connections
+
+The existing `POST /v1/drivers/odoo/post-deploy` route accepts
+`post_deploy.connection_isolation` as `dry-run`, `apply`, or `readback`.
+This mode requires the product's existing post-deploy authority, rejects
+production before provider access, and reserves the lane against concurrent
+release work. It operates on the current tracked target and database. No SQL,
+credentials, carrier requests, notification probes, staff-account changes,
+addon upgrades, or restore inputs are accepted.
+
+Inspect the actual copy without changing it:
+
+```bash
+uv run python scripts/repair-odoo-copy-connections.py dry-run \
+  --product PRODUCT --context CONTEXT --instance testing \
+  --reason "Repair copied carrier/SMS connections" \
+  --operator-helper /path/to/installed/launchplane-write-action.py \
+  --evidence-file /private/path/to/new-receipt.json
+```
+
+The service uses its existing disabled manual data-workflow schedule to
+return boolean verdicts and setting names only. Review that receipt, then use
+`apply` with the same arguments plus `--reviewed-dry-run --idempotency-key
+<stable-key>`. Apply checks the reviewed target/database/runtime/program binding
+again before any effect. Retain the evidence and original idempotency key if
+the response is uncertain; do not submit a new repair.
+
+Dry-run includes the complete integration readback, including settings outside
+this repair's carrier/SMS/IAP scope. Review those findings before apply. A failed
+remote command returns its named findings and deployment evidence; an unverified
+provider outcome returns 503 and must be investigated with the original evidence
+and key. A changed plan or active workflow returns a named 409 with its next step.
+
+Apply stops only this lane's web, replaces copied IAP tokens with an inert
+disabled dummy, disables delivery SMS on every company, deactivates external
+carriers, clears their known stored credential columns (including USPS REST),
+and disables their production mode. Fixed-price/rule-based delivery remains
+available. `database.is_neutralized` makes Odoo disable freshly created IAP
+accounts; invalid-scheme SMS/IAP endpoints also reject synchronous sends before
+opening a network connection. Existing Shopify development-store settings are
+preserved. Neither a carrier nor an IAP allowance exempts these checks.
+
+The independent integration readback now checks that state on every
+non-production deploy/bootstrap/restore. Ordinary maintenance reapplies isolation
+after the data workflow and before readback/web startup; the selected repair
+does not run general account/addon maintenance. Only a passing complete readback
+releases web for its current database/override payload. A failure leaves web
+stopped. Correct the named finding through its supported settings path, then
+repeat the repair with fresh dry-run evidence. Do not recover by restoring copied
+connections. Run the separate `readback` mode after apply, without an evidence
+file, to obtain a fresh read-only verdict; it neither stops nor starts web.
+Keep staff test instructions on hold until that readback passes. Source delivery
+alone is not proof that an existing testing copy has been repaired.
+
 - `POST /v1/drivers/odoo/post-deploy` is the first Launchplane-owned Odoo
   driver route. It executes the remote compose post-deploy data-workflow runner
   for a stable Odoo target and applies DB-backed instance override records when

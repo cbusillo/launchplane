@@ -284,6 +284,87 @@ class LegacyPreviewReconciliationTests(unittest.IsolatedAsyncioTestCase):
             self.store.read_preview_generation_record(generation.generation_id), generation
         )
 
+    def seed_nonterminal_history(self, *, current: bool = False) -> PreviewGenerationRecord:
+        ready = self.historical_generation()
+        pending = ready.model_copy(
+            update={
+                "generation_id": "unsettled-generation",
+                "sequence": 2,
+                "state": "verifying",
+                "finished_at": "",
+            }
+        )
+        self.store.write_preview_generation_record(ready)
+        self.store.write_preview_generation_record(pending)
+        pointer = pending.generation_id if current else ready.generation_id
+        self.store.write_preview_record(
+            self.preview.model_copy(
+                update={
+                    "active_generation_id": pointer,
+                    "serving_generation_id": pointer,
+                    "latest_generation_id": pointer,
+                }
+            )
+        )
+        return pending
+
+    async def test_current_nonterminal_generation_refuses_inspection(self) -> None:
+        generation = self.seed_nonterminal_history(current=True)
+        response = await self.call("inspect")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.search.assert_not_called()
+        self.assertEqual(
+            self.store.read_preview_generation_record(generation.generation_id), generation
+        )
+
+    async def test_sqlite_cannot_qualify_orphan_executor_exclusion(self) -> None:
+        if self.store.database_dialect_name != "sqlite":
+            self.skipTest("SQLite rehearsal boundary")
+        self.seed_nonterminal_history()
+        response = await self.call("inspect")
+        self.assertEqual(response.status_code, 409, response.text)
+        self.search.assert_not_called()
+
+    def verification_request(self) -> Any:
+        from control_plane.drivers.generic_web_preview_dispatch import (
+            GenericWebPreviewVerificationEnvelope,
+        )
+
+        return GenericWebPreviewVerificationEnvelope.model_validate(
+            {
+                "product": self.profile.product,
+                "verification": {
+                    "context": self.profile.preview.context,
+                    "anchor_repo": self.preview.anchor_repo,
+                    "anchor_pr_number": self.preview.anchor_pr_number,
+                    "verification_status": "pass",
+                    "verified_at": self.preview.updated_at,
+                },
+            }
+        )
+
+    def test_verification_cannot_reopen_destroyed_preview(self) -> None:
+        import click
+        from control_plane.generic_web_verification_http import (
+            apply_generic_web_preview_verification_result,
+        )
+
+        generation = self.seed_nonterminal_history()
+        closed = self.store.read_preview_record(self.preview.preview_id).model_copy(
+            update={"state": "destroyed", "destroyed_at": self.preview.updated_at}
+        )
+        self.store.write_preview_record(closed)
+        with self.assertRaises(click.ClickException):
+            apply_generic_web_preview_verification_result(
+                control_plane_root=self.root,
+                record_store=self.store,
+                request=self.verification_request(),
+            )
+        self.assertEqual(self.store.read_preview_record(closed.preview_id), closed)
+        self.assertEqual(
+            self.store.read_preview_generation_record(generation.generation_id), generation
+        )
+
     async def test_historical_runtime_for_another_preview_refuses_inspection(self) -> None:
         generation = self.historical_generation()
         assert generation.runtime_identity is not None

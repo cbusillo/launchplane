@@ -203,6 +203,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyRequest,
     GenericWebPreviewRefreshRequest,
     resolve_generic_web_preview_slug,
+    serialize_generic_web_preview_operation,
 )
 from control_plane.workflows.launchplane import PreviewMutationRecordStore, find_preview_record
 from control_plane.workflows.odoo_preview_runtime import (
@@ -2168,10 +2169,34 @@ def _record_generic_web_preview_serving(
                 ),
             ),
         )
-    generation = record_store.read_preview_generation_record(preview.active_generation_id)
-    record_store.write_preview_generation_record(
-        generation.model_copy(update={"source_build": source_build})
+    slug = resolve_generic_web_preview_slug(
+        profile=profile, preview_slug="", anchor_pr_number=pull_request_number, label="Verification"
     )
+    with serialize_generic_web_preview_operation(
+        record_store=record_store, profile=profile, preview_slug=slug
+    ):
+        current_profile = record_store.read_product_profile_record(profile.product)
+        current_preview = find_preview_record(
+            record_store=cast(PreviewMutationRecordStore, record_store),
+            context_name=profile.preview.context.strip(),
+            anchor_repo=_preview_anchor_repo(profile),
+            anchor_pr_number=pull_request_number,
+        )
+        if (
+            not current_profile.is_active
+            or not current_profile.preview.enabled
+            or current_profile.preview != profile.preview
+            or current_preview is None
+            or current_preview.state == "destroyed"
+            or current_preview.active_generation_id != generation_id
+        ):
+            raise ProductReconcileError(
+                "Preview authority changed before recording build evidence."
+            )
+        generation = record_store.read_preview_generation_record(generation_id)
+        record_store.write_preview_generation_record(
+            generation.model_copy(update={"source_build": source_build})
+        )
 
 
 def reconcile_product_request(
