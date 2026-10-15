@@ -19,6 +19,10 @@ from control_plane.drivers.generic_web_preview_dispatch import (
     _apply_generic_web_preview_verification_records,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
+from control_plane.workflows.generic_web_preview import (
+    resolve_generic_web_preview_slug,
+    serialize_generic_web_preview_operation,
+)
 
 
 GENERIC_WEB_STABLE_VERIFICATION_ROUTE = _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path
@@ -115,11 +119,28 @@ def apply_generic_web_preview_verification_result(
     record_store: object,
     request: GenericWebPreviewVerificationEnvelope,
 ) -> dict[str, object]:
-    return _apply_generic_web_preview_verification_records(
-        control_plane_root_path=control_plane_root,
-        record_store=record_store,
-        request=request.verification,
+    profile = resolve_generic_web_preview_verification_profile(
+        record_store=record_store, product=request.product, context=request.verification.context
     )
+    slug = resolve_generic_web_preview_slug(
+        profile=profile,
+        preview_slug="",
+        anchor_pr_number=request.verification.anchor_pr_number,
+        label="Verification",
+    )
+    with serialize_generic_web_preview_operation(
+        record_store=record_store, profile=profile, preview_slug=slug
+    ):
+        current = resolve_generic_web_preview_verification_profile(
+            record_store=record_store, product=request.product, context=profile.preview.context
+        )
+        if current.preview.slug_template != profile.preview.slug_template:
+            raise click.ClickException("Preview authority changed before verification.")
+        return _apply_generic_web_preview_verification_records(
+            control_plane_root_path=control_plane_root,
+            record_store=record_store,
+            request=request.verification,
+        )
 
 
 def generic_web_verification_response_records(

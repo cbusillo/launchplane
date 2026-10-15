@@ -27,6 +27,9 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import post_deploy as dokploy_post_deploy
+from control_plane.dokploy.connection_isolation import run_connection_isolation
+from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
+from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
 class OdooPostDeployStore(Protocol):
@@ -54,6 +57,10 @@ class OdooPostDeployRequest(BaseModel):
     context: str
     instance: str
     phase: OdooOverrideApplyPhase = "deploy"
+    connection_isolation: OdooConnectionIsolationMode | None = None
+    reviewed_dry_run: bool = False
+    reviewed_plan_sha256: str = ""
+    reason: str = Field(default="", max_length=500)
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooPostDeployRequest":
@@ -63,6 +70,15 @@ class OdooPostDeployRequest(BaseModel):
             raise ValueError("Odoo post-deploy request requires context.")
         if not self.instance:
             raise ValueError("Odoo post-deploy request requires instance.")
+        if self.connection_isolation is not None:
+            if runtime_key_safety_environment_class(self.instance) == "prod":
+                raise ValueError("Connection isolation refuses production.")
+            if self.connection_isolation == "apply" and (
+                not self.reviewed_dry_run
+                or len(self.reviewed_plan_sha256) != 64
+                or not self.reason.strip()
+            ):
+                raise ValueError("Connection isolation apply requires a reviewed dry-run.")
         return self
 
 
@@ -198,6 +214,36 @@ def execute_odoo_post_deploy(
     release_operation: bool = False,
     rollback: bool = False,
 ) -> OdooPostDeployResult:
+    if request.connection_isolation is not None:
+        target = _resolve_compose_target_definition(
+            control_plane_root=control_plane_root,
+            request=request,
+        )
+        host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
+        try:
+            evidence = run_connection_isolation(
+                host=host,
+                token=token,
+                target_definition=target,
+                mode=request.connection_isolation,
+                reviewed_plan_sha256=request.reviewed_plan_sha256,
+            )
+        except dokploy_post_deploy.OdooPostDeployReadbackFailure as error:
+            return OdooPostDeployResult(
+                context=request.context,
+                instance=request.instance,
+                phase=request.phase,
+                post_deploy_status="fail",
+                override_evidence=error.evidence,
+                error_message=str(error),
+            )
+        return OdooPostDeployResult(
+            context=request.context,
+            instance=request.instance,
+            phase=request.phase,
+            post_deploy_status="pass",
+            override_evidence=evidence,
+        )
     typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
         record_store=typed_record_store,

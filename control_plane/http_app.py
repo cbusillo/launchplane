@@ -1,5 +1,7 @@
 from control_plane import odoo_website_settings as control_plane_odoo_website_settings
 from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
+from control_plane.dokploy.api import DokployScheduleExecutionFailed
+from control_plane.odoo_connection_isolation import ConnectionIsolationPreconditionFailed
 from control_plane.action_effects import (
     AGENT_READ_ROLE_ACTION,
     agent_read_role_covers,
@@ -918,6 +920,9 @@ from control_plane.http_routes.product_generic_web_transition import (
     register_product_generic_web_transition_routes,
 )
 from control_plane.http_routes.product_display_name import register_product_display_name_routes
+from control_plane.http_routes.product_testing_restore_policy import (
+    register_testing_restore_policy_routes,
+)
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
 )
@@ -7327,7 +7332,7 @@ def create_launchplane_fastapi_app(
                 product=authorization_product,
                 context=post_deploy_request.post_deploy.context,
                 instance=post_deploy_request.post_deploy.instance,
-                reserve=post_deploy_request.post_deploy.instance == "prod",
+                reserve=True,
             ):
                 records, driver_result = execute_odoo_post_deploy_result(
                     control_plane_root=resolved_control_plane_root,
@@ -7340,6 +7345,20 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="not_found",
                 message=f"No Launchplane route for {_ODOO_POST_DEPLOY_ROUTE}.",
+            ) from error
+        except DokployScheduleExecutionFailed as error:
+            raise _launchplane_http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="provider_outcome_unverified",
+                message="The Odoo data workflow outcome is unverified. Inspect the original operation and retain its evidence and idempotency key.",
+            ) from error
+        except ConnectionIsolationPreconditionFailed as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code=error.code,
+                message=str(error),
             ) from error
         except (ValueError, click.ClickException) as error:
             raise _launchplane_http_error(
@@ -23236,7 +23255,8 @@ def create_launchplane_fastapi_app(
                 )
                 effective_context = plan_record.context
             else:
-                bound = control_plane_product_retirement.bind_product_retirement_authority(
+                bound = await asyncio.to_thread(
+                    control_plane_product_retirement.bind_product_retirement_authority,
                     record_store=retirement_store,
                     request=retirement_request,
                 )
@@ -23392,12 +23412,11 @@ def create_launchplane_fastapi_app(
                 else:
                     if bound.provider_target is None:
                         raise RuntimeError("Tracked retirement requires a provider target.")
-                    observation = (
-                        control_plane_product_retirement.observe_tracked_dokploy_application(
-                            control_plane_root=resolved_control_plane_root,
-                            target_id=bound.provider_target.target_id,
-                            observed_at=requested_at,
-                        )
+                    observation = await asyncio.to_thread(
+                        control_plane_product_retirement.observe_tracked_dokploy_application,
+                        control_plane_root=resolved_control_plane_root,
+                        target_id=bound.provider_target.target_id,
+                        observed_at=requested_at,
                     )
                 preview_plans: tuple[ProductRetirementPreviewPlan, ...] = ()
                 if retirement_request.include_previews:
@@ -23410,10 +23429,10 @@ def create_launchplane_fastapi_app(
                         root=resolved_control_plane_root,
                         observed_at=requested_at,
                     )
-                    current_bound = (
-                        control_plane_product_retirement.bind_product_retirement_authority(
-                            record_store=retirement_store, request=retirement_request
-                        )
+                    current_bound = await asyncio.to_thread(
+                        control_plane_product_retirement.bind_product_retirement_authority,
+                        record_store=retirement_store,
+                        request=retirement_request,
                     )
                     if control_plane_product_retirement.authority_snapshot(
                         current_bound
@@ -28703,6 +28722,9 @@ def create_launchplane_fastapi_app(
         mutation_identity=read_browser_mutation_identity,
     )
     register_product_display_name_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+    register_testing_restore_policy_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 

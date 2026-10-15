@@ -29,6 +29,7 @@ from control_plane.integration_readback import (
     INTEGRATION_READBACK_PASSED_PATH,
     integration_readback_policy,
 )
+from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetIntegrationAllowance,
     DokployTargetPolicies,
@@ -188,6 +189,7 @@ sys.exit(main(sys.argv[1:]))
 _FAKE_PSYCOPG2 = """\
 import json
 import os
+from pathlib import Path
 
 
 def _store_handle(value):
@@ -212,9 +214,17 @@ class _Cursor:
         return False
 
     def execute(self, query, params=None):
-        config = self.database.get("config", {})
+        config = self.database.setdefault("config", {})
         tables = self.database.get("tables", {})
-        if query.startswith("SELECT key FROM ir_config_parameter"):
+        if query == "SET TRANSACTION READ ONLY":
+            self.rows = []
+        elif query.startswith("INSERT INTO ir_config_parameter"):
+            config[params[0]] = params[1]
+        elif query.startswith("SELECT count(*) FROM ir_config_parameter WHERE (key, value)"):
+            self.rows = [(sum(config.get(key) == value for key, value in zip(params[::2], params[1::2])),)]
+        elif query.startswith("SELECT column_name FROM information_schema.columns"):
+            self.rows = []
+        elif query.startswith("SELECT key FROM ir_config_parameter"):
             self.rows = [(key,) for key in params[0] if str(config.get(key) or "").strip()]
         elif query.startswith("SELECT to_regclass"):
             self.rows = [(params[0] in tables,)]
@@ -244,18 +254,27 @@ class _Connection:
     def close(self):
         pass
 
+    def commit(self):
+        (Path(os.environ["FAKE_DOCKER_STATE"]) / "database.json").write_text(json.dumps(self.database))
+
+    def rollback(self):
+        pass
+
 
 def connect(**_kwargs):
     if os.environ.get("FAKE_DB_UNREACHABLE"):
         raise RuntimeError("database unreachable")
-    return _Connection(json.loads(os.environ.get("FAKE_ODOO_DB") or "{}"))
+    path = Path(os.environ["FAKE_DOCKER_STATE"]) / "database.json"
+    return _Connection(json.loads(path.read_text() if path.exists() else os.environ.get("FAKE_ODOO_DB") or "{}"))
 """
 
 
 def _fake_database(
     config: dict[str, str] | None = None, tables: dict[str, bool] | None = None
 ) -> str:
-    return json.dumps({"config": config or {}, "tables": tables or {}})
+    return json.dumps(
+        {"config": {**CONNECTION_ISOLATION_PARAMETERS, **(config or {})}, "tables": tables or {}}
+    )
 
 
 @dataclass(frozen=True)
@@ -473,6 +492,73 @@ def _render_post_deploy_script(
 
 @unittest.skipIf(BASH is None, "bash 4 or newer is required to run the rendered script")
 class DataWorkflowScriptExecutionTests(unittest.TestCase):
+    def test_scoped_connection_repair_modes_and_failed_readback(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        policy = integration_readback_policy(
+            instance_name="testing",
+            policies=_policies(allowed=("shopify",)),
+            workflow_mode="maintenance",
+        )
+        for mode in ("dry-run", "apply", "readback"):
+            with self.subTest(mode=mode):
+                run = self._run(
+                    isolation_script(
+                        compose_app_name="example-testing-app",
+                        database_name="example_testing",
+                        instance="testing",
+                        mode=mode,
+                        readback_spec=policy.encoded_spec(),
+                    ),
+                    FAKE_ODOO_DB=_fake_database({"shopify.api_token": "test-token"}),
+                )
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertEqual(run.web_restarted, mode == "apply")
+                self.assertNotIn("exec workflow", run.docker_log)
+        run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+            ),
+            FAKE_ODOO_DB=_fake_database({"printnode.api_key": PRODUCTION_VALUE}),
+        )
+        self.assertNotEqual(run.returncode, 0)
+        self.assertFalse(run.web_restarted)
+        self.assertFalse((self.root / "readback-passed").exists())
+        self.assertNotIn(PRODUCTION_VALUE, run.stdout + run.stderr)
+        dry_run = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="dry-run",
+                readback_spec=policy.encoded_spec(),
+            ),
+            FAKE_ODOO_DB=_fake_database({"printnode.api_key": PRODUCTION_VALUE}),
+        )
+        self.assertEqual(dry_run.returncode, 0, dry_run.stderr)
+        self.assertIn("printnode/printnode.api_key", dry_run.stdout)
+        self.assertFalse(dry_run.web_restarted)
+        refused = self._run(
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="readback",
+                readback_spec=policy.encoded_spec(),
+            ),
+            FAKE_ODOO_DB=_fake_database(
+                {"sms.endpoint": "enabled-test", "printnode.api_key": PRODUCTION_VALUE}
+            ),
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("customer_sms/isolation_parameters", refused.stdout)
+        self.assertIn("printnode/printnode.api_key", refused.stdout)
+        self.assertFalse(refused.web_restarted)
+
     def setUp(self) -> None:
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
@@ -499,6 +585,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.base_environment = {
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
             "FAKE_DOCKER_STATE": str(self.root),
+            "FAKE_ODOO_DB": _fake_database(),
             "HOME": str(self.root),
         }
 
@@ -507,6 +594,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
     ) -> ScriptRun:
         log_path = self.root / "docker.log"
         log_path.unlink(missing_ok=True)
+        (self.root / "database.json").unlink(missing_ok=True)
         for state_file in self.root.glob("*.state"):
             state_file.unlink()
         for marker in ("web-stopped", "web-started"):
