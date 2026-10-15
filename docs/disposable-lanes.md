@@ -197,7 +197,7 @@ converted or lifted, and even a genuine staff hold continues protecting the old
 lane. Other callers' holds and production aliases refuse preparation.
 
 Apply requires PostgreSQL, complete current provider/executor exclusion, the
-reviewed configuration/secret-metadata/hold/reservation snapshot and a stable
+reviewed configuration/secret-metadata/hold/reservation/provider-placement snapshot and a stable
 idempotency key. It acquires the original executor lock, but never settles or
 releases the original deployment reservation. The only new effect is a disabled,
 manual host schedule with a fixed storage program. A separate preparation fence
@@ -208,7 +208,9 @@ caller. The program creates only local volumes without backing options, then
 qualifies their labels, empty backing directories, distinct filesystem identities
 and absence of overlap with every container's mounts, including stopped ones.
 It starts no container, publishes no host port, installs no credential, copies no
-data and changes no lane record or provider environment.
+data and changes no lane record or provider environment. Existing unsafe keys
+cannot block empty storage preparation because no key is carried. Credential
+inputs are forbidden; the env-staging route still enforces actual key safety.
 
 Use the existing supported same-identity repository client:
 
@@ -223,10 +225,24 @@ After reviewing that receipt, repeat with `resources-apply`,
 `--reviewed-dry-run` and the original `--idempotency-key`. The client saves the
 qualified volume roles (`database`, `config`) and resource digest in an adjacent
 private `.receipt.json`; it prints no topology. A completed same-key replay
-returns the original receipt without another schedule dispatch. Uncertain
-schedule submission or execution retains both fences and the original key;
-queue absence, an unchanged desired build or newer configuration cannot prove
-no effect. Do not delete partial volumes or schedules to make a retry pass.
+returns the original receipt without another creation dispatch. For interrupted
+preparation, repeat the exact original apply and key: only unchanged reviewed
+inputs, an exact disabled original script, complete uniquely correlated terminal
+schedule history and an actual readback of all empty, unused, independently
+backed volumes permit adoption. Readback uses a separate fixed inspection-only
+schedule; it never repeats volume creation or rewrites the original schedule.
+Active, uncorrelated, missing, partial or drifted outcomes retain both fences.
+Drifted or partial original-allocation recovery is separately tracked in
+[#3674](https://github.com/cbusillo/launchplane/issues/3674); it is not clearance
+to retry creation.
+Queue absence, an unchanged desired build or newer configuration cannot prove no
+effect. Do not delete partial volumes or schedules to make a retry pass.
+
+Use `resources-read` with the original `--idempotency-key` and the same product,
+context and private evidence-file path to recover a completed receipt from the
+service even after configuration changes. The DB-backed idempotency record owns
+the allocation; a workstation file is only a convenience copy. Its original
+`qualified_at` describes the recorded observation, not current storage freshness.
 
 This is empty-resource preparation, not activation, rendered application
 isolation or permission to lift a hold. The original hold, request, target and

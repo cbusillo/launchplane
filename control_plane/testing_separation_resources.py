@@ -2,12 +2,14 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.idempotency_record import parse_launchplane_mutation_timestamp
 from control_plane.disposable_lanes import disposable_lane_configuration
 from control_plane.dokploy import api, post_deploy, source
 from control_plane.generic_web_testing_exclusion import (
@@ -15,7 +17,6 @@ from control_plane.generic_web_testing_exclusion import (
     _target_reservations,
     inspect_generic_web_testing_exclusion,
 )
-from control_plane.live_target_runtime import evaluate_runtime_key_safety_for_live_target_sync
 from control_plane.odoo_testing_resources import (
     GenericWebTestingResources,
     resource_readback_passes,
@@ -39,7 +40,7 @@ class SeparationResourcesRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     context: str = Field(min_length=1)
-    mode: Literal["dry-run", "apply"] = "dry-run"
+    mode: Literal["dry-run", "apply", "receipt"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
@@ -48,8 +49,34 @@ class SeparationResourcesRefused(ValueError):
     """No new resource effect has been attempted."""
 
 
+class SeparationResourcesPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    instance: Literal["testing"] = "testing"
+    plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    retained_target_preserved: Literal[True] = True
+    hold_preserved: Literal[True] = True
+    historical_settlement: Literal["not_evaluated"] = "not_evaluated"
+    configuration_updated: Literal[False] = False
+    deployment_requested: Literal[False] = False
+    published_host_ports: Literal[False] = False
+    credentials_installed: Literal[False] = False
+    applied: bool = False
+
+
+class SeparationResourcesResult(SeparationResourcesPlan):
+    applied: Literal[True] = True
+    resources_verified: Literal[True] = True
+    resources_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    volumes: dict[str, str]
+    schedule_id: str
+    qualified_at: AwareDatetime
+
+
 def preparation_binding(
-    store: PostgresRecordStore, product: str, context: str, actor: str
+    store: PostgresRecordStore, product: str, context: str, actor: str, root: Path
 ) -> tuple[str, str]:
     bindings = _bind(store, product, context, "testing")
     profile, target, target_id, provider = bindings
@@ -72,6 +99,18 @@ def preparation_binding(
     )
     if not reservations:
         raise SeparationResourcesRefused("The retained historical reservation is required.")
+    host, token = source.read_dokploy_config(control_plane_root=root)
+    placement = api.fetch_dokploy_target_payload(
+        host=host, token=token, target_type="compose", target_id=target_id.target_id
+    )
+    app_name, server_id = placement.get("appName"), placement.get("serverId")
+    if (
+        placement.get("composeId") != target_id.target_id
+        or not isinstance(app_name, str)
+        or not app_name.strip()
+        or (server_id is not None and not isinstance(server_id, str))
+    ):
+        raise SeparationResourcesRefused("The retained provider placement is unavailable.")
     return canonical_json_sha256(
         {
             "records": [record.model_dump(mode="json") for record in bindings],
@@ -84,6 +123,8 @@ def preparation_binding(
                 row.model_dump(mode="json")
                 for row in store.list_runtime_key_safety_policy_records(status="active", limit=1)
             ],
+            "provider_host": host,
+            "placement": {key: placement.get(key) for key in ("composeId", "serverId", "appName")},
         }
     ), key
 
@@ -108,26 +149,77 @@ class SeparationResourcesAdapter:
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        # Unknown dispatch is never inferred absent, nor blindly reissued. This
-        # receipt cannot settle the original deployment or an interrupted schedule.
-        return ProviderObservation(outcome="unknown")
+        if reconciliation_key != self.request.reviewed_plan_sha256:
+            return ProviderObservation(outcome="unknown")
+        try:
+            binding, old_key = preparation_binding(
+                self.store, self.product, self.request.context, self.actor, self.root
+            )
+            if binding != reconciliation_key:
+                return ProviderObservation(outcome="unknown")
+            with self.store.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(old_key)
+            ) as check:
+                if check is None:
+                    return ProviderObservation(outcome="unknown")
+                resources = self.resources(binding)
+                evidence = run_preparation_schedule(
+                    root=self.root,
+                    resources=resources,
+                    mode="readback",
+                    before_effect=lambda _phase: check(),
+                )
+                with self.store.serialize_disposable_testing_resources():
+                    check()
+                    if preparation_binding(
+                        self.store, self.product, self.request.context, self.actor, self.root
+                    ) != (binding, old_key) or not resource_readback_passes(evidence, resources):
+                        return ProviderObservation(outcome="unknown")
+                    return ProviderObservation(
+                        outcome="present",
+                        response_status_code=202,
+                        response_payload=provider_operation_response_payload(
+                            trace_id=self.trace_id,
+                            records={},
+                            result=self.result(resources, evidence),
+                        ),
+                    )
+        except Exception:
+            # Drift, active or uncorrelated remote work and missing volumes
+            # remain unknown. Readback never creates storage or releases old work.
+            return ProviderObservation(outcome="unknown")
 
     def plan(self) -> dict[str, object]:
-        binding, _ = preparation_binding(self.store, self.product, self.request.context, self.actor)
-        return {
-            "product": self.product,
-            "context": self.request.context,
-            "instance": "testing",
-            "plan_sha256": binding,
-            "retained_target_preserved": True,
-            "hold_preserved": True,
-            "historical_settlement": "not_evaluated",
-            "configuration_updated": False,
-            "deployment_requested": False,
-            "published_host_ports": False,
-            "credentials_installed": False,
-            "applied": False,
-        }
+        binding, _ = preparation_binding(
+            self.store, self.product, self.request.context, self.actor, self.root
+        )
+        return SeparationResourcesPlan(
+            product=self.product, context=self.request.context, plan_sha256=binding
+        ).model_dump(mode="json")
+
+    def resources(self, binding: str) -> GenericWebTestingResources:
+        return GenericWebTestingResources(
+            product=self.product,
+            context=self.request.context,
+            operation_id=binding,
+            target_id=self.store.read_dokploy_target_id_record(
+                context_name=self.request.context, instance_name="testing"
+            ).target_id,
+            namespace=f"lp-testing-{binding[:32]}",
+        )
+
+    def result(
+        self, resources: GenericWebTestingResources, evidence: dict[str, str]
+    ) -> dict[str, object]:
+        return SeparationResourcesResult(
+            product=self.product,
+            context=self.request.context,
+            plan_sha256=resources.operation_id,
+            resources_binding_sha256=resources.binding_sha256,
+            volumes=resources.volumes,
+            schedule_id=evidence.get("schedule_id", ""),
+            qualified_at=datetime.now(timezone.utc),
+        ).model_dump(mode="json")
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
@@ -145,7 +237,7 @@ class SeparationResourcesAdapter:
             if observed.status != "excluded":
                 raise SeparationResourcesRefused("Complete current exclusion is required.")
             binding, old_key = preparation_binding(
-                self.store, self.product, self.request.context, self.actor
+                self.store, self.product, self.request.context, self.actor, self.root
             )
             if binding != self.request.reviewed_plan_sha256:
                 raise SeparationResourcesRefused("Review the changed preparation inputs.")
@@ -159,14 +251,9 @@ class SeparationResourcesAdapter:
                     lease.assert_current()
                     old_check()
                     if preparation_binding(
-                        self.store, self.product, self.request.context, self.actor
+                        self.store, self.product, self.request.context, self.actor, self.root
                     ) != (binding, old_key):
                         raise ValueError("Retained authority changed during preparation.")
-                    evaluate_runtime_key_safety_for_live_target_sync(
-                        record_store=self.store,
-                        context_name=self.request.context,
-                        instance_name="testing",
-                    )
 
                 def effect(phase: str) -> None:
                     nonlocal started
@@ -176,16 +263,7 @@ class SeparationResourcesAdapter:
                         started = True
 
                 check()
-                target_id = self.store.read_dokploy_target_id_record(
-                    context_name=self.request.context, instance_name="testing"
-                ).target_id
-                resources = GenericWebTestingResources(
-                    product=self.product,
-                    context=self.request.context,
-                    operation_id=binding,
-                    target_id=target_id,
-                    namespace=f"lp-testing-{binding[:32]}",
-                )
+                resources = self.resources(binding)
                 evidence = run_preparation_schedule(
                     root=self.root, resources=resources, before_effect=effect
                 )
@@ -193,14 +271,7 @@ class SeparationResourcesAdapter:
                     check()
                     if not resource_readback_passes(evidence, resources):
                         raise ValueError("Independent empty backing storage was not proved.")
-                    result = {
-                        **self.plan(),
-                        "applied": True,
-                        "resources_verified": True,
-                        "resources_binding_sha256": resources.binding_sha256,
-                        "volumes": resources.volumes,
-                        "schedule_id": evidence.get("schedule_id", ""),
-                    }
+                    result = self.result(resources, evidence)
                 return ProviderMutationOutcome(
                     202,
                     provider_operation_response_payload(
@@ -222,6 +293,7 @@ def run_preparation_schedule(
     root: Path,
     resources: GenericWebTestingResources,
     before_effect: Callable[[str], None],
+    mode: Literal["prepare", "readback"] = "prepare",
 ) -> dict[str, str]:
     host, token = source.read_dokploy_config(control_plane_root=root)
     payload = api.fetch_dokploy_target_payload(
@@ -237,18 +309,40 @@ def run_preparation_schedule(
         target_payload=payload,
     )
     name = "Launchplane independent testing storage"
-    existing = api.find_matching_dokploy_schedule(
-        host=host,
-        token=token,
-        target_id=lookup,
-        schedule_type=kind,
-        schedule_name=name,
-        app_name=resources.namespace,
-    )
-    # A foreign or interrupted schedule is never overwritten, even if disabled.
-    if existing is not None:
+    original_name = name
+
+    def find(schedule_name: str) -> api.JsonObject | None:
+        return _find_storage_schedule(host, token, lookup, kind, schedule_name, resources.namespace)
+
+    original = find(name)
+    if mode == "prepare" and original is not None:
         raise ValueError("Retain the existing preparation schedule and original receipt.")
-    return post_deploy.run_manual_data_schedule(
+
+    def original_terminal() -> None:
+        current = find(original_name)
+        if (
+            current is None
+            or current != original
+            or current.get("script") != resources.script("prepare")
+            or current.get("enabled") is not False
+        ):
+            raise ValueError("Original preparation schedule provenance is unavailable.")
+        _require_terminal_storage_history(host, token, api.schedule_key(current), original=True)
+
+    if mode == "readback":
+        original_terminal()
+        name += " readback"
+        existing_read = find(name)
+        if existing_read is not None:
+            if (
+                existing_read.get("script") != resources.script("readback")
+                or existing_read.get("enabled") is not False
+            ):
+                raise ValueError("The readback schedule has different provenance.")
+            _require_terminal_storage_history(
+                host, token, api.schedule_key(existing_read), original=False
+            )
+    result = post_deploy.run_manual_data_schedule(
         host=host,
         token=token,
         target_definition=source.DokployTargetDefinition(
@@ -265,7 +359,7 @@ def run_preparation_schedule(
             "shellType": "bash",
             "scheduleType": kind,
             "command": "control-plane independent testing storage",
-            "script": resources.script("prepare"),
+            "script": resources.script(mode),
             "serverId": server,
             "userId": lookup if kind == "dokploy-server" else None,
             "enabled": False,
@@ -274,3 +368,65 @@ def run_preparation_schedule(
         resolved_schedule_execution_timeout_seconds=300,
         before_provider_mutation=before_effect,
     )
+    if mode == "readback":
+        original_terminal()
+    return result
+
+
+def _find_storage_schedule(
+    host: str, token: str, lookup: str, kind: str, name: str, namespace: str
+) -> api.JsonObject | None:
+    rows = api.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/schedule.list",
+        query={"id": lookup, "scheduleType": kind},
+    )
+    if (
+        not isinstance(rows, list)
+        or len(rows) > 10000
+        or any(not isinstance(row, dict) for row in rows)
+    ):
+        raise ValueError("Complete schedule inventory is required.")
+    matches = [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("name") == name and row.get("appName") == namespace
+    ]
+    if len(matches) > 1:
+        raise ValueError("The service preparation schedule is ambiguous.")
+    return matches[0] if matches else None
+
+
+def _require_terminal_storage_history(
+    host: str, token: str, schedule_id: str, *, original: bool
+) -> None:
+    if not schedule_id:
+        raise ValueError("Preparation schedule identity is unavailable.")
+    rows = api.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/deployment.allByType",
+        query={"id": schedule_id, "type": "schedule"},
+    )
+    if not isinstance(rows, list) or not rows or len(rows) > 10000 or (original and len(rows) != 1):
+        raise ValueError("Complete original schedule history is required.")
+    identifiers = set()
+    for row in rows:
+        if not isinstance(row, dict) or row.get("scheduleId") != schedule_id:
+            raise ValueError("Schedule history is uncorrelated.")
+        identifier = api.deployment_key(row)
+        if (
+            not identifier
+            or identifier in identifiers
+            or api.deployment_status(row) not in {"done", "error"}
+        ):
+            raise ValueError("A remote preparation may still execute.")
+        identifiers.add(identifier)
+        started_at, finished_at = row.get("startedAt"), row.get("finishedAt")
+        if not isinstance(started_at, str) or not isinstance(finished_at, str):
+            raise ValueError("Schedule completion timestamps are unavailable.")
+        started = parse_launchplane_mutation_timestamp(started_at, field_name="startedAt")
+        finished = parse_launchplane_mutation_timestamp(finished_at, field_name="finishedAt")
+        if finished < started:
+            raise ValueError("Schedule completion provenance is invalid.")

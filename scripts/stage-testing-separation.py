@@ -11,7 +11,12 @@ import sys
 import urllib.error
 
 from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
-from control_plane.testing_separation_resources import ROUTE, SeparationResourcesRequest
+from control_plane.testing_separation_resources import (
+    ROUTE,
+    SeparationResourcesRequest,
+    SeparationResourcesPlan,
+    SeparationResourcesResult,
+)
 from control_plane.testing_lane_hold import (
     TESTING_HOLD_APPLY_ROUTE,
     TESTING_HOLD_ROUTE,
@@ -34,6 +39,7 @@ def main() -> int:
             "apply",
             "resources-dry-run",
             "resources-apply",
+            "resources-read",
         ),
     )
     parser.add_argument("--operator-helper", type=Path, required=True)
@@ -49,6 +55,9 @@ def main() -> int:
     args = parser.parse_args()
     applying = args.mode in {"hold-apply", "lift-apply", "apply", "resources-apply"}
     resources = args.mode.startswith("resources-")
+    resource_read = args.mode == "resources-read"
+    if resource_read and not args.idempotency_key.strip():
+        parser.error("Receipt read requires the original preparation key.")
     holding = args.mode.startswith(("hold-", "lift-"))
     lifting = args.mode.startswith("lift-")
     if applying and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
@@ -138,8 +147,10 @@ def main() -> int:
                 if holding
                 else LiveTargetRuntimeApplyEnvelope.model_validate(body)
             ).model_dump(mode="json")
-        elif evidence.exists():
+        elif not resource_read and evidence.exists():
             raise ValueError("Preserve existing evidence; select a new path.")
+        if resource_read:
+            body["mode"] = "receipt"
         submitted = applying
         response = transport["request_launchplane"](
             service_url=settings["service_url"],
@@ -147,7 +158,7 @@ def main() -> int:
             settings=settings,
             body=body,
             timeout=360 if resources else 60,
-            **({"idempotency_key": args.idempotency_key} if applying else {}),
+            **({"idempotency_key": args.idempotency_key} if applying or resource_read else {}),
         )
         if response["status"] != "accepted":
             raise ValueError("Operation was not accepted.")
@@ -173,23 +184,13 @@ def main() -> int:
             and (result["deploy"]["requested"] or result["deploy"]["triggered"])
         ):
             raise ValueError("Unexpected deployment result.")
-        if resources and (
-            result.get("retained_target_preserved") is not True
-            or result.get("hold_preserved") is not True
-            or result.get("historical_settlement") != "not_evaluated"
-            or any(
-                result.get(field) is not False
-                for field in (
-                    "deployment_requested",
-                    "configuration_updated",
-                    "published_host_ports",
-                    "credentials_installed",
-                )
-            )
-            or (applying and result.get("resources_verified") is not True)
-        ):
-            raise ValueError("Independent resource preparation was not verified.")
-        if not applying:
+        if resources:
+            result = (
+                SeparationResourcesResult.model_validate(result)
+                if applying or resource_read
+                else SeparationResourcesPlan.model_validate(result)
+            ).model_dump(mode="json")
+        if not applying and not resource_read:
             with os.fdopen(
                 os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
             ) as output:
@@ -197,7 +198,6 @@ def main() -> int:
         elif resources:
             receipt = evidence.with_name(evidence.name + ".receipt.json")
             completed = {
-                "request": body,
                 "path": path,
                 "result": result,
                 "idempotency_key": args.idempotency_key,

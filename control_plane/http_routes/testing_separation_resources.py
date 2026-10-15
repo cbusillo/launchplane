@@ -4,12 +4,13 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import Depends, Header
+from fastapi import Depends, Header, Path as PathParameter
 
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
     accepted_evidence_response,
     request_fingerprint,
+    idempotency_scope,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.service_auth import LaunchplaneIdentity, director_agent_identity
@@ -19,6 +20,7 @@ from control_plane.testing_separation_resources import (
     SeparationResourcesAdapter,
     SeparationResourcesRefused,
     SeparationResourcesRequest,
+    SeparationResourcesResult,
 )
 
 
@@ -32,7 +34,7 @@ def register_testing_separation_resource_routes(
     run_provider_mutation: Callable[..., Awaitable[AcceptedEvidenceResponse]],
 ) -> None:
     async def prepare(
-        product: str,
+        product: Annotated[str, PathParameter(min_length=1, pattern=r"^\S+$")],
         body: SeparationResourcesRequest,
         identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
@@ -57,6 +59,24 @@ def register_testing_separation_resource_routes(
             root, record_store, product, body, actor(identity), trace
         )
         try:
+            if body.mode == "receipt":
+                row = record_store.read_idempotency_record(
+                    scope=idempotency_scope(identity),
+                    route_path=ROUTE.replace("{product}", product),
+                    idempotency_key=idempotency_key.strip(),
+                )
+                if row is None or row.state != "completed":
+                    raise ValueError("The original preparation has no completed receipt.")
+                result = SeparationResourcesResult.model_validate(
+                    row.response_payload.get("result")
+                )
+                if (result.product, result.context) != (product, body.context):
+                    raise ValueError("The original preparation belongs to another lane.")
+                return accepted_evidence_response(
+                    trace_id=trace,
+                    records={"preparation": row.record_id},
+                    result=result.model_dump(mode="json"),
+                )
             if body.mode == "dry-run":
                 return accepted_evidence_response(trace_id=trace, records={}, result=adapter.plan())
             if record_store.database_dialect_name != "postgresql":

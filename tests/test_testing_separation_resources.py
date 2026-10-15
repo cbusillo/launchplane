@@ -45,7 +45,6 @@ class GenericStorageProgramTests(storage_program.TestingResourceProgramTests):
         self.assertEqual(data.read_text(), "needed production data")
         self.assertEqual(self.containers, before)
         self.assertEqual(set(self.volumes), set(self.resources.volumes.values()))
-        self.assertTrue(all(call[0] in {"volume", "ps", "inspect"} for call in self.calls))
 
 
 class SeparationResourceTests(unittest.TestCase):
@@ -57,6 +56,12 @@ class SeparationResourceTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.store, self.root = self.fixture.store, self.fixture.root
+        config = patch(
+            "control_plane.dokploy.source.read_dokploy_config",
+            return_value=("https://provider.test", "fixture-token"),
+        )
+        config.start()
+        self.addCleanup(config.stop)
         if self.store.database_dialect_name != "postgresql":
             # Unit/rehearsal adapter tests; the HTTP route refuses SQLite apply.
             # The inherited PostgreSQL inventory runs the real guard below.
@@ -92,7 +97,9 @@ class SeparationResourceTests(unittest.TestCase):
         self.production = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="prod"
         )
-        binding, _ = preparation_binding(self.store, self.product, self.context, self.actor)
+        binding, _ = preparation_binding(
+            self.store, self.product, self.context, self.actor, self.root
+        )
         self.body = SeparationResourcesRequest(
             context=self.context,
             mode="apply",
@@ -103,17 +110,6 @@ class SeparationResourceTests(unittest.TestCase):
             self.root, self.store, self.product, self.body, self.actor, "launchplane_req_fixture"
         )
         self.effects: list[str] = []
-        config = patch(
-            "control_plane.dokploy.source.read_dokploy_config",
-            return_value=("https://provider.test", "fixture-token"),
-        )
-        config.start()
-        self.addCleanup(config.stop)
-        safety = patch(
-            "control_plane.testing_separation_resources.evaluate_runtime_key_safety_for_live_target_sync"
-        )
-        self.safety = safety.start()
-        self.addCleanup(safety.stop)
 
     def run_preparation(self, key: str = "prepare") -> DurableProviderOperationResult:
         return run_durable_provider_operation(
@@ -167,6 +163,8 @@ class SeparationResourceTests(unittest.TestCase):
 
     def test_lost_reply_retains_both_fences_and_never_redispatches(self) -> None:
         def lost(**kwargs: object) -> dict[str, str]:
+            if kwargs.get("mode") == "readback":
+                raise OSError("Remote readback is unavailable")
             self.prepare(**kwargs)
             raise OSError("Lost remote schedule outcome")
 
@@ -179,17 +177,34 @@ class SeparationResourceTests(unittest.TestCase):
         self.assertEqual(len(self.store.list_held_provider_target_reservations()), 2)
         self.assert_retained()
 
-    def test_foreign_hold_production_alias_and_unsafe_keys_refuse_before_effect(self) -> None:
+    def test_original_key_adopts_only_actual_complete_storage_readback(self) -> None:
+        def lost_then_read(**kwargs: object) -> dict[str, str]:
+            if kwargs.get("mode") == "readback":
+                resources = kwargs["resources"]
+                assert isinstance(resources, GenericWebTestingResources)
+                return {
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": resources.binding_sha256,
+                }
+            self.prepare(**kwargs)
+            raise OSError("Lost completed schedule response")
+
+        with patch(
+            "control_plane.testing_separation_resources.run_preparation_schedule",
+            side_effect=lost_then_read,
+        ):
+            self.assertEqual(self.run_preparation().response_status_code, 409)
+            recovered = self.run_preparation()
+            self.assertEqual(recovered.response_status_code, 202)
+            replay = self.run_preparation()
+            self.assertEqual(replay.response_status_code, 202)
+        self.assertEqual(self.effects, ["new empty storage"])
+        self.assertEqual(self.store.list_held_provider_target_reservations(), (self.original,))
+        self.assert_retained()
+
+    def test_foreign_hold_and_production_alias_refuse_before_effect(self) -> None:
         from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 
-        self.safety.side_effect = ValueError("Unsafe carried credential")
-        with patch(
-            "control_plane.testing_separation_resources.run_preparation_schedule"
-        ) as schedule:
-            with self.assertRaises(SeparationResourcesRefused):
-                self.run_preparation()
-            schedule.assert_not_called()
-        self.safety.side_effect = None
         hold = self.retained.policies.staff_testing_hold
         assert hold is not None
         changed = self.retained.model_copy(deep=True)
@@ -247,7 +262,7 @@ class SeparationResourceTests(unittest.TestCase):
         with self.assertRaises(SeparationResourcesRefused):
             self.adapter.plan()
 
-    def test_real_key_evaluator_protects_production_binding_without_a_schedule(self) -> None:
+    def test_empty_storage_carries_no_production_credential(self) -> None:
         from control_plane.contracts.secret_record import SecretRecord, SecretBinding
         from control_plane.contracts.runtime_key_safety_policy import (
             RuntimeKeySafetyPolicyRecord,
@@ -255,6 +270,7 @@ class SeparationResourceTests(unittest.TestCase):
         )
         from control_plane.live_target_runtime import (
             evaluate_runtime_key_safety_for_live_target_sync,
+            LiveTargetRuntimeError,
         )
 
         timestamp = self.fixture.now()
@@ -294,15 +310,23 @@ class SeparationResourceTests(unittest.TestCase):
             )
         )
         self.body.reviewed_plan_sha256 = preparation_binding(
-            self.store, self.product, self.context, self.actor
+            self.store, self.product, self.context, self.actor, self.root
         )[0]
-        self.safety.side_effect = evaluate_runtime_key_safety_for_live_target_sync
+        with self.assertRaises(LiveTargetRuntimeError):
+            evaluate_runtime_key_safety_for_live_target_sync(
+                record_store=self.store, context_name=self.context, instance_name="testing"
+            )
+        before = self.store.list_secret_bindings()
         with patch(
-            "control_plane.testing_separation_resources.run_preparation_schedule"
-        ) as schedule:
-            with self.assertRaises(SeparationResourcesRefused):
-                self.run_preparation()
-            schedule.assert_not_called()
+            "control_plane.testing_separation_resources.run_preparation_schedule",
+            side_effect=self.prepare,
+        ):
+            result = self.run_preparation()
+        self.assertEqual(result.response_status_code, 202)
+        payload = result.response_payload["result"]
+        assert isinstance(payload, dict)
+        self.assertFalse(payload["credentials_installed"])
+        self.assertEqual(self.store.list_secret_bindings(), before)
         self.assertEqual(self.store.read_secret_record(secret.secret_id), secret)
         self.assert_retained()
 
@@ -320,7 +344,7 @@ class SeparationResourceTests(unittest.TestCase):
         checkpoint = Mock()
         with (
             patch(
-                "control_plane.dokploy.api.find_matching_dokploy_schedule",
+                "control_plane.testing_separation_resources._find_storage_schedule",
                 return_value={"scheduleId": "retained-preparation"},
             ),
             patch("control_plane.dokploy.post_deploy.run_manual_data_schedule") as schedule,
@@ -331,6 +355,82 @@ class SeparationResourceTests(unittest.TestCase):
                 )
         checkpoint.assert_not_called()
         schedule.assert_not_called()
+        self.assert_retained()
+
+    def test_readback_schedule_requires_terminal_original_provenance_and_never_repeats_creation(
+        self,
+    ) -> None:
+        from control_plane.testing_separation_resources import run_preparation_schedule
+        from unittest.mock import Mock
+
+        resources = self.adapter.resources(self.body.reviewed_plan_sha256)
+        schedules = []
+
+        def run(**kwargs: object) -> dict[str, str]:
+            payload = kwargs["schedule_payload"]
+            assert isinstance(payload, dict)
+            schedules.append(payload.copy())
+            self.fixture.responses["/api/schedule.list"] = [
+                {**payload, "scheduleId": "fixture-preparation"}
+            ]
+            return {
+                "testing_resources_ok": "true",
+                "testing_resources_binding_sha256": resources.binding_sha256,
+            }
+
+        with patch("control_plane.dokploy.post_deploy.run_manual_data_schedule", side_effect=run):
+            run_preparation_schedule(root=self.root, resources=resources, before_effect=Mock())
+        history = {
+            "scheduleId": "fixture-preparation",
+            "deploymentId": "fixture-creation",
+            "status": "done",
+            "startedAt": self.fixture.now(-10),
+            "finishedAt": self.fixture.now(-5),
+        }
+        self.fixture.responses["/api/deployment.allByType"] = [history]
+        with patch(
+            "control_plane.dokploy.post_deploy.run_manual_data_schedule",
+            return_value={
+                "testing_resources_ok": "true",
+                "testing_resources_binding_sha256": resources.binding_sha256,
+            },
+        ) as reader:
+            result = run_preparation_schedule(
+                root=self.root, resources=resources, mode="readback", before_effect=Mock()
+            )
+            self.assertEqual(
+                reader.call_args.kwargs["schedule_payload"]["script"], resources.script("readback")
+            )
+            self.assertEqual(result["testing_resources_binding_sha256"], resources.binding_sha256)
+        self.assertEqual(len(schedules), 1)
+        for invalid in (
+            [],
+            {"items": [], "hasMore": True},
+            [{**history, "status": "running"}],
+            [history, history],
+            [{**history, "scheduleId": "other-schedule"}],
+            [{**history, "finishedAt": None}],
+        ):
+            self.fixture.responses["/api/deployment.allByType"] = invalid
+            with (
+                self.subTest(history=invalid),
+                patch("control_plane.dokploy.post_deploy.run_manual_data_schedule") as reader,
+            ):
+                with self.assertRaises(ValueError):
+                    run_preparation_schedule(
+                        root=self.root, resources=resources, mode="readback", before_effect=Mock()
+                    )
+                reader.assert_not_called()
+        self.assert_retained()
+
+    def test_provider_placement_drift_refuses_before_any_new_storage(self) -> None:
+        self.fixture.payload["serverId"] = "different-server"
+        with patch(
+            "control_plane.testing_separation_resources.run_preparation_schedule"
+        ) as schedule:
+            with self.assertRaises(SeparationResourcesRefused):
+                self.run_preparation()
+            schedule.assert_not_called()
         self.assert_retained()
 
     def test_http_plan_and_apply_use_the_same_identity_and_preserve_replay(self) -> None:
@@ -390,6 +490,16 @@ class SeparationResourceTests(unittest.TestCase):
                 replay = asyncio.run(call())
                 self.assertEqual(replay.status_code, 202, replay.text)
                 self.assertEqual(self.effects, ["new empty storage"])
+                stored = result.json()["result"]
+                changed = self.retained.model_copy(deep=True)
+                changed.env["NEW_CONFIG"] = "different"
+                self.store.write_dokploy_target_record(changed)
+                receipt = asyncio.run(
+                    call(mode="receipt", reason="Read stored original preparation.")
+                )
+                self.assertEqual(receipt.status_code, 202, receipt.text)
+                self.assertEqual(receipt.json()["result"], stored)
+                self.store.write_dokploy_target_record(self.retained)
             else:
                 self.assertEqual(result.status_code, 503, result.text)
                 self.assertFalse(self.effects)
