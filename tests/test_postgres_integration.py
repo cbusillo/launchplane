@@ -10595,6 +10595,9 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
     def test_promotion_recovery_inventory_waits_for_custody_snapshot_commit(self) -> None:
         self.assert_authority_writer_exclusion("recovery")
 
+    def test_secret_rotation_waits_for_custody_snapshot_commit(self) -> None:
+        self.assert_authority_writer_exclusion("rotation")
+
     def test_zero_effect_replan_retains_history_on_postgres(self) -> None:
         self.fixture.test_zero_effect_drift_can_replan_with_retained_history_and_a_new_key()
 
@@ -10602,8 +10605,58 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
         from control_plane.production_recipient import authority_snapshot
         from control_plane.contracts.environment_inventory import EnvironmentInventory
         from control_plane.contracts.promotion_record import PromotionRecord
+        from control_plane.contracts.secret_record import (
+            SecretRecord,
+            SecretBinding,
+            SecretVersion,
+            SecretAuditEvent,
+            SecretRotationWrite,
+        )
 
         fixture = self.fixture
+        rotation = None
+        if kind == "rotation":
+            secret = SecretRecord(
+                secret_id="recipient-fixture-secret",
+                scope="context_instance",
+                integration="runtime_environment",
+                name="DB_PASSWORD",
+                context=fixture.context,
+                instance="prod",
+                current_version_id="old-fixture-version",
+                created_at=fixture.old.updated_at,
+                updated_at=fixture.old.updated_at,
+            )
+            fixture.store.write_secret_record(secret)
+            fixture.store.write_secret_binding(
+                SecretBinding(
+                    binding_id="recipient-fixture-binding",
+                    secret_id=secret.secret_id,
+                    integration=secret.integration,
+                    binding_key=secret.name,
+                    context=fixture.context,
+                    instance="prod",
+                    created_at=secret.created_at,
+                    updated_at=secret.updated_at,
+                )
+            )
+            rotated = secret.model_copy(update={"current_version_id": "new-fixture-version"})
+            rotation = SecretRotationWrite(
+                expected_current_version_id=secret.current_version_id,
+                record=rotated,
+                version=SecretVersion(
+                    version_id=rotated.current_version_id,
+                    secret_id=secret.secret_id,
+                    created_at=secret.created_at,
+                    ciphertext="fixture-ciphertext",
+                ),
+                audit_event=SecretAuditEvent(
+                    event_id="recipient-fixture-rotation",
+                    secret_id=secret.secret_id,
+                    event_type="rotated",
+                    recorded_at=secret.updated_at,
+                ),
+            )
         inventory = EnvironmentInventory.model_validate(
             {
                 "context": fixture.context,
@@ -10618,7 +10671,7 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
                 "deployment_record_id": "original-deploy",
             }
         )
-        if kind != "profile":
+        if kind in {"promotion", "recovery"}:
             fixture.store.write_environment_inventory(inventory)
         original = fixture.adapter.current()
         entered, release = threading.Event(), threading.Event()
@@ -10645,7 +10698,10 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
         changed_inventory = inventory.model_copy(
             update={"updated_at": inventory.updated_at + "-changed"}
         )
-        if kind == "promotion":
+        if kind == "rotation":
+            assert rotation is not None
+            write = partial(second.write_secret_rotations, (rotation,))
+        elif kind == "promotion":
             promotion = PromotionRecord.model_validate(
                 {
                     "record_id": "fixture-promotion",

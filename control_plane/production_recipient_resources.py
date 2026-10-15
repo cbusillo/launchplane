@@ -147,7 +147,7 @@ def main():
         row = rows[0]
         if (row.get("Config", {}).get("Labels") or {}).get("com.docker.compose.project") == spec["project"]:
             raise ValueError("recipient already has containers")
-        for inventory in (row["HostConfig"]["PortBindings"], row.get("NetworkSettings", {}).get("Ports") or {}):
+        for inventory in ((row.get("HostConfig") or {}).get("PortBindings") or {}, (row.get("NetworkSettings") or {}).get("Ports") or {}):
             for bindings in inventory.values():
                 if any(port_conflicts(binding, spec["ports"]) for binding in (bindings or [])):
                     raise ValueError("port already referenced")

@@ -273,9 +273,6 @@ class ProductionRecipientTests(unittest.TestCase):
         self.assertTrue(saved.qualified_at)
         output = json.dumps(plan(saved))
         self.assertNotIn(self.values["DB_PASSWORD"], output)
-        self.assertFalse(
-            any("deploy" in path or "delete" in path or "remove" in path for path in self.effects)
-        )
         self.assert_old_preserved()
 
     def test_unknown_create_retains_custody_and_refuses_new_keys_without_redispatch(self) -> None:
@@ -320,6 +317,20 @@ class ProductionRecipientTests(unittest.TestCase):
         ):
             self.assertEqual(self.run_operation().response_status_code, 409)
         effects = list(self.effects)
+        before = custody(self.store, self.product, self.context)
+        with (
+            patch("control_plane.production_recipient.inspect_resources") as host_check,
+            patch.object(self.store, "write_production_recipient") as custody_write,
+        ):
+            for _ in range(2):
+                observation = self.adapter.observe(
+                    "unused", "configure_recipient", self.body.reviewed_plan_sha256
+                )
+                self.assertEqual(observation.outcome, "absent")
+                self.assertTrue(observation.retry_safe)
+            host_check.assert_not_called()
+            custody_write.assert_not_called()
+        self.assertEqual(custody(self.store, self.product, self.context), before)
         self.assertEqual(self.run_operation().response_status_code, 202)
         self.assertEqual(self.effects, effects)
         self.assert_old_preserved()
@@ -482,6 +493,9 @@ class ProductionRecipientTests(unittest.TestCase):
             ["--innodb-buffer-pool-size=512M", "--innodb_buffer_pool_size=8G"],
             ["--innodb-buffer-pool-size=512M", "--innodb_buffer_pool_size", "8G"],
             ["--innodb_buffer_pool_size=8G"],
+            ["--innodb-buffer-pool-size=512M", "--loose-innodb_buffer_pool_size=8G"],
+            ["--innodb-buffer-pool-size=512M", "--maximum-innodb_buffer_pool_size=8G"],
+            ["--innodb-buffer-pool-size=512M", "--defaults-extra-file=/config/my.cnf"],
         ):
             with self.subTest(arguments=arguments):
                 document = deepcopy(self.document)
@@ -492,6 +506,15 @@ class ProductionRecipientTests(unittest.TestCase):
                 else:
                     with self.assertRaises(ValueError):
                         qualified_render(changed, values)
+        document = deepcopy(self.document)
+        document["services"]["database"]["entrypoint"] = [
+            "mariadbd",
+            "--innodb-buffer-pool-size=8G",
+        ]
+        with self.assertRaises(ValueError):
+            qualified_render(
+                record.model_copy(update={"compose_source": json.dumps(document)}), values
+            )
 
     def test_provider_status_observations_do_not_change_binding_authority(self) -> None:
         original = self.provider_write

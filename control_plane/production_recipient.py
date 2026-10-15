@@ -1,5 +1,6 @@
 """Prepare an independent private recipient without publishing or starting it."""
 
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
 import json
@@ -179,6 +180,13 @@ def runtime_values(
 
 
 def qualified_render(record: ProductionRecipientRecord, values: dict[str, str]) -> dict[str, Any]:
+    try:
+        return _qualified_render(record, values)
+    except (KeyError, TypeError, AttributeError, OverflowError) as error:
+        raise ValueError("Malformed production Compose source is not qualified.") from error
+
+
+def _qualified_render(record: ProductionRecipientRecord, values: dict[str, str]) -> dict[str, Any]:
     document = interpolate(json.loads(record.compose_source), values)
     if not isinstance(document, dict):
         raise ValueError("Compose source is unavailable.")
@@ -206,6 +214,20 @@ def qualified_render(record: ProductionRecipientRecord, values: dict[str, str]) 
 
         command = service.get("command", [])
         arguments = shlex.split(command) if isinstance(command, str) else command
+
+        def normalized_option(argument: object) -> str:
+            option = str(argument).split("=", 1)[0].replace("_", "-")
+            while option.startswith(("--loose-", "--maximum-")):
+                option = "--" + option.split("-", 3)[3]
+            return option
+
+        if name == record.request.database_service and (
+            "entrypoint" in service
+            or any(normalized_option(argument).startswith("--defaults-") for argument in arguments)
+        ):
+            raise ValueError(
+                "The database must use its image entrypoint and explicit reviewed command limits."
+            )
         for argument_name, maximum in required.command_memory_limits.items():
             configured = [
                 (
@@ -216,7 +238,7 @@ def qualified_render(record: ProductionRecipientRecord, values: dict[str, str]) 
                     else ""
                 )
                 for index, argument in enumerate(arguments)
-                if str(argument).split("=", 1)[0].replace("_", "-") == argument_name
+                if normalized_option(argument) == argument_name
             ]
             if len(configured) != 1 or not 0 < memory_bytes(configured[0]) <= maximum:
                 raise ValueError("Product source must enforce its reviewed command memory limit.")
@@ -525,8 +547,25 @@ class ProductionRecipientAdapter:
             raise ValueError("Retain a recipient with unqualified identity or deployment effects.")
         return cast(dict[str, Any], payload)
 
-    def recover_placement(self, record: ProductionRecipientRecord) -> ProductionRecipientRecord:
+    def recover_placement(
+        self,
+        record: ProductionRecipientRecord,
+        *,
+        persist: bool = True,
+        guard: Callable[[], None] | None = None,
+    ) -> ProductionRecipientRecord:
         """Adopt only observed IDs in this original namespace; never repeat an unknown create."""
+
+        def advance(
+            current: ProductionRecipientRecord, **updates: Any
+        ) -> ProductionRecipientRecord:
+            if not persist:
+                return current.model_copy(update=updates)
+            if guard is None:
+                raise ValueError("Placement adoption requires the current execution lease.")
+            guard()
+            return self.save(current, **updates)
+
         if record.phase == "prepared":
             return record
         host, token = source.read_dokploy_config(control_plane_root=self.root)
@@ -548,7 +587,7 @@ class ProductionRecipientAdapter:
         if not record.project_id:
             if record.phase != "create_project":
                 raise ValueError("Unrequested project placement.")
-            record = self.save(record, project_id=project_id, phase="project_ready")
+            record = advance(record, project_id=project_id, phase="project_ready")
         environments = project.get("environments")
         if not isinstance(environments, list) or not all(
             isinstance(item, dict) for item in environments
@@ -570,7 +609,7 @@ class ProductionRecipientAdapter:
         if not record.environment_id:
             if record.phase != "create_environment":
                 raise ValueError("Unrequested environment placement.")
-            record = self.save(record, environment_id=environment_id, phase="environment_ready")
+            record = advance(record, environment_id=environment_id, phase="environment_ready")
         recipients = environment.get("compose")
         if not isinstance(recipients, list) or not all(
             isinstance(item, dict) for item in recipients
@@ -591,7 +630,7 @@ class ProductionRecipientAdapter:
         if not record.target_id:
             if record.phase != "create_recipient":
                 raise ValueError("Unrequested recipient placement.")
-            record = self.save(record, target_id=target_id, phase="recipient_ready")
+            record = advance(record, target_id=target_id, phase="recipient_ready")
         self.unused_recipient(record)
         return record
 
@@ -609,7 +648,7 @@ class ProductionRecipientAdapter:
             ):
                 return ProviderObservation("unknown")
             self.require_unchanged(record)
-            record = self.recover_placement(record)
+            record = self.recover_placement(record, persist=False)
             if not record.target_id or record.phase == "recipient_ready":
                 return ProviderObservation("absent", retry_safe=True)
             try:
@@ -622,14 +661,8 @@ class ProductionRecipientAdapter:
                 ):
                     return ProviderObservation("absent", retry_safe=True)
                 return ProviderObservation("unknown")
-            inspect_resources(
-                self.root,
-                record,
-                prepare=False,
-                checkpoint=lambda phase: self.require_unchanged(self.current()),
-            )
             if not record.qualified_at:
-                record = self.save(record, qualified_at=utc_now_timestamp(), phase="qualified")
+                return ProviderObservation("absent", retry_safe=True)
             return ProviderObservation(
                 "present",
                 response_payload=provider_operation_response_payload(
@@ -662,6 +695,8 @@ class ProductionRecipientAdapter:
                     or record.qualified_at
                 ):
                     raise ValueError("Reconcile the original checkpoint before continuation.")
+                if reservation.attempt > 1:
+                    record = self.recover_placement(record, guard=lease.assert_current)
 
             def checkpoint(phase: str) -> None:
                 nonlocal started
@@ -755,11 +790,11 @@ class ProductionRecipientAdapter:
                 or fresh.get("domains")
             ):
                 raise ValueError("Fresh recipient identity is unverified.")
+            configured = False
             if record.before_configuration_sha256:
                 if provider_binding_digest(fresh) != record.before_configuration_sha256:
-                    raise ValueError(
-                        "An uncertain recipient configuration requires readback, not another write."
-                    )
+                    self.verify(record)
+                    configured = True
             else:
                 if fresh.get("env"):
                     raise ValueError("The fresh recipient has an unexpected environment.")
@@ -768,30 +803,32 @@ class ProductionRecipientAdapter:
                     app_name=app_name,
                     before_configuration_sha256=provider_binding_digest(fresh),
                 )
-            inspect_resources(self.root, record, prepare=True, checkpoint=checkpoint)
+            inspect_resources(self.root, record, prepare=not configured, checkpoint=checkpoint)
             template = json.loads(record.compose_source)
             for volume in template["volumes"].values():
                 volume["external"] = True
-            record = self.save(record, phase="configure_recipient")
-            checkpoint(record.phase)
-            api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/compose.update",
-                method="POST",
-                payload={
-                    "composeId": record.target_id,
-                    "sourceType": "raw",
-                    "composePath": "docker-compose.yml",
-                    "composeFile": json.dumps(template),
-                    "autoDeploy": False,
-                    "env": api.serialize_dokploy_env_text(
-                        runtime_values(self.store, self.root, record)
-                    ),
-                },
-            )
+            if not configured:
+                record = self.save(record, phase="configure_recipient")
+                checkpoint(record.phase)
+                api.dokploy_request(
+                    host=host,
+                    token=token,
+                    path="/api/compose.update",
+                    method="POST",
+                    payload={
+                        "composeId": record.target_id,
+                        "sourceType": "raw",
+                        "composePath": "docker-compose.yml",
+                        "composeFile": json.dumps(template),
+                        "autoDeploy": False,
+                        "env": api.serialize_dokploy_env_text(
+                            runtime_values(self.store, self.root, record)
+                        ),
+                    },
+                )
             self.verify(record)
             inspect_resources(self.root, record, prepare=False, checkpoint=checkpoint)
+            lease.assert_current()
             record = self.save(record, qualified_at=utc_now_timestamp(), phase="qualified")
             self.require_unchanged(record)
             return ProviderMutationOutcome(

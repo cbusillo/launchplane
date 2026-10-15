@@ -27125,6 +27125,7 @@ class PostgresRecordStore(HumanSessionStore):
         ordered_rotations = tuple(sorted(rotations, key=lambda item: item.record.secret_id))
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             for rotation in ordered_rotations:
                 statement = (
                     select(LaunchplaneSecretRow)

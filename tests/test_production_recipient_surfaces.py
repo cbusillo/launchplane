@@ -144,6 +144,9 @@ class HostProgramTests(unittest.TestCase):
         self.assertNotEqual(self.run_program()[0], 0)
         row["HostConfig"]["PortBindings"]["80/tcp"][0]["HostPort"] = "18000-18002"
         self.assertEqual(self.run_program()[0], 0)
+        row["HostConfig"]["PortBindings"] = None
+        row["NetworkSettings"] = None
+        self.assertEqual(self.run_program()[0], 0)
 
 
 class HttpBoundaryTests(unittest.TestCase):
@@ -241,6 +244,16 @@ class HttpBoundaryTests(unittest.TestCase):
         self.assertEqual(response.status_code, 202, response.text)
         host_check.assert_not_called()
         self.assertEqual(self.fixture.effects, before)
+
+    def test_malformed_product_compose_refuses_without_a_server_error_or_effect(self) -> None:
+        for deploy in (None, {"resources": {"limits": {"cpus": {}, "memory": "2G"}}}):
+            with self.subTest(deploy=deploy):
+                self.fixture.document["services"]["database"]["deploy"] = deploy
+                body = self.fixture.body.model_copy(update={"mode": "dry-run"}).model_dump(
+                    mode="json"
+                )
+                self.assertEqual(self.post(body).status_code, 409)
+        self.assertFalse(self.fixture.effects)
 
 
 class TerminalClientTests(unittest.TestCase):

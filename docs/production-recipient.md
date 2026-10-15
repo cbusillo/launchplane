@@ -17,6 +17,10 @@ Terminal identities retain the existing production-setup refusal. Pure planning,
 provider readback and receipt reads use the existing product read authority. Host
 resource checks run only in leased apply/reconciliation. No new grant,
 credential, workflow or identity fallback is introduced.
+The preparer identity must perform its own dry-run and apply. Once custody
+exists, planning and provider readback remain bound to that original actor and
+scope, in addition to product read authority; a reader cannot transfer a saved
+plan to a different setup identity.
 
 The request names one immutable product build/source commit, the explicitly
 reviewed destination server, existing lane setting keys for database and config
