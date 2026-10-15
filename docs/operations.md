@@ -2370,6 +2370,8 @@ re-encryption apply unless the Director approves the exact new plan digest. If
 automatic compensation is rejected or fails, require manual admin follow-up
 and a clean legacy-only dry-run baseline before proceeding.
 
+### Dokploy domain authority
+
 For an invalid tracked Dokploy target domain authority, use the `Dokploy Target
 Setup` workflow with `operation=repair-domain-authority`. Supply the exact
 tracked target type and target ID, a comma-separated tuple of bare DNS hosts,
@@ -2382,6 +2384,28 @@ preserves all target metadata except `domains`, `updated_at`, and
 `source_label`. The same atomic write advances only `updated_at` and
 `source_label` on the canonical provider-target projection so downstream
 projection checks remain consistent.
+
+For domain-authority dry runs, `GET /v1/dokploy-targets/inspect`
+continues to expose complete empty/canonical evidence privately. When the stored
+provider evidence cannot be safely exposed, it instead supplies
+`provider_target_record.comparison_fingerprint`, a keyed commitment to the full
+reference plus its context and instance. Send it as
+`expected_current_provider_target_fingerprint` with the visible
+`expected_current_provider_target` and the exact observed domains to the setup
+route in dry-run mode. Both inspection and this dry-run response omit arbitrary
+stored evidence. The fingerprint supplies comparison evidence only; authorization,
+exclusive lane ownership, visible target identity, live provider identity and the
+exact domain set are still checked. Neither read nor plan writes records.
+
+Fingerprint comparison uses the existing managed-secret key ring, with its own
+purpose. If that bootstrap configuration is unavailable, ordinary inspection
+still works and the plan reports `dokploy_target_comparison_evidence_unavailable`
+with its trace. Repeat inspection after configuration is available. Authority
+drift, a different lane, or key rotation invalidates the fingerprint; inspect
+again rather than retrying an old expectation. Fingerprints are accepted only
+for domain-authority dry runs. Apply retains the complete private reference and
+its existing credential, confirmation and idempotency gates. Keep fingerprints
+and private comparison input out of public helper receipts.
 
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:

@@ -5450,6 +5450,12 @@
               }
             ]
           },
+          "expected_current_provider_target_fingerprint": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Expected Current Provider Target Fingerprint",
+            "type": "string"
+          },
           "healthcheck_path": {
             "default": "",
             "title": "Healthcheck Path",

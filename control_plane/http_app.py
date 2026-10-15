@@ -1,3 +1,7 @@
+from control_plane.dokploy_target_comparison import (
+    DokployTargetComparisonEvidenceUnavailableError,
+    require_provider_target_expectation,
+)
 from control_plane import odoo_website_settings as control_plane_odoo_website_settings
 from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
@@ -87,9 +91,6 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
     require_empty_testing_target_creation,
-)
-from control_plane.workflows.dokploy_target_adoption import (
-    DokployTargetComparisonEvidenceUnavailableError,
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_public_hosts
@@ -25662,11 +25663,33 @@ def create_launchplane_fastapi_app(
                         context_name=setup_request.context,
                         instance_name=setup_request.instance,
                     )
-                    authorized = (
-                        authorized
-                        and tracked_provider.to_deployed_target_reference()
-                        == setup_request.expected_current_provider_target
-                    )
+                    if setup_request.operation == "repair-domain-authority" and authorized:
+                        try:
+                            require_provider_target_expectation(
+                                current=tracked_provider,
+                                expected=setup_request.expected_current_provider_target,
+                                fingerprint=setup_request.expected_current_provider_target_fingerprint,
+                                target=database_store.read_dokploy_target_record(
+                                    context_name=setup_request.context,
+                                    instance_name=setup_request.instance,
+                                ),
+                                target_id=tracked_id,
+                            )
+                        except DokployTargetComparisonEvidenceUnavailableError as error:
+                            raise _launchplane_http_error(
+                                status_code=400,
+                                trace_id=trace_id,
+                                code="dokploy_target_comparison_evidence_unavailable",
+                                message=str(error),
+                            ) from error
+                        except ValueError:
+                            authorized = False
+                    else:
+                        authorized = (
+                            authorized
+                            and tracked_provider.to_deployed_target_reference()
+                            == setup_request.expected_current_provider_target
+                        )
                 except FileNotFoundError:
                     authorized = False
         if not authorized:
