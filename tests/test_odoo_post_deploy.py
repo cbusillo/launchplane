@@ -768,6 +768,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                         fresh_testing_generation=generation().model_copy(
                             update={
                                 "target_id": "compose-123",
+                                "context": "opw",
                                 "source_mode": "container-export" if native else "ssh",
                             }
                         ),
