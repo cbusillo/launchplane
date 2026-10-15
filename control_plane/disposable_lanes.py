@@ -88,6 +88,8 @@ def disposable_lane_binding_sha256(
     target_id: DokployTargetIdRecord | None,
     preview: PreviewRecord | None = None,
     configuration: tuple[LaneConfigurationRecord, ...] = (),
+    *,
+    preview_lifecycle: bool = True,
 ) -> str:
     # The observation itself is not part of the binding it observes. Updating
     # timestamps or retirement lifecycle state does not change lane ownership.
@@ -98,7 +100,27 @@ def disposable_lane_binding_sha256(
         preview_profile.pop("enabled", None)
     bindings: list[object] = [
         payload,
-        *(item.model_dump(mode="json") if item else None for item in (target, target_id, preview)),
+        *(item.model_dump(mode="json") if item else None for item in (target, target_id)),
+        (
+            preview.model_dump(
+                mode="json",
+                include=(
+                    None
+                    if preview_lifecycle
+                    else {
+                        "preview_id",
+                        "context",
+                        "anchor_repo",
+                        "anchor_pr_number",
+                        "anchor_pr_url",
+                        "canonical_url",
+                        "state",
+                    }
+                ),
+            )
+            if preview
+            else None
+        ),
     ]
     bindings.append(
         sorted(
@@ -203,6 +225,7 @@ def require_disposable_lane(
             target_id,
             preview,
             disposable_lane_configuration(store, context, instance),
+            preview_lifecycle=False,
         )
         return binding
     if retirement:

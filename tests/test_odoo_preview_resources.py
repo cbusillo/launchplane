@@ -11,6 +11,10 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.odoo_preview_resources import PREVIEW_RESOURCE_PROGRAM
+from control_plane.contracts.disposable_lane import (
+    ODOO_PREVIEW_RESOURCES_OK_MARKER,
+    ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
+)
 
 
 class PreviewResourceInspectionTests(unittest.TestCase):
@@ -49,18 +53,42 @@ class PreviewResourceInspectionTests(unittest.TestCase):
     def docker(self, command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
         args = command[1:]
         self.calls.append(args)
-        if args == ["ps", "-aq"]:
+        if args[0] == "ps":
             value = "\n".join(self.containers)
         elif args[:2] == ["volume", "inspect"]:
-            value = json.dumps([self.volumes[args[-1]]])
+            item = self.volumes[args[-1]]
+            value = json.dumps(
+                {
+                    "Name": item["Name"],
+                    "Driver": item["Driver"],
+                    "Mountpoint": item["Mountpoint"],
+                    "HasOptions": bool(item.get("Options")),
+                    "Device": (item.get("Options") or {}).get("device"),
+                }
+            )
         elif args[0] == "inspect":
-            value = json.dumps([self.containers[args[-1]]])
+            rows = []
+            for identifier in args[3:]:
+                item = self.containers[identifier]
+                projected = {"Id": identifier, **item}
+                host = item.get("HostConfig")
+                if isinstance(host, dict):
+                    projected["HostConfig"] = {
+                        **host,
+                        "MountTargets": host.get(
+                            "MountTargets", [entry["Target"] for entry in host.get("Mounts", [])]
+                        ),
+                    }
+                rows.append(json.dumps(projected))
+            value = "\n".join(rows)
         else:
             self.fail(f"Unexpected host mutation: {args}")
         return subprocess.CompletedProcess(command, 0, value, "")
 
-    def run_program(self) -> tuple[int, dict[str, str]]:
-        encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
+    def run_program(self, spec: dict[str, Any] | None = None) -> tuple[int, dict[str, str]]:
+        encoded = base64.b64encode(
+            json.dumps(spec if spec is not None else self.spec).encode()
+        ).decode()
         output = io.StringIO()
         status = 0
         with (
@@ -77,7 +105,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
     def test_existing_local_data_is_preserved_by_read_only_inspection(self) -> None:
         status, evidence = self.run_program()
         self.assertEqual(status, 0, evidence)
-        self.assertEqual(evidence["preview_resources_ok"], "true")
+        self.assertEqual(evidence[ODOO_PREVIEW_RESOURCES_OK_MARKER], "true")
         for volume in self.volumes.values():
             self.assertEqual(
                 (Path(volume["Mountpoint"]) / "needed-data").read_text(), "preserve me"
@@ -119,7 +147,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
 
     def test_absent_target_and_unknown_container_owner_refuse(self) -> None:
         self.containers.clear()
-        self.assertNotEqual(self.run_program()[0], 0)
+        self.assertEqual(self.run_program()[0], 0)
         self.containers["unknown"] = {"Mounts": []}
         self.assertNotEqual(self.run_program()[0], 0)
 
@@ -150,6 +178,11 @@ class PreviewResourceInspectionTests(unittest.TestCase):
             "Mounts": [{"Type": "bind", "Source": "/unrelated/deleted/path", "RW": True}],
         }
         self.assertEqual(self.run_program()[0], 0)
+        self.containers["preview"]["HostConfig"]["Mounts"] = [
+            {"Target": "/var/lib/odoo", "Source": anonymous}
+        ]
+        self.assertNotEqual(self.run_program()[0], 0)
+        self.containers["preview"]["HostConfig"]["Mounts"] = []
         self.containers["unrelated-stopped"]["Mounts"] = [
             {
                 "Type": "volume",
@@ -160,13 +193,41 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         ]
         self.assertNotEqual(self.run_program()[0], 0)
 
+    def test_foreign_bind_backed_named_volume_protects_preview_data(self) -> None:
+        name, backing = next(iter(self.volumes.items()))
+        alias = "foreign-alias-volume"
+        self.volumes[alias] = {
+            "Name": alias,
+            "Driver": "local",
+            "Mountpoint": f"/var/lib/docker/volumes/{alias}/_data",
+            "Options": {"type": "none", "o": "bind", "device": backing["Mountpoint"]},
+        }
+        self.containers["foreign"] = {
+            "Config": {"Labels": {}},
+            "Mounts": [
+                {
+                    "Type": "volume",
+                    "Name": alias,
+                    "Source": self.volumes[alias]["Mountpoint"],
+                    "RW": True,
+                }
+            ],
+        }
+        self.assertNotEqual(self.run_program()[0], 0)
+        self.volumes[alias]["Options"]["device"] = str(self.root)
+        self.assertNotEqual(self.run_program()[0], 0)
+
     def test_disappeared_foreign_container_is_not_an_unknown_consumer(self) -> None:
         self.containers["gone"] = {}
         original = self.docker
 
         def disappearing(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-            if command[1:] == ["inspect", "gone"]:
-                return subprocess.CompletedProcess(command, 1, "", "Error: No such container: gone")
+            if command[1] == "inspect":
+                forwarded = [part for part in command if part != "gone"]
+                result = original(forwarded, **kwargs)
+                return subprocess.CompletedProcess(
+                    command, 1, result.stdout, "Error: No such container: gone"
+                )
             return original(command, **kwargs)
 
         with patch.object(self, "docker", side_effect=disappearing):
@@ -192,21 +253,19 @@ class PreviewResourceCollectorTests(unittest.TestCase):
         }
         executed: list[dict[str, Any]] = []
 
+        fixture = PreviewResourceInspectionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+
         def schedule(**kwargs: Any) -> dict[str, str]:
             executed.append(kwargs)
             script = kwargs["schedule_payload"]["script"]
             encoded = script.split("python3 - ")[1].split(" ")[0]
             spec = json.loads(base64.b64decode(encoded))
-            import hashlib
-
-            digest = hashlib.sha256(json.dumps(spec, sort_keys=True).encode()).hexdigest()
+            status, evidence = fixture.run_program(spec)
+            self.assertEqual(status, 0, evidence)
             return extract_odoo_post_deploy_readback_markers(
-                {
-                    "logs": [
-                        "preview_resources_ok=true",
-                        "preview_resources_binding_sha256=" + digest,
-                    ]
-                }
+                {"logs": [f"{key}={value}" for key, value in evidence.items()]}
             )
 
         from control_plane.dokploy import api, post_deploy
@@ -231,6 +290,18 @@ class PreviewResourceCollectorTests(unittest.TestCase):
             fetch.side_effect = [payload, {**payload, "serverId": "moved-server"}]
             with self.assertRaises(click.ClickException):
                 require_existing_preview_resources(**kwargs)
+            fetch.side_effect = None
+            original_app_name = executed[0]["schedule_app_name"]
+            with patch.object(
+                api,
+                "find_matching_dokploy_schedule",
+                return_value={
+                    "deployments": [{"deploymentId": "stale-inspection", "status": "running"}]
+                },
+            ):
+                require_existing_preview_resources(**kwargs)
+            self.assertNotEqual(executed[-1]["schedule_app_name"], original_app_name)
+            self.assertFalse(executed[-1]["schedule_payload"]["enabled"])
 
     def test_wrong_missing_and_stale_receipts_refuse(self) -> None:
         import click
@@ -255,10 +326,10 @@ class PreviewResourceCollectorTests(unittest.TestCase):
         ):
             for receipt in (
                 {},
-                {"preview_resources_ok": "false"},
+                {ODOO_PREVIEW_RESOURCES_OK_MARKER: "false"},
                 {
-                    "preview_resources_ok": "true",
-                    "preview_resources_binding_sha256": "previous-target-receipt",
+                    ODOO_PREVIEW_RESOURCES_OK_MARKER: "true",
+                    ODOO_PREVIEW_RESOURCES_BINDING_MARKER: "previous-target-receipt",
                 },
             ):
                 with self.subTest(receipt=receipt):

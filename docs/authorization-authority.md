@@ -265,7 +265,11 @@ A refused or expired issued plan requires fresh plan/apply inputs.
 The inspector reads Docker's daemon metadata, not filesystem paths in the schedule's
 mount namespace. Only default local volumes without backing options qualify;
 image-declared anonymous volumes are inspected and checked for foreign consumers
-too. Unrelated vanished containers and stale disjoint bind sources are not usage.
+too. The declaration must also have no explicit bind or mount at that destination;
+a hash-like name alone is not provenance. Foreign volumes' backing device paths
+are inspected for bind aliases, including parent directories. Bulk, filtered
+container reads collect no environment values or arbitrary labels. Unrelated
+vanished containers and stale disjoint bind sources are not usage.
 There is no inode or arbitrary host-symlink attestation. Managed resource identities
 and Docker's reported backing/mount relationships are the inspection authority.
 
@@ -276,13 +280,16 @@ five-second lock wait. Deploy/job polling and smoke checks hold no authority fen
 Guarded schedule triggers have a short request deadline and then use the existing
 exact-job observation without retriggering. Profile/configuration equality and
 protective reports are checked inside each dispatch guard and before lifecycle
-publication; a late refusal retains uncertain outcomes. Direct external host
+publication; a late refusal retains uncertain outcomes. Preview generation progress
+and housekeeping timestamps are left to existing supersession/finalization logic;
+preview identity/state, configuration and real protective reports stay bound. Direct external host
 administration is outside this transaction.
 
 Inspection commands time out and the fixed script exits within its own deadline.
-If a previous inspection still runs, wait for its terminal provider job, then retry
-the original apply/key; an inspection-only refusal releases the pre-effect
-reservation. It never permits a second application dispatch to settle uncertainty.
+A stuck older inspection cannot fence a read: collection uses a fresh separately
+named, disabled inspection schedule and preserves the old job for diagnosis.
+It neither cancels that job nor changes an application. An inspection-only refusal
+releases the pre-effect reservation. It never permits a second application dispatch to settle uncertainty.
 SQLite remains a rehearsal backend and cannot enable this live qualification.
 No production, backup, promotion or Client-access boundary changes.
 

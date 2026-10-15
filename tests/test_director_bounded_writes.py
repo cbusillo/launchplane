@@ -363,6 +363,36 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         # reservation as though the first effect never happened.
         self.assertEqual(response.json()["error"]["code"], "mutation_reconciliation_required")
 
+    async def test_lifecycle_progress_during_refresh_does_not_create_a_false_fence(self) -> None:
+        def execute(**kwargs: Any) -> Any:
+            with kwargs["provider_mutation_guard"]():
+                kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+            self.store.write_preview_record(
+                self.preview.model_copy(
+                    update={
+                        "updated_at": datetime.now(timezone.utc).isoformat(),
+                        "latest_generation_id": "newer-announced-generation",
+                    }
+                )
+            )
+            with kwargs["provider_mutation_guard"]():
+                kwargs["provider_effect_checkpoint"]("fixture-second-effect")
+            return {
+                "status": "pass",
+                "provider_effect_attempted": True,
+                "operation": "refresh",
+                "product": self.profile.product,
+                "repository": self.profile.repository,
+                "preview_slug": "pr-42",
+                "preview_url": self.payload["apply"]["dry_run_plan"]["preview_url"],
+                "domain_host": self.payload["apply"]["dry_run_plan"]["domain_host"],
+                "compose_name": "cm-odoo-preview-pr-42",
+            }
+
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result", side_effect=execute):
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 202, response.text)
+
     async def test_refused_fence_entry_is_a_known_pre_effect_refusal(self) -> None:
         from sqlalchemy.exc import OperationalError
 

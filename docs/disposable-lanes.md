@@ -83,7 +83,9 @@ for each bounded dispatch, with a lock timeout. Deploy/job waits hold no global
 transaction. A pre-effect admission refusal releases its reservation; a late
 refusal preserves the original uncertain key for read-only reconciliation. A new
 apply repeats inspection automatically. The inspection script has its own deadline;
-wait for an existing inspection to finish before original-key retry. See the full
+a stale running inspection uses a fresh separately named disabled read job, without
+cancelling the old job or modifying an application. Original-key retry remains
+available after an inspection-only refusal. See the full
 [authorization and recovery contract](authorization-authority.md#reviewed-never-live-classification-and-preview-execution).
 
 ## Preparing a testing production-copy policy
