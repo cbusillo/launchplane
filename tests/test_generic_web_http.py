@@ -3721,7 +3721,10 @@ class GenericWebHttpTests(unittest.TestCase):
                         "Provider work must run outside the ASGI event loop",
                     )
                     loop.call_soon_threadsafe(provider_wait_started.set)
-                    release_provider_wait.wait()
+                    self.assertTrue(
+                        release_provider_wait.wait(timeout=30),
+                        "Provider was never released; the event loop may be blocked",
+                    )
                     return {
                         "refresh_status": "pass",
                         "refresh_started_at": "2026-05-03T15:00:00Z",
