@@ -410,7 +410,10 @@ class FilesystemRecordStore:
                 # Publish pending work first, under the same bundle lock as the
                 # atomic file replacement. A crash can leave retryable extra work,
                 # but cannot publish a source without its pending marker.
-                with filesystem_index(self.state_dir) as index, index.engine.begin() as connection:
+                with (
+                    filesystem_index(self.state_dir, backfill=False) as index,
+                    index.engine.begin() as connection,
+                ):
                     source_changed(
                         connection, FILESYSTEM_TYPES[record_type], model.model_dump(mode="json")
                     )

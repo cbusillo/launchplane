@@ -1494,7 +1494,10 @@ class RealPostgresSchemaIntegrationTests(unittest.TestCase):
                         source_git_ref=record.source_git_ref,
                         deploy_started_at="",
                         deploy_finished_at=record.deploy.finished_at,
-                        payload=record.model_dump(mode="json"),
+                        payload={
+                            **record.model_dump(mode="json"),
+                            "retired_legacy_field": "historical",
+                        },
                     )
                 )
             alembic_command.upgrade(config, "head")
@@ -4420,6 +4423,115 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_delivery_capture_observes_core_writes_without_runtime_hooks(self) -> None:
+        from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
+        from control_plane.storage.postgres import (
+            LaunchplaneDeploymentRow,
+            LaunchplaneIdempotencyRow,
+        )
+        from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+        from control_plane.client_release import CLIENT_RELEASE_IDEMPOTENCY_SCOPE
+        from tests.test_release_review_storage import standing_decision
+
+        case = DeliveryEvidenceIndexTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        with _store_for_fresh_head_database() as store:
+            case.store = store
+            store.write_product_profile_record(case.profile)
+            record = case.deploy("current")
+            case.monitor()
+            assert record.artifact_identity is not None
+            failed = record.model_copy(
+                update={
+                    "record_id": "old-writer",
+                    "deploy": record.deploy.model_copy(update={"status": "fail"}),
+                }
+            )
+            with store._engine.begin() as connection:
+                connection.execute(
+                    insert(LaunchplaneDeploymentRow).values(
+                        record_id=failed.record_id,
+                        context=failed.context,
+                        instance="prod",
+                        artifact_id=record.artifact_identity.artifact_id,
+                        source_git_ref=failed.source_git_ref,
+                        deploy_started_at="",
+                        deploy_finished_at=failed.deploy.finished_at,
+                        payload=failed.model_dump(mode="json"),
+                    )
+                )
+            case.monitor()
+            self.assertTrue(
+                any(
+                    "old-writer" in incident.summary
+                    for incident in store.list_public_ingress_incident_records(status="open")
+                )
+            )
+            success = record.model_copy(
+                update={
+                    "record_id": failed.record_id,
+                    "deploy": record.deploy.model_copy(
+                        update={"finished_at": (case.now + timedelta(seconds=1)).isoformat()}
+                    ),
+                }
+            )
+            with store._engine.begin() as connection:
+                connection.execute(
+                    update(LaunchplaneDeploymentRow)
+                    .where(LaunchplaneDeploymentRow.record_id == success.record_id)
+                    .values(
+                        payload=success.model_dump(mode="json"),
+                        deploy_finished_at=success.deploy.finished_at,
+                    )
+                )
+            case.monitor()
+            self.assertFalse(store.list_public_ingress_incident_records(status="open"))
+            # A release step written through Core also wakes an acknowledged decision.
+            decision = standing_decision(store)
+            store.write_release_review_decision_record(decision)
+            store.reserve_mutation(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=decision.record_id + ":promote-1",
+                request_fingerprint="f" * 64,
+                lease_owner="old-worker",
+            )
+            reservation = store.read_idempotency_record(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=decision.record_id + ":promote-1",
+            )
+            assert reservation is not None
+            profile = store.read_product_profile_record(decision.product)
+            context = next(lane.context for lane in profile.lanes if lane.instance == "prod")
+            with store.delivery_evidence_index() as index:
+                index.bind(
+                    decision.record_id,
+                    ("launchplane_idempotency_records:" + reservation.record_id,),
+                )
+                work = next(
+                    work
+                    for work in index.pending(context, profile.product, limit=10)
+                    if work.kind == "decision"
+                )
+                index.acknowledge(work, {})
+                with store._engine.begin() as connection:
+                    connection.execute(
+                        update(LaunchplaneIdempotencyRow)
+                        .where(LaunchplaneIdempotencyRow.record_id == reservation.record_id)
+                        .values(
+                            payload={
+                                **reservation.model_dump(mode="json"),
+                                "response_trace_id": "updated-worker-trace",
+                            }
+                        )
+                    )
+                self.assertIn(
+                    "decision:" + decision.record_id,
+                    {work.key for work in index.pending(context, profile.product, limit=10)},
+                )
+
     def test_delivery_index_commits_with_source_and_fences_replica_acknowledgement(self) -> None:
         from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
         from control_plane.storage.delivery_evidence import sources

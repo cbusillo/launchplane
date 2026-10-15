@@ -1916,8 +1916,10 @@ in-progress retries and idempotency-protocol errors do not open delivery inciden
 Recurring delivery evidence reads use a derived storage index, not an event-time
 watermark. Each pass reads at most `DELIVERY_EVIDENCE_PAGE_SIZE` changed sources
 plus the latest deployment; recovery queries use the indexed matching successful
-candidate, including successes between polls. Source writes mark work in their
-transaction, so late/backdated records and changes to old steps remain visible.
+candidate, including successes between polls. Database triggers capture source
+inserts, updates and deletes in their transaction, including writes by an older
+running service or Core SQL, so late/backdated records and changes to old steps
+remain visible.
 Release dependencies include unstarted steps and failure recovery; creating or
 updating a step wakes its decision. A per-lane monitor lock excludes overlapping
 scans, and acknowledgement compares the source version so concurrent updates
@@ -1934,6 +1936,12 @@ processed identities are consumed during paged bootstrap and then removed from
 the checkpoint. The filesystem index lives at `.delivery-evidence.sqlite3` under
 the explicit state directory. Use store APIs for file-backed evidence writes;
 editing historical JSON files directly does not update its derived index.
+New or changed evidence runs ahead of initial historical backfill, so an
+upgrade backlog cannot postpone a new failure behind the old history. The
+migration uses a frozen schema and raw-JSON projection without validating
+historical rows against current runtime models or acquiring a lock per row.
+File-backed history is backfilled by the first monitor pass; a damaged old file
+can make monitoring unavailable but cannot block a new source write.
 Storage outcomes and the incident/outbox remain the authorities; the index owns
 only discovery, ordering and deduplication bookkeeping.
 

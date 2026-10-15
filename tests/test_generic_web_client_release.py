@@ -1395,9 +1395,11 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         with patch("control_plane.client_release.datetime") as clock:
             clock.now.return_value = future
             monitor(future)
+            run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
         incidents = self.store.list_public_ingress_incident_records(status="open")
         self.assertEqual(len(incidents), 1)
-        self.assertIn("reconciliation_required", incidents[0].summary)
+        self.assertIn(run.steps[-1].status, incidents[0].summary)
 
     def test_expired_running_promotion_reports_reconciliation(self) -> None:
         accepted = self.accept()

@@ -524,8 +524,7 @@ def _work_events(
                 raise
             index.forget_missing(work.key, work.version)
             return []
-        if isinstance(store, FilesystemRecordStore):
-            index.reconcile_file(work, record.model_dump(mode="json"))
+        index.reconcile_source(work, record.model_dump(mode="json"))
         if record.failure is not None or any(
             status == "fail"
             for status in (

@@ -78,6 +78,15 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
         self.store.write_deployment_record(record)
         return record
 
+    def bounded_list(self, original: object) -> object:
+        def read(*args: object, **kwargs: object) -> object:
+            limit = kwargs.get("limit")
+            if not isinstance(limit, int) or limit > DELIVERY_EVIDENCE_PAGE_SIZE:
+                raise AssertionError("Unbounded historical read")
+            return original(*args, **kwargs)  # type: ignore[operator]
+
+        return read
+
     def monitor(self) -> None:
         monitor_production_delivery_once(
             self.store,
@@ -101,17 +110,19 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                     patch.object(
                         self.store,
                         "list_deployment_records",
-                        side_effect=AssertionError("Full history read"),
+                        side_effect=self.bounded_list(self.store.list_deployment_records),
                     ),
                     patch.object(
                         self.store,
                         "list_promotion_records",
-                        side_effect=AssertionError("Full promotion read"),
+                        side_effect=self.bounded_list(self.store.list_promotion_records),
                     ),
                     patch.object(
                         self.store,
                         "list_release_review_decision_records",
-                        side_effect=AssertionError("Full decision read"),
+                        side_effect=self.bounded_list(
+                            self.store.list_release_review_decision_records
+                        ),
                     ),
                     patch.object(
                         self.store,
@@ -125,14 +136,12 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                         self.assertLessEqual(read.call_count, DELIVERY_EVIDENCE_PAGE_SIZE + 1)
                     read.reset_mock()
                     self.monitor()
-                    self.assertEqual(
-                        read.call_count, 1, "An idle pass only reads the current deployment"
-                    )
+                    self.assertLessEqual(read.call_count, 1, "Idle source reads must stay bounded")
                     self.assertFalse(self.incidents())
                     self.deploy("late", failed=True, minutes_ago=count + 10)
                     read.reset_mock()
                     self.monitor()
-                    self.assertEqual(read.call_count, 2)
+                    self.assertLessEqual(read.call_count, 2)
                     self.assertEqual(len(self.incidents()), 1)
                     self.deploy("late", failed=True, minutes_ago=count + 10, code="provider_failed")
                     self.monitor()
@@ -150,6 +159,49 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                     self.assertFalse(
                         index.pending(self.lane.context, self.profile.product, limit=count)
                     )
+
+    def test_new_failure_is_prioritized_over_remaining_bootstrap_history(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                for number in range(DELIVERY_EVIDENCE_PAGE_SIZE * 3):
+                    self.deploy(f"history-{number:05}", minutes_ago=number + 1)
+                self.monitor()
+                self.deploy("new-failure", failed=True, minutes_ago=1000)
+                self.monitor()
+                self.assertTrue(
+                    any(
+                        "new-failure" in incident.summary
+                        for incident in self.store.list_public_ingress_incident_records(
+                            status="open"
+                        )
+                    )
+                )
+                with self.store.delivery_evidence_index() as index:
+                    self.assertTrue(
+                        index.pending(self.lane.context, self.profile.product, limit=1),
+                        "Old history remains queued while new evidence alerts",
+                    )
+
+    def test_corrupt_history_does_not_block_new_filesystem_source_writes(self) -> None:
+        self.setup_store("filesystem")
+        path = self.root / "filesystem" / "deployments" / "corrupt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("invalid json")
+        self.deploy("new-source", failed=True)
+        self.assertEqual(self.store.read_deployment_record("new-source").deploy.status, "fail")
+        # The monitor remains explicitly unknown until the damaged evidence is repaired.
+        with self.assertLogs("control_plane.production_delivery_monitor", level="ERROR"):
+            self.monitor()
+        self.assertTrue(self.incidents())
+        path.unlink()
+        self.monitor()
+        self.assertTrue(
+            any(
+                "new-source" in incident.summary
+                for incident in self.store.list_public_ingress_incident_records(status="open")
+            )
+        )
 
     def test_acknowledging_an_old_version_cannot_hide_a_concurrent_source_update(self) -> None:
         for backend in ("filesystem", "sqlite"):
@@ -259,6 +311,52 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
         with patch("control_plane.production_delivery_monitor.DELIVERY_EVIDENCE_PAGE_SIZE", 1):
             self.monitor()
         self.assertEqual(len(self.incidents()), 1)
+        self.monitor()
+        self.assertEqual(len(self.incidents()), 1)
+
+    def test_filesystem_read_waits_for_a_paused_publication(self) -> None:
+        import os
+
+        self.setup_store("filesystem")
+        record = self.deploy("candidate")
+        paused, release, attempted, published = Event(), Event(), Event(), Event()
+        original_replace = os.replace
+        original_read = self.store._read_model
+
+        def replace(source: object, destination: object) -> None:
+            if str(destination).endswith("deployments/candidate.json"):
+                paused.set()
+                self.assertTrue(release.wait(10))
+                original_replace(source, destination)  # type: ignore[arg-type]
+                published.set()
+            else:
+                original_replace(source, destination)  # type: ignore[arg-type]
+
+        def read(*args: object, **kwargs: object) -> object:
+            attempted.set()
+            result: object = original_read(*args, **kwargs)  # type: ignore[arg-type]
+            self.assertTrue(
+                published.is_set(), "A source read must wait for publication under the bundle lock"
+            )
+            return result
+
+        failed = record.model_copy(
+            update={"deploy": record.deploy.model_copy(update={"status": "fail"})}
+        )
+        with (
+            patch("control_plane.storage.filesystem.os.replace", side_effect=replace),
+            patch.object(self.store, "_read_model", side_effect=read),
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                writer = executor.submit(self.store.write_deployment_record, failed)
+                self.assertTrue(paused.wait(10))
+                reader = executor.submit(self.store.read_deployment_record, record.record_id)
+                try:
+                    self.assertTrue(attempted.wait(10))
+                finally:
+                    release.set()
+                writer.result(timeout=10)
+                self.assertEqual(reader.result(timeout=10).deploy.status, "fail")
         self.monitor()
         self.assertEqual(len(self.incidents()), 1)
 

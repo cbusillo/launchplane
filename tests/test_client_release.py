@@ -721,7 +721,15 @@ class ClientReleaseTests(unittest.TestCase):
             monitor()
         incidents = self.store.list_public_ingress_incident_records(status="open")
         self.assertEqual(len(incidents), 1)
-        self.assertIn("failed", incidents[0].summary)
+        from control_plane.client_release import read_client_release_step_views
+
+        accepted = self.store.list_release_review_decision_records(product=profile.product)[0]
+        failure = read_client_release_step_views(
+            store=self.store, profile=profile, decision=accepted
+        )[0].failure
+        assert failure is not None
+        self.assertIn(failure.code, incidents[0].summary)
+        self.assertIn(failure.trace_id or failure.record_id, incidents[0].summary)
         self.assertEqual(profile.product, incidents[0].product)
 
     def test_a_failed_step_stops_the_release(self) -> None:

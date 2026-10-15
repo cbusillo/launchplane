@@ -6,7 +6,7 @@ from pathlib import Path
 
 from control_plane.storage.delivery_evidence import (
     DeliveryEvidenceIndex,
-    install_delete_triggers,
+    install_triggers,
     metadata as delivery_evidence_metadata,
     register_source_events,
 )
@@ -5758,7 +5758,7 @@ class PostgresRecordStore(HumanSessionStore):
             return
         Base.metadata.create_all(self._engine)
         with self._engine.begin() as connection:
-            install_delete_triggers(connection)
+            install_triggers(connection)
 
     def list_recorded_product_scopes(self) -> tuple[str, ...]:
         """Product projections include historical records without an active profile."""
