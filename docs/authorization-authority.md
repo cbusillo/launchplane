@@ -290,8 +290,9 @@ preview identity/state, configuration and real protective reports stay bound. Di
 administration is outside this transaction.
 
 Inspection commands time out and the fixed script exits within its own deadline.
-A stuck older inspection cannot fence a read: collection uses a fresh separately
-named, disabled inspection schedule and preserves the old job for diagnosis.
+If the base inspection job remains running, collection uses a separately named,
+disabled inspection schedule, reused while that stale job persists. It preserves
+the old job for diagnosis.
 It neither cancels that job nor changes an application. An inspection-only refusal
 releases the pre-effect reservation. It never permits a second application dispatch to settle uncertainty.
 SQLite remains a rehearsal backend and cannot enable this live qualification.

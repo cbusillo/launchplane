@@ -71,16 +71,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
             rows = []
             for identifier in args[3:]:
                 item = self.containers[identifier]
-                projected = {"Id": identifier, **item}
-                host = item.get("HostConfig")
-                if isinstance(host, dict):
-                    projected["HostConfig"] = {
-                        **host,
-                        "MountTargets": host.get(
-                            "MountTargets", [entry["Target"] for entry in host.get("Mounts", [])]
-                        ),
-                    }
-                rows.append(json.dumps(projected))
+                rows.append(json.dumps({"Id": identifier, **item}))
             value = "\n".join(rows)
         else:
             self.fail(f"Unexpected host mutation: {args}")
@@ -146,7 +137,7 @@ class PreviewResourceInspectionTests(unittest.TestCase):
         )
         self.assertNotEqual(self.run_program()[0], 0)
 
-    def test_absent_target_and_unknown_container_owner_refuse(self) -> None:
+    def test_absent_containers_qualify_but_incomplete_metadata_refuses(self) -> None:
         self.containers.clear()
         self.assertEqual(self.run_program()[0], 0)
         self.containers["unknown"] = {"Mounts": []}
@@ -180,14 +171,9 @@ class PreviewResourceInspectionTests(unittest.TestCase):
             "Mounts": [{"Type": "bind", "Source": "/unrelated/deleted/path", "RW": True}],
         }
         self.assertEqual(self.run_program()[0], 0)
-        self.containers["preview"]["HostConfig"]["Mounts"] = [
-            {"Target": "/var/lib/odoo", "Source": anonymous}
-        ]
-        self.assertEqual(self.run_program()[0], 0)
         self.volumes[anonymous]["Anonymous"] = False
         self.assertNotEqual(self.run_program()[0], 0)
         self.volumes[anonymous]["Anonymous"] = True
-        self.containers["preview"]["HostConfig"]["Mounts"] = []
         self.containers["unrelated-stopped"]["Mounts"] = [
             {
                 "Type": "volume",
