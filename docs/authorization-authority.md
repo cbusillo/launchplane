@@ -178,6 +178,28 @@ never ask for a grant to bypass it. Bounded empty testing replacement staging
 also follows this boundary; it creates only new placement and a new empty
 compose, leaving retained target/storage and historical effects untouched.
 
+### First testing target creation
+
+The authenticated Director agent may stage a first testing target without a
+policy grant through the existing Dokploy target setup dry-run/apply endpoint.
+This path creates only a new project, a new environment and an empty raw compose
+for an active product's exclusively owned context. It accepts no existing
+project, environment or target IDs, replacement reference, repository source,
+domain route or published port. The testing lane and all three target authority
+records must be absent. Production ownership on the same product does not block
+this new-resource staging and acquires no new permission.
+
+The service checks eligibility before each provider effect and provider read,
+and retains atomic ownership/profile comparison when committing authority.
+Completed same-key replay does not allocate again. Source completion, lane
+registration, credential delivery, deployment and health qualification remain
+separate supported operations; staging an empty target proves none of them.
+An existing lane needs its own supported qualification/rebuild path, including
+current usage, data and isolation evidence. This path cannot reset or replace it.
+Other agent identities retain their scoped policy rules. No grant or credential
+is installed, and general setup, production, backup and promotion authority do
+not change.
+
 ### Testing-copy connection isolation
 
 The Odoo post-deploy endpoint classifies validated `connection_isolation`

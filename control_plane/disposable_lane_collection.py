@@ -44,7 +44,11 @@ def collect_disposable_lane_facts(
     particular, historical generation states are not executor observations.
     This first collector deliberately cannot authorize a disposable apply.
     """
-    held = target is not None and target.policies.staff_testing_hold is not None
+    held = (
+        target is not None
+        and target.policies.staff_testing_hold is not None
+        and target.policies.staff_testing_hold.purpose == "staff_testing"
+    )
     shared_sources = []
     if target is not None and target_id is not None:
         for other in store.list_dokploy_target_id_records():

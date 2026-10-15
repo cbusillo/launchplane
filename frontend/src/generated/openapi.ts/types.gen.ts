@@ -494,6 +494,7 @@ export type DokployTargetShopifyPolicy = {
 };
 
 export type DokployTargetStaffTestingHold = {
+    purpose?: 'staff_testing' | 'isolation_staging';
     reason: string;
     recorded_at: string;
     recorded_by: string;
@@ -3103,6 +3104,7 @@ export type ProductHealthMonitoringPlan = {
     context: string;
     current_check_kind: 'public_http' | 'private_http' | 'provider' | null;
     current_enabled: boolean | null;
+    current_expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     current_monitoring_intent: 'public' | 'private' | 'prelaunch';
     current_private_endpoint_key: string | null;
     current_require_runtime_identity: boolean | null;
@@ -3118,6 +3120,7 @@ export type ProductHealthMonitoringPlan = {
     reason: string;
     requested_check_kind: 'public_http' | 'private_http';
     requested_enabled: boolean;
+    requested_expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     requested_monitoring_intent: 'public' | 'private' | 'prelaunch';
     requested_require_runtime_identity: boolean;
     resolved_url: string;
@@ -3272,6 +3275,7 @@ export type ProductIncidentSummary = {
 
 export type ProductLaneHealthCheck = {
     enabled: boolean;
+    expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     kind: 'public_http' | 'private_http' | 'provider';
     name: string;
     private_endpoint_key: string;
@@ -3380,6 +3384,7 @@ export type ProductObservedTlsDomain = {
 };
 
 export type ProductObservedTopology = {
+    dns_targets?: Array<PublicDnsDiagnostic>;
     ingress: ProductObservedIngress;
     placement: ProductObservedPlacement;
     tls_domains: Array<ProductObservedTlsDomain>;
@@ -4280,6 +4285,21 @@ export type ProxmoxStorageBackupDestinationReference = {
     provider_type?: 'proxmox';
     storage_id: string;
     username: string;
+};
+
+export type PublicDnsDiagnostic = {
+    check_name: string;
+    expected_addresses: Array<string>;
+    failure_code: string;
+    observed_addresses: Array<string>;
+    provenance: DataProvenance;
+    public_name: string;
+    status: 'match' | 'mismatch' | 'unavailable' | 'missing_expectation' | 'stale';
+};
+
+export type PublicDnsExpectedTarget = {
+    addresses: Array<string>;
+    public_name: string;
 };
 
 export type PublicHostEffect = {
@@ -6553,6 +6573,7 @@ export type ApplyProductHealthMonitoringData = {
         check_name: string;
         context: string;
         enabled?: boolean;
+        expected_dns_targets?: Array<PublicDnsExpectedTarget> | null;
         instance: string;
         mode?: 'dry-run' | 'apply';
         monitoring_intent: 'public' | 'private' | 'prelaunch';

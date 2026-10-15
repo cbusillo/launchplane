@@ -53,7 +53,7 @@ STAFF_TESTING_HOLD_CANCELLATION_REASON = (
 )
 
 TestingHoldMode = Literal["dry-run", "apply"]
-TestingHoldRefusalCode = Literal["target_record_missing", "not_testing_lane"]
+TestingHoldRefusalCode = Literal["target_record_missing", "not_testing_lane", "protected_hold"]
 TestingHoldAction = Literal["set", "update", "clear", "unchanged"]
 
 
@@ -138,6 +138,7 @@ class TestingHoldApplyRequest(BaseModel):
     instance: str
     mode: TestingHoldMode = "dry-run"
     hold: bool
+    purpose: Literal["staff_testing", "isolation_staging"] = "staff_testing"
     # The hold's reason when setting it; the audit reason when lifting it.
     reason: str
     reviewed_plan_sha256: str = ""
@@ -200,8 +201,8 @@ def _read_target_record(
         ) from error
 
 
-def _hold_terms(hold: DokployTargetStaffTestingHold | None) -> str | None:
-    return None if hold is None else hold.reason
+def _hold_terms(hold: DokployTargetStaffTestingHold | None) -> tuple[str, str] | None:
+    return None if hold is None else (hold.reason, hold.purpose)
 
 
 def _desired_hold(
@@ -210,11 +211,28 @@ def _desired_hold(
     existing: DokployTargetStaffTestingHold | None,
     actor: str,
 ) -> DokployTargetStaffTestingHold | None:
+    if existing is not None and existing.purpose != request.purpose:
+        raise TestingHoldRefusal(
+            "protected_hold",
+            "A staff hold and a staging interlock cannot replace or lift one another.",
+        )
     if not request.hold:
         return None
     candidate = DokployTargetStaffTestingHold(
-        reason=request.reason, recorded_by=actor, recorded_at=utc_now_timestamp()
+        reason=request.reason,
+        purpose=request.purpose,
+        recorded_by=actor,
+        recorded_at=utc_now_timestamp(),
     )
+    if (
+        existing is not None
+        and request.purpose == "isolation_staging"
+        and existing.recorded_by != actor
+    ):
+        raise TestingHoldRefusal(
+            "protected_hold",
+            "An existing staff or foreign staging hold cannot become this staging interlock.",
+        )
     # An unchanged hold keeps who recorded it and when.
     if existing is not None and _hold_terms(existing) == _hold_terms(candidate):
         return existing
@@ -364,6 +382,7 @@ def apply_testing_hold_plan(
     reconcile_requested = False
     if (
         stored_hold is None
+        and request.purpose != "isolation_staging"
         and read_back_matches
         and isinstance(record_store, ProductReconcileRequester)
     ):

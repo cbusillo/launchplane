@@ -590,3 +590,96 @@ class GenericWebTestingHoldRouteTests(TestingHoldRouteTests):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IsolationStagingHoldTests(unittest.TestCase):
+    def test_staging_interlock_keeps_dispatch_held_and_cannot_replace_staff_hold(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            _seed_target(store)
+            draft = TestingHoldApplyRequest.model_validate(
+                {**_payload(), "purpose": "isolation_staging"}
+            )
+            plan, _ = build_testing_hold_plan(record_store=store, request=draft, actor="agent")
+            applied = apply_testing_hold_plan(
+                record_store=store,
+                request=draft.model_copy(
+                    update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+                ),
+                actor="agent",
+            )
+            self.assertTrue(applied.read_back_matches)
+            self.assertFalse(applied.reconcile_requested)
+            hold = _read_hold(store)
+            assert hold is not None
+            self.assertEqual(hold.purpose, "isolation_staging")
+            _seed_target(
+                store, hold=DokployTargetStaffTestingHold(reason=_HOLD_REASON, recorded_by="agent")
+            )
+            with self.assertRaises(TestingHoldRefusal):
+                build_testing_hold_plan(record_store=store, request=draft, actor="agent")
+            hold = _read_hold(store)
+            assert hold is not None
+            self.assertEqual(hold.reason, _HOLD_REASON)
+
+    def test_lifting_staging_requires_its_purpose_and_never_requests_reconcile(self) -> None:
+        from unittest.mock import patch
+
+        with TemporaryDirectory() as directory:
+            store = _postgres_store(Path(directory))
+            self.addCleanup(store.close)
+            _seed_target(
+                store,
+                hold=DokployTargetStaffTestingHold(
+                    reason="Prepare separation.", purpose="isolation_staging", recorded_by="agent"
+                ),
+            )
+            with self.assertRaises(TestingHoldRefusal):
+                build_testing_hold_plan(
+                    record_store=store, request=_request(hold=False), actor="admin"
+                )
+            draft = TestingHoldApplyRequest.model_validate(
+                {**_payload(hold=False), "purpose": "isolation_staging"}
+            )
+            plan, _ = build_testing_hold_plan(record_store=store, request=draft, actor="admin")
+            with patch.object(store, "request_product_reconcile") as reconcile:
+                for _ in range(2):
+                    result = apply_testing_hold_plan(
+                        record_store=store,
+                        request=draft.model_copy(
+                            update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+                        ),
+                        actor="admin",
+                    )
+                    self.assertTrue(result.read_back_matches)
+                    self.assertFalse(result.reconcile_requested)
+                reconcile.assert_not_called()
+            self.assertIsNone(_read_hold(store))
+
+    def test_ordinary_holds_keep_the_older_reader_payload_shape(self) -> None:
+        hold = DokployTargetStaffTestingHold(reason=_HOLD_REASON)
+        self.assertNotIn("purpose", hold.model_dump(mode="json"))
+        legacy = DokployTargetStaffTestingHold.model_validate(hold.model_dump(mode="json"))
+        self.assertEqual(legacy.purpose, "staff_testing")
+
+    def test_cross_purpose_updates_and_lifts_preserve_the_existing_hold(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            for existing_purpose, requested_purpose in (
+                ("staff_testing", "isolation_staging"),
+                ("isolation_staging", "staff_testing"),
+            ):
+                existing = DokployTargetStaffTestingHold.model_validate(
+                    {"reason": _HOLD_REASON, "purpose": existing_purpose, "recorded_by": "agent"}
+                )
+                _seed_target(store, hold=existing)
+                for holding in (False, True):
+                    draft = TestingHoldApplyRequest.model_validate(
+                        {**_payload(hold=holding), "purpose": requested_purpose}
+                    )
+                    with (
+                        self.subTest(existing_purpose=existing_purpose, holding=holding),
+                        self.assertRaises(TestingHoldRefusal),
+                    ):
+                        build_testing_hold_plan(record_store=store, request=draft, actor="agent")
+                    self.assertEqual(_read_hold(store), existing)

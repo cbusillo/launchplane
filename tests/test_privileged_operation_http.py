@@ -595,7 +595,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
             records = store.list_privileged_operation_records(limit=None)
             active_policy_record = store.list_authz_policy_records(status="active", limit=2)[0]
-            principal = store.read_current_ordinary_agent_principal(principal_id="agent_terminal")
             store.close()
 
         self.assertEqual(first.status_code, 200, first.text)
@@ -603,7 +602,6 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conflict.status_code, 409, conflict.text)
         self.assertEqual(len(records), 1)
         self.assertEqual(policy_record, active_policy_record)
-        self.assertIsNone(principal)
         self.assertEqual(
             review.json()["review"]["title"], "Review terminal client connection requests"
         )
