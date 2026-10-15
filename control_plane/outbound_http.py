@@ -13,6 +13,7 @@ import ssl
 
 from cryptography import x509
 from cryptography.x509.oid import NameOID
+from control_plane.public_network import is_public_address as _is_public_address
 
 
 PublicUrlError = Literal["invalid_url", "private_url"]
@@ -707,29 +708,6 @@ def _private_hostname(hostname: str) -> bool:
     return hostname == "localhost" or hostname.endswith(
         (".localhost", ".local", ".internal", ".invalid")
     )
-
-
-def _is_public_address(address: IPv4Address | IPv6Address) -> bool:
-    if (
-        address.is_private
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_reserved
-        or address.is_unspecified
-        or not address.is_global
-    ):
-        return False
-    if isinstance(address, IPv6Address):
-        if address.ipv4_mapped is not None and not _is_public_address(address.ipv4_mapped):
-            return False
-        if address.sixtofour is not None and not _is_public_address(address.sixtofour):
-            return False
-        if address.teredo is not None and any(
-            not _is_public_address(embedded_address) for embedded_address in address.teredo
-        ):
-            return False
-    return True
 
 
 def _system_address_resolver(hostname: str, port: int) -> tuple[ResolvedAddressInfo, ...]:

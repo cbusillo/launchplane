@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.data_provenance import FreshnessStatus
+from control_plane.contracts.public_dns import PublicDnsObservation
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
@@ -297,12 +298,19 @@ class PublicIngressTargetObservation(BaseModel):
     runtime_identity_detail: str = ""
     observed_runtime_identity: RuntimeIdentity | None = None
     tls: PublicIngressTlsObservation | None = None
+    dns: PublicDnsObservation | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     summary: str
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "PublicIngressTargetObservation":
         self.url = _required_text(self.url, "public ingress target observation requires url")
         self.final_url = self.final_url.strip()
+        if self.dns is not None and self.target not in {"base_url", "health_url"}:
+            raise ValueError("DNS diagnostics require a public HTTP target")
         self.summary = _required_text(
             self.summary, "public ingress target observation requires summary"
         )

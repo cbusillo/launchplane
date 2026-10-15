@@ -1087,6 +1087,26 @@ surface for both modes and supplies the target product and requested `none` or
 from service-backed or admin-supplied authz input rather than a checked-in
 product catalog.
 
+Public HTTP checks may also declare `expected_dns_targets`, a bounded list of
+`{public_name, addresses}` entries. Each entry names an existing probed host and
+an explicit public unicast A/AAAA answer set. These expectations belong to the
+service-owned health check, never to route attestations, provider guesses or a
+checked-in product/IP catalog. The existing natural monitor cycle compares the
+complete validated resolver answer set with that expectation; extra, missing or
+wrong addresses produce `mismatch`, and failed or private-address resolution
+produces `unavailable`. This verifies terminal addresses, not a CNAME chain or an
+authoritative DNS zone. HTTP reachability, TLS and runtime identity remain
+independent observations.
+
+The persisted public target's optional `dns` evidence is projected separately in
+`topology.observed.dns_targets`. Missing expectations read `missing_expectation`;
+an absent comparison reads `unavailable`. Existing records without DNS evidence
+remain readable and unproved. A result expires at the lane monitor's existing
+cadence, with no grace period; changing expectations invalidates the old
+comparison immediately. DNS diagnostic failures do not change HTTP health,
+operational green, route authority or incident ownership. They remain visible in
+the topology API even when HTTP and runtime identity pass.
+
 Stable-lane health policy and monitoring-intent changes use
 `POST /v1/product-profiles/health-monitoring/apply`. The request identifies one
 exact product/context/instance lane and one health-check name, then supplies the
@@ -1096,8 +1116,15 @@ Launchplane preserves any existing public-check URL or derives it from lane-owne
 `health_url`/`base_url`. Private checks carry only a registered
 `private_endpoint_key`; apply validates that the record is active and belongs to
 the exact product/context/instance without returning or logging its internal URL.
-The request cannot carry a domain, provider target, proxy record, certificate
-reference, or replacement product profile. Enabling strict public runtime
+Public requests can supply `expected_dns_targets` for hosts already probed by
+the selected check; omission preserves them and an empty list clears them.
+Dry-run shows the current/requested expectations and binds the exact candidate
+to its reviewed digest. Legacy callers omitting the field retain their existing
+response shape. Deploy compatible readers before enrolling expectations, and
+retain a reader-capable rollback while records contain the added evidence; this
+source change does not enroll real products or authorize production writes.
+The request cannot carry a replacement domain, provider target, proxy record,
+certificate reference, or replacement product profile. Enabling strict public runtime
 identity requires an HTTPS host already owned by that lane. Dry-run returns a
 canonical plan bound to the complete current profile; apply requires the reviewed
 digest and an idempotency key, then compare-and-writes only the selected check,
