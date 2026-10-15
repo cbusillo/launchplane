@@ -1,6 +1,6 @@
 """Inspect current dispatch exclusion without interpreting historical outcomes."""
 
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from collections.abc import Callable
 from pathlib import Path
 
@@ -210,6 +210,7 @@ def inspect_generic_web_testing_exclusion(
     context: str,
     instance: str,
     trace_id: str,
+    held_execution_check: Callable[[], None] | None = None,
 ) -> GenericWebTestingExclusionResponse:
     bindings = _bind(store, product, context, instance)
     _, target, target_id_record, provider = bindings
@@ -249,7 +250,11 @@ def inspect_generic_web_testing_exclusion(
     # does not renew, retire, reclassify or acquire any mutation reservation.
     with ExitStack() as stack:
         check = stack.enter_context(
-            store.testing_replacement_execution_lock(testing_event_execution_lock_name(target_key))
+            nullcontext(held_execution_check)
+            if held_execution_check is not None
+            else store.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(target_key)
+            )
         )
         if check is None:
             response.execution = TestingExclusionFacet(code="execution_lock_busy")

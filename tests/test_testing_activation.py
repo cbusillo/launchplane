@@ -139,15 +139,16 @@ class ActivationTests(unittest.TestCase):
             DB_PORT="3307", CONFIG_VOLUME="production-config", OLD_RECIPIENT_ONLY="old"
         )
         self.store.write_dokploy_target_record(fixture.retained)
-        binding, _ = preparation_binding(
-            self.store, fixture.product, fixture.context, fixture.actor, fixture.root
-        )
-        fixture.body.reviewed_plan_sha256 = binding
         self.product, self.context, self.scope = (
             fixture.product,
             fixture.context,
             self.caller_scope(),
         )
+        self.seed_runtime_fixture()
+        binding, _ = preparation_binding(
+            self.store, fixture.product, fixture.context, fixture.actor, fixture.root
+        )
+        fixture.body.reviewed_plan_sha256 = binding
         with patch(
             "control_plane.testing_separation_resources.run_preparation_schedule",
             side_effect=fixture.prepare,
@@ -242,6 +243,64 @@ class ActivationTests(unittest.TestCase):
             update={"mode": "apply", "reviewed_plan_sha256": record.plan_sha256}
         )
         self.adapter.request = self.request
+
+    def seed_runtime_fixture(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+        from control_plane.contracts.secret_record import SecretRecord, SecretBinding
+        from control_plane.contracts.runtime_key_safety_policy import (
+            RuntimeKeySafetyPolicyRecord,
+            RuntimeSecretSafetyRule,
+        )
+
+        stamp = self.preparation.fixture.now()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.context,
+                instance="testing",
+                env={
+                    "DB_PORT": "19213",
+                    "HTTP_PORT": "19212",
+                    "DB_VOLUME": "lane-db",
+                    "CONFIG_VOLUME": "lane-config",
+                },
+                updated_at=stamp,
+            )
+        )
+        self.store.write_secret_record(
+            SecretRecord(
+                secret_id="testing-password",
+                scope="context_instance",
+                integration="runtime_environment",
+                name="DB_PASSWORD",
+                context=self.context,
+                instance="testing",
+                current_version_id="testing-version",
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+        self.store.write_secret_binding(
+            SecretBinding(
+                binding_id="testing-password",
+                secret_id="testing-password",
+                integration="runtime_environment",
+                binding_key="DB_PASSWORD",
+                context=self.context,
+                instance="testing",
+                declared_secret_class="testing",
+                created_at=stamp,
+                updated_at=stamp,
+            )
+        )
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="testing-policy",
+                source="fixture",
+                updated_at=stamp,
+                rules=(RuntimeSecretSafetyRule(binding_key="DB_PASSWORD", secret_class="testing"),),
+            )
+        )
 
     @staticmethod
     def caller_scope() -> str:
@@ -517,6 +576,7 @@ class ActivationTests(unittest.TestCase):
         )
 
     def test_plain_repoint_cannot_hide_an_old_incident_or_release_its_lane_fence(self) -> None:
+        self.assertEqual(self.run_activation().response_status_code, 202)
         target_id = self.store.read_dokploy_target_id_record(
             context_name=self.context, instance_name="testing"
         )
@@ -524,6 +584,74 @@ class ActivationTests(unittest.TestCase):
             target_id.model_copy(update={"target_id": "unproved-replacement"})
         )
         self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+
+    def test_real_environment_composition_agrees_before_and_after_publication(self) -> None:
+        from control_plane.dokploy.api import parse_dokploy_env_text
+        from control_plane.testing_activation import require_activation_hold_lift
+        from control_plane.testing_lane_hold import TestingHoldApplyRequest
+        from control_plane.workflows.generic_web_deploy_provider import (
+            _resolve_store_runtime_environment_values,
+        )
+
+        with (
+            patch(
+                "control_plane.testing_activation.runtime_values",
+                side_effect=resolve_activation_runtime,
+            ),
+            patch(
+                "control_plane.runtime_environments.control_plane_secrets.resolve_site_secret_values",
+                return_value={"DB_PASSWORD": "safe-test-password"},
+            ),
+        ):
+            self.assertEqual(self.run_activation().response_status_code, 202)
+            record = activation_record(self.store, self.product, self.context)
+            assert record is not None
+            self.adapter.verify_provider(record)
+            self.assertTrue(
+                require_activation_hold_lift(
+                    self.store,
+                    TestingHoldApplyRequest(
+                        product=self.product,
+                        context=self.context,
+                        instance="testing",
+                        hold=False,
+                        reason="Separation proven",
+                        activation_plan_sha256=record.plan_sha256,
+                    ),
+                    self.actor,
+                    self.root,
+                )
+            )
+            target = self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            )
+            with patch(
+                "control_plane.workflows.generic_web_deploy_provider.control_plane_secrets.overlay_runtime_environment_secret_values_from_store",
+                side_effect=lambda **kwargs: (
+                    kwargs["environment_values"] | {"DB_PASSWORD": "safe-test-password"}
+                ),
+            ):
+                deployed_values = _resolve_store_runtime_environment_values(
+                    record_store=self.store,
+                    context_name=self.context,
+                    instance_name="testing",
+                    target_environment=target.env,
+                )
+            configured_values = parse_dokploy_env_text(self.payloads[record.target_id]["env"])
+            configured_values.pop("DOCKER_IMAGE_REFERENCE")
+            self.assertEqual(configured_values, deployed_values)
+            self.assertNotIn("OLD_RECIPIENT_ONLY", configured_values)
+
+    def test_real_exclusion_reuses_the_held_old_executor_guard(self) -> None:
+        from control_plane.generic_web_testing_exclusion import (
+            inspect_generic_web_testing_exclusion,
+        )
+
+        with patch(
+            "control_plane.testing_activation.inspect_generic_web_testing_exclusion",
+            side_effect=inspect_generic_web_testing_exclusion,
+        ):
+            self.assertEqual(self.run_activation().response_status_code, 202)
 
     def test_lost_configuration_reply_adopts_only_the_original_complete_render(self) -> None:
         original = self.provider

@@ -195,11 +195,15 @@ def runtime_values(
         context_name=record.context,
         instance_name="testing",
         database_url=store.database_url,
+        target_environment_override={},
     )
     values = dict(environment.values)
+    if (
+        set((*record.request.volume_keys.values(), *record.request.port_keys))
+        & environment.secret_keys
+    ):
+        raise ValueError("A resource setting cannot be secret-backed.")
     for role, key in record.request.volume_keys.items():
-        if key in environment.secret_keys:
-            raise ValueError("A resource setting cannot be secret-backed.")
         values[key] = resources.volumes[role]
     safety = evaluate_runtime_key_safety_for_live_target_sync(
         record_store=store, context_name=record.context, instance_name="testing"
@@ -1037,6 +1041,7 @@ class TestingActivationAdapter:
                     context=record.context,
                     instance="testing",
                     trace_id=self.trace_id,
+                    held_execution_check=old_check,
                 )
                 if excluded.status != "excluded":
                     raise ValueError("The retained recipient is not fully excluded.")
@@ -1110,8 +1115,8 @@ class TestingActivationAdapter:
                         }
                         if old.get("serverId"):
                             body["serverId"] = str(old["serverId"])
-                    record = self.save(record, phase=phase)
                     checkpoint(phase)
+                    record = self.save(record, phase=phase)
                     response = api.dokploy_request(
                         host=host,
                         token=token,
