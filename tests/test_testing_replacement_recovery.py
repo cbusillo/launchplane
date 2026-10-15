@@ -145,6 +145,9 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
                         )
                         self.assertEqual(response.status_code, 409, response.text)
                         self.assertEqual(
+                            response.json()["error"]["code"], "service_testing_recovery_required"
+                        )
+                        self.assertEqual(
                             store.read_odoo_stable_target_replacement_operation_record(
                                 fenced.operation_id
                             ),
