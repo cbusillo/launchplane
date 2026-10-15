@@ -29,7 +29,11 @@ from control_plane.workflows.odoo_prod_backup_gate import (
 )
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
-from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
+from control_plane.odoo_cutover_plan import (
+    decision_bound_cutover_plan,
+    resolve_profile_cutover_plan,
+    persisted_cutover,
+)
 
 from control_plane.workflows.odoo_prod_promotion import (
     OdooProdPromotionResult,
@@ -66,6 +70,7 @@ class OdooProdPromotionRunAdmission:
 
     inputs_result: OdooProdPromotionInputsResult
     blocked_reason: str = ""
+    release_decision: ReleaseReviewDecisionRecord | None = None
 
 
 def admit_odoo_prod_promotion_run(
@@ -73,6 +78,7 @@ def admit_odoo_prod_promotion_run(
     control_plane_root: Path,
     record_store: OdooProdPromotionRunStore,
     request: OdooProdPromotionRunRequest,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooProdPromotionRunAdmission:
     """Check ready inputs, release approval, and the verified infrastructure backup."""
 
@@ -97,13 +103,14 @@ def admit_odoo_prod_promotion_run(
             blocked_reason="Testing no longer carries the accepted release; a new decision is required.",
         )
     try:
-        require_release_approval(
+        current_decision = require_release_approval(
             control_plane_root=control_plane_root,
             record_store=record_store,
             product=request.product,
             artifact_id=inputs_result.artifact_id,
             source_commit=inputs_result.source_git_ref,
         )
+        release_decision = release_decision or current_decision
         admitted_plan = resolve_profile_cutover_plan(
             record_store,
             product=request.product,
@@ -112,6 +119,8 @@ def admit_odoo_prod_promotion_run(
             artifact_id=inputs_result.artifact_id,
             release_id=request.request_id,
         )
+        if admitted_plan is not None:
+            admitted_plan = decision_bound_cutover_plan(admitted_plan, release_decision)
         recovery = persisted_cutover(record_store, admitted_plan)
         if admitted_plan is not None and any(
             item.odoo_cutover is not None
@@ -138,7 +147,9 @@ def admit_odoo_prod_promotion_run(
             inputs_result=inputs_result,
             blocked_reason=str(error) or "Odoo prod promotion is not admitted.",
         )
-    return OdooProdPromotionRunAdmission(inputs_result=inputs_result)
+    return OdooProdPromotionRunAdmission(
+        inputs_result=inputs_result, release_decision=release_decision
+    )
 
 
 def execute_odoo_prod_promotion_run(
@@ -169,7 +180,9 @@ def execute_odoo_prod_promotion_run(
         control_plane_root=control_plane_root,
         record_store=record_store,
         request=request,
+        release_decision=release_decision,
     )
+    release_decision = admission.release_decision
     inputs_result = admission.inputs_result
     if admission.blocked_reason:
         from control_plane.odoo_cutover_plan import cutover_identity
@@ -214,7 +227,17 @@ def execute_odoo_prod_promotion_run(
                 run_status="blocked",
                 error_message="Two-slot release requires an activated lane-bound provider; in-place fallback is refused.",
             )
-        cutover_provider = cutover_provider_factory(cutover_plan)
+        try:
+            cutover_plan = decision_bound_cutover_plan(cutover_plan, release_decision)
+            cutover_provider = cutover_provider_factory(cutover_plan)
+            cutover_provider.preflight(cutover_plan)
+        except ValueError as error:
+            return _result_from_inputs(
+                request=request,
+                inputs_result=inputs_result,
+                run_status="blocked",
+                error_message=str(error),
+            )
     record_phase("validated")
     if provider_effect_checkpoint is not None:
         provider_effect_checkpoint(ODOO_LOGICAL_BACKUP_EFFECT)

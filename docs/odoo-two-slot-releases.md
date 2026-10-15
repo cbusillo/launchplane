@@ -146,3 +146,72 @@ available; this is separate from source/component acceptance. Missing provider
 access or activation prerequisites are reported, never bypassed with a local
 live-target command. Real-release acceptance remains on #3268 and the parent
 #3237. Delivery follows the repository's [delivery boundary](../AGENTS.md#delivery-boundary).
+
+## Typed website settings
+
+The release decision supplies both the candidate and retained production website
+snapshots. They are persisted in the immutable cutover plan and bound into the
+native maintenance payload digest; a retry cannot substitute mutable prepared
+intent. Preparation of website intent remains inert for two-slot lanes.
+
+`run_planned_slot_maintenance` applies the candidate snapshot with Launchplane's
+native website consumer after the credential boundary and module work pass,
+before releasing the web startup guard. The receipt includes the committed
+settings digest and the independently read-back durable startup digest. Missing
+or mismatched evidence blocks readiness, route switching and writer activation,
+including recovery from persisted intermediate steps. The deployment bridge
+records the verified applied baseline separately from pending preparation.
+
+The installed host adapter must bind `configure_startup` and the driver's
+`website_settings` capability. The former merges the selected snapshot and its legacy indexing parameter
+into both slots' durable managed startup payloads, preserves unrelated settings
+and secrets, and returns `StartupSettingsReadback` only after readback. It must
+recreate every stopped writer container in both slots from those payloads and
+return the complete bound inventory. Restarting an existing container retains
+its creation-time environment and cannot satisfy this contract. Launchplane
+independently inspects that inventory's images, stopped state, effective typed
+payload and legacy indexing parameter before native commit or guard release.
+The maintenance/rollback helper must receive the same `ContainerSlotWriters`
+object used by the driver's handoff; readback must match its current targets.
+Recreation under new names must update that shared inventory while fenced.
+The driver also binds `website_settings_preflight` to verify both forward and
+rollback startup/native capabilities before any cutover record, provider-effect
+checkpoint or candidate preparation. It must keep the slot
+fenced on failure. `run_slot_website_settings` checks the immutable runner image,
+merges the native execution payload without exporting secrets, and requires the
+consumer's post-commit digest. Missing capability refuses the release before
+candidate preparation; there is no in-place fallback. Source support does not
+configure those installed host capabilities or activate a lane. A Client's
+hotfix rejection describes the rejected release's current production snapshot;
+switch-back uses the original cutover's retained snapshot instead.
+The run admission, recovery comparison and provider factory all bind the same
+decision snapshots. Rollback repeats read-only preflight before any publication
+or writer fencing, since forward-time capability proof may no longer hold.
+
+Typed-settings releases use prepared public serving and a measured writer pause
+even for compatible artifacts, so candidate settings never appear on the old
+public artifact during failed readiness. Compatible switch-back reuses that
+verified prepared bundle and records a separate rollback pause. It applies the
+retained production snapshot before old-slot
+readiness/traffic/writer activation. If the release has no historical snapshot,
+it disables analytics and indexing across websites while preserving native
+consent/embedding controls. The startup configuration must agree even for legacy
+images, so a restart cannot re-enable forward indexing. The rollback receipt and
+intent survive an uncertain switch; replay reads authority and the saved
+receipt, repeating the idempotent settings operation only when its receipt was
+not persisted. An abort before maintenance leaves the verified baseline and
+collection unchanged. Database-changing rollback still requires the
+existing authorized coherent-tuple restore path.
+
+Forward and rollback writer pauses use distinct persisted provider idempotency
+keys. A cached forward fence/resume receipt cannot stand in for the rollback's
+fresh drain or old-slot resumption. The maintenance attempt marker is persisted
+before the applied baseline is marked pending, so an interrupted pending write
+still takes the settings recovery path.
+If failed forward maintenance/readiness is recovered by rollback, the original
+forward pause closes at the verified rollback resumption and retains its full
+measured interval and actual old-slot recovery binding. A started maintenance
+whose settings outcome is unproved remains conservative: without a verified
+retained snapshot, rollback disables collection even if the failure occurred
+before a settings receipt was produced. Only a pre-maintenance abort proves
+that the candidate's maintenance never began.
