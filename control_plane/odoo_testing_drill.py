@@ -31,8 +31,6 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
     DisposableLaneSafetyUnknown,
-    disposable_lane_binding_sha256,
-    disposable_lane_configuration,
     require_disposable_lane,
 )
 from control_plane.launchplane_reconcile_authorization import (
@@ -58,11 +56,12 @@ DRILL_POLL_SECONDS = 30
 DRILL_ALERT_RETRY_SECONDS = 300
 DRILL_SCOPE = "launchplane:odoo-testing-drill:v1"
 DRILL_ROUTE = "service:odoo-testing-drill"
+DRILL_DEADLINE_STEP = "completion_deadline"
 _LOGGER = logging.getLogger(__name__)
 
 
 class DrillSkipped(ValueError):
-    """No provider effect: a person, custody, isolation or another operation protects the lane."""
+    """Protected lane use or custody refuses the next dispatch."""
 
 
 class DrillPrerequisite(ValueError):
@@ -173,8 +172,12 @@ def prepare_drill(
     generation = previous.model_copy(
         update={
             "drill_database": database,
-            "discard_drill_database": previous.drill_database,
-            "discard_copy_binding": generation_binding(previous) if previous.drill_database else "",
+            "retained_drill_database": previous.drill_database,
+            "retained_copy_binding": generation_binding(previous)
+            if previous.drill_database
+            else "",
+            "discard_drill_database": previous.retained_drill_database,
+            "discard_copy_binding": previous.retained_copy_binding,
             "prepared_at": prepared_at or timestamp(now),
             "completed_at": "",
             "reconcile_requested_at": prepared_at or timestamp(now),
@@ -212,27 +215,10 @@ def prepare_drill(
             product=product, context=context, authorized_at=timestamp(now)
         ),
     )
-    # Preserve the fact sources and their original expiry; our own atomic database-name
-    # change can rebind them, but cannot manufacture or renew an unused observation.
+    # Preserve the original observed binding. The operation's activation receipt
+    # records admission; it does not rewrite or renew the collector's observation.
     safety = store.read_disposable_lane_safety(product, context, "testing")
     assert safety is not None
-    configuration = tuple(
-        runtime
-        if isinstance(item, RuntimeEnvironmentRecord)
-        and (item.scope, item.context, item.instance) == (runtime.scope, context, "testing")
-        else item
-        for item in disposable_lane_configuration(store, context, "testing")
-    )
-    safety = safety.model_copy(
-        update={
-            "binding_sha256": disposable_lane_binding_sha256(
-                profile,
-                target,
-                store.read_dokploy_target_id_record(context_name=context, instance_name="testing"),
-                configuration=configuration,
-            )
-        }
-    )
     return PreparedDrill(previous, generation, runtime, safety, operation)
 
 
@@ -243,6 +229,8 @@ def require_drill_checkpoint(
         return
     if not isinstance(store, PostgresRecordStore) or operation.instance != "testing":
         raise DrillPrerequisite("testing_drill_storage_unavailable")
+    if read_staff_testing_hold(record_store=store, context=operation.context) is not None:
+        raise DrillSkipped("staff_testing_hold")
     receipt = store.read_idempotency_record(
         scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
     )
@@ -262,7 +250,7 @@ def require_drill_checkpoint(
         or safety.usage != "unused"
         or safety.data != "reproducible"
         or safety.production_resources != "isolated"
-        or safety.expires_at <= datetime.now(timezone.utc)
+        or safety.model_dump(mode="json") != receipt.response_payload.get("activation_safety")
     ):
         raise DrillSkipped("testing_drill_use_evidence_changed")
 
@@ -348,12 +336,18 @@ class OdooTestingDrillScheduler:
     ) -> None:
         prefix = lane_key(profile.product, context)
         latest = self._read(prefix)
+        blocked = False
         if latest is not None:
             key = str(latest.response_payload["key"])
             receipt = self._read(key)
-            if receipt is not None and self._observe(profile.product, context, receipt, now):
-                return
-        key = f"{prefix}:{int(now // DRILL_INTERVAL_SECONDS)}"
+            if receipt is not None:
+                blocked = self._observe(profile.product, context, receipt, now)
+        self._deliver_alerts(profile.product, context, now)
+        if blocked:
+            return
+        # Spread recurring slots across the day without storing a second lane catalog.
+        offset = int(prefix[:8], 16) % DRILL_INTERVAL_SECONDS
+        key = f"{prefix}:{int((now - offset) // DRILL_INTERVAL_SECONDS)}"
         if self._read(key) is not None:
             return
         self.store.enqueue_odoo_testing_drill(profile.product, context, key, now)
@@ -362,7 +356,7 @@ class OdooTestingDrillScheduler:
         self, product: str, context: str, receipt: LaunchplaneIdempotencyRecord, now: float
     ) -> bool:
         payload = dict(receipt.response_payload)
-        if payload["status"] == "queued":
+        if payload["status"] in {"queued", "fail"} and payload.get("operation_id"):
             operation = self.store.read_odoo_stable_target_replacement_operation_record(
                 str(payload["operation_id"])
             )
@@ -390,6 +384,8 @@ class OdooTestingDrillScheduler:
                     payload.update(
                         status="pass", deployment_record_id=operation.result.deployment_record_id
                     )
+                    if payload.get("failure_step") == DRILL_DEADLINE_STEP:
+                        payload["step"] = "late_completion"
                 else:
                     payload.update(status="fail", step="copy_completion_missing")
             elif operation.status == "cancelled":
@@ -399,24 +395,24 @@ class OdooTestingDrillScheduler:
                     status="fail",
                     step=operation.error_code
                     or (
-                        "completion_deadline"
+                        DRILL_DEADLINE_STEP
                         if operation.status in {"pending", "running"}
                         else operation.phase
                     ),
                 )
-            self.store.write_idempotency_record(
-                drill_receipt(receipt.idempotency_key, now, payload)
-            )
-        if (
-            payload["status"] == "fail"
-            and not payload.get("alert_delivered")
-            and now >= float(str(payload.get("next_alert_at", 0)))
-        ):
-            payload["alert_delivered"] = self.notify(product, context, payload)
-            payload["next_alert_at"] = now + DRILL_ALERT_RETRY_SECONDS
-            self.store.write_idempotency_record(
-                drill_receipt(receipt.idempotency_key, now, payload)
-            )
+            if payload["status"] == "fail":
+                if payload.get("failure_step") != payload["step"]:
+                    payload.update(
+                        failure_step=payload["step"],
+                        failure_trace=payload["trace"],
+                        alert_delivered=False,
+                        delivered_destinations=[],
+                        next_alert_at=0,
+                    )
+            if payload != receipt.response_payload:
+                self.store.write_idempotency_record(
+                    drill_receipt(receipt.idempotency_key, now, payload)
+                )
         # Never replace an unfinished or held generation with a new snapshot/key.
         if payload.get("operation_id") and payload["status"] == "fail":
             operation = self.store.read_odoo_stable_target_replacement_operation_record(
@@ -424,7 +420,21 @@ class OdooTestingDrillScheduler:
             )
             if operation.status in {"pending", "running", "reconciliation_required"}:
                 return True
-        return payload["status"] == "fail" and not payload.get("alert_delivered", False)
+            generation = self.store.read_fresh_odoo_testing_generation(product, context)
+            if generation is not None and not generation.completed_at:
+                return True
+        return False
+
+    def _deliver_alerts(self, product: str, context: str, now: float) -> None:
+        for receipt in self.store.list_pending_odoo_testing_drill_alerts(product, context):
+            payload = dict(receipt.response_payload)
+            if now < float(str(payload.get("next_alert_at", 0))):
+                continue
+            payload["alert_delivered"] = self.notify(product, context, payload)
+            payload["next_alert_at"] = now + DRILL_ALERT_RETRY_SECONDS
+            self.store.write_idempotency_record(
+                drill_receipt(receipt.idempotency_key, now, payload)
+            )
 
     def _notify(self, product: str, context: str, payload: dict[str, JsonValue]) -> bool:
         from control_plane.notifications import post_discord_webhook
@@ -451,7 +461,11 @@ class OdooTestingDrillScheduler:
             )
 
         delivered = True
+        delivered_destinations = list(cast(list[str], payload.get("delivered_destinations", [])))
         for destination in destinations.values():
+            destination_key = canonical_json_sha256(destination.model_dump(mode="json"))
+            if destination_key in delivered_destinations:
+                continue
             try:
                 sender = managed_notification_secret_value(
                     self.store, destination.discord_webhook_secret, context, "testing"
@@ -460,11 +474,13 @@ class OdooTestingDrillScheduler:
                     sender,
                     {
                         "allowed_mentions": {"parse": []},
-                        "content": f"Odoo testing rebuild failed: {safe(product)} / testing. Step: {safe(payload.get('step'))}. Trace: {safe(payload.get('trace'))}. Inspect the retained drill operation; no automatic recapture.",
+                        "content": f"Odoo testing rebuild failed: {safe(product)} / testing. Step: {safe(payload.get('failure_step', payload.get('step')))}. Trace: {safe(payload.get('failure_trace', payload.get('trace')))}. Inspect the retained drill operation; no automatic recapture.",
                     },
                 )
+                delivered_destinations.append(destination_key)
             except Exception:
                 delivered = False
+        payload["delivered_destinations"] = cast(list[JsonValue], delivered_destinations)
         return delivered
 
 

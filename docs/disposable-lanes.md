@@ -746,7 +746,9 @@ module work before someone needs it. A queue that never starts the work is a
 failure too. A durable daily slot and per-lane observer lease prevent duplicate
 queueing and reporting across API replicas and restarts. A two-hour unfinished
 operation records a failed completion deadline, alerts, and retains its original
-operation rather than recapturing or replacing it.
+operation rather than recapturing or replacing it. Recurring lane slots are spread
+deterministically across the day. A late success updates the current evidence
+with `late_completion`; the original deadline failure remains alertable.
 
 Admission requires a completed qualified fresh testing generation and current
 unused/reproducible/isolated evidence, with its original expiry and exact binding.
@@ -764,8 +766,12 @@ receipt without changing the running lane's settings. After its hold check,
 the worker atomically selects a new service-named testing database and matching
 filestore path and activates that exact generation under its current lease.
 It repeats usage, credential and resource admission; changed source/configuration
-refuses before selection. Every provider checkpoint rechecks the generation,
-current use/custody/isolation evidence and hold. A person starting a test session
+refuses before selection. The original collector row is never rebound or renewed.
+Its accepted snapshot is stored on the active worker attempt; an unchanged snapshot
+does not expire in the middle of that continuously leased restore. A reclaimed
+attempt requires fresh admission against the selected database. Every provider
+checkpoint rechecks the generation, unchanged admitted use/custody/isolation facts
+and current hold. Changed evidence or a person starting a test session
 or placing a hold therefore protects the lane even after queueing. Protect a
 lane through the existing staff-testing hold before starting a session. Unknown
 or expired observations cannot substitute for that hold.
@@ -775,12 +781,14 @@ the production source with the existing bounded read-only export, and consume
 testing storage. It never changes production data, ports, storage, routes,
 credentials or permissions. Its copy has live keys and outbound connections
 removed before the first registry process. After the new copy passes sanitization,
-module and integration readback, the restore guard disposes only the prior
-service-created drill database and its filestore. The prior database must carry
+module and integration readback, the restore guard may dispose of the older
+service-created drill database and its filestore. The immediate completed
+predecessor is retained through final web/health checks, including when those
+checks fail. Only the copy two generations behind can be disposed of, and it must carry
 its exact committed copy witness; DROP uses no FORCE, so an unexpected connection
 refuses disposal. The new copy is distinct and the initial bootstrap database
 is retained. This bounds steady-state drill storage to the initial copy, current
-copy and in-progress copy; failed partial captures/copies remain recovery custody.
+copy, immediate predecessor and in-progress copy; failed partial captures/copies remain recovery custody.
 A failed copy never deletes its predecessor. Final web and health verification
 still gates a passing operation and generation completion.
 
@@ -791,7 +799,9 @@ requires the worker's health result and this exact generation's committed copy
 completion. It does not replace monitor freshness or prove platform updates.
 Failures use the lane's existing enabled Discord notification destinations and
 managed sender. No destination or unreadable sender leaves `alert_delivered=false`;
-retry occurs at five-minute intervals and remains visible. Webhook delivery is
+retry occurs at five-minute intervals and remains visible without blocking later
+drill slots. Successful destinations are recorded individually, so another
+destination's outage does not repeat their notices. Webhook delivery is
 at least once: a lost acknowledgement may repeat a notice. Arbitrary provider
 errors, source settings, copy bytes and secrets never enter the notice or lane
 projection.

@@ -10668,6 +10668,31 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
+    def list_pending_odoo_testing_drill_alerts(
+        self, product: str, context: str
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE, lane_key
+
+        payload = LaunchplaneIdempotencyRow.payload["response_payload"]
+        return self._list_models(
+            model_type=LaunchplaneIdempotencyRecord,
+            orm_model=LaunchplaneIdempotencyRow,
+            filters=(
+                LaunchplaneIdempotencyRow.scope == DRILL_SCOPE,
+                LaunchplaneIdempotencyRow.route_path == DRILL_ROUTE,
+                LaunchplaneIdempotencyRow.idempotency_key.like(lane_key(product, context) + ":%"),
+                or_(
+                    payload["status"].as_string() == "fail",
+                    payload["failure_step"].as_string().is_not(None),
+                ),
+                or_(
+                    payload["alert_delivered"].as_boolean().is_(False),
+                    payload["alert_delivered"].as_boolean().is_(None),
+                ),
+            ),
+            order_by=(LaunchplaneIdempotencyRow.recorded_at.asc(),),
+        )
+
     def enqueue_odoo_testing_drill(self, product: str, context: str, key: str, now: float) -> None:
         """Atomically archive the completed copy, select a fresh database and queue its restore.
 
@@ -10802,6 +10827,7 @@ class PostgresRecordStore(HumanSessionStore):
                 worker_row is None
                 or worker_row.status != "running"
                 or worker_row.lease_owner != operation.lease_owner
+                or worker_row.attempt != operation.attempt
                 or not operation.lease_owner
                 or parse_launchplane_mutation_timestamp(
                     worker_row.lease_expires_at, field_name="lease_expires_at"
@@ -10834,6 +10860,31 @@ class PostgresRecordStore(HumanSessionStore):
                 raise DrillPrerequisite("drill_generation_missing")
             current = FreshOdooTestingGeneration.model_validate(row.payload)
             if generation_binding(current) == generation_binding(planned):
+                from control_plane.disposable_lanes import (
+                    require_disposable_lane,
+                    DisposableLaneStore,
+                )
+                from control_plane.odoo_testing_drill import require_drill_checkpoint
+
+                if receipt.response_payload.get("activation_attempt") != operation.attempt:
+                    require_disposable_lane(
+                        cast(DisposableLaneStore, self),
+                        product=operation.product,
+                        context=operation.context,
+                        instance="testing",
+                    )
+                    current_safety = self.read_disposable_lane_safety(
+                        operation.product, operation.context, "testing"
+                    )
+                    assert current_safety is not None
+                    receipt.response_payload["activation_safety"] = current_safety.model_dump(
+                        mode="json"
+                    )
+                    receipt.response_payload["activation_attempt"] = operation.attempt
+                    self._sync_idempotency_row(receipt_row, receipt)
+                    session.commit()
+                else:
+                    require_drill_checkpoint(self, operation)
                 return
             if current.model_dump(mode="json") != receipt.response_payload["previous_generation"]:
                 raise DrillPrerequisite("drill_generation_changed")
@@ -10855,14 +10906,9 @@ class PostgresRecordStore(HumanSessionStore):
                 raise DrillPrerequisite("drill_source_changed")
             session.merge(self._runtime_environment_row(prepared.runtime))
             row.payload = self._payload_dict(planned)
-            session.merge(
-                LaunchplaneDisposableLaneSafetyRow(
-                    product=operation.product,
-                    context=operation.context,
-                    instance="testing",
-                    payload=self._payload_dict(prepared.safety),
-                )
-            )
+            receipt.response_payload["activation_safety"] = prepared.safety.model_dump(mode="json")
+            receipt.response_payload["activation_attempt"] = operation.attempt
+            self._sync_idempotency_row(receipt_row, receipt)
             session.commit()
 
     def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:

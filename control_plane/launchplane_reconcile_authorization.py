@@ -1,8 +1,8 @@
 """Launchplane's own grant for the work it starts from source-control events.
 
 Launchplane needs no caller grant to verify a build and deploy it to that
-product's testing lane and PR previews (DIRECTION.md). The reconciler is the only
-code that builds this grant. It is stored only on the testing lane's stable target
+product's testing lane and PR previews (DIRECTION.md). The reconciler and the
+service-owned testing drill build this grant. It is stored only on the testing lane's stable target
 replacement, which the worker re-checks before running; no HTTP route builds or
 accepts it, and every other worker path refuses it. A preview and a generic-web
 testing deploy run in-process, so the reconciler checks their destination
@@ -33,7 +33,7 @@ TESTING_INSTANCE = "testing"
 def build_launchplane_reconcile_authorization(
     *, product: str, context: str, authorized_at: str
 ) -> DurableOperationAuthorization:
-    """The grant on a testing-lane stable target replacement the reconciler queues."""
+    """The grant on a testing-lane replacement Launchplane's own service queues."""
     return DurableOperationAuthorization(
         grant="launchplane_reconcile",
         action=TESTING_TARGET_REPLACEMENT_ACTION,

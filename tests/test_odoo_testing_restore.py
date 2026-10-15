@@ -190,6 +190,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.previous_drill_witness = ""
         self.previous_drill_busy = False
         self.previous_drill_dropped = False
+        self.previous_drill_query = 0
         self.gate_payload = "payload-fixture"
         self.gate_hash = ""
         for suffix in ("data", "logs", "db"):
@@ -258,12 +259,13 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 and command[-1] == self.previous_drill
                 and "psql " in " ".join(command)
             ):
-                query = kwargs.get("input", b"")
-                if query.startswith(b"SELECT count(*)"):
+                phase = self.previous_drill_query
+                self.previous_drill_query += 1
+                if phase == 0:
                     result = b"1"
-                elif query.startswith(b"SELECT value"):
+                elif phase == 1:
                     result = self.previous_drill_witness.encode()
-                elif query.startswith(b"DROP DATABASE"):
+                elif phase == 2:
                     if self.previous_drill_busy:
                         return subprocess.CompletedProcess(
                             command, 1, stdout=b"", stderr=b"database is in use"
@@ -312,6 +314,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         return subprocess.CompletedProcess(command, 0, stdout=result, stderr=b"")
 
     def run_program(self) -> tuple[int, str]:
+        self.previous_drill_query = 0
         encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
         output = io.StringIO()
         status = 0

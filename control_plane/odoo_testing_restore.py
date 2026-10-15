@@ -55,6 +55,12 @@ class FreshOdooTestingGeneration(BaseModel):
     discard_copy_binding: str = Field(
         default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
     )
+    retained_drill_database: str = Field(
+        default="", pattern=r"^(?:lp_drill_[a-f0-9]{32})?$", exclude_if=lambda value: not value
+    )
+    retained_copy_binding: str = Field(
+        default="", pattern=r"^(?:[a-f0-9]{64})?$", exclude_if=lambda value: not value
+    )
 
     @model_validator(mode="after")
     def _validate_source(self) -> "FreshOdooTestingGeneration":
@@ -64,6 +70,11 @@ class FreshOdooTestingGeneration(BaseModel):
             self.discard_drill_database and self.discard_drill_database == self.drill_database
         ):
             raise ValueError("Drill disposal requires a different witnessed prior drill database.")
+        if bool(self.retained_drill_database) != bool(self.retained_copy_binding) or (
+            self.retained_drill_database
+            and self.retained_drill_database in {self.drill_database, self.discard_drill_database}
+        ):
+            raise ValueError("A retained predecessor must differ from the new and disposed copies.")
         return self
 
 

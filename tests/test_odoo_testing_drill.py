@@ -35,6 +35,7 @@ from control_plane.odoo_testing_drill import (
     DRILL_ALERT_RETRY_SECONDS,
     DRILL_SCOPE,
     DRILL_ROUTE,
+    DRILL_DEADLINE_STEP,
     OdooTestingDrillScheduler,
     require_drill_checkpoint,
     testing_drill_evidence,
@@ -244,7 +245,7 @@ class TestingDrillScenario(unittest.TestCase):
                 update={
                     "status": status,
                     "phase": "completed" if status == "pass" else "failed",
-                    "finished_at": datetime.now(timezone.utc).isoformat(),
+                    "finished_at": datetime.fromtimestamp(self.now, timezone.utc).isoformat(),
                     "result": result,
                     "error_code": "restore_failed" if status == "fail" else "",
                     "error_message": "private provider details" if status == "fail" else "",
@@ -257,7 +258,11 @@ class TestingDrillScenario(unittest.TestCase):
             )
             assert current is not None
             self.store.write_fresh_odoo_testing_generation(
-                current.model_copy(update={"completed_at": datetime.now(timezone.utc).isoformat()})
+                current.model_copy(
+                    update={
+                        "completed_at": datetime.fromtimestamp(self.now, timezone.utc).isoformat()
+                    }
+                )
             )
 
     def activate(self) -> Any:
@@ -399,7 +404,7 @@ class TestingDrillTests(TestingDrillScenario):
         self.now += DRILL_TIMEOUT_SECONDS + 1
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "fail")
-        self.assertEqual(self.evidence().step, "completion_deadline")
+        self.assertEqual(self.evidence().step, DRILL_DEADLINE_STEP)
         self.assertTrue(self.notifications.called)
         self.now += DRILL_INTERVAL_SECONDS
         self.scheduler.run_once()
@@ -493,3 +498,214 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertIn("restore_failed", post.call_args.args[1]["content"])
         self.assertIn("fixture-trace", post.call_args.args[1]["content"])
         self.assertNotIn("must not leak", str(post.call_args))
+
+    def test_running_attempt_keeps_admission_after_observation_expires_without_rewriting_it(
+        self,
+    ) -> None:
+        self.scheduler.run_once()
+        original = self.store.read_disposable_lane_safety(
+            self.profile.product, self.context, "testing"
+        )
+        operation = self.activate()
+        self.assertEqual(
+            self.store.read_disposable_lane_safety(self.profile.product, self.context, "testing"),
+            original,
+        )
+        assert original is not None
+        with patch("control_plane.odoo_testing_drill.datetime") as clock:
+            clock.now.return_value = original.expires_at + timedelta(minutes=20)
+            require_drill_checkpoint(self.store, operation)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "policies": target.policies.model_copy(
+                        update={
+                            "staff_testing_hold": DokployTargetStaffTestingHold(
+                                reason="staff session",
+                                recorded_by="fixture",
+                                recorded_at=self.profile.updated_at,
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        with self.assertRaises(DrillSkipped):
+            require_drill_checkpoint(self.store, operation)
+
+    def test_worker_classifies_pre_effect_use_as_skip_and_keeps_current_database(self) -> None:
+        from control_plane.workflows.odoo_stable_operation_worker import (
+            _execute_target_replacement_with_checkpoint,
+        )
+
+        self.scheduler.run_once()
+        operation = self.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="fixture-worker",
+            claimed_at=datetime.fromtimestamp(self.now, timezone.utc).isoformat(),
+            lease_expires_at=datetime.fromtimestamp(self.now + 300, timezone.utc).isoformat(),
+        )
+        assert operation is not None
+        record_safety(self.store, self.profile.product, self.context, "testing", usage="in_use")
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.DurableOperationAuthorizationGuard"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker._start_target_replacement_heartbeat"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply"
+            ) as execute,
+        ):
+            self.assertTrue(
+                _execute_target_replacement_with_checkpoint(
+                    record_store=self.store,
+                    control_plane_root_path=Path("/fixture/control-plane"),
+                    operation=operation,
+                    lease_owner=operation.lease_owner,
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                )
+            )
+        execute.assert_not_called()
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "skipped")
+        self.assertFalse(self.notifications.called)
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+
+    def test_undelivered_alert_does_not_block_repaired_prerequisite_next_day(self) -> None:
+        self.notifications.return_value = False
+        self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
+        self.scheduler.run_once()
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "fail")
+        self.now += DRILL_INTERVAL_SECONDS
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.context,
+            "testing",
+            observed_at=datetime.fromtimestamp(self.now, timezone.utc),
+            expires_at=datetime.fromtimestamp(self.now, timezone.utc) + timedelta(minutes=5),
+        )
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "queued")
+        self.assertTrue(
+            self.store.list_pending_odoo_testing_drill_alerts(self.profile.product, self.context)
+        )
+
+    def test_late_success_refreshes_lane_evidence_and_keeps_deadline_alert(self) -> None:
+        self.scheduler.run_once()
+        self.activate()
+        self.now += DRILL_TIMEOUT_SECONDS + 1
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "fail")
+        operation = self.operation()
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "status": "pass",
+                    "phase": "completed",
+                    "finished_at": datetime.fromtimestamp(self.now, timezone.utc).isoformat(),
+                    "result": OdooStableTargetReplacementApplyResult(
+                        product=operation.product,
+                        context=operation.context,
+                        instance="testing",
+                        strategy="recreate-in-place",
+                        deploy_status="pass",
+                        health_status="pass",
+                        deployment_record_id="late-deployment",
+                    ),
+                }
+            )
+        )
+        current = self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context)
+        assert current is not None
+        self.store.write_fresh_odoo_testing_generation(
+            current.model_copy(
+                update={"completed_at": datetime.fromtimestamp(self.now, timezone.utc).isoformat()}
+            )
+        )
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "pass")
+        self.assertTrue(self.evidence().alert_delivered)
+
+    def test_partial_discord_delivery_does_not_resend_successful_destination(self) -> None:
+        destinations = tuple(
+            PublicIngressNotificationDestination(
+                destination_id=name, kind="discord", discord_webhook_secret=name
+            )
+            for name in ("working", "unavailable")
+        )
+        self.store.write_public_ingress_notification_policy_record(
+            PublicIngressNotificationPolicyRecord(
+                policy_id="fixture-partial",
+                product=self.profile.product,
+                context=self.context,
+                instance="testing",
+                destinations=destinations,
+                created_at=self.profile.updated_at,
+                updated_at=self.profile.updated_at,
+            )
+        )
+        scheduler = OdooTestingDrillScheduler(self.store)
+        payload: dict[str, Any] = {"step": "restore", "trace": "fixture"}
+
+        def post(sender: str, body: object) -> None:
+            if sender == "unavailable":
+                raise RuntimeError("fixture provider offline")
+
+        with (
+            patch(
+                "control_plane.workflows.public_ingress_monitor.managed_notification_secret_value",
+                side_effect=lambda store, key, context, instance: key,
+            ),
+            patch("control_plane.notifications.post_discord_webhook", side_effect=post) as send,
+        ):
+            self.assertFalse(scheduler._notify(self.profile.product, self.context, payload))
+            self.assertFalse(scheduler._notify(self.profile.product, self.context, payload))
+        self.assertEqual([call.args[0] for call in send.call_args_list].count("working"), 1)
+
+    def test_failed_final_verification_retains_immediate_completed_predecessor(self) -> None:
+        self.scheduler.run_once()
+        self.complete("pass")
+        first = self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context)
+        assert first is not None
+        self.scheduler.run_once()
+        self.now += DRILL_INTERVAL_SECONDS
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.context,
+            "testing",
+            observed_at=datetime.fromtimestamp(self.now, timezone.utc),
+            expires_at=datetime.fromtimestamp(self.now, timezone.utc) + timedelta(minutes=5),
+        )
+        self.scheduler.run_once()
+        self.complete("pass")
+        second = self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context)
+        assert second is not None
+        self.scheduler.run_once()
+        self.now += DRILL_INTERVAL_SECONDS
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.context,
+            "testing",
+            observed_at=datetime.fromtimestamp(self.now, timezone.utc),
+            expires_at=datetime.fromtimestamp(self.now, timezone.utc) + timedelta(minutes=5),
+        )
+        self.scheduler.run_once()
+        self.complete("fail")
+        failed = self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context)
+        assert failed is not None
+        self.assertEqual(failed.retained_drill_database, second.drill_database)
+        self.assertEqual(failed.retained_copy_binding, generation_binding(second))
+        self.assertEqual(failed.discard_drill_database, first.drill_database)
+        self.assertNotEqual(failed.discard_drill_database, failed.retained_drill_database)
