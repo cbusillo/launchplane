@@ -153,7 +153,10 @@ test("pending identity verification recovers initial load without another sign-i
     evidenceReads++;
     return route.fulfill({ json: { status: "ok", products: fixture.products } });
   });
+  const pendingSession = page.waitForResponse(response =>
+    new URL(response.url()).pathname === "/v1/auth/session" && response.status() === 503);
   await page.goto("/ui/products");
+  await pendingSession;
   await expect(page.locator(".session-card h1")).toBeVisible();
   await expect(page.getByRole("link", { name: "Sign in with GitHub" })).toHaveCount(0);
   expect(evidenceReads).toBe(0);
