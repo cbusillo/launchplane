@@ -82,6 +82,9 @@ class HealthAlertDrillTests(unittest.TestCase):
             )
         )
         before = self.store.list_public_ingress_incident_records()
+        before_policies = self.store.list_public_ingress_notification_policy_records()
+        before_secrets = self.store.list_secret_records()
+        before_outbox = self.store.list_outbox_delivery_records()
         result = health_alert_drill(
             self.store, scope=self.scope, now=self.now, send=True, drivers=self.drivers
         )
@@ -106,6 +109,11 @@ class HealthAlertDrillTests(unittest.TestCase):
         self.assertEqual(readback.receipt, result.receipt)
         self.assertEqual(self.store.read_product_profile_record(self.scope.product), self.profile)
         self.assertEqual(self.store.list_public_ingress_incident_records(), before)
+        self.assertEqual(
+            self.store.list_public_ingress_notification_policy_records(), before_policies
+        )
+        self.assertEqual(self.store.list_secret_records(), before_secrets)
+        self.assertEqual(self.store.list_outbox_delivery_records(), before_outbox)
         self.assertFalse(self.store.list_public_ingress_observation_records())
         self.assertFalse(self.store.list_public_ingress_notification_attempt_records())
         self.assertFalse(self.store.list_public_ingress_incident_event_records())
@@ -301,6 +309,18 @@ class HealthAlertDrillTests(unittest.TestCase):
         )
         assert result.receipt is not None
         self.assertEqual(result.receipt.status, "unavailable")
+        invalid_driver = PublicIngressNotificationDriverSet(
+            secret_resolver=lambda _: "https://example.invalid/webhook"
+        )
+        invalid = health_alert_drill(
+            self.store,
+            scope=self.scope,
+            now=self.now + DRILL_WINDOW_SECONDS,
+            send=True,
+            drivers=invalid_driver,
+        )
+        assert invalid.receipt is not None
+        self.assertEqual(invalid.receipt.status, "unavailable")
         self.policy = self.policy.model_copy(
             update={
                 "destinations": tuple(
@@ -318,6 +338,18 @@ class HealthAlertDrillTests(unittest.TestCase):
             drivers=self.drivers,
         )
         self.assertEqual(disabled.routing, "disabled")
+        self.assertFalse(self.posts)
+
+    def test_inactive_product_cannot_drill(self) -> None:
+        self.write_policy()
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"lifecycle_state": "retired"})
+        )
+        result = health_alert_drill(
+            self.store, scope=self.scope, now=self.now, send=True, drivers=self.drivers
+        )
+        self.assertEqual(result.routing, "disabled")
+        self.assertIsNone(result.receipt)
         self.assertFalse(self.posts)
 
     def test_database_window_prevents_concurrent_and_restarted_resends(self) -> None:

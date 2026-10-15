@@ -13,6 +13,8 @@ The monitor's own target selection determines whether the check is effective.
 means that a declared effective check has no matching Discord route. Only
 declared lane checks are drillable; monitor-created TLS, deploy-fence and
 production-delivery targets are outside this capability.
+`disabled` covers both an inactive/ineffective check and a matching disabled
+Discord policy or destination. Neither case sends an alert.
 This read does not decrypt notification credentials or prove delivery.
 
 `POST /v1/health-alert-drills` accepts the same four fields in JSON. Its default

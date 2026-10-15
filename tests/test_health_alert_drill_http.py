@@ -81,9 +81,12 @@ class HealthAlertDrillHttpTests(unittest.IsolatedAsyncioTestCase):
             bearer_identity_config=_local_operator_bearer_config(),
         )
         headers = {"Authorization": "Bearer local-operator-token"}
-        with patch(
-            "control_plane.health_alert_drill.public_ingress_notification_drivers",
-            return_value=fixture.drivers,
+        with (
+            patch(
+                "control_plane.health_alert_drill.public_ingress_notification_drivers",
+                return_value=fixture.drivers,
+            ),
+            patch("control_plane.http_routes.health_alert_drill.time", return_value=fixture.now),
         ):
             async with lifespan_client(app) as client:
                 read = await client.get(

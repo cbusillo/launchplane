@@ -257,7 +257,7 @@ def health_alert_drill(
             ),
             drill=True,
         )
-        if delivery.action == "missing_discord_webhook":
+        if delivery.action in {"missing_discord_webhook", "invalid_discord_webhook"}:
             continue
         receipt.unavailable_count -= 1
         if delivery.delivery_status == "delivered":

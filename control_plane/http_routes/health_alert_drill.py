@@ -1,5 +1,5 @@
 from collections.abc import Callable
-import time
+from time import time
 from typing import Annotated
 
 from fastapi import Depends, Query
@@ -76,9 +76,7 @@ def register_health_alert_drill_routes(
             )
         try:
             evidence = await run_in_worker_thread(
-                lambda: health_alert_drill(
-                    store, scope=scope, now=time.time(), send=send, window=window
-                )
+                lambda: health_alert_drill(store, scope=scope, now=time(), send=send, window=window)
             )
         except HealthAlertDrillWindowError as error:
             raise dependencies.http_error(
