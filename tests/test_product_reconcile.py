@@ -658,6 +658,55 @@ class ProductReconcileTestCase(unittest.TestCase):
 
 
 class ProductReconcileStoreTests(ProductReconcileTestCase):
+    def test_requeued_work_yields_to_waiting_products_without_losing_requests(self) -> None:
+        outcomes: tuple[Literal["done", "failed"], ...] = ("done", "failed")
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome):
+                busy = ProductReconcileTarget(product=f"busy-{outcome}", target_kind="testing")
+                waiting = ProductReconcileTarget(
+                    product=f"waiting-{outcome}", target_kind="testing"
+                )
+                self.store.request_product_reconcile(busy, "2026-09-29T12:00:00Z")
+                claimed = self.store.claim_next_product_reconcile_request(
+                    "worker-a", 60, now="2026-09-29T12:00:00Z"
+                )
+                assert claimed is not None
+                self.assertEqual(claimed.target_key, busy.target_key)
+                self.store.request_product_reconcile(waiting, "2026-09-29T12:00:10Z")
+                rerequested = self.store.request_product_reconcile(busy, "2026-09-29T12:00:20Z")
+                plan: dict[str, object] = {"deferred": "lane_busy"}
+                error = "lane unavailable" if outcome == "failed" else ""
+                completed = self.store.complete_product_reconcile_request(
+                    busy.target_key,
+                    "worker-a",
+                    outcome,
+                    plan,
+                    error,
+                    now="2026-09-29T12:00:30Z",
+                )
+                self.assertEqual(completed.state, "pending")
+                self.assertEqual(completed.request_count, rerequested.request_count)
+                self.assertEqual(completed.last_plan, plan)
+                self.assertEqual(completed.last_error, error)
+
+                next_claim = self.store.claim_next_product_reconcile_request(
+                    "worker-a", 60, now="2026-09-29T12:00:30Z"
+                )
+                assert next_claim is not None
+                self.assertEqual(next_claim.target_key, waiting.target_key)
+                self.store.complete_product_reconcile_request(
+                    waiting.target_key, "worker-a", "done", {}, now="2026-09-29T12:00:40Z"
+                )
+                retry = self.store.claim_next_product_reconcile_request(
+                    "worker-a", 60, now="2026-09-29T12:00:40Z"
+                )
+                assert retry is not None
+                self.assertEqual(retry.target_key, busy.target_key)
+                self.assertEqual(retry.request_count, rerequested.request_count)
+                self.store.complete_product_reconcile_request(
+                    busy.target_key, "worker-a", "done", {}, now="2026-09-29T12:00:50Z"
+                )
+
     def test_claims_oldest_pending_and_completes_with_plan(self) -> None:
         self.request()
         self.store.request_product_reconcile(
