@@ -23352,6 +23352,14 @@
             "title": "Reserve Bytes",
             "type": "integer"
           },
+          "retained_copy_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Copy Bindings",
+            "type": "array"
+          },
           "staging_bytes": {
             "exclusiveMinimum": 0.0,
             "title": "Staging Bytes",

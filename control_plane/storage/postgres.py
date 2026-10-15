@@ -10804,12 +10804,19 @@ class PostgresRecordStore(HumanSessionStore):
             raise DrillPrerequisite("testing_storage_readback_unavailable")
         with locked() as session:
             current = None
+            skip_code = ""
             try:
                 current = validate(session)
+            except DrillSkipped as error:
+                skip_code = str(error)
             except (ValueError, FileNotFoundError):
                 # Preserve exact completed cleanup evidence even if new authority
                 # prevents using its capacity snapshot for activation.
-                pass
+                safety = self.read_disposable_lane_safety(
+                    operation.product, operation.context, "testing"
+                )
+                if safety is not None and (safety.usage == "in_use" or safety.data == "only_copy"):
+                    skip_code = "lane_use_or_only_copy_protected"
             for key, copy, status in zip(
                 intent["receipts"], intent["copies"], results, strict=True
             ):
@@ -10898,7 +10905,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             session.commit()
-        return {**result, "authority_current": current is not None}
+        return {**result, "authority_current": current is not None, "skip_code": skip_code}
 
     @staticmethod
     def _odoo_testing_disposal_statement(
@@ -10914,7 +10921,10 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneIdempotencyRow.route_path == DRILL_ROUTE,
                 LaunchplaneIdempotencyRow.idempotency_key.like(lane_key(product, context) + ":%"),
                 payload["planned_generation"]["discard_drill_database"].as_string() != "",
-                payload["status"].as_string() == "pass",
+                or_(
+                    payload["status"].as_string() == "pass",
+                    payload["activation_attempt"].as_integer().is_not(None),
+                ),
                 or_(
                     payload["disposal_status"].as_string().is_(None),
                     payload["disposal_status"]
@@ -10926,7 +10936,12 @@ class PostgresRecordStore(HumanSessionStore):
         )
 
     def update_odoo_testing_drill_receipt(
-        self, key: str, now: float, payload: dict[str, Any]
+        self,
+        key: str,
+        now: float,
+        payload: dict[str, Any],
+        *,
+        expected_failure: tuple[Any, Any] | None = None,
     ) -> None:
         """Merge only scheduler-owned projection/delivery fields, preserving worker admission."""
         from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE, timestamp
@@ -10957,6 +10972,15 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise FileNotFoundError(key)
             current = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            if expected_failure is not None and expected_failure != (
+                current.response_payload.get("failure_step", current.response_payload.get("step")),
+                current.response_payload.get(
+                    "failure_trace", current.response_payload.get("trace")
+                ),
+            ):
+                return
+            if current.response_payload.get("disposal_status") in {"disposed", "retained"}:
+                payload = {key: value for key, value in payload.items() if key != "disposal_status"}
             current.response_payload.update(
                 {name: value for name, value in payload.items() if name in fields}
             )

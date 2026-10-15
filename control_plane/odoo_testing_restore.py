@@ -674,57 +674,76 @@ def discard_previous_drill(gen, database_container, runner, database, receipt_ro
     protected = {database, gen.get('drill_database'), gen.get('retained_drill_database')}
     if not re.fullmatch(r'lp_drill_[a-f0-9]{32}', previous) or previous in protected or not re.fullmatch(r'[a-f0-9]{64}', witness):
         raise RuntimeError('Invalid prior drill database')
-    # A persistent write-ahead witness is required before DROP. It survives a
-    # successful drop followed by failed filestore removal or lost transport.
+    # This host-owned state is never mounted in an application container.
+    # Traverse beneath a trusted anchor with directory fds, never path-following
+    # opens that a container or another user could redirect during a check.
     if receipt_root is None:
-        volume = json.loads(docker('volume','inspect',gen['namespace']+'-logs'))[0]
-        receipt_root = Path(volume['Mountpoint']) / '.launchplane-drill-disposal'
-    root = Path(receipt_root)
-    if root.resolve() != root.absolute() or root.is_symlink():
-        raise RuntimeError('Unsafe disposal receipt path')
-    root.mkdir(mode=0o700, exist_ok=True)
-    receipt = root / (previous + '.json')
-    expected = {'database':previous,'witness':witness}
-    if receipt.is_symlink():
-        raise RuntimeError('Unsafe disposal receipt')
-    if receipt.exists() and json.loads(receipt.read_text()) != expected:
-        raise RuntimeError('Disposal receipt identity changed')
-    present = docker('exec','-i',database_container,'sh','-c',
-        'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
-        '_', previous, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
-    if present not in {'0','1'}:
-        raise RuntimeError('Ambiguous prior drill database')
-    if present == '1':
-        observed = docker('exec','-i',database_container,'sh','-c',
-            'psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"',
-            '_', previous, stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
-        if observed != witness:
-            raise RuntimeError('Prior database lacks its committed drill witness')
-        if not receipt.exists():
-            descriptor = os.open(receipt, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600)
-            with os.fdopen(descriptor,'w') as handle:
-                json.dump(expected,handle,sort_keys=True);handle.flush();os.fsync(handle.fileno())
-            for directory in (root, root.parent):
-                descriptor = os.open(directory, os.O_RDONLY|os.O_DIRECTORY)
-                try:
-                    os.fsync(descriptor)
-                finally:
-                    os.close(descriptor)
-        # No FORCE or connection termination. Unexpected connections retain it.
-        current()
-        docker('exec','-i',database_container,'sh','-c',
+        anchor = Path.home().resolve(strict=True)
+        components = ('.local', 'state', 'launchplane-testing-disposal', gen['namespace'])
+    else:
+        anchor = Path(receipt_root).resolve(strict=True)
+        components = ()
+    directory = os.open(anchor, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+    try:
+        for component in components:
+            try:
+                os.mkdir(component, 0o700, dir_fd=directory)
+            except FileExistsError:
+                pass
+            child = os.open(component, os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW, dir_fd=directory)
+            owner = os.fstat(child)
+            if owner.st_uid != os.geteuid() or owner.st_mode & 0o022:
+                os.close(child)
+                raise RuntimeError('Disposal state is not host-owned')
+            os.fsync(directory)
+            os.close(directory)
+            directory = child
+        receipt = previous + '.json'
+        expected = {'database':previous,'witness':witness}
+        recorded = False
+        try:
+            descriptor = os.open(receipt, os.O_RDONLY|os.O_NOFOLLOW, dir_fd=directory)
+        except FileNotFoundError:
+            pass
+        else:
+            with os.fdopen(descriptor) as handle:
+                if json.loads(handle.read(4097)) != expected:
+                    raise RuntimeError('Disposal receipt identity changed')
+            recorded = True
+        present = docker('exec','-i',database_container,'sh','-c',
             'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
-            '_', previous, stdin=b'DROP DATABASE :"database_name";\n')
-    elif not receipt.exists():
-        absent = docker('exec',runner,'python3','-c',
-            "from pathlib import Path;import sys;p=Path('/volumes/data/filestore')/sys.argv[1];assert p.resolve()==p.absolute() and not p.is_symlink();print('absent' if not p.exists() else 'present')",previous).decode().strip()
-        if absent == 'absent':
-            return
-        return 'retained'
-    current()
-    docker('exec',runner,'python3','-c',
-        "from pathlib import Path;import re,shutil,sys;name=sys.argv[1];assert re.fullmatch(r'lp_drill_[a-f0-9]{32}',name);p=Path('/volumes/data/filestore')/name;assert p.resolve()==p.absolute() and not p.is_symlink();shutil.rmtree(p) if p.exists() else None", previous)
-    # Keep the receipt even on success: original-key readback remains possible.
+            '_', previous, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
+        if present not in {'0','1'}:
+            raise RuntimeError('Ambiguous prior drill database')
+        if present == '1':
+            observed = docker('exec','-i',database_container,'sh','-c',
+                'psql -X -q -t -A -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$1"',
+                '_', previous, stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
+            if observed != witness:
+                raise RuntimeError('Prior database lacks its committed drill witness')
+            if not recorded:
+                descriptor = os.open(receipt, os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW, 0o600, dir_fd=directory)
+                with os.fdopen(descriptor,'w') as handle:
+                    json.dump(expected,handle,sort_keys=True);handle.flush();os.fsync(handle.fileno())
+                os.fsync(directory)
+                recorded = True
+            # No FORCE or connection termination. Unexpected connections retain it.
+            current()
+            docker('exec','-i',database_container,'sh','-c',
+                'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
+                '_', previous, stdin=b'DROP DATABASE :"database_name";\n')
+        elif not recorded:
+            absent = docker('exec',runner,'python3','-c',
+                "from pathlib import Path;import sys;p=Path('/volumes/data/filestore')/sys.argv[1];assert p.resolve()==p.absolute() and not p.is_symlink();print('absent' if not p.exists() else 'present')",previous).decode().strip()
+            if absent == 'absent':
+                return
+            return 'retained'
+        current()
+        docker('exec',runner,'python3','-c',
+            "from pathlib import Path;import re,shutil,sys;name=sys.argv[1];assert re.fullmatch(r'lp_drill_[a-f0-9]{32}',name);p=Path('/volumes/data/filestore')/name;assert p.resolve()==p.absolute() and not p.is_symlink();shutil.rmtree(p) if p.exists() else None", previous)
+        # Keep the receipt even on success: original-key readback remains possible.
+    finally:
+        os.close(directory)
 
 
 def restore_main():
@@ -823,6 +842,13 @@ def restore_main():
                    or (mount.get("RW", True) and path.is_relative_to(source_path))
                    for path in paths):
                 raise RuntimeError("Testing storage has a bind consumer")
+    private_state = Path.home().resolve(strict=True) / '.local/state/launchplane-testing-disposal'
+    for container in all_containers:
+        for mount in container.get('Mounts', []):
+            if mount.get('RW', True) and mount.get('Source'):
+                source_path = Path(mount['Source']).resolve(strict=False)
+                if private_state.is_relative_to(source_path) or source_path.is_relative_to(private_state):
+                    raise RuntimeError('Disposal state is exposed to a container')
     runner = containers["script-runner"][0]
     web = containers["web"][0]
     if spec.get('storage_maintenance'):
@@ -855,7 +881,16 @@ def restore_main():
     if present not in {"0", "1"}:
         raise RuntimeError("Fresh testing database inventory is ambiguous")
     resume = present == "1"
-    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget']):
+    staged_bytes = 0
+    assembly_bytes = 0
+    if not resume and gen.get('drill_storage_budget') and gen.get('source_mode') == 'container-export':
+        capture = spec.get('native_capture')
+        if capture is None:
+            raise RuntimeError('Native copy lacks its original capture receipt')
+        files = json.loads(docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':capture,'mode':'inspect'}).encode()).decode(),stdin=spec['native_files_program'].encode()))
+        staged_bytes = sum(item['size'] for item in files['chunks'])
+        assembly_bytes = sum(capture[part]['size'] for part in ('database', 'filestore'))
+    if not resume and gen.get('drill_storage_budget') and not storage_capacity(spec, containers, gen['drill_storage_budget'], staged_bytes, assembly_bytes):
         raise RuntimeError('Testing storage capacity is insufficient')
     docker("exec", "-u", "root", runner, "rm", "-f", spec["web_gate_path"])
     docker("stop", web)
@@ -981,7 +1016,7 @@ try:
     main()
 except PermissionError:
     if len(sys.argv)>2:
-        print(sys.argv[2]+json.dumps({'type':'denied'}),flush=True)
+        print(sys.argv[2]+json.dumps({'type':'failed'}),flush=True)
         sys.exit(1)
     print('odoo_restore_completed=false')
     print('testing_copy_sanitized=false')

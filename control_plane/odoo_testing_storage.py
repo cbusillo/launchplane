@@ -153,7 +153,7 @@ def prepare_drill_storage(
             operation.idempotency_key, time.time(), {"storage_status": "unconfigured"}
         )
         raise DrillPrerequisite("testing_storage_budget_required")
-    budget = lane.odoo_testing_drill_storage.model_dump()
+    budget = lane.odoo_testing_drill_storage.model_dump(exclude={"retained_copy_bindings"})
     binding = fresh_testing_authority_sha256(store, generation)
     pending = store.list_odoo_testing_disposal_receipts(operation.product, operation.context)
     copies = []
@@ -164,7 +164,12 @@ def prepare_drill_storage(
         planned = FreshOdooTestingGeneration.model_validate(
             receipt.response_payload["planned_generation"]
         )
-        if planned.discard_drill_database in protected or not planned.discard_drill_database:
+        if (
+            planned.discard_drill_database in protected
+            or not planned.discard_drill_database
+            or planned.discard_copy_binding
+            in lane.odoo_testing_drill_storage.retained_copy_bindings
+        ):
             retained[receipt.idempotency_key] = planned.model_dump(mode="json")
             continue
         if (planned.namespace, planned.target_id, planned.resources_binding_sha256) != (
@@ -221,6 +226,8 @@ def prepare_drill_storage(
         if safety is not None and (safety.usage == "in_use" or safety.data == "only_copy"):
             raise DrillSkipped("lane_use_or_only_copy_protected") from error
         raise DrillPrerequisite("usage_custody_or_isolation_unverified") from error
+    if result.get("skip_code"):
+        raise DrillSkipped(str(result["skip_code"]))
     if not result["authority_current"]:
         raise DrillPrerequisite("testing_storage_authority_changed")
     if not result["capacity"]:

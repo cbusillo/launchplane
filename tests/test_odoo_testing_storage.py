@@ -3,6 +3,8 @@
 import ast
 from datetime import datetime, timezone
 import json
+import io
+from contextlib import redirect_stdout
 import os
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -216,6 +218,24 @@ class TestingStorageTests(TestingDrillScenario):
         with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_capacity_unverified"):
             self.store.activate_odoo_testing_drill(self.worker, self.now)
 
+    def test_reclaimed_worker_cannot_reuse_previous_attempt_capacity(self) -> None:
+        self.prepare()
+        from control_plane.storage.postgres import (
+            LaunchplaneOdooStableTargetReplacementOperationRow,
+        )
+
+        reclaimed = self.worker.model_copy(update={"attempt": self.worker.attempt + 1})
+        with self.store._session_factory() as session:
+            row = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow, self.worker.operation_id
+            )
+            assert row is not None
+            row.attempt = reclaimed.attempt
+            row.payload = reclaimed.model_dump(mode="json")
+            session.commit()
+        with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_capacity_unverified"):
+            self.store.activate_odoo_testing_drill(reclaimed, self.now)
+
     def test_use_report_before_locked_maintenance_refuses_provider_dispatch(self) -> None:
         from tests.support.disposable_lanes import record_safety
 
@@ -224,6 +244,100 @@ class TestingStorageTests(TestingDrillScenario):
         with self.assertRaises(DrillSkipped):
             self.prepare(execute)
         execute.assert_not_called()
+
+    def test_failed_activated_drill_keeps_its_disposal_in_the_ledger(self) -> None:
+        receipt = self.old_receipt()
+        receipt.response_payload.update(status="fail", activation_attempt=1)
+        self.store.write_idempotency_record(receipt)
+        self.prepare()
+        self.assertEqual(
+            len(self.storage_executor.call_args.args[2]["storage_maintenance"]["copies"]), 1
+        )
+        self.assertFalse(
+            self.store.list_odoo_testing_disposal_receipts(self.profile.product, self.context)
+        )
+
+    def test_explicit_retention_uses_original_binding_and_preserves_a_copy(self) -> None:
+        receipt = self.old_receipt()
+        witness = receipt.response_payload["planned_generation"]["discard_copy_binding"]
+        profile = self.profile.model_dump(mode="json")
+        for lane in profile["lanes"]:
+            if lane["instance"] == "testing":
+                lane["odoo_testing_drill_storage"]["retained_copy_bindings"] = [witness]
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(profile)
+        )
+        from tests.support.disposable_lanes import record_safety
+
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.context,
+            "testing",
+            observed_at=datetime.fromtimestamp(self.now, timezone.utc),
+        )
+        self.prepare()
+        self.assertEqual(
+            self.storage_executor.call_args.args[2]["storage_maintenance"]["copies"], []
+        )
+        self.assertEqual(self.evidence().disposal_attention, 1)
+
+    def test_use_report_during_remote_wait_preserves_evidence_and_skips_activation(self) -> None:
+        from tests.support.disposable_lanes import record_safety
+
+        def execute(
+            root: Path, target_id: str, spec: dict[str, object], dispatch: Any
+        ) -> dict[str, object]:
+            dispatch(lambda: None)
+            record_safety(
+                self.store,
+                self.profile.product,
+                self.context,
+                "testing",
+                usage="in_use",
+                observed_at=datetime.fromtimestamp(self.now, timezone.utc),
+            )
+            return {"capacity": True, "disposals": []}
+
+        with self.assertRaises(DrillSkipped):
+            prepare_drill_storage(
+                self.store,
+                self.worker,
+                Path("."),
+                execute=execute,
+                now=self.now,
+                checkpoint=lambda: None,
+            )
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+        retained = storage_receipt(self.store, self.worker.operation_id)
+        assert retained is not None
+        self.assertEqual(retained.response_payload["phase"], "complete")
+
+    def test_stale_alert_delivery_cannot_resurrect_disposal_state(self) -> None:
+        self.store.update_odoo_testing_drill_receipt(
+            self.worker.idempotency_key,
+            self.now,
+            {
+                "failure_step": "testing_disposal_deferred",
+                "failure_trace": self.worker.operation_id,
+                "disposal_status": "deferred",
+            },
+        )
+
+        def notify(product: str, context: str, payload: Any) -> bool:
+            self.store.update_odoo_testing_drill_receipt(
+                self.worker.idempotency_key, self.now, {"disposal_status": "disposed"}
+            )
+            return True
+
+        self.scheduler.notify = notify
+        self.scheduler._deliver_alerts(self.profile.product, self.context, self.now)
+        self.assertEqual(self.read_slot().response_payload["disposal_status"], "disposed")
 
     def test_hold_arriving_during_handshake_is_checked_before_dispatch(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
@@ -301,6 +415,9 @@ class HostCapacityTests(unittest.TestCase):
                 os, "statvfs", return_value=SimpleNamespace(f_bavail=100, f_frsize=1)
             ):
                 self.assertFalse(namespace["storage_capacity"](spec, containers, budget))
+                self.assertTrue(
+                    namespace["storage_capacity"](spec, containers, budget, staged_bytes=40)
+                )
                 budget["staging_bytes"] = 10
                 self.assertTrue(namespace["storage_capacity"](spec, containers, budget))
                 spec["generation"]["source_mode"] = "ssh"
@@ -309,3 +426,35 @@ class HostCapacityTests(unittest.TestCase):
                 containers["script-runner"][1]["GraphDriver"] = {}
                 with self.assertRaises(RuntimeError):
                     namespace["storage_capacity"](spec, containers, budget)
+
+    def test_filestore_permission_failure_is_recorded_per_copy(self) -> None:
+        from datetime import timedelta
+
+        namespace: dict[str, Any] = {
+            "Path": Path,
+            "os": os,
+            "json": json,
+            "sys": SimpleNamespace(argv=["test", "payload", "result:"]),
+            "docker": Mock(return_value=b"fixture-witness"),
+            "discard_previous_drill": Mock(side_effect=PermissionError),
+        }
+        exec(STORAGE_MAINTENANCE_LIBRARY, namespace)
+        namespace["storage_capacity"] = Mock(return_value=True)
+        spec = {
+            "generation": {},
+            "database_name": "current",
+            "copy_witness_parameter": "fixture-marker",
+            "copy_binding_sha256": "fixture-witness",
+            "storage_maintenance": {
+                "copies": [{}],
+                "budget": {},
+                "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=1)).timestamp(),
+            },
+        }
+        output = io.StringIO()
+        with redirect_stdout(output):
+            namespace["storage_maintenance"](
+                spec, {"database": ("db", {}), "script-runner": ("runner", {})}
+            )
+        result = json.loads(output.getvalue().removeprefix(namespace["sys"].argv[2]))
+        self.assertEqual(result["disposals"], ["deferred"])

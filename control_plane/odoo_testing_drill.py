@@ -509,7 +509,15 @@ class OdooTestingDrillScheduler:
                     payload["disposal_status"] = "disposed"
             if payload != receipt.response_payload:
                 payload["observed_at"] = timestamp(now)
-                self.store.update_odoo_testing_drill_receipt(receipt.idempotency_key, now, payload)
+                self.store.update_odoo_testing_drill_receipt(
+                    receipt.idempotency_key,
+                    now,
+                    {
+                        key: value
+                        for key, value in payload.items()
+                        if receipt.response_payload.get(key) != value
+                    },
+                )
         # Never replace an unfinished or held generation with a new snapshot/key.
         if payload.get("operation_id") and payload["status"] == "fail":
             operation = self.store.read_odoo_stable_target_replacement_operation_record(
@@ -534,7 +542,23 @@ class OdooTestingDrillScheduler:
                 continue
             payload["alert_delivered"] = self.notify(product, context, payload)
             payload["next_alert_at"] = now + DRILL_ALERT_RETRY_SECONDS
-            self.store.update_odoo_testing_drill_receipt(receipt.idempotency_key, now, payload)
+            self.store.update_odoo_testing_drill_receipt(
+                receipt.idempotency_key,
+                now,
+                {
+                    key: payload[key]
+                    for key in ("alert_delivered", "next_alert_at", "delivered_destinations")
+                    if key in payload
+                },
+                expected_failure=(
+                    receipt.response_payload.get(
+                        "failure_step", receipt.response_payload.get("step")
+                    ),
+                    receipt.response_payload.get(
+                        "failure_trace", receipt.response_payload.get("trace")
+                    ),
+                ),
+            )
 
     def _notify(self, product: str, context: str, payload: dict[str, JsonValue]) -> bool:
         from control_plane.notifications import post_discord_webhook

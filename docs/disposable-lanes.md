@@ -839,18 +839,27 @@ An outstanding retriable disposal prevents the next capture from starting;
 the last healthy copy keeps serving. Later scheduled attempts reconcile the
 same original identities instead of adding another copy to a growing backlog.
 
-Before DROP, the host fsyncs a write-ahead receipt on the qualified logs
-volume outside PGDATA, binding the original database and witness. If DROP succeeds but filestore
+Before DROP, the host fsyncs a write-ahead receipt in its account's private
+`~/.local/state/launchplane-testing-disposal/<namespace>/` directory, outside
+PGDATA and container mounts, binding the original database and witness. If DROP succeeds but filestore
 removal or transport fails, the original-key retry reacquires the host lock and
 uses that receipt. An absent database with a remaining filestore and no receipt
 is retained without deleting files; absence of both needs no deletion. Foreign witnesses, symlinks and
-current/immediate-predecessor identities are refused. Historical slot receipts
+current/immediate-predecessor identities are refused. Directory-relative,
+no-follow opens protect receipt creation/readback, and actual mount inspection
+refuses any writable container access to the host state directory. Historical slot receipts
 remain queryable after cleanup. Legacy `testing_drill_disposal_deferred` log
 markers are consumed into service evidence, but new copies no longer perform
-inline best-effort deletion after web startup.
+inline best-effort deletion after web startup. Activated failed/cancelled slots
+stay in the ledger too; success is not the source of disposal custody.
 
 Each testing lane's `odoo_testing_drill_storage` record supplies positive integer
-`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`. Set these
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`.
+`staging_bytes` covers the complete working staging peak: SSH host staging must
+include both dump and rsynced filestore; the runner copy holds the dump. Native
+staging must include chunks and assembled artifacts. Already verified staged
+native bytes are deducted at the later host check, while space for the immutable
+capture's assembly remains required. Set these
 working-headroom requirements through the existing authenticated product-profile
 write path, preserving the rest of the current profile. There are no invented
 real sizes, default budgets, new grants or assumed observation lifetimes.
@@ -936,3 +945,19 @@ Once a profile or generation contains a drill storage budget, use this image or 
 compatible successor for recovery. Older images cannot interpret those fields;
 forward-fix rather than removing custody evidence to roll back. Disabling the
 existing drill flag prevents new scheduled captures and changes no retained copy.
+
+For a deliberately retained copy, the existing authenticated profile path accepts
+`odoo_testing_drill_storage.retained_copy_bindings`, a list of exact original
+committed discard-copy bindings from private slot evidence. The bounded service
+pass records these as retained attention without deleting data, erasing receipts,
+changing identity or granting access. This is the supported continuation for a
+copy that must stay connected or cannot be removed: it prevents an indefinite
+retriable-cleanup block while preserving its storage/custody. Capacity and fresh
+lane safety still gate each new capture. It is not a recurring manual usage
+approval or permission to delete a retained copy.
+
+The guarded terminal program send has its own bounded deadline; expiry shuts
+down that connection and retains original-key uncertainty. Alert delivery writes
+only delivery fields for its original failure, and cannot overwrite worker
+storage/disposal evidence. A hold or positive use report arriving while a completed
+cleanup result is in flight preserves that result but skips the new activation.

@@ -2008,6 +2008,7 @@ export type OdooTestingDrillStorageBudget = {
     database_bytes: number;
     filestore_bytes: number;
     reserve_bytes: number;
+    retained_copy_bindings: Array<string>;
     staging_bytes: number;
 };
 

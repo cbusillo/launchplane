@@ -550,6 +550,50 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertFalse(any(call[:2] == ["docker", "cp"] for call in self.calls))
         self.assertIn(["docker", "start", "web"], self.calls)
 
+    def test_native_staged_chunks_are_not_charged_again_before_restore(self) -> None:
+        from types import SimpleNamespace
+
+        self.spec["generation"].update(
+            source_mode="container-export",
+            source_binding_sha256="f" * 64,
+            drill_storage_budget={
+                "database_bytes": 20,
+                "filestore_bytes": 20,
+                "staging_bytes": 80,
+                "reserve_bytes": 1,
+            },
+        )
+        self.spec["source"] = {}
+        self.spec["native_capture"] = {
+            "capture_id": "a" * 32,
+            "generation_binding_sha256": self.spec["copy_binding_sha256"],
+            "source_binding_sha256": "f" * 64,
+            "database": {"size": 20},
+            "filestore": {"size": 20},
+        }
+        self.containers["script-runner"]["GraphDriver"] = {"Data": {"UpperDir": str(self.root)}}
+        command = self.command
+
+        def staged(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            if kwargs.get("input") == self.spec["native_files_program"].encode():
+                request = json.loads(base64.b64decode(arguments[-1]))
+                if request["mode"] == "inspect":
+                    return subprocess.CompletedProcess(
+                        arguments,
+                        0,
+                        stdout=json.dumps({"chunks": [{"size": 40}], "artifacts": {}}).encode(),
+                        stderr=b"",
+                    )
+            return command(arguments, **kwargs)
+
+        with (
+            patch.object(self, "command", side_effect=staged),
+            patch.object(os, "statvfs", return_value=SimpleNamespace(f_bavail=90, f_frsize=1)),
+        ):
+            status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.assertIn(["docker", "start", "web"], self.calls)
+
     def test_published_port_or_host_credential_mount_refuses_before_source_read(self) -> None:
         self.containers["web"]["HostConfig"]["PortBindings"] = {"8069/tcp": [{"HostPort": "18069"}]}
         status, _ = self.run_program()

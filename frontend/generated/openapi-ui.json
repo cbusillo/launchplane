@@ -20623,6 +20623,14 @@
             "title": "Reserve Bytes",
             "type": "integer"
           },
+          "retained_copy_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Copy Bindings",
+            "type": "array"
+          },
           "staging_bytes": {
             "exclusiveMinimum": 0,
             "title": "Staging Bytes",
@@ -20633,6 +20641,7 @@
           "database_bytes",
           "filestore_bytes",
           "reserve_bytes",
+          "retained_copy_bindings",
           "staging_bytes"
         ],
         "title": "OdooTestingDrillStorageBudget",

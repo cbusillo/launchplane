@@ -23,15 +23,13 @@ def storage_maintenance(spec, containers):
         try:
             status = discard_previous_drill(candidate, containers['database'][0], containers['script-runner'][0], spec['database_name'])
             results.append(status or 'disposed')
-        except PermissionError:
-            raise
         except Exception:
             results.append('deferred')
     capacity = storage_capacity(spec, containers, maintenance['budget'])
     print(sys.argv[2] + json.dumps({'type':'complete', 'disposals':results, 'capacity':capacity}), flush=True)
 
 
-def storage_capacity(spec, containers, budget):
+def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0):
     gen = spec['generation']
     # Group demands on the same actual backing filesystem. Comparing each
     # volume independently would admit two allocations against the same free bytes.
@@ -53,7 +51,7 @@ def storage_capacity(spec, containers, budget):
     upper = driver.get('Data', {}).get('UpperDir')
     if not upper:
         raise RuntimeError('Runner staging backing is unavailable')
-    demand(upper, budget['staging_bytes'])
+    demand(upper, max(assembly_bytes, budget['staging_bytes'] - staged_bytes))
     if gen.get('source_mode', 'ssh') != 'container-export':
         demand(tempfile.gettempdir(), budget['staging_bytes'])
     capacity = all(available[device] >= size + budget['reserve_bytes'] for device, size in required.items())

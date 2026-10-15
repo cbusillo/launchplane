@@ -91,8 +91,10 @@ class Connection:
 class NativeSourceTransportTests(unittest.TestCase):
     def test_dispatch_guard_can_refuse_after_handshake_without_sending_the_program(self) -> None:
         connection = Connection()
+        before_refusal: list[str] = []
 
         def refuse(dispatch: Any) -> None:
+            before_refusal.extend(connection.sent)
             raise transport.NativeSourceAuthorizationDenied("fixture revoked authority")
 
         with self.assertRaises(transport.NativeSourceAuthorizationDenied):
@@ -105,7 +107,50 @@ class NativeSourceTransportTests(unittest.TestCase):
                 dispatch_guard=refuse,
             )
         self.assertTrue(connection.sent)
-        self.assertFalse(any(message.startswith("{") for message in connection.sent))
+        self.assertEqual(connection.sent, before_refusal)
+
+    def test_guarded_send_deadline_aborts_the_connection(self) -> None:
+        connection = Connection()
+        abort = Mock()
+        scheduled: list[Any] = []
+
+        class Deadline:
+            daemon = False
+
+            def __init__(self, seconds: float, callback: Any):
+                scheduled.append(callback)
+
+            def start(self) -> None:
+                pass
+
+            def cancel(self) -> None:
+                pass
+
+            def join(self) -> None:
+                pass
+
+        original = connection.send
+
+        def send(message: str) -> None:
+            if scheduled:
+                scheduled[0]()
+            original(message)
+
+        with (
+            patch.object(transport, "Timer", Deadline),
+            patch.object(connection, "send", side_effect=send),
+        ):
+            with self.assertRaises(transport.NativeSourceUnavailable):
+                transport._read_program(
+                    connection,
+                    program="fixture",
+                    payload={},
+                    timeout_seconds=5,
+                    receive=lambda frame: None,
+                    dispatch_guard=lambda send: send(),
+                    abort_send=abort,
+                )
+        abort.assert_called_once()
 
     def test_private_cache_requires_a_mount_outside_the_shared_backing(self) -> None:
         from control_plane.odoo_testing_native_source import require_private_copy_mount

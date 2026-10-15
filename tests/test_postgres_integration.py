@@ -11309,14 +11309,34 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             )
         previous_engine.dispose()
         cleaned: list[str] = []
+        import io
+        import sys
+        from contextlib import redirect_stdout
+
+        filestore = Path(self.enterContext(TemporaryDirectory())).resolve()
+        (filestore / previous).mkdir()
+        concrete_path = type(filestore)
+
+        def child_path(value: str) -> Path:
+            return filestore if value == "/volumes/data/filestore" else concrete_path(value)
+
         filestore_failure = False
+        refuse_connected = False
 
         def docker(*arguments: str, stdin: bytes | None = None) -> bytes:
             if stdin is None:
                 if filestore_failure:
                     raise OSError("fixture filestore removal failure")
-                cleaned.append(arguments[-1])
-                return b""
+                output = io.StringIO()
+                with (
+                    patch("pathlib.Path", side_effect=child_path),
+                    patch.object(sys, "argv", ["child", arguments[-1]]),
+                    redirect_stdout(output),
+                ):
+                    exec(arguments[-2], {})
+                if not (filestore / previous).exists():
+                    cleaned.append(arguments[-1])
+                return output.getvalue().encode()
             command = shlex.split(arguments[arguments.index("-c") + 1])
             database = command[command.index("-d") + 1]
             database = arguments[-1] if database == "$1" else database
@@ -11330,7 +11350,8 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                         .replace(':"database_name"', sql.Identifier(arguments[-1]).as_string(raw))
                         .replace(":'database_name'", sql.Literal(arguments[-1]).as_string(raw))
                     )
-                    connection.exec_driver_sql("SET statement_timeout = '250ms'")
+                    if refuse_connected:
+                        connection.exec_driver_sql("SET statement_timeout = '250ms'")
                     result = connection.exec_driver_sql(program)
                     value = result.scalar_one_or_none() if result.returns_rows else None
                     return ("" if value is None else str(value)).encode()
@@ -11365,8 +11386,10 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             )
         previous_engine.dispose()
         with previous_engine.connect():
+            refuse_connected = True
             with self.assertRaises(Exception):
                 discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
+        refuse_connected = False
         previous_engine.dispose()
         self.assertFalse(cleaned)
         filestore_failure = True
@@ -11374,6 +11397,16 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
         filestore_failure = False
         discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
+        self.assertEqual(cleaned, [previous])
+        # A legacy partial drop has no host receipt. Preserve its remaining
+        # filestore as visible attention, without blocking current resources.
+        (filestore / previous).mkdir()
+        legacy_state = Path(self.enterContext(TemporaryDirectory())).resolve()
+        self.assertEqual(
+            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, legacy_state),
+            "retained",
+        )
+        self.assertTrue((filestore / previous).is_dir())
         self.assertEqual(cleaned, [previous])
         with root_engine.connect() as connection:
             self.assertFalse(
@@ -11468,6 +11501,13 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             try:
                 writer.result(timeout=5)
                 admission.result(timeout=5)
+                second.write_runtime_environment_record(
+                    scenario.runtime.model_copy(
+                        update={
+                            "env": {**scenario.runtime.env, "EXAMPLE_INSTANCE_SETTING": "changed"}
+                        }
+                    )
+                )
             finally:
                 finish_remote.set()
             from control_plane.odoo_testing_drill import DrillPrerequisite

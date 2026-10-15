@@ -1,7 +1,8 @@
 """Value-free lane evidence for the service's disposable rebuild drill."""
 
 from typing import Literal
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+import re
 
 
 class OdooTestingDrillStorageBudget(BaseModel):
@@ -13,6 +14,18 @@ class OdooTestingDrillStorageBudget(BaseModel):
     filestore_bytes: int = Field(gt=0)
     staging_bytes: int = Field(gt=0)
     reserve_bytes: int = Field(gt=0)
+    retained_copy_bindings: tuple[str, ...] = Field(
+        default=(), strict=False, exclude_if=lambda value: not value
+    )
+
+    @field_validator("retained_copy_bindings")
+    @classmethod
+    def validate_retained_bindings(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if len(values) != len(set(values)) or any(
+            not re.fullmatch(r"[a-f0-9]{64}", value) for value in values
+        ):
+            raise ValueError("Retained copies require unique original committed copy bindings.")
+        return values
 
 
 class OdooTestingDrillEvidence(BaseModel):
