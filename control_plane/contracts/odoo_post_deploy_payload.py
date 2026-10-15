@@ -10,6 +10,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooWebsiteBootstrapPayload,
 )
 from control_plane.contracts.runtime_environment_record import ScalarValue
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
 
 OdooPostDeployWorkflowIntent = Literal["deploy", "restore", "bootstrap"]
 
@@ -116,6 +117,7 @@ class OdooPostDeployPayload(BaseModel):
     config_parameters: tuple[OdooPostDeployConfigParameter, ...] = ()
     addon_settings: tuple[OdooPostDeployAddonSetting, ...] = ()
     website_bootstrap: OdooWebsiteBootstrapPayload | None = None
+    website_settings: OdooWebsiteSettings | None = None
 
     @model_validator(mode="after")
     def _validate_payload(self) -> "OdooPostDeployPayload":
@@ -142,7 +144,9 @@ class OdooPostDeployPayload(BaseModel):
 
     @property
     def override_count(self) -> int:
-        website_count = 1 if self.website_bootstrap is not None else 0
+        website_count = int(self.website_bootstrap is not None) + int(
+            self.website_settings is not None
+        )
         return len(self.config_parameters) + len(self.addon_settings) + website_count
 
     @property
@@ -157,6 +161,8 @@ class OdooPostDeployPayload(BaseModel):
             "config_parameters": [override.to_wire_dict() for override in self.config_parameters],
             "addon_settings": [override.to_wire_dict() for override in self.addon_settings],
         }
+        if self.website_settings is not None:
+            payload["website_settings"] = self.website_settings.model_dump(mode="json")
         if self.website_bootstrap is not None:
             payload["website_bootstrap"] = self.website_bootstrap.model_dump(mode="json")
         return payload
