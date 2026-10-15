@@ -47411,6 +47411,15 @@
             "pattern": "^(?:[a-f0-9]{64})?$",
             "title": "Reviewed Plan Sha256",
             "type": "string"
+          },
+          "source_mode": {
+            "default": "ssh",
+            "enum": [
+              "ssh",
+              "container-export"
+            ],
+            "title": "Source Mode",
+            "type": "string"
           }
         },
         "required": [
@@ -47500,7 +47509,8 @@
               "recovery_inspection_before_fence",
               "recovery_provider_evidence_incomplete",
               "recovery_operation_or_binding_changed",
-              "recovery_evidence_unavailable"
+              "recovery_evidence_unavailable",
+              "recovery_source_exceeds_bound"
             ],
             "title": "Reason",
             "type": "string"

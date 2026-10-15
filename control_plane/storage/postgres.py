@@ -139,6 +139,7 @@ from control_plane.contracts.disposable_lane import (
     DisposableTestingResourcePreparation,
 )
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+from control_plane.contracts.odoo_testing_source import NativeTestingCopyCapture
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
     RELEASE_DECISION_GRANTS,
@@ -651,8 +652,11 @@ class OrdinaryAgentDeliveryActivationStore(Protocol):
 
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
+NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS = 5
 ProductProfileCompareWriteStatus = Literal[
     "written",
+    "history_busy",
+    "history_conflict",
     "missing",
     "changed",
     "replayed",
@@ -3732,6 +3736,12 @@ class LaunchplaneFreshOdooTestingGenerationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneNativeTestingCopyCaptureRow(Base):
+    __tablename__ = "launchplane_native_testing_copy_captures"
+    generation_binding_sha256: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneTestingActivationRow(Base):
     __tablename__ = "launchplane_testing_activations"
     product: Mapped[str] = mapped_column(String, primary_key=True)
@@ -5998,7 +6008,11 @@ class PostgresRecordStore(HumanSessionStore):
 
     @staticmethod
     def _payload_dict(model: BaseModel) -> PayloadDict:
-        return model.model_dump(mode="json", exclude_none=True)
+        payload = model.model_dump(mode="json", exclude_none=True)
+        if isinstance(model, FreshOdooTestingGeneration) and model.source_mode == "ssh":
+            payload.pop("source_mode", None)
+            payload.pop("source_binding_sha256", None)
+        return payload
 
     @staticmethod
     def _read_payload(*, model_type: type[RecordModel], payload: PayloadDict) -> RecordModel:
@@ -10431,6 +10445,47 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
             return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
+
+    def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneNativeTestingCopyCaptureRow, binding)
+            return NativeTestingCopyCapture.model_validate(row.payload) if row else None
+
+    def write_native_testing_copy_capture(self, record: NativeTestingCopyCapture) -> None:
+        from control_plane.odoo_testing_restore import generation_binding
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            generation_row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (record.product, record.context),
+                with_for_update=True,
+            )
+            if generation_row is None:
+                raise ValueError("Native capture requires its recorded generation.")
+            generation = FreshOdooTestingGeneration.model_validate(generation_row.payload)
+            if (
+                generation.source_mode != "container-export"
+                or generation.completed_at
+                or generation_binding(generation) != record.generation_binding_sha256
+                or generation.source_binding_sha256 != record.source_binding_sha256
+            ):
+                raise ValueError("Native capture differs from the active generation.")
+            row = session.get(
+                LaunchplaneNativeTestingCopyCaptureRow, record.generation_binding_sha256
+            )
+            if row is not None:
+                if NativeTestingCopyCapture.model_validate(row.payload) != record:
+                    raise ValueError("Native capture receipts are immutable; do not recapture.")
+                return
+            session.add(
+                LaunchplaneNativeTestingCopyCaptureRow(
+                    generation_binding_sha256=record.generation_binding_sha256,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
 
     def read_testing_activation(self, product: str, context: str) -> dict[str, Any] | None:
         with self._session_factory() as session:
@@ -21597,6 +21652,10 @@ class PostgresRecordStore(HumanSessionStore):
                 {
                     **record.model_dump(),
                     "state": "pending" if record.rerequested_while_running else outcome,
+                    # A deferred or newly requested pass yields to work already waiting.
+                    "requested_at": (
+                        completed_at if record.rerequested_while_running else record.requested_at
+                    ),
                     "updated_at": completed_at,
                     "lease_owner": "",
                     "lease_expires_at": "",
@@ -23969,24 +24028,41 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="changed")
-        if require_never_live_history:
-            self._lock_product_authority_bundle_write(session)
-        if require_never_live_history and self._engine.dialect.name == "postgresql":
-            session.execute(text("SET LOCAL lock_timeout = '5s'"))
-            # Include concurrent history insertions, not only existing rows.
-            tables = ", ".join(
-                model.__tablename__
-                for model in (
-                    LaunchplaneDeploymentRow,
-                    LaunchplanePromotionRow,
-                    LaunchplanePreviewRow,
-                )
+        try:
+            if require_never_live_history:
+                if self._engine.dialect.name == "postgresql":
+                    session.execute(
+                        text(
+                            "SET LOCAL lock_timeout = "
+                            f"'{NEVER_LIVE_CLASSIFICATION_LOCK_TIMEOUT_SECONDS}s'"
+                        )
+                    )
+                self._lock_product_authority_bundle_write(session)
+                if self._engine.dialect.name == "postgresql":
+                    # Include concurrent history insertions, not only existing rows.
+                    tables = ", ".join(
+                        model.__tablename__
+                        for model in (
+                            LaunchplaneDeploymentRow,
+                            LaunchplanePromotionRow,
+                            LaunchplanePreviewRow,
+                        )
+                    )
+                    session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
+            self._lock_landing_authority(
+                session, landing_authority.product_profile(expected_record.product)
             )
-            session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
-        self._lock_landing_authority(
-            session, landing_authority.product_profile(expected_record.product)
-        )
-        row = session.scalar(statement)
+            row = session.scalar(statement)
+        except DBAPIError as error:
+            if not require_never_live_history or getattr(error.orig, "sqlstate", None) not in {
+                "55P03",
+                "40P01",
+            }:
+                raise
+            # No profile or provider effect has occurred. The reservation is
+            # in this transaction too; rollback permits a same-key retry.
+            session.rollback()
+            return ProductProfileCompareWriteResult(status="history_busy")
         if row is None:
             if reservation_row is not None:
                 session.delete(reservation_row)
@@ -24056,7 +24132,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if reservation_row is not None:
                     session.delete(reservation_row)
                     session.commit()
-                return ProductProfileCompareWriteResult(status="changed")
+                return ProductProfileCompareWriteResult(status="history_conflict")
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id

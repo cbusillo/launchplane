@@ -207,6 +207,77 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_deployment_records(), ())
         self.assertEqual(self.store.list_promotion_records(), ())
 
+    def test_reclaimed_classification_reservation_rolls_back_and_retries(self) -> None:
+        from functools import partial
+        from psycopg.errors import CheckViolation, DeadlockDetected, LockNotAvailable
+        from sqlalchemy.exc import DBAPIError
+        from control_plane.http_app import _PRODUCT_PRODUCTION_USE_SETTING_ROUTE
+        from control_plane.storage.postgres import DbOnlyMutationRequest
+
+        for failure in (LockNotAvailable, DeadlockDetected, CheckViolation):
+            with self.subTest(failure=failure.__name__):
+                profile = self.store.read_product_profile_record(self.profile.product)
+                now = datetime.now(timezone.utc)
+                with patch.object(
+                    self.store,
+                    "_database_mutation_timestamp",
+                    return_value=(now - timedelta(minutes=2)).isoformat(),
+                ):
+                    expired = self.store.reserve_mutation(
+                        scope="fixture-classification",
+                        route_path=_PRODUCT_PRODUCTION_USE_SETTING_ROUTE,
+                        idempotency_key=failure.__name__,
+                        request_fingerprint="reviewed-classification",
+                        lease_owner="expired-worker",
+                        lease_seconds=60,
+                    ).record
+                assert expired is not None
+                compare = partial(
+                    self.store.compare_and_write_product_profile_record,
+                    expected_record=profile,
+                    replacement_record=profile.model_copy(update={"production_use": "prelaunch"}),
+                    require_never_live_history=True,
+                    mutation=DbOnlyMutationRequest(
+                        scope=expired.scope,
+                        route_path=expired.route_path,
+                        idempotency_key=expired.idempotency_key,
+                        request_fingerprint=expired.request_fingerprint,
+                        lease_owner="retry-worker",
+                        response_status_code=202,
+                        response_trace_id="fixture-classification",
+                        response_payload={"result": {"applied": True}},
+                    ),
+                )
+                # Real PostgreSQL tests supply actual waits. Here inject each
+                # driver's failure at the lock boundary to exercise reclaimed
+                # transactions and ensure unrelated database errors still escape.
+                with patch.object(
+                    self.store,
+                    "_lock_landing_authority",
+                    side_effect=DBAPIError(None, None, failure("fixture lock failure")),
+                ):
+                    if failure is CheckViolation:
+                        with self.assertRaises(DBAPIError):
+                            compare()
+                    else:
+                        self.assertEqual(compare().status, "history_busy")
+                self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+                self.assertEqual(
+                    self.store.read_idempotency_record(
+                        scope=expired.scope,
+                        route_path=expired.route_path,
+                        idempotency_key=expired.idempotency_key,
+                    ),
+                    expired,
+                )
+                self.assertEqual(compare().status, "written")
+                replay = compare()
+                self.assertEqual(replay.status, "replayed")
+                assert replay.idempotency_record is not None
+                self.assertEqual(
+                    replay.idempotency_record.response_payload, {"result": {"applied": True}}
+                )
+
     async def test_live_and_production_products_cannot_be_downgraded(self) -> None:
         for updated in (
             self.profile.model_copy(update={"production_use": "live"}),
@@ -701,7 +772,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             self.store, "compare_and_write_product_profile_record", side_effect=insert_then_compare
         ):
             result = await self.classify()
-        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(result.status_code, 403, result.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
     async def test_uncertain_preview_can_reconcile_after_safety_expires(self) -> None:
