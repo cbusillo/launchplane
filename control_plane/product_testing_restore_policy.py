@@ -69,7 +69,7 @@ def build_testing_restore_policy_plan(
     # Operational source settings remain in the lane's managed runtime records.
     policy = ProductOdooLaneDataPolicy(
         data_authority=(
-            "restorable"
+            "authoritative"
             if lane.odoo_data_policy.data_authority == "unknown"
             else lane.odoo_data_policy.data_authority
         ),

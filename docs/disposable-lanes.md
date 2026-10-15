@@ -59,8 +59,10 @@ destination, credentials, runtime values, prelaunch approval, or full profile.
 The production lane and all other profile authority remain unchanged.
 Existing testing data authority is preserved, including an authoritative lane's
 backup requirement and a resettable lane's empty-rebuild eligibility. Only
-unknown data authority becomes `restorable`; that metadata change does not
-qualify unknown custody or isolation facts for execution.
+unknown data authority becomes conservatively `authoritative`, retaining its
+existing backup-before-replacement requirement while allowing an upstream
+source. This metadata preparation never waives a replacement backup requirement
+and does not qualify unknown custody or isolation facts for execution.
 
 Use the bounded repo client with the installed authenticated agent transport. Save its
 review evidence outside the checkout:

@@ -5,7 +5,10 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductOdooLaneDataPolicy,
+)
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.http_routes.product_testing_restore_policy import ROUTE
 from control_plane.product_testing_restore_policy import (
@@ -27,6 +30,29 @@ def profile() -> LaunchplaneProductProfileRecord:
 
 
 class TestingRestorePolicyTests(unittest.TestCase):
+    def test_default_authority_keeps_its_existing_replacement_backup_requirement(self) -> None:
+        before = profile()
+        testing = next(lane for lane in before.lanes if lane.instance == "testing")
+        policy = ProductOdooLaneDataPolicy()
+        before = before.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"odoo_data_policy": policy})
+                    if lane == testing
+                    else lane
+                    for lane in before.lanes
+                )
+            }
+        )
+        plan, _ = build_testing_restore_policy_plan(
+            before, TestingRestorePolicyRequest(context=testing.context, reason="Restore")
+        )
+        self.assertEqual(
+            plan.policy_after.destructive_replacement_proof_required,
+            policy.destructive_replacement_proof_required,
+        )
+        self.assertTrue(plan.policy_after.allows_rebuild_source("upstream_restore"))
+
     def test_existing_authority_and_its_backup_or_empty_rebuild_eligibility_are_preserved(
         self,
     ) -> None:
