@@ -10456,6 +10456,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "environment_id",
                     "target_id",
                     "app_name",
+                    "before_configuration_sha256",
                     "phase",
                     "published",
                     "qualified_at",
@@ -10463,7 +10464,13 @@ class PostgresRecordStore(HumanSessionStore):
                 }
                 if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
                     raise ValueError("Testing activation identities are immutable.")
-                for key in ("project_id", "environment_id", "target_id", "app_name"):
+                for key in (
+                    "project_id",
+                    "environment_id",
+                    "target_id",
+                    "app_name",
+                    "before_configuration_sha256",
+                ):
                     if getattr(previous, key) and getattr(previous, key) != getattr(record, key):
                         raise ValueError("Testing activation placement is immutable.")
                 if previous.published and not record.published:

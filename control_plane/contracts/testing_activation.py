@@ -51,6 +51,7 @@ class TestingActivationRecord(BaseModel):
     environment_id: str = ""
     target_id: str = ""
     app_name: str = ""
+    before_configuration_sha256: str = ""
     phase: str = "prepared"
     published: bool = False
     qualified_at: str = ""

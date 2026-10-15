@@ -37,7 +37,9 @@ are read back, then its actual converted Compose is interpolated with those
 same managed values and checked against the reviewed source. It can use only
 the two qualified volumes, explicit independent ports and its private Compose
 network. Host mounts, host capabilities, external networks, routing labels,
-unclassified credentials and external writable database endpoints refuse it.
+unclassified credentials and unqualified external `*_HOST`/`*_URL` environment
+endpoints refuse it. Application code remains responsible for the behavior of
+its declared read-only source integration.
 
 Use `dry-run` with a fresh `--evidence-file`, inspect the public result, then
 `apply --reviewed-dry-run --idempotency-key ORIGINAL` against that saved review.
@@ -50,9 +52,18 @@ Keep the original key after interruption. `receipt` reads its immutable complete
 result; `readback` checks the current published recipient. An original-key apply
 may adopt a fully persisted, exactly matching configuration after a lost reply
 and fresh storage/port readback. It does not redispatch creation. Missing creation
-identities, partial placements, drift, active work or incomplete evidence stay
-unknown and fenced. Preserve their resources and original key; never delete or
-reallocate to make a retry pass.
+identities are recovered only from one unambiguous original namespace and
+placement; only previously undispatched creation steps continue. Unknown absent
+creates, drift, active work or incomplete evidence stay fenced. An interrupted
+configuration can resume only when the unused recipient still exactly matches
+its recorded pre-write configuration; a completed matching write is adopted.
+Preserve resources and the original key; never delete or reallocate to retry.
+
+The new recipient uses raw Compose from the reviewed immutable source commit.
+Image deployments continue normally; later product Compose changes require a
+separately reviewed source/configuration update. Publication persists only the
+qualified volume and port overrides, so old recipient overrides cannot return
+shared storage or production ports during ordinary reconciliation.
 
 After separation is proved, use the existing supported testing-hold path:
 `scripts/stage-testing-separation.py lift-dry-run`, then `lift-apply`, with the
@@ -63,7 +74,9 @@ actual safe provider render and empty resources/ports before the lift, and
 checks authority again while clearing it. A new or foreign staff hold remains
 protected. This bounded continuation requests normal testing reconciliation;
 an ordinary staging-hold lift without activation proof keeps its existing
-no-reconcile behavior.
+no-reconcile behavior. A lost post-clear receipt can retry the original lift and
+recover its reconcile request. Its dry-run reads metadata only; apply rechecks
+the provider and executes the fixed read-only host inspection before clearing.
 
 Only the exact retained reservation of a published qualified replacement stops
 blocking the new recipient. The old reservation remains unchanged and continues

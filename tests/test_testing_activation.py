@@ -24,6 +24,7 @@ from control_plane.testing_activation_compose import (
     read_compose_source,
 )
 from tests import test_testing_separation_resources as preparation
+from control_plane.testing_separation_resources import preparation_binding
 
 
 COMPOSE = {
@@ -132,10 +133,20 @@ class ActivationTests(unittest.TestCase):
         self.addCleanup(self.preparation.doCleanups)
         fixture = self.preparation
         self.store, self.root, self.actor = fixture.store, fixture.root, fixture.actor
+        # Reconciliation must never inherit the old recipient's unsafe resource
+        # overrides, even when the independently managed lane values are safe.
+        fixture.retained.env.update(
+            DB_PORT="3307", CONFIG_VOLUME="production-config", OLD_RECIPIENT_ONLY="old"
+        )
+        self.store.write_dokploy_target_record(fixture.retained)
+        binding, _ = preparation_binding(
+            self.store, fixture.product, fixture.context, fixture.actor, fixture.root
+        )
+        fixture.body.reviewed_plan_sha256 = binding
         self.product, self.context, self.scope = (
             fixture.product,
             fixture.context,
-            "local-operator|local-owner-agent|local-owner-write",
+            self.caller_scope(),
         )
         with patch(
             "control_plane.testing_separation_resources.run_preparation_schedule",
@@ -167,6 +178,7 @@ class ActivationTests(unittest.TestCase):
             fixture.fixture.target.resolved_target.target_id: deepcopy(fixture.fixture.payload)
         }
         self.writes: list[tuple[str, Any]] = []
+        self.projects: list[dict[str, Any]] = []
         self.inspections: list[bool] = []
         self.enterContext(
             patch(
@@ -190,7 +202,10 @@ class ActivationTests(unittest.TestCase):
             )
         )
         self.enterContext(
-            patch("control_plane.testing_activation.api.fetch_dokploy_projects", return_value=[])
+            patch(
+                "control_plane.testing_activation.api.fetch_dokploy_projects",
+                side_effect=lambda **kwargs: deepcopy(self.projects),
+            )
         )
         self.enterContext(
             patch("control_plane.testing_activation.api.dokploy_request", side_effect=self.provider)
@@ -228,6 +243,15 @@ class ActivationTests(unittest.TestCase):
         )
         self.adapter.request = self.request
 
+    @staticmethod
+    def caller_scope() -> str:
+        from control_plane.http_routes.mutation_support import idempotency_scope
+        from control_plane.service_auth import LocalOperatorIdentity
+
+        return idempotency_scope(
+            LocalOperatorIdentity(subject="local-owner-agent", token_label="local-owner-write")
+        )
+
     def values(self, store: Any, root: Any, record: Any, resources: Any) -> dict[str, str]:
         return {
             "DOCKER_IMAGE_REFERENCE": "ghcr.io/example/site@sha256:" + "a" * 64,
@@ -260,15 +284,27 @@ class ActivationTests(unittest.TestCase):
         assert isinstance(body, dict)
         self.writes.append((path, deepcopy(body)))
         if path == "/api/project.create":
-            return {"projectId": "new-project"}
+            self.projects.append({**body, "projectId": "new-project", "environments": []})
+            return {
+                "project": {**body, "projectId": "new-project"},
+                "environment": {"environmentId": "default-environment"},
+            }
         if path == "/api/environment.create":
+            self.projects[0]["environments"].append(
+                {**body, "environmentId": "new-environment", "compose": []}
+            )
             return {"environmentId": "new-environment"}
         if path == "/api/compose.create":
+            self.projects[0]["environments"][0]["compose"].append(
+                {**body, "composeId": "new-compose"}
+            )
             self.payloads["new-compose"] = {
                 **body,
                 "composeId": "new-compose",
                 "env": "",
                 "serverId": "server",
+                "deployments": [],
+                "composeStatus": "idle",
             }
             return {"composeId": "new-compose"}
         if path == "/api/compose.update":
@@ -308,6 +344,11 @@ class ActivationTests(unittest.TestCase):
             self.preparation.retained.policies.staff_testing_hold,
         )
         self.assertEqual(
+            {int(current.env[key]) for key in self.request.port_keys},
+            set(self.planned_record.host_ports),
+        )
+        self.assertNotIn("OLD_RECIPIENT_ONLY", current.env)
+        self.assertEqual(
             self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
             production,
         )
@@ -329,21 +370,83 @@ class ActivationTests(unittest.TestCase):
         self.assertEqual(record.retained_target, self.preparation.retained)
         self.assertTrue(record.published)
 
-    def test_lost_creation_reply_and_new_key_never_duplicate_creation(self) -> None:
+    def check_lost_creation_reply(self, lost_path: str) -> None:
         original = self.provider
 
         def lost(**kwargs: Any) -> Any:
             value = original(**kwargs)
-            if kwargs["path"] == "/api/compose.create":
+            if kwargs["path"] == lost_path:
                 raise OSError("Lost creation response")
             return value
 
         with patch("control_plane.testing_activation.api.dokploy_request", side_effect=lost):
-            for key in ("activate", "activate", "different-key"):
-                self.assertEqual(self.run_activation(key).response_status_code, 409)
+            self.assertEqual(self.run_activation().response_status_code, 409)
+            self.assertEqual(self.run_activation("different-key").response_status_code, 409)
+            self.assertEqual(self.run_activation().response_status_code, 202)
         self.assertEqual(sum(path == "/api/compose.create" for path, _ in self.writes), 1)
-        self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+        self.assertEqual(sum(path == lost_path for path, _ in self.writes), 1)
+        self.assertIn(
+            self.preparation.original, self.store.list_held_provider_target_reservations()
+        )
+
+    def test_lost_project_creation_reply_adopts_without_duplicate(self) -> None:
+        self.check_lost_creation_reply("/api/project.create")
+
+    def test_lost_environment_creation_reply_adopts_without_duplicate(self) -> None:
+        self.check_lost_creation_reply("/api/environment.create")
+
+    def test_lost_recipient_creation_reply_adopts_without_duplicate(self) -> None:
+        self.check_lost_creation_reply("/api/compose.create")
+
+    def test_unknown_absent_creation_is_never_reissued(self) -> None:
+        original = self.provider
+        attempted: list[str] = []
+
+        def unknown(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/project.create":
+                attempted.append(kwargs["path"])
+                raise OSError("Uncertain request; no creation visible yet")
+            return original(**kwargs)
+
+        with patch("control_plane.testing_activation.api.dokploy_request", side_effect=unknown):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+            initial = list(attempted)
+            self.assertEqual(self.run_activation().response_status_code, 409)
+            self.assertEqual(attempted, initial)
+        self.assertEqual(self.writes, [])
         self.preparation.assert_retained()
+
+    def test_ambiguous_original_namespace_stays_fenced(self) -> None:
+        original = self.provider
+
+        def lost(**kwargs: Any) -> Any:
+            result = original(**kwargs)
+            if kwargs["path"] == "/api/project.create":
+                raise OSError("Lost creation reply")
+            return result
+
+        with patch("control_plane.testing_activation.api.dokploy_request", side_effect=lost):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        self.projects.append({**deepcopy(self.projects[0]), "projectId": "ambiguous-project"})
+        before = deepcopy(self.writes)
+        self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertEqual(self.writes, before)
+        self.preparation.assert_retained()
+
+    def test_configuration_not_written_can_resume_only_unchanged_unused_recipient(self) -> None:
+        original = self.provider
+
+        def before_configuration(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.update":
+                raise OSError("Transport failed before configuration")
+            return original(**kwargs)
+
+        with patch(
+            "control_plane.testing_activation.api.dokploy_request", side_effect=before_configuration
+        ):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(sum(path == "/api/compose.create" for path, _ in self.writes), 1)
 
     def test_unknown_port_or_storage_readback_keeps_old_recipient(self) -> None:
         with patch(
@@ -574,6 +677,37 @@ class ActivationTests(unittest.TestCase):
             current.policies.staff_testing_hold,
         )
 
+    def test_unrelated_profile_edits_do_not_strand_the_activation_lift(self) -> None:
+        from control_plane.testing_activation import require_activation_hold_lift
+        from control_plane.testing_lane_hold import TestingHoldApplyRequest
+
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        profile = self.store.read_product_profile_record(self.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"display_name": "Renamed product"})
+        )
+        request = TestingHoldApplyRequest(
+            product=self.product,
+            context=self.context,
+            instance="testing",
+            hold=False,
+            reason="Separation proven",
+            activation_plan_sha256=self.request.reviewed_plan_sha256,
+        )
+        self.assertTrue(require_activation_hold_lift(self.store, request, self.actor, self.root))
+
+    def test_safe_target_edits_keep_old_fence_attributed_but_resource_drift_does_not(self) -> None:
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        target.deploy_timeout_seconds = 123
+        self.store.write_dokploy_target_record(target)
+        self.assertTrue(retained_fence_is_separated(self.store, self.preparation.original))
+        target.env[self.request.port_keys[0]] = "3307"
+        self.store.write_dokploy_target_record(target)
+        self.assertFalse(retained_fence_is_separated(self.store, self.preparation.original))
+
     def test_supported_http_lift_replays_and_requests_only_testing_reconcile(self) -> None:
         import asyncio
         from control_plane.http_app import create_launchplane_fastapi_app
@@ -619,6 +753,18 @@ class ActivationTests(unittest.TestCase):
             "mode": "apply",
             "reviewed_plan_sha256": planned.json()["result"]["plan_sha256"],
         }
+        with patch.object(
+            self.store,
+            "request_product_reconcile",
+            side_effect=OSError("Receipt lost after hold clear"),
+        ):
+            with self.assertRaises(OSError):
+                asyncio.run(post(applied_body, "lift-qualified-testing"))
+        self.assertIsNone(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ).policies.staff_testing_hold
+        )
         applied = asyncio.run(post(applied_body, "lift-qualified-testing"))
         self.assertEqual(applied.status_code, 202, applied.text)
         self.assertTrue(applied.json()["result"]["reconcile_requested"])
@@ -627,7 +773,7 @@ class ActivationTests(unittest.TestCase):
         self.assertTrue(replayed.json()["replayed"])
         self.assertEqual(
             [row.target_key for row in self.store.list_product_reconcile_requests()],
-            [f"{self.product}:testing"],
+            [self.reconcile_target_key()],
         )
         self.assertEqual(
             self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
@@ -665,6 +811,11 @@ class ActivationTests(unittest.TestCase):
                 (_held_generic_web_deploy_fences(self.store) or {})[(self.context, "testing")],
                 current_fence,
             )
+
+    def reconcile_target_key(self) -> str:
+        from control_plane.contracts.product_reconcile import ProductReconcileTarget
+
+        return ProductReconcileTarget(product=self.product, target_kind="testing").target_key
 
     def test_supported_route_rejects_production_and_preserves_original_key_receipt(self) -> None:
         import asyncio
@@ -727,12 +878,19 @@ class ActivationTests(unittest.TestCase):
 
 
 class ActivationPortProgramTests(unittest.TestCase):
-    def run_program(self, ports: list[int], containers: list[dict[str, Any]]) -> tuple[int, str]:
+    def run_program(
+        self, ports: list[int], containers: list[dict[str, Any]], *, occupied: bool = False
+    ) -> tuple[int, str]:
         from contextlib import redirect_stdout
         import io
         import subprocess
         import sys
         from control_plane.testing_activation import PORT_INSPECTION_PROGRAM
+        from unittest.mock import Mock
+
+        listener = Mock()
+        if occupied:
+            listener.bind.side_effect = OSError("Address already in use")
 
         def docker(command: list[str], **kwargs: Any) -> Any:
             if command == ["docker", "ps", "-aq"]:
@@ -749,22 +907,20 @@ class ActivationPortProgramTests(unittest.TestCase):
         with (
             patch.object(sys, "argv", ["port-inspection", encoded]),
             patch("subprocess.run", side_effect=docker),
+            patch("socket.socket", return_value=listener),
             redirect_stdout(output),
         ):
             try:
                 exec(compile(PORT_INSPECTION_PROGRAM, "<testing-port-inspection>", "exec"), {})
             except SystemExit as error:
                 status = error.code if isinstance(error.code, int) else 1
+        if listener.bind.called:
+            listener.close.assert_called()
         return status, output.getvalue()
 
-    def test_actual_listener_and_stopped_container_port_are_protected(self) -> None:
-        import socket
-
-        with socket.socket() as listener:
-            listener.bind(("127.0.0.1", 0))
-            port = listener.getsockname()[1]
-            self.assertNotEqual(self.run_program([port], [])[0], 0)
-            self.assertEqual(listener.getsockname()[1], port)
+    def test_listener_refusal_and_stopped_container_port_are_protected(self) -> None:
+        port = 19212
+        self.assertNotEqual(self.run_program([port], [], occupied=True)[0], 0)
         stopped: dict[str, Any] = {
             "State": {"Running": False},
             "HostConfig": {"PortBindings": {"3306/tcp": [{"HostPort": str(port)}]}},

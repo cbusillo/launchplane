@@ -8900,6 +8900,7 @@ def create_launchplane_fastapi_app(
                         hold_request,
                         launchplane_identity_actor(identity),
                         resolved_control_plane_root,
+                        inspect_provider=hold_request.mode == "apply",
                     )
                 )
             except (
@@ -9040,6 +9041,8 @@ def create_launchplane_fastapi_app(
                 status_code=409, trace_id=trace_id, code="stale", message=str(error)
             ) from error
         except ValueError as error:
+            if not activated_interlock:
+                raise
             raise _launchplane_http_error(
                 status_code=409,
                 trace_id=trace_id,

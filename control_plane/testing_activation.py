@@ -116,16 +116,36 @@ def activation_record(
 
 
 def configuration_digest(store: PostgresRecordStore, product: str, context: str) -> str:
+    profile = store.read_product_profile_record(product)
+    lane = next(
+        item for item in profile.lanes if (item.context, item.instance) == (context, "testing")
+    )
+    configuration = disposable_lane_configuration(store, context, "testing")
+    keys = {item.binding_key for item in configuration if hasattr(item, "binding_key")}
     return canonical_json_sha256(
         {
-            "profile": store.read_product_profile_record(product).model_dump(mode="json"),
+            "profile": {
+                "product": profile.product,
+                "repository": profile.repository,
+                "driver_id": profile.driver_id,
+                "is_active": profile.is_active,
+                "image": profile.image.model_dump(mode="json"),
+                "lane": lane.model_dump(mode="json"),
+            },
             "configuration": [
                 row.model_dump(mode="json")
-                for row in disposable_lane_configuration(store, context, "testing")
+                for row in configuration
                 if not hasattr(row, "target_name")
             ],
             "key_policy": [
-                row.model_dump(mode="json")
+                {
+                    "rules": [
+                        rule.model_dump(mode="json", exclude={"description"})
+                        for rule in row.rules
+                        if rule.binding_key in keys
+                    ],
+                    "integration_key_markers": row.integration_key_markers,
+                }
                 for row in store.list_runtime_key_safety_policy_records(status="active", limit=1)
             ],
         }
@@ -267,6 +287,10 @@ def rendered_source(
         ports=ports_for(record, values),
         credential_values=credential_values,
     )
+    if not any(
+        service.get("image") == record.image_reference for service in rendered["services"].values()
+    ):
+        raise ValueError("The reviewed source must consume the verified product image.")
     return cast(dict[str, Any], rendered)
 
 
@@ -274,6 +298,21 @@ def target_without_hold(target: Any) -> dict[str, Any]:
     payload = target.model_dump(mode="json", exclude={"updated_at", "source_label"})
     payload["policies"].pop("staff_testing_hold", None)
     return cast(dict[str, Any], payload)
+
+
+def same_reservation_intent(current: object, original: object) -> bool:
+    return current is not None and all(
+        getattr(current, key, None) == getattr(original, key)
+        for key in (
+            "record_id",
+            "scope",
+            "route_path",
+            "idempotency_key",
+            "request_fingerprint",
+            "provider_target_key",
+            "reconciliation_key",
+        )
+    )
 
 
 def retained_fence_is_separated(store: object, reservation: object) -> bool:
@@ -295,22 +334,26 @@ def retained_fence_is_separated(store: object, reservation: object) -> bool:
         if (
             record is None
             or not record.published
-            or reservation not in record.retained_reservations
+            or not any(
+                same_reservation_intent(reservation, original)
+                for original in record.retained_reservations
+            )
         ):
             return False
-        target = store.read_provider_target_record(
-            context_name=record.context, instance_name="testing"
+        _profile, current, target_id, target = _bind(
+            store, record.product, record.context, "testing"
         )
         return (
             target.target_id == record.target_id
+            and target_id.target_id == record.target_id
+            and target.provider_target_type == "compose"
             and target.target_id != record.retained_target_id.target_id
             and record.published_target is not None
-            and target_without_hold(
-                store.read_dokploy_target_record(
-                    context_name=record.context, instance_name="testing"
-                )
+            and current.target_type == "compose"
+            and all(
+                current.env.get(key) == record.published_target.env.get(key)
+                for key in (*record.request.volume_keys.values(), *record.request.port_keys)
             )
-            == target_without_hold(record.published_target)
         )
     except (ValueError, FileNotFoundError):
         return False
@@ -352,9 +395,14 @@ def require_activation_hold_lift(
     if protection and protection.usage == "in_use":
         raise ValueError("Known staff use protects the testing recipient.")
     target = store.read_dokploy_target_record(context_name=record.context, instance_name="testing")
-    if target.policies.staff_testing_hold != record.retained_target.policies.staff_testing_hold:
+    if target.policies.staff_testing_hold not in (
+        None,
+        record.retained_target.policies.staff_testing_hold,
+    ):
         raise ValueError("A later genuine staff hold remains protected.")
-    if not inspect_provider:
+    if not inspect_provider or target.policies.staff_testing_hold is None:
+        # A lost post-clear receipt must still reach the writer's no-op/reconcile
+        # recovery; the now-running recipient need not remain empty.
         return True
     adapter.verify_provider(record)
     resources, _ = preparation_resources(store, record.product, record.request, record.scope)
@@ -600,7 +648,7 @@ class TestingActivationAdapter:
                 route_path=original.route_path,
                 idempotency_key=original.idempotency_key,
             )
-            if current != original:
+            if not same_reservation_intent(current, original):
                 raise ValueError("The retained original reservation changed.")
 
     def save(self, record: TestingActivationRecord, **updates: Any) -> TestingActivationRecord:
@@ -677,6 +725,127 @@ class TestingActivationAdapter:
         if actual != expected_render:
             raise ValueError("Actual provider render differs from the reviewed source and values.")
 
+    def unused_recipient(self, record: TestingActivationRecord) -> dict[str, Any]:
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        payload = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=record.target_id
+        )
+        old = api.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=record.retained_target_id.target_id,
+        )
+        app_name = payload.get("appName")
+        if (
+            payload.get("composeId") != record.target_id
+            or payload.get("environmentId") != record.environment_id
+            or payload.get("serverId") != old.get("serverId")
+            or not isinstance(app_name, str)
+            or not re.fullmatch(re.escape(record.namespace) + r"(?:-[a-z0-9]{6})?", app_name)
+            or payload.get("deployments") != []
+            or payload.get("composeStatus") not in {None, "idle"}
+            or payload.get("domains")
+            or payload.get("mounts")
+            or payload.get("serviceNetworks")
+        ):
+            raise ValueError("The original fresh recipient is not provably unused.")
+        return cast(dict[str, Any], payload)
+
+    @staticmethod
+    def recipient_configuration_sha256(payload: dict[str, Any]) -> str:
+        return canonical_json_sha256(
+            {
+                key: payload.get(key)
+                for key in (
+                    "composeId",
+                    "environmentId",
+                    "serverId",
+                    "appName",
+                    "sourceType",
+                    "composeFile",
+                    "composePath",
+                    "autoDeploy",
+                    "env",
+                    "mounts",
+                    "domains",
+                    "serviceNetworks",
+                    "randomize",
+                    "isolatedDeployment",
+                )
+            }
+        )
+
+    def recover_placement(self, record: TestingActivationRecord) -> TestingActivationRecord:
+        """Adopt only observed IDs in this original namespace; never repeat an unknown create."""
+        if record.phase == "prepared":
+            return record
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        matches = [
+            item
+            for item in api.fetch_dokploy_projects(host=host, token=token)
+            if item.get("name") == record.namespace
+        ]
+        if len(matches) != 1:
+            raise ValueError("Original placement is absent or ambiguous; retain its original key.")
+        project = cast(dict[str, Any], matches[0])
+        project_id = project.get("projectId")
+        if (
+            not isinstance(project_id, str)
+            or not project_id
+            or (record.project_id and record.project_id != project_id)
+        ):
+            raise ValueError("Original project identity changed.")
+        if not record.project_id:
+            if record.phase != "create_project":
+                raise ValueError("Unrequested project placement.")
+            record = self.save(record, project_id=project_id, phase="project_ready")
+        environments = project.get("environments")
+        if not isinstance(environments, list) or not all(
+            isinstance(item, dict) for item in environments
+        ):
+            raise ValueError("Original environment inventory is incomplete.")
+        candidates = [item for item in environments if item.get("name") == record.namespace]
+        if not candidates and record.phase == "project_ready":
+            return record
+        if len(candidates) != 1:
+            raise ValueError("Original environment is absent or ambiguous.")
+        environment = candidates[0]
+        environment_id = environment.get("environmentId")
+        if (
+            not isinstance(environment_id, str)
+            or not environment_id
+            or (record.environment_id and record.environment_id != environment_id)
+        ):
+            raise ValueError("Original environment identity changed.")
+        if not record.environment_id:
+            if record.phase != "create_environment":
+                raise ValueError("Unrequested environment placement.")
+            record = self.save(record, environment_id=environment_id, phase="environment_ready")
+        recipients = environment.get("compose")
+        if not isinstance(recipients, list) or not all(
+            isinstance(item, dict) for item in recipients
+        ):
+            raise ValueError("Original recipient inventory is incomplete.")
+        candidates = [item for item in recipients if item.get("name") == record.namespace]
+        if not candidates and record.phase == "environment_ready":
+            return record
+        if len(candidates) != 1:
+            raise ValueError("Original recipient is absent or ambiguous.")
+        target_id = candidates[0].get("composeId")
+        if (
+            not isinstance(target_id, str)
+            or not target_id
+            or (record.target_id and record.target_id != target_id)
+        ):
+            raise ValueError("Original recipient identity changed.")
+        if not record.target_id:
+            if record.phase != "create_compose":
+                raise ValueError("Unrequested recipient placement.")
+            record = self.save(record, target_id=target_id, phase="recipient_ready")
+        self.unused_recipient(record)
+        return record
+
     def result(self, record: TestingActivationRecord) -> dict[str, Any]:
         return TestingActivationResult(
             product=self.product,
@@ -695,6 +864,7 @@ class TestingActivationAdapter:
         resources: GenericWebTestingResources,
         checkpoint: Callable[[str], None],
     ) -> TestingActivationRecord:
+        values = runtime_values(self.store, self.root, record, resources)
         with self.store.serialize_disposable_testing_resources():
             checkpoint("publish_new_recipient")
             stamp = utc_now_timestamp()
@@ -707,11 +877,11 @@ class TestingActivationAdapter:
                     "custom_git_url": "",
                     "custom_git_branch": "",
                     "env": {
-                        **record.retained_target.env,
                         **{
                             key: resources.volumes[role]
                             for role, key in record.request.volume_keys.items()
                         },
+                        **{key: values[key] for key in record.request.port_keys},
                     },
                     "updated_at": stamp,
                     "source_label": "service:testing-activation",
@@ -788,10 +958,20 @@ class TestingActivationAdapter:
                 if old_check is None:
                     return ProviderObservation("unknown")
                 self.require_unchanged(record)
-                self.verify_provider(record)
                 if not record.published:
+                    record = self.recover_placement(record)
                     if record.phase != "configure_new_recipient":
-                        return ProviderObservation("unknown")
+                        return ProviderObservation("absent", retry_safe=True)
+                    try:
+                        self.verify_provider(record)
+                    except ValueError:
+                        fresh = self.unused_recipient(record)
+                        if (
+                            self.recipient_configuration_sha256(fresh)
+                            != record.before_configuration_sha256
+                        ):
+                            return ProviderObservation("unknown")
+                        return ProviderObservation("absent", retry_safe=True)
                     resources, _ = preparation_resources(
                         self.store, self.product, self.request, self.scope
                     )
@@ -807,6 +987,8 @@ class TestingActivationAdapter:
                         checkpoint,
                     )
                     record = self.publish(record, resources, checkpoint)
+                else:
+                    self.verify_provider(record)
             return ProviderObservation(
                 "present",
                 response_status_code=202,
@@ -826,10 +1008,13 @@ class TestingActivationAdapter:
             if record.plan_sha256 != self.request.reviewed_plan_sha256:
                 raise ValueError("Review the changed activation plan.")
             existing = activation_record(self.store, self.product, record.context)
-            if existing is not None and not (
-                existing.phase == "prepared"
-                and not (existing.project_id or existing.environment_id or existing.target_id)
-            ):
+            if existing is not None and existing.phase not in {
+                "prepared",
+                "project_ready",
+                "environment_ready",
+                "recipient_ready",
+                "configure_new_recipient",
+            }:
                 raise ValueError(
                     "Continue the original activation by readback, never redispatch creation."
                 )
@@ -883,6 +1068,7 @@ class TestingActivationAdapter:
                 )
                 if any(
                     item.get("name") == record.namespace
+                    and item.get("projectId") != record.project_id
                     for item in api.fetch_dokploy_projects(host=host, token=token)
                 ):
                     raise ValueError(
@@ -906,6 +1092,13 @@ class TestingActivationAdapter:
                     ("create_environment", "/api/environment.create", {}, "environmentId"),
                     ("create_compose", "/api/compose.create", {}, "composeId"),
                 ):
+                    storage_field = {
+                        "projectId": "project_id",
+                        "environmentId": "environment_id",
+                        "composeId": "target_id",
+                    }[field]
+                    if getattr(record, storage_field):
+                        continue
                     if phase == "create_environment":
                         body = {"name": record.namespace, "projectId": record.project_id}
                     if phase == "create_compose":
@@ -926,6 +1119,14 @@ class TestingActivationAdapter:
                         method="POST",
                         payload=cast(api.JsonObject, body),
                     )
+                    # Current Dokploy returns {project, environment}; older
+                    # supported servers returned the project directly.
+                    if (
+                        field == "projectId"
+                        and isinstance(response, dict)
+                        and isinstance(response.get("project"), dict)
+                    ):
+                        response = response["project"]
                     if (
                         not isinstance(response, dict)
                         or not isinstance(response.get(field), str)
@@ -935,16 +1136,15 @@ class TestingActivationAdapter:
                     record = self.save(
                         record,
                         **{
-                            {
-                                "projectId": "project_id",
-                                "environmentId": "environment_id",
-                                "composeId": "target_id",
-                            }[field]: response[field]
+                            storage_field: response[field],
+                            "phase": {
+                                "projectId": "project_ready",
+                                "environmentId": "environment_ready",
+                                "composeId": "recipient_ready",
+                            }[field],
                         },
                     )
-                fresh = api.fetch_dokploy_target_payload(
-                    host=host, token=token, target_type="compose", target_id=record.target_id
-                )
+                fresh = self.unused_recipient(record)
                 app_name = fresh.get("appName")
                 if (
                     not isinstance(app_name, str)
@@ -952,10 +1152,22 @@ class TestingActivationAdapter:
                         re.escape(record.namespace) + r"(?:-[a-z0-9]{6})?", app_name
                     )
                     or fresh.get("environmentId") != record.environment_id
-                    or fresh.get("env") not in {None, ""}
                 ):
                     raise ValueError("Fresh recipient has unexpected identity or environment.")
-                record = self.save(record, app_name=app_name)
+                if record.phase == "configure_new_recipient":
+                    if (
+                        self.recipient_configuration_sha256(fresh)
+                        != record.before_configuration_sha256
+                    ):
+                        raise ValueError("Uncertain recipient configuration changed; preserve it.")
+                else:
+                    if fresh.get("env") not in {None, ""}:
+                        raise ValueError("Fresh recipient has an unexpected environment.")
+                    record = self.save(
+                        record,
+                        app_name=app_name,
+                        before_configuration_sha256=self.recipient_configuration_sha256(fresh),
+                    )
                 values = runtime_values(self.store, self.root, record, resources)
                 rendered_source(record, values, resources)
                 template = json.loads(record.compose_source)
