@@ -3432,6 +3432,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     )
 
     def test_fresh_restore_preflights_forbidden_overrides_and_rechecks_plan_drift(self) -> None:
+        from control_plane.contracts.odoo_target_replacement_failures import (
+            OdooFreshTestingIntentRefusedError,
+        )
         from tests.test_odoo_testing_restore import generation
         from control_plane.integration_readback import INTEGRATION_FAMILIES
 
@@ -3507,7 +3510,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                             self.assertEqual(result.deploy_status, "fail")
                             self.assertEqual(
                                 result.error_code,
-                                deploy_blocked_code("fresh_testing_intent_invalid"),
+                                OdooFreshTestingIntentRefusedError.code,
                             )
                             post_deploy.assert_not_called()
                             assert stores[0].deployment_records[-1].failure is not None

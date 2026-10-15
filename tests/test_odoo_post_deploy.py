@@ -4,7 +4,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Literal, cast
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.odoo_instance_override_record import (
@@ -694,10 +694,17 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             deploy_failure_description,
         )
         from tests.test_odoo_testing_restore import generation
+        from tests.test_odoo_testing_native_source import descriptor
         from tests.test_odoo_stable_target_replacement import _UPSTREAM_RESTORE_ENV
 
-        for phase in ("deploy", "restore"):
-            with self.subTest(phase=phase), TemporaryDirectory() as directory:
+        cases: tuple[tuple[Literal["deploy", "restore"], bool], ...] = (
+            ("deploy", False),
+            ("restore", False),
+            ("deploy", True),
+            ("restore", True),
+        )
+        for phase, native in cases:
+            with self.subTest(phase=phase, native=native), TemporaryDirectory() as directory:
                 root = Path(directory)
                 store = FilesystemRecordStore(state_dir=root / "state")
                 store.write_odoo_instance_override_record(
@@ -732,6 +739,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                         "fetch_dokploy_target_payload",
                         return_value={
                             "env": "ODOO_DB_NAME=fixture\nODOO_INSTALL_MODULES=website\n",
+                            "serverId": "registered-testing",
                         },
                     ),
                     patch.object(
@@ -744,6 +752,9 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                     patch.object(dokploy_api, "trigger_deployment") as deploy,
                     patch.object(dokploy_api, "upsert_dokploy_schedule") as schedule,
                     patch.object(dokploy_api, "dokploy_request") as provider,
+                    patch(
+                        "control_plane.odoo_testing_native_source.prepare_native_testing_delivery"
+                    ) as prepare_native,
                     self.assertRaises(OdooFreshTestingIntentRefusedError) as caught,
                 ):
                     execute_odoo_post_deploy(
@@ -754,9 +765,13 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                         ),
                         run_destructive_restore=True,
                         fresh_testing_generation=generation().model_copy(
-                            update={"target_id": "compose-123"}
+                            update={
+                                "target_id": "compose-123",
+                                "source_mode": "container-export" if native else "ssh",
+                            }
                         ),
                         fresh_restore_source_environment=_UPSTREAM_RESTORE_ENV,
+                        fresh_native_source=descriptor() if native else None,
                         provider_effect_checkpoint=effects,
                         hold_uncertain_effects=True,
                     )
@@ -765,6 +780,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                 schedule.assert_not_called()
                 provider.assert_not_called()
                 effects.assert_not_called()
+                prepare_native.assert_not_called()
                 record = store.read_odoo_instance_override_record(
                     context_name="opw", instance_name="testing"
                 )
