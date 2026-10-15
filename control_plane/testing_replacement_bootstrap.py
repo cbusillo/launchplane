@@ -410,6 +410,7 @@ class TestingReplacementBootstrapAdapter:
             generation is None
             or generation.operation_id != self.request.operation_id
             or generation.domain_host != self.request.domain_host
+            or generation.request_sha256 != bootstrap_request_sha256(self.request)
         ):
             raise ValueError("Testing bootstrap generation is unavailable.")
         target_id = self.store.read_dokploy_target_id_record(
@@ -454,9 +455,10 @@ class TestingReplacementBootstrapAdapter:
                 source_binding_sha256=generation.source_binding_sha256,
                 plan_sha256=generation.bootstrap_plan_sha256,
                 resources_binding_sha256=generation.resources_binding_sha256,
-                omitted_runtime_keys=bootstrap_plan(
-                    self.store, self.product, self.request
-                ).omitted_runtime_keys,
+                # Bootstrap preconditions include an idle lane. The queue we
+                # committed may already be executing; read its immutable receipt
+                # rather than planning a second bootstrap against that lane.
+                omitted_runtime_keys=generation.omitted_runtime_keys,
                 applied=True,
                 reconcile_requested=True,
             )
