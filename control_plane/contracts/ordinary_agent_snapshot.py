@@ -7,19 +7,14 @@ from typing import Literal
 from pydantic import Field, field_validator, model_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.repository_evidence import (
-    RepositoryEvidence,
-)
 from control_plane.contracts.ordinary_agent import (
     OrdinaryAgentPullRequest,
     OrdinaryAgentTarget,
     StrictFrozenModel,
 )
 from control_plane.merge_train import MergeTrainCheckStatus, MergeTrainDryRunSnapshot
-from control_plane.tenant_admission_controller import TenantAdmissionTechnicalChecks
 
 
-Digest = str
 MAX_ORDINARY_LANDING_ENTRIES = 4
 
 
@@ -208,71 +203,3 @@ class OrdinaryAgentCandidateCheckResult(StrictFrozenModel):
     status: MergeTrainCheckStatus
     counts: OrdinaryAgentProviderRequestCounts
     observation_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-
-class OrdinaryAgentLandingEvidence(StrictFrozenModel):
-    """Complete normalized provider evidence for one prepared merge landing."""
-
-    repository_id: int = Field(gt=0, le=2**63 - 1)
-    repository_owner_id: int = Field(gt=0, le=2**63 - 1)
-    repository: str = Field(min_length=3, max_length=512)
-    base_ref: str = Field(min_length=1, max_length=255)
-    base_identity: OrdinaryAgentCommitIdentity
-    repository_evidence: RepositoryEvidence
-    candidate_entry_evidence: tuple[RepositoryEvidence, ...] = Field(
-        min_length=1, max_length=MAX_ORDINARY_LANDING_ENTRIES
-    )
-    snapshot: MergeTrainDryRunSnapshot
-    candidate_sha: str = Field(min_length=1, max_length=64)
-    technical_checks: TenantAdmissionTechnicalChecks
-    protection: OrdinaryAgentProtectionEvidence
-    expected_merge_tree_sha: str = Field(min_length=1, max_length=64)
-    observed_at: int = Field(ge=0)
-    counts: OrdinaryAgentProviderRequestCounts
-    evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-
-    @field_validator("candidate_entry_evidence", mode="before")
-    @classmethod
-    def normalize_entries(cls, value: object) -> object:
-        return tuple(value) if isinstance(value, list) else value
-
-    @model_validator(mode="after")
-    def validate_exact_target(self) -> OrdinaryAgentLandingEvidence:
-        target = self.repository_evidence.target
-        if (
-            target.repository_id != str(self.repository_id)
-            or target.repository_owner_id != str(self.repository_owner_id)
-            or target.repository != self.repository
-            or self.repository_evidence.base is None
-            or self.repository_evidence.base.base_ref != self.base_ref
-            or self.repository_evidence.base.base_sha != self.base_identity.sha
-            or self.technical_checks.head_sha != self.candidate_sha
-            or self.technical_checks.base_sha != self.base_identity.sha
-            or {(item.context, item.integration_id) for item in self.protection.required_checks}
-            != {(item.name, item.app_id) for item in self.technical_checks.required_checks}
-        ):
-            raise ValueError("landing evidence identities must be exact and internally consistent")
-        entries = {item.target.pull_request_number: item for item in self.candidate_entry_evidence}
-        if (
-            len(entries) != len(self.candidate_entry_evidence)
-            or entries.get(target.pull_request_number) != self.repository_evidence
-            or any(
-                item.target.repository != self.repository
-                or item.target.repository_id != str(self.repository_id)
-                or item.target.repository_owner_id != str(self.repository_owner_id)
-                for item in self.candidate_entry_evidence
-            )
-            or self.snapshot.repository != self.repository
-            or self.snapshot.base_branch != self.base_ref
-            or self.snapshot.base_sha != self.base_identity.sha
-            or target.pull_request_number
-            not in {item.number for item in self.snapshot.pull_requests}
-            or len({item.number for item in self.snapshot.pull_requests})
-            != len(self.snapshot.pull_requests)
-            or any(
-                item.number not in entries or item.head_sha != entries[item.number].target.head_sha
-                for item in self.snapshot.pull_requests
-            )
-        ):
-            raise ValueError("landing candidate evidence and queue identities must agree")
-        return self
