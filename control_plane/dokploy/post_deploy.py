@@ -50,6 +50,7 @@ from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     build_fresh_testing_restore_script,
+    preflight_fresh_testing_intent,
 )
 from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MARKER
 
@@ -670,6 +671,14 @@ def run_compose_post_deploy_update(
         run_destructive_restore=run_destructive_restore,
         requested_timeout_seconds=schedule_execution_timeout_seconds,
     )
+    if fresh_testing_generation is not None:
+        preflight_fresh_testing_intent(
+            modules=resolved_workflow_environment_overrides.get("ODOO_UPDATE_MODULES", ""),
+            encoded_payload=resolved_workflow_environment_overrides.get(
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
+                desired_env_map.get(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""),
+            ),
+        )
     if desired_env_map != current_env_map:
         with (provider_mutation_guard or nullcontext)():
             if before_provider_mutation is not None:

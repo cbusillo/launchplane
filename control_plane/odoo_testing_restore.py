@@ -213,6 +213,26 @@ def encoded_restore_source(environment: dict[str, str]) -> str:
     return base64.b64encode(json.dumps(source, sort_keys=True).encode()).decode()
 
 
+def preflight_fresh_testing_intent(*, modules: str, encoded_payload: str) -> None:
+    """Use the strict restore policy before provider effects; expose no payload values."""
+    from control_plane.contracts.odoo_target_replacement_failures import (
+        OdooFreshTestingIntentRefusedError,
+    )
+    from control_plane.integration_readback import INTEGRATION_FAMILIES, IntegrationReadbackPolicy
+
+    policy = IntegrationReadbackPolicy(
+        families=INTEGRATION_FAMILIES,
+        allowed_integrations=(),
+        protected_shopify_store_handles=(),
+    )
+    try:
+        validate_fresh_testing_intent(
+            modules=modules, encoded_payload=encoded_payload, readback_spec=policy.encoded_spec()
+        )
+    except ValueError as error:
+        raise OdooFreshTestingIntentRefusedError() from error
+
+
 def validate_fresh_testing_intent(
     *, modules: str, encoded_payload: str, readback_spec: str
 ) -> None:
