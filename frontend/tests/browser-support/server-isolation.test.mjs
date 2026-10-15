@@ -5,11 +5,12 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { test } from "node:test";
+import { isolationDeadline } from "../../playwright-deadlines.mjs";
 
 const frontendRoot = fileURLToPath(new URL("../../", import.meta.url));
 const cli = fileURLToPath(import.meta.resolve("@playwright/test/cli"));
 
-test("overlapping smoke runs own distinct servers", { timeout: 90_000 }, async () => {
+test("overlapping smoke runs own distinct servers", { timeout: 2 * isolationDeadline }, async () => {
   const scratchRoot = resolve(frontendRoot, "../tmp/browser-isolation");
   await mkdir(scratchRoot, { recursive: true });
   const scratch = await mkdtemp(join(scratchRoot, "run-"));
@@ -24,27 +25,29 @@ test("overlapping smoke runs own distinct servers", { timeout: 90_000 }, async (
       const config = join(root, "playwright.config.ts");
       await writeFile(config, `
 import original from ${JSON.stringify(join(frontendRoot, "playwright.config.ts"))};
+import { isolationDeadline } from ${JSON.stringify(join(frontendRoot, "playwright-deadlines.mjs"))};
 export default {
   ...original,
   testDir: ${JSON.stringify(root)},
   outputDir: ${JSON.stringify(join(root, "results"))},
   workers: 1,
+  timeout: isolationDeadline,
+  expect: { ...original.expect, timeout: isolationDeadline },
   projects: [original.projects[0]],
-  webServer: { ...original.webServer, cwd: ${JSON.stringify(frontendRoot)}, timeout: 15_000 },
+  webServer: { ...original.webServer, cwd: ${JSON.stringify(frontendRoot)} },
 };
 `);
       await writeFile(join(root, "isolation.spec.ts"), `
-import { test, expect } from ${JSON.stringify(join(frontendRoot, "node_modules/@playwright/test/index.mjs"))};
+import { test, expect, waitForState } from ${JSON.stringify(join(frontendRoot, "tests/browser/state.ts"))};
 import { writeFile, access } from "node:fs/promises";
 test("serves this run while its peer is alive", async ({ page, baseURL }) => {
-  test.setTimeout(45_000);
   await page.goto("/ui/?fixture=products");
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await writeFile(${JSON.stringify(receipt)}, JSON.stringify({ baseURL }));
-  await expect.poll(async () => {
+  await waitForState(async () => {
     try { await access(${JSON.stringify(receipts[1 - index])}); return true; }
     catch { return false; }
-  }, { timeout: 30_000 }).toBe(true);
+  }).toBe(true);
 });
 `);
       return new Promise((resolveRun, rejectRun) => {

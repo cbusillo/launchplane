@@ -40,6 +40,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
     OdooCutoverApplyResult,
@@ -60,7 +61,7 @@ class _RollbackSource:
     detail: str
 
 
-class OdooProdRollbackStore(OdooStableTargetReplacementStore, Protocol):
+class OdooProdRollbackStore(OdooStableTargetReplacementStore, DeploymentStore, Protocol):
     def list_deployment_records(
         self,
         *,
@@ -447,6 +448,23 @@ def execute_odoo_prod_rollback(
     )
     try:
         if current_deployment is not None and current_deployment.odoo_cutover is not None:
+            plan = current_deployment.odoo_cutover.plan
+            # A rejection is recorded while the hotfix is serving, so its
+            # production snapshot describes the rejected hotfix, not the
+            # retained release. Recovery uses the immutable cutover snapshot.
+            if release_decision is not None and (
+                release_decision.product != product
+                or release_decision.checklist.candidate.artifact_id != plan.candidate.artifact_id
+                or release_decision.decision != "changes_requested"
+                and (
+                    plan.website_settings != release_decision.checklist.website_settings
+                    or plan.production_website_settings
+                    != release_decision.checklist.production_website_settings
+                )
+            ):
+                raise click.ClickException(
+                    "Rollback website snapshots differ from the release decision."
+                )
             if current_deployment.odoo_cutover.plan.compatibility.classification != "compatible":
                 raise click.ClickException(
                     "Database-changing cutover recovery requires the authorized coherent image/DB/filestore backup restore workflow; image-only rollback is refused."
@@ -457,6 +475,10 @@ def execute_odoo_prod_rollback(
                 raise click.ClickException(
                     "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
                 )
+            try:
+                cutover_provider.preflight(plan)
+            except ValueError as error:
+                raise click.ClickException(str(error)) from error
             if (
                 rollback_source.artifact_id
                 != current_deployment.odoo_cutover.plan.production.artifact_id

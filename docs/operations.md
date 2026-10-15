@@ -4565,3 +4565,62 @@ preview without `fishbowl_source` is again source-free, including on a new PR
 head. Reselect the source explicitly when new-head import proof is needed.
 There is no production
 or stable-lane rollback because neither was changed.
+
+### Testing import diagnostics
+
+`GET /v1/products/{product}/environments/testing/odoo-import-diagnostics`
+requires the existing `operations.read` authorization for the selected
+product and testing instance. It accepts no query parameters, SQL, endpoints,
+usernames or credentials. The response is `Cache-Control: no-store`.
+
+The read resolves the product's current testing lane and verifies its running
+Odoo container, immutable artifact and runtime identity. Through that verified
+origin it reads only the fixed cm_data, RepairShopr and Fishbowl import parameter
+keys. Comparisons with current lane runtime authority and the selected managed
+password stay inside Launchplane; the response contains presence and agreement
+categories only. Missing, ambiguous, unsafe or undecryptable bindings never
+select a personal/writer fallback. A source needs an exact testing binding
+classified `testing` or `non_prod`, or `shared_safe` with read-only sharing evidence, and its
+existing `read_only_source` allowance. Classification alone proves no privilege.
+
+Retired password keys are excluded by the same binding selector used for lane
+delivery. Non-secret agreement remains visible when a password binding is refused.
+A source is probed only when its managed host and port agree with the applied
+Odoo parameters; changing runtime intent cannot send a password to an unapplied
+endpoint. A password mismatch for the same applied source account also leaves
+grants unknown without attempting a login.
+
+Each source's selected managed connection is independently inspected using
+`SHOW GRANTS`, without reading customer tables or trying a write. Connections
+require verified TLS. Only the configured `SSL_CERT_FILE` and `SSL_CERT_DIR`
+trust paths are inherited by the child; service secrets and other environment
+variables are excluded. A separate process bounds each attempt, including DNS,
+to ten seconds and discards stderr. Repeated unqualified probes have a 60-second
+cooldown in each service process/replica; concurrent requests for that credential return unknown.
+At most four source probes run concurrently per process. Successful grant results
+are never cached. Retry a cooled-down unknown after the interval; no read can
+guarantee that source authentication does not update its own audit/failure counters.
+Odoo authentication can also produce Odoo login audit records; the read does not
+write business records.
+Only SELECT, SHOW VIEW, SHOW DATABASES and
+USAGE are accepted; grant options or other privileges are unsafe. Role grants,
+partial revokes, unrecognized syntax and incomplete results stay unknown.
+Applicable roles are not expanded by this version. This follows the
+[MySQL SHOW GRANTS contract](https://dev.mysql.com/doc/refman/8.0/en/show-grants.html).
+
+`managed_connection_grants` describes the account MySQL selected for the
+connection from Launchplane, not a connection originating in Odoo. MySQL can
+select different host-qualified accounts for those two origins, so
+`applied_connection_grants` remains unknown. Even matching applied parameters
+and a read-only managed observation do not establish the runtime account's
+effective privileges or complete credential qualification. Do not use this
+read as authorization to run an importer or as proof that testing holds no
+production-capable key. No production credential is decrypted or tested.
+
+The service rechecks lane authority, binding/version selection, the same
+container and applied parameters after source I/O. Changes discard the evidence.
+Unavailable runtime reads return a fixed unknown result; individual source
+failures do not hide other source observations. Responses, errors and logs
+contain no passwords, hashes, host/account values or raw grant rows. This read
+changes no configuration, binding, account, grants, runtime, source data or
+business data, and invokes no importer, deployment or synchronization.

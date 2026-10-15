@@ -74,8 +74,6 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
     )
     production = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
     if request.website_settings is not None:
-        if production is not None and production.odoo_cutover is not None:
-            raise ValueError("Website settings require the stopped-web maintenance driver.")
         _validate_candidate(store, request, profile, production)
     existing = _existing(store, request.context, request.instance)
     before = existing.model_dump(mode="json") if existing else None

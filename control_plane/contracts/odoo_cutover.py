@@ -1,5 +1,7 @@
 """Exact release and observation contracts for Odoo's two-slot executor."""
 
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Literal, Self
 
@@ -18,6 +20,7 @@ from control_plane.contracts.prepared_public_site import (
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 
 
 class OdooSlot(FrozenRecord):
@@ -39,9 +42,39 @@ class OdooCutoverPlan(FrozenRecord):
     old: OdooSlot
     new: OdooSlot
     writers: tuple[WriterTarget, ...]
+    website_settings: OdooWebsiteSettingsIntent | None = None
+    production_website_settings: OdooWebsiteSettingsIntent | None = None
+
+    @property
+    def rollback_website_settings(self) -> OdooWebsiteSettingsIntent | None:
+        if self.production_website_settings is not None:
+            return self.production_website_settings
+        if self.website_settings is None:
+            return None
+        return OdooWebsiteSettingsIntent(
+            artifact_id=self.production.artifact_id,
+            settings=self.website_settings.settings.model_copy(
+                update={
+                    "operation": "disable_collection",
+                    "google_analytics_key": "",
+                    "public_indexing_enabled": False,
+                    "cookies_bar": None,
+                    "block_third_party_domains": None,
+                }
+            ),
+        )
 
     @model_validator(mode="after")
     def validate_release(self) -> Self:
+        for intent, artifact in (
+            (self.website_settings, self.candidate),
+            (self.production_website_settings, self.production),
+        ):
+            if intent is not None and (
+                intent.artifact_id != artifact.artifact_id
+                or intent.settings.public_origin.rstrip("/") != "https://" + self.host
+            ):
+                raise ValueError("website snapshot differs from its exact slot artifact/origin")
         if self.compatibility != classify_release_database_compatibility(
             production=self.production, candidate=self.candidate
         ):
@@ -117,6 +150,15 @@ class OdooRouteObservation(FrozenRecord):
         return self.public_health.observed_runtime_identity if self.public_health else None
 
 
+class OdooWebsiteSettingsReceipt(FrozenRecord):
+    binding: PublicSiteBinding
+    image: str
+    settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    startup_settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    retained_startup_settings_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    committed: Literal[True]
+
+
 class OdooMaintenanceReceipt(FrozenRecord):
     release_id: str
     binding: PublicSiteBinding
@@ -128,6 +170,7 @@ class OdooMaintenanceReceipt(FrozenRecord):
     update_modules: tuple[str, ...]
     module_readback: Literal[True]
     evidence_id: str = Field(min_length=1)
+    website_settings: OdooWebsiteSettingsReceipt | None = None
 
 
 class OdooRecoveryTuple(FrozenRecord):
@@ -171,6 +214,9 @@ class OdooCutoverRecord(FrozenRecord):
     pause: PublicPauseRecord | None = None
     backup: OdooRecoveryTuple | None = None
     maintenance: OdooMaintenanceReceipt | None = None
+    rollback_website_settings: OdooWebsiteSettingsReceipt | None = None
+    website_settings_attempted: bool = False
+    rollback_pause: PublicPauseRecord | None = None
     readiness: OdooSlotReadiness | None = None
     route: OdooRouteObservation | None = None
     error: str = ""

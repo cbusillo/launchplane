@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { setClockTime, expect, test } from "./state";
 
 const cases = ["healthy", "missing-route", "expired-route", "failed", "incident", "stale", "unknown", "absent"] as const;
 
@@ -76,7 +76,7 @@ for (const state of cases) {
       }
       return { product, products, identity: module.fixtureIdentity, now, testingDescription: sidebarStatus(product.environments[0] ?? null, "Testing").description };
     }, state);
-    await page.clock.install({ time: new Date(fixtures.now) });
+    await setClockTime(page, fixtures.now);
     if (theme === "light") await page.getByRole("button", { name: "Switch to light theme" }).click();
     const mutations: string[] = [];
     page.on("request", request => {

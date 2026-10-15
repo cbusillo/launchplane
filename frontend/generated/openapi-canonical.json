@@ -12884,6 +12884,44 @@
         "title": "HistoricalCompletionPreflightResult",
         "type": "object"
       },
+      "ImportDiagnosticResult": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "const": false,
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "runtime": {
+            "default": "unknown",
+            "enum": [
+              "verified",
+              "unknown"
+            ],
+            "title": "Runtime",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceDiagnostic"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "values_redacted": {
+            "const": true,
+            "default": true,
+            "title": "Values Redacted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "sources"
+        ],
+        "title": "ImportDiagnosticResult",
+        "type": "object"
+      },
       "ImportOverrideEntry": {
         "additionalProperties": false,
         "properties": {
@@ -21149,6 +21187,16 @@
           "production": {
             "$ref": "#/components/schemas/ArtifactIdentityManifest"
           },
+          "production_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "release_id": {
             "minLength": 1,
             "title": "Release Id",
@@ -21158,6 +21206,16 @@
             "pattern": "^[a-zA-Z0-9_-]+$",
             "title": "Route Id",
             "type": "string"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "writers": {
             "items": {
@@ -21273,6 +21331,16 @@
             "title": "Record Id",
             "type": "string"
           },
+          "rollback_pause": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PublicPauseRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "rollback_started_at": {
             "anyOf": [
               {
@@ -21284,6 +21352,16 @@
               }
             ],
             "title": "Rollback Started At"
+          },
+          "rollback_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "route": {
             "anyOf": [
@@ -21318,6 +21396,11 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "website_settings_attempted": {
+            "default": false,
+            "title": "Website Settings Attempted",
+            "type": "boolean"
           }
         },
         "required": [
@@ -21327,6 +21410,30 @@
           "updated_at"
         ],
         "title": "OdooCutoverRecord",
+        "type": "object"
+      },
+      "OdooImportDiagnosticResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/ImportDiagnosticResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "OdooImportDiagnosticResponse",
         "type": "object"
       },
       "OdooInstanceOverrideRecord": {
@@ -21473,6 +21580,16 @@
             },
             "title": "Update Modules",
             "type": "array"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -23432,6 +23549,48 @@
           "settings"
         ],
         "title": "OdooWebsiteSettingsIntent",
+        "type": "object"
+      },
+      "OdooWebsiteSettingsReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "committed": {
+            "const": true,
+            "title": "Committed",
+            "type": "boolean"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "retained_startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Retained Startup Settings Sha256",
+            "type": "string"
+          },
+          "settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Settings Sha256",
+            "type": "string"
+          },
+          "startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Startup Settings Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding",
+          "image",
+          "settings_sha256",
+          "startup_settings_sha256",
+          "retained_startup_settings_sha256",
+          "committed"
+        ],
+        "title": "OdooWebsiteSettingsReceipt",
         "type": "object"
       },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {
@@ -25783,6 +25942,44 @@
           "fields"
         ],
         "title": "OwnerSecretInputResponse",
+        "type": "object"
+      },
+      "ParameterAgreement": {
+        "additionalProperties": false,
+        "properties": {
+          "agreement": {
+            "enum": [
+              "match",
+              "mismatch",
+              "missing",
+              "unknown"
+            ],
+            "title": "Agreement",
+            "type": "string"
+          },
+          "applied_present": {
+            "title": "Applied Present",
+            "type": "boolean"
+          },
+          "field": {
+            "enum": [
+              "host",
+              "user",
+              "db",
+              "port",
+              "ssl_verify",
+              "password"
+            ],
+            "title": "Field",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "applied_present",
+          "agreement"
+        ],
+        "title": "ParameterAgreement",
         "type": "object"
       },
       "PathCheckStep": {
@@ -45687,6 +45884,58 @@
           "expires_at"
         ],
         "title": "SoloAdministrationConfirmationResponse",
+        "type": "object"
+      },
+      "SourceDiagnostic": {
+        "additionalProperties": false,
+        "properties": {
+          "applied_connection_grants": {
+            "const": "unknown",
+            "default": "unknown",
+            "title": "Applied Connection Grants",
+            "type": "string"
+          },
+          "binding": {
+            "default": "missing_or_unsafe",
+            "enum": [
+              "selected",
+              "missing_or_unsafe"
+            ],
+            "title": "Binding",
+            "type": "string"
+          },
+          "managed_connection_grants": {
+            "default": "unknown",
+            "enum": [
+              "read_only",
+              "unsafe",
+              "unknown"
+            ],
+            "title": "Managed Connection Grants",
+            "type": "string"
+          },
+          "parameters": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ParameterAgreement"
+            },
+            "title": "Parameters",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "cm_data",
+              "repairshopr",
+              "fishbowl"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "SourceDiagnostic",
         "type": "object"
       },
       "StoredRecordSnapshot": {
@@ -84767,6 +85016,134 @@
           }
         },
         "summary": "Plan or apply product environment config"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/odoo-import-diagnostics": {
+      "get": {
+        "operationId": "read_odoo_import_diagnostics",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooImportDiagnosticResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read value-free Odoo testing import binding and source-grant evidence"
       }
     },
     "/v1/products/{product}/environments/{environment}/odoo-import-overrides/reconcile": {
