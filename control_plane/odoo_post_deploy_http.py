@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol, cast
 
@@ -171,6 +172,7 @@ def execute_odoo_post_deploy_result(
     control_plane_root: Path,
     record_store: object,
     request: OdooPostDeployEnvelope,
+    before_connection_isolation_mutation: Callable[[], None] | None = None,
 ) -> tuple[dict[str, object], dict[str, object]]:
     driver_result = execute_odoo_post_deploy(
         control_plane_root=control_plane_root,
@@ -178,6 +180,7 @@ def execute_odoo_post_deploy_result(
         request=request.post_deploy,
         # This command reapplies settings; it never selects a forward artifact.
         allow_historical_sender_contract=True,
+        before_connection_isolation_mutation=before_connection_isolation_mutation,
     )
     records: dict[str, object] = {
         "transition": (

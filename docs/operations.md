@@ -2815,9 +2815,25 @@ context only, and `context_instance` has both context and instance.
 
 The existing `POST /v1/drivers/odoo/post-deploy` route accepts
 `post_deploy.connection_isolation` as `dry-run`, `apply`, or `readback`.
-This mode requires the product's existing post-deploy authority, rejects
-production before provider access, and reserves the lane against concurrent
-release work. It operates on the current tracked target and database. No SQL,
+Dry-run and readback use the separate instance-scoped
+`odoo_connection_isolation.plan` and `odoo_connection_isolation.read` actions.
+The authenticated Director agent inherits these inert observations without a
+post-deploy write grant. Existing post-deploy callers retain observation access.
+Apply is a separate `odoo_connection_isolation.apply` effect and accepts only
+`testing`. The Director agent can use it without a DB grant only when current,
+binding-matched disposable-lane evidence proves unused, reproducible data and
+production isolation. Missing, expired or unknown evidence, staff holds, target
+aliases, protected usage and only-copy data refuse with
+`disposable_lane_safety_unknown`. The current conservative collector cannot prove
+all these facts; an observation must not manufacture them. Source delivery alone
+therefore does not promise an eligible apply on an existing lane.
+General maintenance retains `odoo_post_deploy.execute`; observing a copy gives
+no maintenance, production, grant or credential authority.
+
+Every isolation mode rejects production before provider access and reserves
+the lane against concurrent release work. Apply rechecks disposable safety
+inside the reservation and immediately before dispatching the provider repair.
+It operates on the current tracked target and database. No SQL,
 credentials, carrier requests, notification probes, staff-account changes,
 addon upgrades, or restore inputs are accepted.
 

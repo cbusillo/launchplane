@@ -7,6 +7,13 @@ from typing import Literal, Mapping
 
 ActionEffect = Literal["read", "plan", "write"]
 AGENT_READ_ROLE_ACTION = "agent.read"
+ODOO_CONNECTION_ISOLATION_ACTIONS = MappingProxyType(
+    {
+        "dry-run": "odoo_connection_isolation.plan",
+        "readback": "odoo_connection_isolation.read",
+        "apply": "odoo_connection_isolation.apply",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -126,6 +133,9 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "odoo_app_maintenance.execute": ActionDeclaration("write"),
         "odoo_config_parameter_override.write": ActionDeclaration("write"),
         "odoo_post_deploy.execute": ActionDeclaration("write"),
+        ODOO_CONNECTION_ISOLATION_ACTIONS["dry-run"]: ActionDeclaration("plan"),
+        ODOO_CONNECTION_ISOLATION_ACTIONS["readback"]: ActionDeclaration("read"),
+        ODOO_CONNECTION_ISOLATION_ACTIONS["apply"]: ActionDeclaration("write"),
         "odoo_preview_apply.execute": ActionDeclaration("write"),
         "odoo_preview_apply_inputs.read": ActionDeclaration("read"),
         "odoo_prod_backup_gate.execute": ActionDeclaration("write"),
