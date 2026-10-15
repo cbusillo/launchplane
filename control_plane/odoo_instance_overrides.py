@@ -3,6 +3,7 @@ from dataclasses import dataclass
 
 import click
 from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
 
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
@@ -232,6 +233,7 @@ def render_post_deploy_payload(
     protected_shopify_store_keys: tuple[str, ...] = (),
     clear_undeclared_shopify: bool = True,
     record_store: object | None = None,
+    selected_website_settings: OdooWebsiteSettings | None = None,
 ) -> OdooPostDeployPayload:
     try:
         runtime_values = runtime_values_for_override(record, record_store)
@@ -286,10 +288,10 @@ def render_post_deploy_payload(
             )
         )
     website_bootstrap = record.website_bootstrap if workflow_intent != "restore" else None
+    # Pending record intent is never a deploy/ship payload. Only the release
+    # maintenance driver supplies a decision-bound or previously verified choice.
     website_settings = (
-        record.website_settings.settings
-        if record.website_settings is not None and odoo_instance_is_production(record.instance)
-        else None
+        selected_website_settings if odoo_instance_is_production(record.instance) else None
     )
     if website_settings is not None:
         # The legacy settings addon runs on every startup, even on rollback images.
@@ -403,6 +405,7 @@ def build_post_deploy_environment(
     protected_shopify_store_keys: tuple[str, ...] = (),
     clear_undeclared_shopify: bool = True,
     record_store: object | None = None,
+    selected_website_settings: OdooWebsiteSettings | None = None,
 ) -> PostDeployOverrideEnvironment:
     payload = render_post_deploy_payload(
         record,
@@ -410,6 +413,7 @@ def build_post_deploy_environment(
         protected_shopify_store_keys=protected_shopify_store_keys,
         clear_undeclared_shopify=clear_undeclared_shopify,
         record_store=record_store,
+        selected_website_settings=selected_website_settings,
     )
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),

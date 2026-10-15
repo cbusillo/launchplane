@@ -212,6 +212,11 @@ class OdooOverrideApplyResult(BaseModel):
     status: OdooOverrideApplyStatus = "skipped"
     applied_at: str = ""
     detail: str = ""
+    website_settings_verified: bool = Field(
+        default=True,
+        exclude_if=lambda value: value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     website_settings: OdooWebsiteSettingsIntent | None = Field(
         default=None,
         exclude_if=lambda value: value is None,

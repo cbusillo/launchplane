@@ -9,6 +9,8 @@ from unittest.mock import patch
 
 from pydantic import ValidationError
 
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
+from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.odoo_website_settings import (
     OdooWebsiteSettings,
@@ -103,6 +105,68 @@ class WebsiteSettingsTests(unittest.TestCase):
                 context_name="example-site", instance_name="prod"
             )
             self.assertFalse(stored.last_apply.attempted)
+
+    def test_pending_intent_is_absent_from_deploy_and_legacy_ship_payloads(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            prepare(store)
+            record = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            payload = build_post_deploy_environment(record, record_store=store).payload
+            self.assertIsNone(payload.website_settings)
+            self.assertFalse(
+                any(item.key == WEBSITE_INDEXING_PARAMETER for item in payload.config_parameters)
+            )
+
+    def test_generic_apply_success_cannot_confirm_failed_website_settings(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            prepare(store)
+            accepted = decision(store)
+            store.create_release_review_decision_record_if_absent(accepted)
+            self.assertTrue(
+                build_release_review(store=store, profile=profile(), read=github_read).approved
+            )
+            record = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            record.last_apply = OdooOverrideApplyResult(
+                attempted=True,
+                status="pass",
+                website_settings=intent(),
+                website_settings_verified=False,
+                applied_at=record.updated_at,
+            )
+            store.write_odoo_instance_override_record(record)
+            from control_plane.cli import _write_odoo_instance_override_apply_result as legacy_write
+            from types import SimpleNamespace
+            from unittest.mock import Mock
+
+            adapter = SimpleNamespace(
+                ensure_schema=Mock(),
+                close=Mock(),
+                update_odoo_instance_override_apply_result=store.update_odoo_instance_override_apply_result,
+            )
+            with patch("control_plane.cli.PostgresRecordStore", return_value=adapter):
+                legacy_write(
+                    database_url="fixture",
+                    record=record,
+                    status="pass",
+                    detail="Unrelated successful legacy ship",
+                )
+            persisted = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            self.assertEqual(
+                persisted.last_apply.website_settings, record.last_apply.website_settings
+            )
+            self.assertFalse(persisted.last_apply.website_settings_verified)
+            self.assertFalse(
+                build_release_review(store=store, profile=profile(), read=github_read).approved
+            )
 
     def test_stale_plan_cannot_replace_current_intent(self) -> None:
         with TemporaryDirectory() as directory:

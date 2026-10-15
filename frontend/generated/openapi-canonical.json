@@ -21364,6 +21364,12 @@
               }
             ],
             "x-launchplane-optional-response": true
+          },
+          "website_settings_verified": {
+            "default": true,
+            "title": "Website Settings Verified",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "OdooOverrideApplyResult",

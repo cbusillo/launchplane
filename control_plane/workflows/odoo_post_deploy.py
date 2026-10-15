@@ -111,6 +111,7 @@ def _write_odoo_instance_override_apply_result(
     source_label: str = "odoo-post-deploy-driver",
     applied_website_settings: OdooWebsiteSettingsIntent | None = None,
     settings_attempted: bool = False,
+    website_settings_verified: bool | None = None,
 ) -> OdooInstanceOverrideRecord:
     now = utc_now_timestamp()
     return record_store.update_odoo_instance_override_apply_result(
@@ -122,8 +123,11 @@ def _write_odoo_instance_override_apply_result(
             applied_at=now if status in {"pass", "fail"} else "",
             detail=detail,
             website_settings=applied_website_settings
-            if status == "pass" or settings_attempted
+            if settings_attempted
             else record.last_apply.website_settings,
+            website_settings_verified=website_settings_verified
+            if website_settings_verified is not None
+            else record.last_apply.website_settings_verified,
         ),
         updated_at=now,
         source_label=source_label,
@@ -271,10 +275,18 @@ def execute_odoo_post_deploy(
                         "Website settings differ from the operation artifact."
                     )
                 accepted_settings = release_website_settings
+                if rollback and accepted_settings is None:
+                    applied = rendering_record.last_apply.website_settings
+                    if (
+                        rendering_record.last_apply.website_settings_verified
+                        and applied is not None
+                        and applied.artifact_id == artifact_id
+                    ):
+                        accepted_settings = applied
             else:
                 applied = rendering_record.last_apply.website_settings
                 if (
-                    rendering_record.last_apply.status == "fail"
+                    not rendering_record.last_apply.website_settings_verified
                     and applied is not None
                     and applied.artifact_id != artifact_id
                 ):
@@ -285,12 +297,16 @@ def execute_odoo_post_deploy(
                     applied if applied is not None and applied.artifact_id == artifact_id else None
                 )
         rendered_settings = accepted_settings
-        if rollback and rendered_settings is None and rendering_record.website_settings is not None:
+        if (
+            rollback
+            and rendered_settings is None
+            and rendering_record.last_apply.website_settings is not None
+        ):
             # This is an explicit historical rollback, never preparation or maintenance.
-            rendered_settings = rendering_record.website_settings.model_copy(
+            rendered_settings = rendering_record.last_apply.website_settings.model_copy(
                 update={
                     "artifact_id": artifact_id,
-                    "settings": rendering_record.website_settings.settings.model_copy(
+                    "settings": rendering_record.last_apply.website_settings.settings.model_copy(
                         update={
                             "operation": "disable_collection",
                             "google_analytics_key": "",
@@ -312,6 +328,9 @@ def execute_odoo_post_deploy(
                     record_store=record_store,
                     workflow_intent=workflow_intent,
                     protected_shopify_store_keys=protected_shopify_store_keys,
+                    selected_website_settings=rendering_record.website_settings.settings
+                    if rendering_record.website_settings is not None
+                    else None,
                 )
             )
             override_payload = post_deploy_environment.payload
@@ -414,6 +433,9 @@ def execute_odoo_post_deploy(
                 if rendering_record
                 else None,
                 settings_attempted=bool(override_payload and override_payload.website_settings),
+                website_settings_verified=False
+                if override_payload and override_payload.website_settings
+                else None,
             )
         if isinstance(
             error, (OdooProviderSafetyRefusedError, DurableOperationAuthorizationDeniedError)
@@ -476,7 +498,13 @@ def execute_odoo_post_deploy(
             record=odoo_override_record,
             status=override_status,
             detail=detail,
-            applied_website_settings=accepted_settings,
+            applied_website_settings=rendering_record.website_settings
+            if rendering_record is not None
+            else None,
+            settings_attempted=bool(override_payload and override_payload.website_settings),
+            website_settings_verified=True
+            if override_payload and override_payload.website_settings
+            else None,
         )
         applied_at = updated_record.last_apply.applied_at
 

@@ -22,6 +22,17 @@ class OdooWebsiteSettings(BaseModel):
     cookies_bar: StrictBool | None = True
     block_third_party_domains: StrictBool | None = True
 
+    @model_validator(mode="before")
+    @classmethod
+    def restore_collection_only_null_controls(cls, value: object) -> object:
+        # Record stores omit nulls; the operation's semantics still preserve
+        # consent/embedding controls when rehydrating that persisted intent.
+        if isinstance(value, dict) and value.get("operation") == "disable_collection":
+            value = dict(value)
+            value.setdefault("cookies_bar", None)
+            value.setdefault("block_third_party_domains", None)
+        return value
+
     @model_validator(mode="after")
     def validate_settings(self) -> OdooWebsiteSettings:
         if self.operation == "disable_collection":

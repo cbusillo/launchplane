@@ -30,7 +30,10 @@ The Client release checklist shows these exact settings and includes their
 digest in the candidate identity. Changing a setting invalidates that release's
 acceptance even when the artifact is unchanged. Production application selects
 the exact decision authorizing the durable operation (including a recorded hotfix or override) for the artifact being deployed; newer
-prepared settings cannot alter an accepted release. For full application the native consumer checks
+prepared settings cannot alter an accepted release. Default deploy/legacy-ship
+rendering omits typed website intent; only maintenance supplies the selected
+snapshot. Website verification is persisted independently from the generic
+override result, so unrelated successful runs cannot confirm an unverified state. For full application the native consumer checks
 that the selected website's domain equals the reviewed public origin, writes
 and reads back native analytics/consent fields and
 `cm_website.public_indexing_enabled` in its transaction. Launchplane requires
@@ -42,7 +45,9 @@ image's startup settings addon cannot re-enable the forward flag.
 A failed consumer, including the recovery path after a failed workflow, keeps
 web stopped. No new credential or provider interface is introduced.
 
-Rollback selects the production snapshot retained in that operation's decision. Historical
+A preparation alone never changes unrelated rollback: historical clearing is
+triggered only by a recorded applied/attempted website snapshot. Same-artifact
+manual recovery reuses its verified snapshot. Rollback selects the production snapshot retained in that operation's decision. Historical
 artifacts without a website snapshot disable CM indexing and native analytics
 across the database, without depending on the unverified new selector; they do
 not retain forward-release settings. Collection-only historical rollback preserves existing cookie and third-party controls. Successful readback retains the actually

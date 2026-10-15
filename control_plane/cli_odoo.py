@@ -503,6 +503,8 @@ def _build_odoo_instance_override_record_with_apply_result(
                 applied_at=applied_at.strip()
                 or (utc_now_timestamp() if normalized_status in {"pass", "fail"} else ""),
                 detail=detail,
+                website_settings=target_record.last_apply.website_settings,
+                website_settings_verified=target_record.last_apply.website_settings_verified,
             ),
             "updated_at": utc_now_timestamp(),
             "source_label": source_label.strip() or "cli",

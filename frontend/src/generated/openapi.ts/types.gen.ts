@@ -1783,6 +1783,7 @@ export type OdooOverrideApplyResult = {
     detail: string;
     status: 'skipped' | 'pending' | 'pass' | 'fail';
     website_settings?: OdooWebsiteSettingsIntent | null;
+    website_settings_verified?: boolean;
 };
 
 export type OdooOverrideValue = {

@@ -188,7 +188,7 @@ def release_website_settings(
         record: OdooInstanceOverrideRecord = reader(context_name=prod.context, instance_name="prod")
     except FileNotFoundError:
         return None
-    if instance == "prod" and record.last_apply.status == "fail":
+    if instance == "prod" and not record.last_apply.website_settings_verified:
         return None
     settings = record.last_apply.website_settings if instance == "prod" else record.website_settings
     return settings if settings is not None and settings.artifact_id == artifact_id else None
@@ -282,7 +282,7 @@ def build_release_review(
         try:
             intent_record = reader(context_name=prod_lane.context, instance_name="prod")
             settings_readback_failed = bool(
-                intent_record.last_apply.status == "fail"
+                not intent_record.last_apply.website_settings_verified
                 and (intent_record.website_settings or intent_record.last_apply.website_settings)
             )
             stale_settings = (
