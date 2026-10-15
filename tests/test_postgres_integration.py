@@ -11045,6 +11045,7 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
 
     def test_drill_login_history_query_on_real_postgres(self) -> None:
         from datetime import timedelta
+        import re
         import subprocess
         from psycopg import sql
         from tests.test_odoo_testing_restore import FreshTestingHostProgramTests
@@ -11078,8 +11079,12 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                     ) as connection:
                         raw = connection.connection.driver_connection
                         assert raw is not None
-                        program = query.decode().replace(
-                            ":'usage_since'", sql.Literal(arguments[-1]).as_string(raw)
+                        # Emulate psql's quoted-variable binding, independent of
+                        # the query's chosen cutoff variable name.
+                        program = re.sub(
+                            r":'[a-zA-Z_][a-zA-Z0-9_]*'",
+                            lambda match: sql.Literal(arguments[-1]).as_string(raw),
+                            query.decode(),
                         )
                         with raw.cursor() as cursor:
                             cursor.execute(program)

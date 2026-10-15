@@ -480,6 +480,57 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         status, output = self.run_program()
         self.assertNotEqual(status, 0)
 
+    def test_reclaim_preserves_a_new_copy_that_has_started_serving(self) -> None:
+        from datetime import datetime, timezone
+
+        new_database = "lp_drill_" + "d" * 32
+        self.spec.update(
+            inspection_only=True,
+            usage_only=True,
+            usage_reclaim=True,
+            usage_new_database=new_database,
+            usage_database_names=[self.database, new_database],
+            usage_since=datetime.now(timezone.utc).isoformat(),
+        )
+        self.existing_database = True
+        command = self.command
+        for running, opened in ((True, False), (False, True), (False, False)):
+            with self.subTest(running=running, opened=opened):
+                self.containers["web"]["State"] = {"Running": running}
+                for service in ("web", "script-runner"):
+                    self.containers[service]["Config"]["Env"] = [
+                        item
+                        if not item.startswith("ODOO_DB_NAME=")
+                        else "ODOO_DB_NAME=" + new_database
+                        for item in self.containers[service]["Config"]["Env"]
+                    ]
+
+                def read(arguments: list[str], **kwargs: Any) -> Any:
+                    query = kwargs.get("input") or b""
+                    if b"ir_config_parameter" in query:
+                        result = self.spec["copy_binding_sha256"].encode()
+                    elif b"res_users_log" in query:
+                        result = b"f"
+                    elif arguments[-1] == self.spec["web_gate_path"]:
+                        result = str(opened).encode()
+                    else:
+                        return command(arguments, **kwargs)
+                    return subprocess.CompletedProcess(arguments, 0, stdout=result, stderr=b"")
+
+                with patch.object(self, "command", side_effect=read):
+                    status, output = self.run_program()
+                self.assertEqual(status, 0, output)
+                frame = json.loads(output.strip().removeprefix("fixture:"))
+                self.assertEqual(
+                    frame,
+                    {"type": "complete", "new_copy_serving": True}
+                    if running or opened
+                    else {"type": "complete", "recent_signins": False},
+                )
+        self.assertFalse(
+            any(call[:2] in (["docker", "stop"], ["docker", "start"]) for call in self.calls)
+        )
+
     def test_provider_converted_testing_networks_pass_the_receiver_guard(self) -> None:
         """Execute the guard on the renderer's graph plus Dokploy's domain injection."""
         composition = yaml.safe_load(

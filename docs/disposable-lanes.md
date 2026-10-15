@@ -831,9 +831,14 @@ attempt requires fresh admission. It reads login history from the original serve
 copy witness, including when web is stopped or the new copy is incomplete;
 copied production login rows in the new database cannot stand in for testing use.
 An unavailable original database still skips rather than assuming non-use.
+If the selected new copy is running or already has its web-start gate, reclaim
+skips and preserves it: people may have used it before final completion was
+recorded. A stopped web process alone does not erase that gate's protection.
 Every provider checkpoint rechecks the generation, admitted use/custody/isolation facts and
-current hold. Routine renewal of the same facts does not cancel a running copy;
-changed bindings require fresh current proof. A sign-in before activation
+current hold. The normal replacement recovery guard also binds the profile,
+runtime configuration and source/secret metadata before provider effects and
+refuses authority drift. Routine renewal of the general observation does not
+cancel a running copy. A sign-in before activation
 or a staff hold therefore protects the lane even after queueing. Protect a
 lane through the existing staff-testing hold before starting a session. Unknown
 or expired observations cannot substitute for that hold.

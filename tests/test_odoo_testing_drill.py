@@ -339,6 +339,83 @@ class TestingDrillTests(TestingDrillScenario):
         )
         require_drill_checkpoint(self.store, reclaimed)
 
+    def test_context_database_name_is_preserved_for_reclaim(self) -> None:
+        self.runtime = self.runtime.model_copy(
+            update={
+                "env": {
+                    key: value for key, value in self.runtime.env.items() if key != "ODOO_DB_NAME"
+                }
+            }
+        )
+        self.store.write_runtime_environment_record(self.runtime)
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context=self.context,
+                env={"ODOO_DB_NAME": "context_database"},
+                updated_at=self.profile.updated_at,
+            )
+        )
+        self.scheduler.run_once()
+        operation = self.activate()
+        reclaimed = operation.model_copy(update={"attempt": operation.attempt + 1})
+        self.store.write_odoo_stable_target_replacement_operation_record(reclaimed)
+        self.store.activate_odoo_testing_drill(reclaimed, self.now)
+        self.assertEqual(self.signins.call_args.kwargs["history_database"], "context_database")
+
+    def test_reclaim_skips_a_copy_that_may_already_have_testers(self) -> None:
+        from control_plane.odoo_testing_drill_usage import DrillCopyAlreadyServing
+
+        self.scheduler.run_once()
+        operation = self.activate()
+        reclaimed = operation.model_copy(update={"attempt": operation.attempt + 1})
+        self.store.write_odoo_stable_target_replacement_operation_record(reclaimed)
+        self.signins.side_effect = DrillCopyAlreadyServing()
+        before = self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context)
+        with self.assertRaises(DrillSkipped):
+            self.store.activate_odoo_testing_drill(reclaimed, self.now)
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            before,
+        )
+
+    def test_recovery_checkpoint_refuses_a_changed_drill_policy(self) -> None:
+        from control_plane.testing_replacement_recovery import guard_testing_replacement
+
+        self.scheduler.run_once()
+        operation = self.activate()
+        with guard_testing_replacement(
+            self.store, operation, operation.lease_owner, lambda phase: None
+        ) as checkpoint:
+            checkpoint("fixture-first-effect")
+            self.store.write_product_profile_record(
+                self.profile.model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"odoo_testing_drill_enabled": False})
+                            if lane.instance == "testing"
+                            else lane
+                            for lane in self.profile.lanes
+                        )
+                    }
+                )
+            )
+            with self.assertRaises(RuntimeError):
+                checkpoint("fixture-later-effect")
+
+    def test_activation_refuses_an_expired_observation(self) -> None:
+        from control_plane.odoo_testing_drill import collect_drill_admission
+
+        self.scheduler.run_once()
+        old = collect_drill_admission(self.store, self.gen, self.now - 600)
+        with patch("control_plane.odoo_testing_drill.collect_drill_admission", return_value=old):
+            with self.assertRaises(DrillSkipped):
+                self.activate()
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+
     def test_expired_recorded_person_use_still_skips(self) -> None:
         record_safety(
             self.store,

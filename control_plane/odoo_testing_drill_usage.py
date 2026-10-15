@@ -12,10 +12,28 @@ from control_plane.odoo_testing_restore import (
     generation_binding,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
 # Cover a full daily drill interval. Count every account, including administrators
 # and portal users; no account list or privileged-user exclusion can hide use.
 DRILL_RECENT_USE_SECONDS = 24 * 60 * 60
+
+
+class DrillCopyAlreadyServing(ValueError):
+    """A reclaimed copy may already contain a tester's work."""
+
+
+def testing_drill_environment(store: PostgresRecordStore, context: str) -> dict[str, str]:
+    environment: dict[str, str] = {}
+    for scope in ("context", "instance"):
+        for record in store.list_runtime_environment_records(context_name=context):
+            if record.scope == scope and record.instance == (
+                "testing" if scope == "instance" else ""
+            ):
+                environment.update({key: str(value) for key, value in record.env.items()})
+    target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+    environment.update({key: str(value) for key, value in target.env.items()})
+    return environment
 
 
 def read_drill_recent_signins(
@@ -46,14 +64,7 @@ def read_drill_recent_signins(
     )
     if str(provider.get("name") or "") != target.target_name:
         raise ValueError("Testing provider target changed.")
-    environment: dict[str, str] = {}
-    for scope in ("context", "instance"):
-        for record in store.list_runtime_environment_records(context_name=generation.context):
-            if record.scope == scope and record.instance == (
-                "testing" if scope == "instance" else ""
-            ):
-                environment.update({key: str(value) for key, value in record.env.items()})
-    environment.update({key: str(value) for key, value in target.env.items()})
+    environment = testing_drill_environment(store, generation.context)
     database = environment.get("ODOO_DB_NAME", "")
     history = history_generation or generation
     history_database = history_database or database
@@ -76,6 +87,9 @@ def read_drill_recent_signins(
             "copy_binding_sha256": generation_binding(history),
             "workflow_environment": {},
             "usage_only": True,
+            "usage_reclaim": history_generation is not None,
+            "usage_new_database": generation.drill_database,
+            "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
             "usage_since": max(
                 completed,
                 datetime.fromtimestamp(now, timezone.utc)
@@ -85,6 +99,12 @@ def read_drill_recent_signins(
         receive=frames.append,
     )
     assert_selection_current(store, selection)
+    if (
+        len(frames) == 1
+        and frames[0].get("type") == "complete"
+        and frames[0].get("new_copy_serving") is True
+    ):
+        raise DrillCopyAlreadyServing("The new testing copy has already been opened.")
     if (
         len(frames) != 1
         or frames[0].get("type") != "complete"

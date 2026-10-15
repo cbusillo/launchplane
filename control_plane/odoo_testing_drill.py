@@ -44,7 +44,11 @@ from control_plane.odoo_testing_restore import (
     generation_binding,
     read_current_testing_generation,
 )
-from control_plane.odoo_testing_drill_usage import read_drill_recent_signins
+from control_plane.odoo_testing_drill_usage import (
+    read_drill_recent_signins,
+    testing_drill_environment,
+    DrillCopyAlreadyServing,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_lane_hold import read_staff_testing_hold
 from control_plane.provider_operations import _ReservationHeartbeat
@@ -138,6 +142,7 @@ class PreparedDrill:
     runtime: RuntimeEnvironmentRecord
     safety: DisposableLaneSafety
     operation: OdooStableTargetReplacementOperationRecord
+    previous_database: str
 
 
 def require_drill_use_unprotected(store: PostgresRecordStore, product: str, context: str) -> None:
@@ -181,6 +186,8 @@ def collect_drill_admission(
             history_generation=history_generation,
             history_database=history_database,
         )
+    except DrillCopyAlreadyServing as error:
+        raise DrillSkipped("new_testing_copy_already_serving") from error
     except Exception as error:
         raise DrillSkipped("successful_login_check_unreadable") from error
     if used:
@@ -321,7 +328,14 @@ def prepare_drill(
         ),
     )
     # The scoped receipt never rewrites or renews the general observation row.
-    return PreparedDrill(previous, generation, runtime, safety, operation)
+    return PreparedDrill(
+        previous,
+        generation,
+        runtime,
+        safety,
+        operation,
+        testing_drill_environment(store, context).get("ODOO_DB_NAME", ""),
+    )
 
 
 def require_drill_checkpoint(

@@ -796,6 +796,29 @@ def restore_main():
         if spec.get('usage_only'):
             if present != '1':
                 raise RuntimeError('Testing login history is unavailable')
+            if spec.get('usage_reclaim'):
+                state=containers['web'][1].get('State',{})
+                if type(state.get('Running')) is not bool:
+                    raise RuntimeError('Testing web state is unreadable')
+                web_env=dict(item.split('=',1) for item in containers['web'][1]['Config'].get('Env',[]) if '=' in item)
+                new_database=spec['usage_new_database']
+                if not re.fullmatch(r'lp_drill_[a-f0-9]{32}',new_database):
+                    raise RuntimeError('Reclaimed testing database is unbound')
+                serving=state['Running'] and web_env.get('ODOO_DB_NAME')==new_database
+                new_present=docker('exec','-i',containers['database'][0],'sh','-c',
+                    'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
+                    '_',new_database,stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
+                if new_present not in {'0','1'}:
+                    raise RuntimeError('Reclaimed testing database is unreadable')
+                if new_present=='1':
+                    gate=docker('exec',runner,'python3','-c',
+                        "from pathlib import Path;import sys;print(Path(sys.argv[1]).is_file())",spec['web_gate_path']).decode().strip()
+                    if gate not in {'True','False'}:
+                        raise RuntimeError('Testing web gate is unreadable')
+                    serving=serving or gate=='True'
+                if serving:
+                    print(prefix+json.dumps({'type':'complete','new_copy_serving':True}),flush=True)
+                    return
             # Odoo records successful logins in res_users_log.create_date with
             # create_uid naming the account. Read all accounts without logging
             # identities or creating an Odoo session (which would add a login).

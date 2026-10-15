@@ -78,6 +78,7 @@ class DrillUsageReadTests(unittest.TestCase):
             {"type": "complete", "recent_signins": 0},
             {"type": "failed"},
             {"type": "complete", "recent_signins": "false"},
+            {"type": "complete", "new_copy_serving": True},
         ):
             with self.subTest(frame=frame):
                 self.inspect.side_effect = lambda **kw: kw["receive"](frame) if frame else None

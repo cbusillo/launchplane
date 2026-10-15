@@ -10830,6 +10830,7 @@ class PostgresRecordStore(HumanSessionStore):
                     operation_id=prepared.operation.operation_id,
                     generation_binding=generation_binding(prepared.generation),
                     previous_generation=prepared.previous.model_dump(mode="json"),
+                    previous_database=prepared.previous_database,
                     planned_generation=prepared.generation.model_dump(mode="json"),
                 )
                 operation = prepared.operation
@@ -10919,12 +10920,18 @@ class PostgresRecordStore(HumanSessionStore):
                 previous_runtime = RuntimeEnvironmentRecord.model_validate(
                     observed_payload["previous_runtime"]
                 )
+                history_database = str(
+                    observed_payload.get("previous_database")
+                    or previous_runtime.env.get("ODOO_DB_NAME", "")
+                )
+                if not history_database:
+                    raise DrillSkipped("original_testing_database_unreadable")
                 current_safety = collect_drill_admission(
                     self,
                     observed_generation,
                     now,
                     history_generation=previous,
-                    history_database=str(previous_runtime.env["ODOO_DB_NAME"]),
+                    history_database=history_database,
                 )
         else:
             candidate = prepare_drill(
@@ -10997,6 +11004,11 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise DrillPrerequisite("drill_generation_missing")
             current = FreshOdooTestingGeneration.model_validate(row.payload)
+            observation = candidate.safety if candidate is not None else current_safety
+            if observation is not None and observation.expires_at.timestamp() <= max(
+                now, datetime.now(timezone.utc).timestamp()
+            ):
+                raise DrillSkipped("successful_login_check_expired")
             if generation_binding(current) == generation_binding(planned):
                 from control_plane.odoo_testing_drill import (
                     require_drill_checkpoint,
