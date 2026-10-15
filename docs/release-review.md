@@ -139,13 +139,30 @@ updated first; keep one marked issue per product. Multiple matches on that page
 or incomplete reads refuse publication. Discovery is bounded to 1,000 entries
 (including PRs); for a larger repository, mark its destination before enabling
 the publisher so it appears at the front of the updated-issue list. A closed
-marked issue is intentionally reused; its mentions still notify the Client.
+marked issue is intentionally reused and reopened when a genuine new review
+is ready; its mentions still notify the Client.
 Comment lookup is also bounded to 1,000 entries; keep the requests issue unlocked
 and preserve its receipts. The Client must already be able to read the product
 repository for the mention to notify them; missing access is a reported prerequisite,
 not a reason to grant access automatically.
 The marker functions live in `control_plane/release_invitation.py`; there is no
 checked-in destination catalog.
+
+When production and testing match, the publisher reconciles the previous
+invitation only if the current Client's saved acceptance names that exact
+candidate and its saved release run has passed. Equal versions alone, held
+approval, a running/stopped release, and missing evidence cannot complete an
+invitation. The existing invitation is marked released without another mention,
+with the saved acceptance linked and the original text and delivery receipts
+retained in a collapsed history section. Historical mentions are neutralized.
+The marked issue closes only when there is no other outstanding invitation;
+requests delivered after that acceptance are preserved. A newer testing
+candidate prevents settlement of the old release. Completion receipts make
+retries and replica restarts idempotent, and the product publication lock and
+fresh decision/run/lane checks protect concurrent workers. Workers throttle
+unchanged completion lookups to five minutes; they do not compile a new
+checklist for a release already completed. No acceptance or release record is
+changed by invitation reconciliation.
 
 Each request includes `release_invitation_marker(product, candidate)`, derived
 from the candidate's artifact, commit and shared-input identity. The worker

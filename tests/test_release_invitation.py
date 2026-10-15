@@ -10,6 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.release_review import ReleaseReviewItem, ReleaseReviewStatus
+from control_plane.client_release import ClientReleaseRunView
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.merge_train_batch import (
@@ -979,6 +980,14 @@ class ReleaseInvitationTests(unittest.TestCase):
             return None
         self.assertTrue(path.startswith("/repos/example/site/issues"))
         if kwargs.get("method") == "PATCH":
+            if "state" in kwargs["body"]:
+                issue = next(issue for issue in self.issues if path.endswith(f"/{issue['number']}"))
+                issue.update(kwargs["body"])
+                self.edits.append(kwargs["body"])
+                if self.lose_response:
+                    self.lose_response = False
+                    raise TimeoutError("response lost after issue update")
+                return issue.copy()
             comment_id = int(path.rsplit("/", 1)[1])
             comment = next(comment for comment in self.comments if comment["id"] == comment_id)
             comment.update(kwargs["body"], updated_at=self.now.isoformat())
@@ -997,7 +1006,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                     self.lose_response = False
                     raise TimeoutError("response lost after publication")
                 return result
-            issue = {"number": 91, **body}
+            issue = {"number": 91, "state": "open", **body}
             self.issues.append(issue)
             return issue
         return self.comments.copy() if "/comments?" in path else self.issues.copy()
@@ -1449,6 +1458,166 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIs(self.publish(backoff), False)
         self.assertEqual(self.read_count, 2)
         self.assertEqual(self.posts, [])
+
+    def complete_release(self) -> Any:
+        self.now += timedelta(minutes=1)
+        accepted = decision(self.store, date=self.now.isoformat()).model_copy(
+            update={"release_start": "promote"}
+        )
+        self.store.create_release_review_decision_record_if_absent(accepted)
+        production = self.store.read_release_tuple_record(
+            context_name="example-site", channel_name="prod"
+        )
+        self.store.write_release_tuple_record(
+            production.model_copy(update={"artifact_id": accepted.checklist.candidate.artifact_id})
+        )
+        run = ClientReleaseRunView(
+            decision_record_id=accepted.record_id, rollback_drill=False, state="passed", steps=()
+        )
+        patcher = patch("control_plane.client_release.read_client_release_run", return_value=run)
+        reader = patcher.start()
+        self.addCleanup(patcher.stop)
+        return accepted, reader
+
+    def test_completed_release_settles_original_invitation_and_closes_issue_once(self) -> None:
+        self.publish()
+        original = self.comments[0]["body"]
+        accepted, _ = self.complete_release()
+        posts = self.posts.copy()
+        self.assertFalse(self.publish())
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertIn(original.replace("@", "@\u200b"), self.comments[0]["body"])
+        self.assertIn(accepted.release_issue_url, self.comments[0]["body"])
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=self.profile.product, record_id=accepted.record_id
+            ),
+            accepted,
+        )
+        edits = self.edits.copy()
+        self.publish(ReleaseInvitationBackoff())
+        self.publish()
+        self.assertEqual(self.edits, edits)
+        self.assertEqual(self.posts, posts)
+
+    def test_completed_manual_receipt_is_preserved_without_another_mention(self) -> None:
+        self.publish()
+        assert self.review.checklist is not None
+        original = (
+            release_invitation_marker(self.profile.product, self.review.checklist.candidate)
+            + "\n\n@site-owner please review."
+        )
+        self.comments[0]["body"] = original
+        self.complete_release()
+        self.publish()
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertIn(original.replace("@", "@\u200b"), self.comments[0]["body"])
+
+    def test_incomplete_failed_held_or_unavailable_run_cannot_settle(self) -> None:
+        self.publish()
+        accepted, reader = self.complete_release()
+        original = self.comments[0]["body"]
+        for state in ("waiting", "running", "stopped", None):
+            with self.subTest(state=state):
+                reader.return_value = (
+                    reader.return_value.model_copy(update={"state": state}) if state else None
+                )
+                self.publish()
+                self.assertEqual(self.comments[0]["body"], original)
+                self.assertEqual(self.issues[0]["state"], "open")
+        # A record-only acceptance is not a production release, even with equal lanes.
+        reader.return_value = ClientReleaseRunView(
+            decision_record_id=accepted.record_id, rollback_drill=False, state="passed", steps=()
+        )
+        self.store.write_release_review_decision_record(
+            accepted.model_copy(update={"release_start": ""})
+        )
+        self.publish()
+        self.assertEqual(self.edits, [])
+
+    def test_unavailable_lane_or_wrong_run_evidence_cannot_settle(self) -> None:
+        self.publish()
+        _, reader = self.complete_release()
+        reader.return_value = reader.return_value.model_copy(update={"decision_record_id": "other"})
+        self.publish()
+        self.assertEqual(self.edits, [])
+        with patch(
+            "control_plane.release_invitation.release_version", side_effect=ValueError("missing")
+        ):
+            with self.assertRaises(ValueError):
+                self.publish()
+        self.assertEqual(self.edits, [])
+
+    def test_newer_pending_candidate_is_never_settled_by_old_release(self) -> None:
+        self.publish()
+        self.complete_release()
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        self.publish()
+        current = self.comments[-1]["body"]
+        self.publish()
+        self.assertEqual(self.comments[-1]["body"], current)
+        self.assertEqual(self.issues[0]["state"], "open")
+
+    def test_newer_request_on_same_candidate_prevents_issue_closure(self) -> None:
+        self.publish()
+        self.complete_release()
+        self.now += timedelta(minutes=1)
+        self.comments.append(
+            {"id": 2, "created_at": self.now.isoformat(), "body": self.comments[0]["body"]}
+        )
+        pending = self.comments[-1].copy()
+        self.publish()
+        self.assertEqual(self.comments[-1], pending)
+        self.assertEqual(self.issues[0]["state"], "open")
+
+    def test_completed_release_rechecks_evidence_after_destination_lookup(self) -> None:
+        self.publish()
+        self.complete_release()
+        original = self.github
+
+        def moving_candidate(**kwargs: Any) -> object:
+            result = original(**kwargs)
+            if "/comments?" in kwargs["path"]:
+                self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+            return result
+
+        with patch("control_plane.release_invitation.github_api_request", moving_candidate):
+            self.publish()
+        self.assertEqual(self.edits, [])
+        self.assertEqual(self.issues[0]["state"], "open")
+
+    def test_lost_settlement_responses_and_replica_races_do_not_duplicate_delivery(self) -> None:
+        self.publish()
+        self.complete_release()
+        self.lose_response = True
+        with self.assertRaises(TimeoutError):
+            self.publish()
+        self.lose_response = True
+        with self.assertRaises(TimeoutError):
+            self.publish()
+        edits = self.edits.copy()
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            list(workers.map(lambda _: self.publish(ReleaseInvitationBackoff()), range(2)))
+        self.assertEqual(self.edits, edits)
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertEqual(len(self.comments), 1)
+
+    def test_next_real_review_reopens_settled_destination(self) -> None:
+        self.publish()
+        self.complete_release()
+        self.publish()
+        previous = self.comments[0].copy()
+        self.now += timedelta(minutes=1)
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        self.publish()
+        self.assertEqual(self.issues[0]["state"], "open")
+        self.assertEqual(len(self.issues), 1)
+        self.assertEqual(self.comments[0], previous)
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+        count = len(self.comments)
+        self.publish()
+        self.assertEqual(len(self.comments), count)
 
     def test_changed_notes_after_acceptance_renew_the_client_request(self) -> None:
         self.publish()
