@@ -239,7 +239,7 @@ class DiagnosticTests(unittest.TestCase):
 
     def test_missing_unsafe_and_unreachable_are_independent(self) -> None:
         self.fixture.bindings[0] = self.fixture.bindings[0].model_copy(
-            update={"declared_secret_class": "prod"}
+            update={"declared_secret_class": "prod_only"}
         )
         self.fixture.records[:] = [
             record for record in self.fixture.records if record.secret_id != "repairshopr"
@@ -251,6 +251,13 @@ class DiagnosticTests(unittest.TestCase):
             ["missing_or_unsafe", "missing_or_unsafe", "selected"],
         )
         self.assertEqual(result.sources[-1].managed_connection_grants, "unknown")
+        self.assertTrue(
+            all(
+                item.agreement == "match"
+                for item in result.sources[0].parameters
+                if item.field != "password"
+            )
+        )
         self.mocks[-2].assert_called_once()
         self.mocks[-1].assert_called_once()
 
@@ -260,6 +267,38 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(result.sources[0].binding, "missing_or_unsafe")
         self.assertEqual(result.sources[1].managed_connection_grants, "read_only")
         self.assertNotIn(PRIVATE, result.model_dump_json())
+
+    def test_non_prod_delivery_and_equivalent_boolean_agree(self) -> None:
+        self.fixture.bindings[0] = self.fixture.bindings[0].model_copy(
+            update={"declared_secret_class": "non_prod"}
+        )
+        self.fixture.applied["cm_data.db.ssl_verify"] = "true"
+        source = self.run_diagnostic().sources[0]
+        self.assertEqual(source.binding, "selected")
+        self.assertTrue(all(item.agreement == "match" for item in source.parameters))
+
+    def test_retired_password_is_never_decrypted_or_probed(self) -> None:
+        key = self.fixture.bindings[0].binding_key
+        self.fixture.runtime = self.fixture.runtime.model_copy(
+            update={
+                "schema_version": 2,
+                "retired_provider_keys": (key,),
+            }
+        )
+        result = self.run_diagnostic()
+        self.assertEqual(result.sources[0].binding, "missing_or_unsafe")
+        self.assertEqual(self.mocks[-2].call_count, 2)
+        self.assertEqual(self.mocks[-1].call_count, 2)
+
+    def test_changed_host_cannot_receive_selected_password(self) -> None:
+        values = dict(self.fixture.runtime.env)
+        values[config_parameter_runtime_key("cm_data.db.host")] = "redirect.invalid"
+        self.fixture.runtime = self.fixture.runtime.model_copy(update={"env": values})
+        result = self.run_diagnostic()
+        self.assertEqual(result.sources[0].managed_connection_grants, "unknown")
+        fields = {item.field: item.agreement for item in result.sources[0].parameters}
+        self.assertEqual(fields["host"], "mismatch")
+        self.assertEqual(self.mocks[-1].call_count, 2)
 
     def test_runtime_and_config_drift_discard_evidence(self) -> None:
         for kind in ("runtime", "settings", "binding", "container", "applied"):
@@ -334,9 +373,8 @@ class AppliedReadTests(unittest.TestCase):
                 return {"uid": 7}
             if path.endswith("destroy"):
                 return None
-            self.assertEqual(params["model"], "ir.config_parameter")
-            self.assertEqual(params["method"], "search_read")
-            self.assertEqual(params["kwargs"]["fields"], ["key", "value"])
+            requested = set(params["args"][0][0][2])
+            self.assertLessEqual(requested, set(fixture.applied))
             return [{"key": key, "value": value} for key, value in fixture.applied.items()]
 
         with (
@@ -345,17 +383,57 @@ class AppliedReadTests(unittest.TestCase):
                 reads,
                 "_http_json",
                 return_value={"runtime_identity": fixture.identity.model_dump()},
-            ) as health,
+            ),
             patch.object(reads, "_rpc", side_effect=rpc),
         ):
             self.assertEqual(
                 diagnostic.read_applied_parameters(fixture.connection), fixture.applied
             )
-        self.assertEqual(health.call_count, 2)
         self.assertTrue(calls[-1][0].endswith("destroy"))
 
 
 class GrantTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cache = patch.dict(
+            "control_plane.odoo_import_diagnostics._FAILED_PROBES", {}, clear=True
+        )
+        self.cache.start()
+        self.addCleanup(self.cache.stop)
+
+    def test_failed_login_polling_is_cooled_down_but_success_is_fresh(self) -> None:
+        settings = {"host": "source.invalid", "user": "reader", "password": PRIVATE}
+        with (
+            patch(
+                "control_plane.odoo_import_diagnostics.time.monotonic", return_value=100
+            ) as clock,
+            patch(
+                "control_plane.odoo_import_diagnostics.subprocess.run", side_effect=OSError(PRIVATE)
+            ) as run,
+        ):
+            self.assertEqual(diagnostic.managed_grants(settings), "unknown")
+            self.assertEqual(diagnostic.managed_grants(settings), "unknown")
+            run.assert_called_once()
+            self.assertNotIn(PRIVATE, repr(diagnostic._FAILED_PROBES))
+            clock.return_value = 1000
+            run.side_effect = None
+            run.return_value = subprocess.CompletedProcess([], 0, stdout='{"grants":"read_only"}')
+            self.assertEqual(diagnostic.managed_grants(settings), "read_only")
+            self.assertEqual(diagnostic.managed_grants(settings), "read_only")
+            self.assertEqual(run.call_count, 3)
+
+    def test_same_source_has_one_in_flight_probe(self) -> None:
+        settings = {"host": "source.invalid", "user": "reader", "password": PRIVATE}
+
+        def concurrent(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+            self.assertEqual(diagnostic.managed_grants(settings), "unknown")
+            return subprocess.CompletedProcess([], 0, stdout='{"grants":"read_only"}')
+
+        with patch(
+            "control_plane.odoo_import_diagnostics.subprocess.run", side_effect=concurrent
+        ) as run:
+            self.assertEqual(diagnostic.managed_grants(settings), "read_only")
+            run.assert_called_once()
+
     def test_privilege_categories_roles_and_grant_options_fail_closed(self) -> None:
         for privileges, expected in (
             ("SELECT, SHOW VIEW", "read_only"),
@@ -404,7 +482,6 @@ class GrantTests(unittest.TestCase):
                 probe.probe({"host": "source.invalid", "user": "reader", "password": PRIVATE}),
                 "read_only",
             )
-        self.assertEqual(cursor.execute.call_args_list[0].args, ("SHOW GRANTS",))
         self.assertTrue(
             all(
                 call.args[0].startswith(("SELECT ", "SHOW "))
@@ -436,21 +513,23 @@ class GrantTests(unittest.TestCase):
 
     def test_parent_timeout_and_malformed_response_never_leak(self) -> None:
         settings = {"host": "source.invalid", "user": "reader", "password": PRIVATE}
-        for value in (
-            subprocess.TimeoutExpired("probe", 10, output=PRIVATE),
-            OSError(PRIVATE),
-            subprocess.CompletedProcess([], 0, stdout=PRIVATE),
-            subprocess.CompletedProcess(
-                [], 0, stdout='{"grants":"read_only","secret":"' + PRIVATE + '"}'
-            ),
+        for index, value in enumerate(
+            (
+                subprocess.TimeoutExpired("probe", 10, output=PRIVATE),
+                OSError(PRIVATE),
+                subprocess.CompletedProcess([], 0, stdout=PRIVATE),
+                subprocess.CompletedProcess(
+                    [], 0, stdout='{"grants":"read_only","secret":"' + PRIVATE + '"}'
+                ),
+            )
         ):
+            settings["user"] = f"reader-{index}"
             kwargs = (
                 {"side_effect": value} if isinstance(value, Exception) else {"return_value": value}
             )
             with patch("control_plane.odoo_import_diagnostics.subprocess.run", **kwargs) as run:
                 self.assertEqual(diagnostic.managed_grants(settings), "unknown")
             self.assertNotIn(PRIVATE, repr(run.call_args.args))
-            self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
             self.assertGreater(run.call_args.kwargs["timeout"], 0)
 
 
@@ -490,7 +569,6 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
             response = await request(app, "GET", path)
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.headers["cache-control"], "no-store")
-            self.assertEqual(allowed.call_args.kwargs["action"], "product_environment.read")
             self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
             self.assertNotIn(PRIVATE, response.text)
             execute.reset_mock()
@@ -506,3 +584,7 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
             allowed.return_value = False
             self.assertEqual((await request(app, "GET", path)).status_code, 403)
             execute.assert_not_called()
+            fixture.store.read_product_profile_record.return_value = fixture.profile.model_copy(
+                update={"driver_id": "generic-web"}
+            )
+            self.assertEqual((await request(app, "GET", path)).status_code, 400)

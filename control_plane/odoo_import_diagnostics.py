@@ -4,6 +4,9 @@ import hmac
 import json
 import subprocess
 import sys
+import threading
+import time
+from secrets import token_bytes
 from dataclasses import dataclass, field
 from http.cookiejar import CookieJar
 from pathlib import Path
@@ -22,6 +25,8 @@ from control_plane.odoo_instance_overrides import config_parameter_secret_env_ke
 from control_plane.odoo_product_driver_http import resolve_odoo_product_route
 from control_plane.product_secret_copy import ProductSecretCopyStore, product_secret_bindings
 from control_plane.secrets import _decrypt_secret_value
+from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
+from control_plane.runtime_key_safety import ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
 from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
 
@@ -32,6 +37,10 @@ SOURCE_PREFIXES = {
 }
 FIELDS = ("host", "user", "db", "port", "ssl_verify")
 Agreement = Literal["match", "mismatch", "missing", "unknown"]
+_PROBE_KEY = token_bytes(32)
+_PROBE_LOCK = threading.Lock()
+_ACTIVE_PROBES: set[bytes] = set()
+_FAILED_PROBES: dict[bytes, float] = {}
 
 
 class DiagnosticStore(
@@ -88,6 +97,7 @@ class ImportAuthority:
     profile: LaunchplaneProductProfileRecord
     private_snapshot: str = field(repr=False)
     sources: dict[str, SourceAuthority] = field(repr=False)
+    settings: dict[str, dict[str, str]] = field(repr=False)
 
 
 def import_authority(store: DiagnosticStore, product: str) -> ImportAuthority:
@@ -103,6 +113,16 @@ def import_authority(store: DiagnosticStore, product: str) -> ImportAuthority:
         context_name=lane.context, instance_name=lane.instance
     )
     pairs = product_secret_bindings(store, product=product)
+    delivered = site_delivered_secret_bindings_from_store(
+        record_store=store, context_name=lane.context, instance_name=lane.instance
+    )
+    source_settings = {
+        name: {
+            field_name: values.get(config_parameter_runtime_key(prefix + "." + field_name), "")
+            for field_name in FIELDS
+        }
+        for name, prefix in SOURCE_PREFIXES.items()
+    }
     sources: dict[str, SourceAuthority] = {}
     selected_metadata: list[object] = []
     for name, prefix in SOURCE_PREFIXES.items():
@@ -125,10 +145,12 @@ def import_authority(store: DiagnosticStore, product: str) -> ImportAuthority:
         if len(selected) != 1:
             continue
         binding, record = selected[0]
+        if delivered.get(key) != binding:
+            continue
         sharing = binding.sharing_reason
         if (
             record.scope != "context_instance"
-            or binding.declared_secret_class not in {"testing", "shared_safe"}
+            or binding.declared_secret_class not in ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT["testing"]
             or (
                 binding.declared_secret_class == "shared_safe"
                 and (sharing is None or sharing.kind != "read_only_source")
@@ -149,11 +171,7 @@ def import_authority(store: DiagnosticStore, product: str) -> ImportAuthority:
             continue
         if version.secret_id != record.secret_id or version.version_id != record.current_version_id:
             continue
-        settings = {
-            field_name: values.get(config_parameter_runtime_key(prefix + "." + field_name), "")
-            for field_name in FIELDS
-        }
-        sources[name] = SourceAuthority(binding, record, version, settings)
+        sources[name] = SourceAuthority(binding, record, version, source_settings[name])
     snapshot = json.dumps(
         {
             "profile": profile.model_dump(mode="json"),
@@ -168,7 +186,7 @@ def import_authority(store: DiagnosticStore, product: str) -> ImportAuthority:
         },
         sort_keys=True,
     )
-    return ImportAuthority(profile, snapshot, sources)
+    return ImportAuthority(profile, snapshot, sources, source_settings)
 
 
 def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str, str]:
@@ -255,6 +273,34 @@ def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str
 
 
 def managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "unknown"]:
+    # Single-flight and failure cooldown, keyed privately so plaintext passwords
+    # are never retained in a cache or a key's repr. Successful grants are never
+    # cached: every successful result is a fresh source observation.
+    key = hmac.digest(_PROBE_KEY, json.dumps(settings, sort_keys=True).encode(), "sha256")
+    now = time.monotonic()
+    with _PROBE_LOCK:
+        for expired in [item for item, until in _FAILED_PROBES.items() if until <= now]:
+            del _FAILED_PROBES[expired]
+        if (
+            key in _ACTIVE_PROBES
+            or key in _FAILED_PROBES
+            or len(_ACTIVE_PROBES) >= 4
+            or len(_FAILED_PROBES) >= 128
+        ):
+            return "unknown"
+        _ACTIVE_PROBES.add(key)
+    result: Literal["read_only", "unsafe", "unknown"] = "unknown"
+    try:
+        result = _run_managed_grants(settings)
+        return result
+    finally:
+        with _PROBE_LOCK:
+            _ACTIVE_PROBES.discard(key)
+            if result == "unknown":
+                _FAILED_PROBES[key] = time.monotonic() + 60
+
+
+def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "unknown"]:
     if not all(settings.get(key) for key in ("host", "user", "password")):
         return "unknown"
     if settings.get("ssl_verify", "").lower() not in {"", "true", "1"}:
@@ -271,6 +317,7 @@ def managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            env={},
             timeout=10,
             check=False,
         )
@@ -283,6 +330,18 @@ def managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsafe", "
     except (OSError, subprocess.SubprocessError, ValueError):
         pass
     return "unknown"
+
+
+def parameter_agreement(key: str, expected: str, applied: str) -> Agreement:
+    if not applied:
+        return "missing"
+    if not expected:
+        return "unknown"
+    if key == "ssl_verify":
+        booleans = {"true": "true", "1": "true", "false": "false", "0": "false"}
+        expected = booleans.get(expected.lower(), expected)
+        applied = booleans.get(applied.lower(), applied)
+    return "match" if hmac.compare_digest(expected.encode(), applied.encode()) else "mismatch"
 
 
 def diagnose_imports(
@@ -313,9 +372,11 @@ def diagnose_imports(
                                     key,
                                 ),
                                 applied_present=bool(applied.get(prefix + "." + key)),
-                                agreement="unknown"
-                                if applied.get(prefix + "." + key)
-                                else "missing",
+                                agreement=parameter_agreement(
+                                    key,
+                                    authority.settings[name].get(key, ""),
+                                    applied.get(prefix + "." + key, ""),
+                                ),
                             )
                             for key in (*FIELDS, "password")
                         ),
@@ -333,16 +394,8 @@ def diagnose_imports(
                             Literal["host", "user", "db", "port", "ssl_verify", "password"], key
                         ),
                         applied_present=bool(applied.get(prefix + "." + key)),
-                        agreement=(
-                            "missing"
-                            if not applied.get(prefix + "." + key)
-                            else "unknown"
-                            if not settings[key]
-                            else "match"
-                            if hmac.compare_digest(
-                                applied[prefix + "." + key].encode(), settings[key].encode()
-                            )
-                            else "mismatch"
+                        agreement=parameter_agreement(
+                            key, settings[key], applied.get(prefix + "." + key, "")
                         ),
                     )
                     for key in (*FIELDS, "password")
@@ -352,7 +405,12 @@ def diagnose_imports(
                         source=source_name,
                         binding="selected",
                         parameters=parameters,
-                        managed_connection_grants=managed_grants(settings),
+                        managed_connection_grants=managed_grants(settings)
+                        if all(
+                            settings[key] and settings[key] == applied.get(prefix + "." + key)
+                            for key in ("host", "port")
+                        )
+                        else "unknown",
                     )
                 )
             except Exception:

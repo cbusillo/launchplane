@@ -6,7 +6,7 @@ import ssl
 import sys
 from typing import Literal
 
-import pymysql  # type: ignore[import-untyped]
+import pymysql
 
 GrantStatus = Literal["read_only", "unsafe", "unknown"]
 _READ_PRIVILEGES = frozenset({"SELECT", "SHOW VIEW", "SHOW DATABASES", "USAGE"})

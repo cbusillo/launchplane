@@ -4580,13 +4580,24 @@ keys. Comparisons with current lane runtime authority and the selected managed
 password stay inside Launchplane; the response contains presence and agreement
 categories only. Missing, ambiguous, unsafe or undecryptable bindings never
 select a personal/writer fallback. A source needs an exact testing binding
-classified `testing`, or `shared_safe` with read-only sharing evidence, and its
+classified `testing` or `non_prod`, or `shared_safe` with read-only sharing evidence, and its
 existing `read_only_source` allowance. Classification alone proves no privilege.
+
+Retired password keys are excluded by the same binding selector used for lane
+delivery. Non-secret agreement remains visible when a password binding is refused.
+A source is probed only when its managed host and port agree with the applied
+Odoo parameters; changing runtime intent cannot send a password to an unapplied
+endpoint.
 
 Each source's selected managed connection is independently inspected using
 `SHOW GRANTS`, without reading customer tables or trying a write. Connections
 require verified TLS. A separate process bounds each attempt, including DNS,
-to ten seconds and discards stderr. Only SELECT, SHOW VIEW, SHOW DATABASES and
+to ten seconds and discards stderr. Repeated unqualified probes have a 60-second
+process-local cooldown; concurrent requests for that credential return unknown.
+At most four source probes run concurrently per process. Successful grant results
+are never cached. Retry a cooled-down unknown after the interval; no read can
+guarantee that source authentication does not update its own audit/failure counters.
+Only SELECT, SHOW VIEW, SHOW DATABASES and
 USAGE are accepted; grant options or other privileges are unsafe. Role grants,
 partial revokes, unrecognized syntax and incomplete results stay unknown.
 Applicable roles are not expanded by this version. This follows the
