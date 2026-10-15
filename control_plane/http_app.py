@@ -223,6 +223,7 @@ from control_plane.http_routes import (
     register_agent_context_read_routes,
     register_deployment_promotion_read_routes,
     register_dokploy_target_inspect_read_routes,
+    register_dokploy_inventory_read_routes,
     register_driver_descriptor_read_routes,
     register_evidence_write_routes,
     register_engineering_review_decision_routes,
@@ -27013,6 +27014,7 @@ def create_launchplane_fastapi_app(
         },
     )
 
+    register_dokploy_inventory_read_routes(app, dependencies=driver_read_route_dependencies)
     register_dokploy_target_inspect_read_routes(
         app,
         dependencies=driver_read_route_dependencies,
