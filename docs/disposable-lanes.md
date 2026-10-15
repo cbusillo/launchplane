@@ -534,6 +534,8 @@ versions cannot prove separation (`testing_credentials_unverified`), or the
 supported source configuration is incomplete (`testing_restore_source_unconfigured`).
 Known missing-version and password-overlap cases are distinguished as
 `testing_credential_versions_missing` and `testing_credentials_overlap`.
+Other bounded failures within a named prerequisite report that its proof is
+unavailable; the phase classification does not assert the underlying cause.
 These HTTP 409 results expose fixed descriptions, never the private exception or
 credential values. Correct the named prerequisite and repeat the dry run before
 any apply; a refused dry run has prepared no generation, route or restore.

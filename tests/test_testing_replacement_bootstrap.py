@@ -458,6 +458,7 @@ class TestingBootstrapHttpRefusalTests(unittest.IsolatedAsyncioTestCase):
             result = await self.post()
         self.assertEqual(result.status_code, 409, result.text)
         self.assertNotIn("private-value", result.text)
+        self.assertNotIn(result.json()["error"]["code"], tuple(BootstrapPrerequisiteCode))
 
     async def test_dry_run_returns_the_prerequisite_classification(self) -> None:
         prerequisite = TestingBootstrapPrerequisiteError(
