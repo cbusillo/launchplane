@@ -43,6 +43,7 @@ class ReleaseInvitationBackoff:
     next_reads: dict[str, tuple[str, float]] = field(default_factory=dict)
     delivered: dict[tuple[str, str], tuple[str, float]] = field(default_factory=dict)
     settled: dict[str, tuple[str, float]] = field(default_factory=dict)
+    completions: dict[str, tuple[str, float]] = field(default_factory=dict)
 
 
 def _now() -> datetime:
@@ -197,7 +198,10 @@ def _comment_lines(comment: dict[str, object]) -> list[str]:
 
 
 def _last_client_decision(
-    store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord
+    store: ReleaseReviewStore,
+    profile: LaunchplaneProductProfileRecord,
+    *,
+    candidate: ReleaseVersion | None = None,
 ) -> ReleaseReviewDecisionRecord | None:
     return max(
         [
@@ -206,6 +210,7 @@ def _last_client_decision(
             if decision.checklist.repository == profile.repository
             and decision.checklist.owner_github_id == profile.owner.github_id
             and decision.decision in ("accepted", "changes_requested")
+            and (candidate is None or decision.checklist.candidate == candidate)
         ],
         key=lambda decision: (_timestamp(decision.decided_at), decision.record_id),
         default=None,
@@ -319,20 +324,29 @@ def _settle_completed_invitation(
     store: ReleaseReviewStore,
     control_plane_root: Path,
     profile: LaunchplaneProductProfileRecord,
+    production: ReleaseVersion,
     candidate: ReleaseVersion,
     backoff: ReleaseInvitationBackoff | None,
 ) -> None:
     # Equal lane versions alone are not evidence of an accepted, successful release.
     from control_plane.client_release import read_client_release_run
 
+    fingerprint = (
+        profile.model_dump_json() + production.model_dump_json() + candidate.model_dump_json()
+    )
+    if backoff is not None:
+        previous, next_read = backoff.completions.get(profile.product, ("", 0))
+        if previous == fingerprint and monotonic() < next_read:
+            return
+        backoff.completions[profile.product] = (fingerprint, monotonic() + 300)
     with store.release_review_publication_lock(record_id=f"invitation:{profile.product}"):
-        decision = _last_client_decision(store, profile)
+        last_decision = _last_client_decision(store, profile)
+        decision = _last_client_decision(store, profile, candidate=production)
         if (
             store.read_product_profile_record(profile.product) != profile
             or decision is None
             or decision.decision != "accepted"
             or decision.release_start not in ("promote", "promote_with_rollback_drill")
-            or decision.checklist.candidate != candidate
             or not decision.release_issue_url
         ):
             return
@@ -344,19 +358,17 @@ def _settle_completed_invitation(
                 and run.decision_record_id == decision.record_id
                 and run.state == "passed"
                 and store.read_product_profile_record(profile.product) == profile
-                and _last_client_decision(store, profile) == decision
-                and release_version(store=store, profile=profile, instance="prod") == candidate
+                and _last_client_decision(store, profile) == last_decision
+                and store.read_release_review_decision_record(
+                    product=profile.product, record_id=decision.record_id
+                )
+                == decision
+                and release_version(store=store, profile=profile, instance="prod") == production
                 and release_version(store=store, profile=profile, instance="testing") == candidate
             )
 
         if not completed():
             return
-        fingerprint = profile.model_dump_json() + candidate.model_dump_json() + decision.record_id
-        if backoff is not None:
-            previous, next_read = backoff.next_reads.get(profile.product, ("", 0))
-            if previous == fingerprint and monotonic() < next_read:
-                return
-            backoff.next_reads[profile.product] = (fingerprint, monotonic() + 300)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
         with launchplane_github_token(
             token_resolver=resolve_launchplane_github_token,
@@ -383,7 +395,7 @@ def _settle_completed_invitation(
             if not isinstance(number, int) or number < 1:
                 raise ValueError("Release invitation issue number is unavailable.")
             comments = _pages(f"{path}/{number}/comments", token)
-            marker = release_invitation_marker(profile.product, candidate)
+            marker = release_invitation_marker(profile.product, production)
             completion = (
                 COMPLETED_PREFIX + hashlib.sha256(decision.record_id.encode()).hexdigest() + " -->"
             )
@@ -403,10 +415,11 @@ def _settle_completed_invitation(
                     for line in lines
                 ):
                     continue
-                if marker not in lines or _timestamp(comment.get("created_at")) > _timestamp(
-                    decision.decided_at
-                ):
+                if _timestamp(comment.get("created_at")) > _timestamp(decision.decided_at):
                     pending = True
+                    continue
+                if marker not in lines:
+                    # Older decided reviews are historical, not outstanding tasks.
                     continue
                 if not completed():
                     return
@@ -433,7 +446,9 @@ def _settle_completed_invitation(
                 if not isinstance(result, dict) or result.get("id") != comment_id:
                     raise ValueError("Release invitation completion was not confirmed.")
                 matched = True
-            if matched and not pending and issues[0].get("state") != "closed" and completed():
+            if not matched or pending or production != candidate or not completed():
+                return
+            if issues[0].get("state") != "closed":
                 result = github_api_request(
                     path=f"{path}/{number}", token=token, method="PATCH", body={"state": "closed"}
                 )
@@ -443,6 +458,8 @@ def _settle_completed_invitation(
                     or result.get("state") != "closed"
                 ):
                     raise ValueError("Release invitation issue closure was not confirmed.")
+            if backoff is not None:
+                backoff.completions[profile.product] = (fingerprint, float("inf"))
 
 
 def publish_release_invitation(
@@ -472,14 +489,15 @@ def publish_release_invitation(
         return False
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
+    _settle_completed_invitation(
+        store=store,
+        control_plane_root=control_plane_root,
+        profile=profile,
+        production=production,
+        candidate=candidate,
+        backoff=backoff,
+    )
     if production == candidate:
-        _settle_completed_invitation(
-            store=store,
-            control_plane_root=control_plane_root,
-            profile=profile,
-            candidate=candidate,
-            backoff=backoff,
-        )
         return False
     last_decision = _last_client_decision(store, profile)
     request_marker = _request_marker(profile, last_decision)

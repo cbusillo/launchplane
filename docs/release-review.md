@@ -148,20 +148,24 @@ not a reason to grant access automatically.
 The marker functions live in `control_plane/release_invitation.py`; there is no
 checked-in destination catalog.
 
-When production and testing match, the publisher reconciles the previous
-invitation only if the current Client's saved acceptance names that exact
-candidate and its saved release run has passed. Equal versions alone, held
+The publisher reconciles an invitation only if the current Client's saved
+acceptance names the exact candidate now in production and its saved release
+run has passed. Equal versions alone, held
 approval, a running/stopped release, and missing evidence cannot complete an
 invitation. The existing invitation is marked released without another mention,
 with the saved acceptance linked and the original text and delivery receipts
 retained in a collapsed history section. Historical mentions are neutralized.
-The marked issue closes only when there is no other outstanding invitation;
+The marked issue closes only when testing matches production and there is no
+other outstanding invitation. Older decided invitations remain history;
 requests delivered after that acceptance are preserved. A newer testing
-candidate prevents settlement of the old release. Completion receipts make
+candidate keeps its own request open while the completed invitation settles.
+Completion receipts make
 retries and replica restarts idempotent, and the product publication lock and
 fresh decision/run/lane checks protect concurrent workers. Workers throttle
-unchanged completion lookups to five minutes; they do not compile a new
-checklist for a release already completed. No acceptance or release record is
+unchanged completion lookups to five minutes and stop looking up fully settled,
+closed requests until the profile or lane versions change; a restart recovers
+the durable completion receipts. They do not compile a new checklist for a
+release already completed. No acceptance or release record is
 changed by invitation reconciliation.
 
 Each request includes `release_invitation_marker(product, candidate)`, derived

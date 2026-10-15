@@ -1486,7 +1486,9 @@ class ReleaseInvitationTests(unittest.TestCase):
         posts = self.posts.copy()
         self.assertFalse(self.publish())
         self.assertEqual(self.issues[0]["state"], "closed")
-        self.assertIn(original.replace("@", "@\u200b"), self.comments[0]["body"])
+        for line in original.splitlines():
+            if "@" not in line:
+                self.assertIn(line, self.comments[0]["body"])
         self.assertIn(accepted.release_issue_url, self.comments[0]["body"])
         self.assertNotIn("@site-owner", self.comments[0]["body"])
         self.assertEqual(
@@ -1512,7 +1514,53 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.complete_release()
         self.publish()
         self.assertEqual(self.issues[0]["state"], "closed")
-        self.assertIn(original.replace("@", "@\u200b"), self.comments[0]["body"])
+        for line in original.splitlines():
+            if "@" not in line:
+                self.assertIn(line, self.comments[0]["body"])
+        self.assertIn(original.partition("@site-owner")[2], self.comments[0]["body"])
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
+
+    def test_decided_older_reviews_do_not_keep_completed_issue_open(self) -> None:
+        self.publish()
+        original = self.comments[0].copy()
+        self.now += timedelta(minutes=1)
+        self.store.create_release_review_decision_record_if_absent(
+            decision(self.store, outcome="changes_requested", date=self.now.isoformat())
+        )
+        self.now += timedelta(minutes=1)
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        self.publish()
+        accepted, _ = self.complete_release()
+        self.publish()
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertEqual(self.comments[0], original)
+        self.assertIn(accepted.release_issue_url, self.comments[-1]["body"])
+
+    def test_completed_issue_needs_no_more_locks_run_reads_or_github_until_lanes_change(
+        self,
+    ) -> None:
+        self.publish()
+        _, reader = self.complete_release()
+        backoff = ReleaseInvitationBackoff()
+        self.publish(backoff)
+        self.now += timedelta(days=10)
+        reader.reset_mock()
+        with (
+            patch.object(
+                self.store,
+                "release_review_publication_lock",
+                side_effect=AssertionError("already completed"),
+            ),
+            patch(
+                "control_plane.release_invitation.github_api_request",
+                side_effect=AssertionError("already delivered"),
+            ),
+        ):
+            self.publish(backoff)
+        reader.assert_not_called()
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        self.publish(backoff)
+        self.assertEqual(self.issues[0]["state"], "open")
 
     def test_incomplete_failed_held_or_unavailable_run_cannot_settle(self) -> None:
         self.publish()
@@ -1551,9 +1599,12 @@ class ReleaseInvitationTests(unittest.TestCase):
 
     def test_newer_pending_candidate_is_never_settled_by_old_release(self) -> None:
         self.publish()
-        self.complete_release()
+        accepted, _ = self.complete_release()
+        self.now += timedelta(minutes=1)
         self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
         self.publish()
+        self.assertIn(accepted.release_issue_url, self.comments[0]["body"])
+        self.assertNotIn("@site-owner", self.comments[0]["body"])
         current = self.comments[-1]["body"]
         self.publish()
         self.assertEqual(self.comments[-1]["body"], current)
