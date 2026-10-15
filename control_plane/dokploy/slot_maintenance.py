@@ -1,12 +1,17 @@
 """Complete planned maintenance in a private, immutable candidate runner."""
 
+from __future__ import annotations
+
 from collections.abc import Callable
 import hashlib
 import json
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooMaintenanceReceipt
 from control_plane.dokploy.slot_website_settings import StartupSettings, run_slot_website_settings
+
+if TYPE_CHECKING:
+    from control_plane.dokploy.slot_writers import ContainerSlotWriters
 
 # The driver passes a transport executing argv and stdin on the bound provider
 # host. Secrets stay in the existing managed container environment.
@@ -50,6 +55,7 @@ def run_planned_slot_maintenance(
     python: str = "/venv/bin/python",
     workflow: str = "/volumes/scripts/run_odoo_data_workflows.py",
     configure_startup: StartupSettings | None = None,
+    writers: ContainerSlotWriters | None = None,
 ) -> OdooMaintenanceReceipt:
     """Read back before repeating; a running/failed attempt remains uncertain.
 
@@ -58,7 +64,7 @@ def run_planned_slot_maintenance(
     boundary and creates its registry once. Never invoke the legacy install
     pass, infer success from generic schedule text, or start candidate web here.
     """
-    if plan.website_settings is not None and configure_startup is None:
+    if plan.website_settings is not None and (configure_startup is None or writers is None):
         raise ValueError("website settings require the bound startup configuration capability")
     if not runner_container:
         raise ValueError("private maintenance requires an explicit runner/state directory")
@@ -181,6 +187,7 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
                     runner_container=runner_container,
                     execute=execute,
                     configure_startup=configure_startup,
+                    writers=writers,
                     python=python,
                 )
             }

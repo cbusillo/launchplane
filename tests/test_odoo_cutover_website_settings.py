@@ -27,7 +27,7 @@ from control_plane.dokploy.slot_website_settings import (
     StartupSettingsReadback,
     run_slot_website_settings,
 )
-from control_plane.dokploy.slot_writers import SlotWriterContainer
+from control_plane.dokploy.slot_writers import ContainerSlotWriters, SlotWriterContainer
 from control_plane.odoo_cutover_storage import DeploymentCutoverStore
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
@@ -93,6 +93,12 @@ def startup_readback(plan: OdooCutoverPlan) -> StartupSettingsReadback:
             for slot in (plan.old, plan.new)
             for writer in plan.writers
         ),
+    )
+
+
+def writer_inventory(plan: OdooCutoverPlan) -> ContainerSlotWriters:
+    return ContainerSlotWriters(
+        plan, startup_readback(plan).containers, lambda *_args: "", active_jobs=lambda _target: 0
     )
 
 
@@ -235,6 +241,18 @@ class CutoverWebsiteTests(unittest.TestCase):
         rollback_compatible_cutover(self.store, self.provider, self.record_id)
         self.assertEqual(self.provider.website_receipts[-1], retained)
 
+    def test_rollback_missing_capability_keeps_candidate_serving_and_writers_running(self) -> None:
+        self.run_cutover()
+        self.provider.actions.clear()
+        with patch.object(
+            self.provider, "preflight", side_effect=ValueError("fixture unavailable")
+        ):
+            with self.assertRaises(ValueError):
+                rollback_compatible_cutover(self.store, self.provider, self.record_id)
+        self.assertEqual(self.provider.target, self.provider.cutover.new)
+        self.assertFalse(self.provider.actions)
+        self.assertEqual(self.store.load(self.record_id).step, "complete")
+
     def test_native_runner_requires_startup_readback_and_committed_digest(self) -> None:
         plan = self.provider.cutover
         intent = plan.website_settings
@@ -321,6 +339,7 @@ class CutoverWebsiteTests(unittest.TestCase):
             runner_container="runner",
             execute=execute,
             configure_startup=startup,
+            writers=writer_inventory(plan),
         )
         self.assertEqual(receipt.settings_sha256, intent.settings.digest)
         self.assertEqual(calls, ["startup", "native"])
@@ -332,6 +351,7 @@ class CutoverWebsiteTests(unittest.TestCase):
                 intent,
                 runner_container="runner",
                 execute=execute,
+                writers=writer_inventory(plan),
                 configure_startup=lambda *_args: StartupSettingsReadback(
                     intent.settings.digest, "", ()
                 ),
@@ -345,6 +365,7 @@ class CutoverWebsiteTests(unittest.TestCase):
                 intent,
                 runner_container="runner",
                 execute=execute,
+                writers=writer_inventory(plan),
                 configure_startup=lambda *_args: StartupSettingsReadback("", "", ()),
             )
         self.assertNotIn("native", calls)
@@ -388,6 +409,7 @@ class CutoverWebsiteTests(unittest.TestCase):
                 plan,
                 runner_container="runner",
                 execute=transport,
+                writers=writer_inventory(plan),
                 configure_startup=lambda *_args: startup_readback(plan),
             )
         self.assertFalse(stamp_writes)
@@ -447,6 +469,7 @@ class CutoverWebsiteTests(unittest.TestCase):
                             plan.website_settings,
                             runner_container="runner",
                             execute=execute,
+                            writers=writer_inventory(plan),
                             configure_startup=lambda *_args: readback,
                         )
                     native.assert_not_called()
@@ -518,6 +541,34 @@ class CutoverWebsiteTests(unittest.TestCase):
                 self.run_cutover()
         with self.assertRaises(FileNotFoundError):
             self.store.load(self.record_id)
+
+    def test_recreated_inventory_cannot_differ_from_containers_used_for_writer_handoff(
+        self,
+    ) -> None:
+        from dataclasses import replace
+
+        plan = self.provider.cutover
+        readback = startup_readback(plan)
+        recreated = replace(
+            readback,
+            containers=tuple(
+                replace(target, container=target.container + "-recreated")
+                for target in readback.containers
+            ),
+        )
+        assert plan.website_settings is not None
+        transport = MagicMock(return_value=plan.new.image)
+        with self.assertRaises(ValueError):
+            run_slot_website_settings(
+                plan,
+                plan.new,
+                plan.website_settings,
+                runner_container="runner",
+                execute=transport,
+                writers=writer_inventory(plan),
+                configure_startup=lambda *_args: recreated,
+            )
+        self.assertEqual(transport.call_count, 1)
 
     def test_deployment_bridge_updates_verified_baseline_without_replacing_prepared_intent(
         self,

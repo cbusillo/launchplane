@@ -20,7 +20,7 @@ from control_plane.contracts.odoo_cutover import (
 from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 
 if TYPE_CHECKING:
-    from control_plane.dokploy.slot_writers import SlotWriterContainer
+    from control_plane.dokploy.slot_writers import ContainerSlotWriters, SlotWriterContainer
 
 
 @dataclass(frozen=True)
@@ -96,6 +96,7 @@ def run_slot_website_settings(
     runner_container: str,
     execute: Callable[[tuple[str, ...], str | None], str],
     configure_startup: StartupSettings | None,
+    writers: ContainerSlotWriters | None = None,
     python: str = "/venv/bin/python",
 ) -> OdooWebsiteSettingsReceipt:
     """Idempotent application/readback, including historical images.
@@ -112,7 +113,7 @@ def run_slot_website_settings(
         or intent.artifact_id != slot.binding.artifact_id
     ):
         raise ValueError("website settings differ from the immutable slot snapshot")
-    if not runner_container or configure_startup is None:
+    if not runner_container or configure_startup is None or writers is None or writers.plan != plan:
         raise ValueError("website settings require a bound runner/startup configuration capability")
     image = execute(
         ("docker", "inspect", "--format", "{{.Config.Image}}", runner_container), None
@@ -133,7 +134,12 @@ def run_slot_website_settings(
     startup_digest, retained_digest = readback.selected_digest, readback.retained_digest
     if startup_digest != intent.settings.digest or retained_digest != intent.settings.digest:
         raise ValueError("durable startup website settings readback differs from the snapshot")
-    _verify_startup_containers(plan, intent, readback, execute)
+    if readback.containers != writers.targets:
+        raise ValueError("startup readback differs from the writer handoff inventory")
+    try:
+        _verify_startup_containers(plan, intent, readback, execute)
+    except (KeyError, TypeError, json.JSONDecodeError) as error:
+        raise ValueError("effective startup configuration readback is incomplete") from error
     program = """
 import base64, json, os, subprocess, sys
 request=json.load(sys.stdin)

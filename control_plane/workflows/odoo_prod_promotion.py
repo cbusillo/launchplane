@@ -191,27 +191,10 @@ def execute_odoo_prod_promotion(
                 # legacy records. Replacement still requires the real profile.
                 cutover_plan = None
         if cutover_plan is not None:
-            candidate_settings = (
-                release_decision.checklist.website_settings if release_decision else None
-            )
-            production_settings = (
-                release_decision.checklist.production_website_settings if release_decision else None
-            )
-            if cutover_plan.website_settings not in (
-                None,
-                candidate_settings,
-            ) or cutover_plan.production_website_settings not in (None, production_settings):
-                raise click.ClickException(
-                    "Two-slot website snapshots differ from the release decision."
-                )
+            from control_plane.odoo_cutover_plan import decision_bound_cutover_plan
+
             try:
-                cutover_plan = OdooCutoverPlan.model_validate(
-                    {
-                        **cutover_plan.model_dump(),
-                        "website_settings": candidate_settings,
-                        "production_website_settings": production_settings,
-                    }
-                )
+                cutover_plan = decision_bound_cutover_plan(cutover_plan, release_decision)
                 if cutover_provider is None and cutover_provider_factory is not None:
                     cutover_provider = cutover_provider_factory(cutover_plan)
                 if cutover_provider is None:

@@ -343,6 +343,7 @@ def rollback_compatible_cutover(
     rollback_pause_id = rollback_pause_identity(record_id)
     if plan.compatibility.classification != "compatible":
         raise ValueError("database-changing rollback requires an authorized coherent tuple restore")
+    provider.preflight(plan)
     with provider.exclusive(plan):
         if record.step == "rolled_back":
             require_website_receipt(

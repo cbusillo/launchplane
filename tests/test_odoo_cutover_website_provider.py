@@ -5,7 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
 from control_plane.dokploy.odoo_cutover import DokployOdooCutoverProvider, OdooSlotDriver
@@ -135,6 +135,109 @@ class WebsiteProviderAdapterTests(unittest.TestCase):
         )
         provider.prepare_candidate(self.plan)
         self.assertEqual(order, ["preflight", "prepare"])
+
+    def test_run_binds_decision_snapshots_before_constructing_real_provider(self) -> None:
+        from dataclasses import replace
+        from tests.test_odoo_prod_promotion_run import (
+            _inputs_result,
+            _backup_result,
+            _promotion_result,
+            _promotion_store,
+        )
+        from tests.test_release_review import seed, decision
+        from control_plane.storage.filesystem import FilesystemRecordStore
+        from control_plane.workflows.odoo_prod_promotion_run import (
+            OdooProdPromotionRunRequest,
+            execute_odoo_prod_promotion_run,
+        )
+
+        records = FilesystemRecordStore(Path(self.temporary.name) / "review")
+        seed(records)
+        approved = decision(records)
+        approved = approved.model_copy(
+            update={
+                "product": self.plan.new.binding.product_id,
+                "checklist": approved.checklist.model_copy(
+                    update={
+                        "candidate": approved.checklist.candidate.model_copy(
+                            update={"artifact_id": self.plan.candidate.artifact_id}
+                        ),
+                        "website_settings": self.plan.website_settings,
+                        "production_website_settings": self.plan.production_website_settings,
+                    }
+                ),
+            }
+        )
+        unbound = self.plan.model_copy(
+            update={"website_settings": None, "production_website_settings": None}
+        )
+        store = _promotion_store()
+        store.read_deployment_record.side_effect = FileNotFoundError
+        store.list_deployment_records.return_value = ()
+        order: list[str] = []
+
+        def factory(plan: Any) -> DokployOdooCutoverProvider:
+            self.assertEqual(plan, self.plan)
+            order.append("factory")
+            return DokployOdooCutoverProvider(
+                plan,
+                replace(
+                    self.driver, website_settings_preflight=lambda _plan: order.append("preflight")
+                ),
+                self.route,
+                pause_id="release-pause",
+            )
+
+        def promote(**kwargs: Any) -> Any:
+            provider = kwargs["cutover_provider"]
+            with provider.exclusive(kwargs["cutover_plan"]):
+                pass
+            return _promotion_result()
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.resolve_profile_cutover_plan",
+                return_value=unbound,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.resolve_odoo_prod_promotion_inputs",
+                return_value=_inputs_result().model_copy(
+                    update={"artifact_id": self.plan.candidate.artifact_id}
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.require_release_approval",
+                return_value=approved,
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.require_production_promotion_backup"
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_backup_gate",
+                return_value=_backup_result(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion_run.execute_odoo_prod_promotion",
+                side_effect=promote,
+            ),
+        ):
+            result = execute_odoo_prod_promotion_run(
+                control_plane_root=Path(self.temporary.name),
+                state_dir=Path(self.temporary.name),
+                database_url=None,
+                record_store=store,
+                request=OdooProdPromotionRunRequest(
+                    product=self.plan.new.binding.product_id,
+                    context="fixture",
+                    request_id="fixture",
+                ),
+                cutover_provider_factory=factory,
+                provider_effect_checkpoint=lambda _effect: order.append("effect"),
+            )
+        self.assertEqual(result.run_status, "pass")
+        self.assertLess(order.index("preflight"), order.index("effect"))
+        with self.assertRaises(ValueError):
+            self.provider.preflight(unbound)
 
     def test_concrete_writer_fence_stops_both_web_slots_before_settings(self) -> None:
         targets = tuple(

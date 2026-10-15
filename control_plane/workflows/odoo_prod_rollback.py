@@ -475,6 +475,10 @@ def execute_odoo_prod_rollback(
                 raise click.ClickException(
                     "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
                 )
+            try:
+                cutover_provider.preflight(plan)
+            except ValueError as error:
+                raise click.ClickException(str(error)) from error
             if (
                 rollback_source.artifact_id
                 != current_deployment.odoo_cutover.plan.production.artifact_id

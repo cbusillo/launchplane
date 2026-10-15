@@ -171,6 +171,9 @@ return the complete bound inventory. Restarting an existing container retains
 its creation-time environment and cannot satisfy this contract. Launchplane
 independently inspects that inventory's images, stopped state, effective typed
 payload and legacy indexing parameter before native commit or guard release.
+The maintenance/rollback helper must receive the same `ContainerSlotWriters`
+object used by the driver's handoff; readback must match its current targets.
+Recreation under new names must update that shared inventory while fenced.
 The driver also binds `website_settings_preflight` to verify both forward and
 rollback startup/native capabilities before any cutover record, provider-effect
 checkpoint or candidate preparation. It must keep the slot
@@ -181,6 +184,9 @@ candidate preparation; there is no in-place fallback. Source support does not
 configure those installed host capabilities or activate a lane. A Client's
 hotfix rejection describes the rejected release's current production snapshot;
 switch-back uses the original cutover's retained snapshot instead.
+The run admission, recovery comparison and provider factory all bind the same
+decision snapshots. Rollback repeats read-only preflight before any publication
+or writer fencing, since forward-time capability proof may no longer hold.
 
 Typed-settings releases use prepared public serving and a measured writer pause
 even for compatible artifacts, so candidate settings never appear on the old

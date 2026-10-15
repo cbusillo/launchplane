@@ -100,6 +100,8 @@ class DokployOdooCutoverProvider:
         return self.driver.exclusive(plan)
 
     def preflight(self, plan: OdooCutoverPlan) -> None:
+        if plan != self.plan:
+            raise ValueError("cannot cross provider/release binding")
         if plan.rollback_website_settings is not None and (
             self.driver.website_settings is None or self.driver.website_settings_preflight is None
         ):
