@@ -180,6 +180,9 @@ class IsolatedCutoverProvider(WebsiteFixture):
         )
         return self.maintenance_receipt
 
+    def website_settings(self, plan: OdooCutoverPlan, slot: OdooSlot, intent: Any) -> Any:
+        raise ValueError("fixture has no website settings capability")
+
     def readiness(self, plan: OdooCutoverPlan, slot: OdooSlot) -> OdooSlotReadiness:
         self.actions.append("readiness")
         if self.fail_ready:

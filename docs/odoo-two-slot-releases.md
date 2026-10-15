@@ -146,3 +146,38 @@ available; this is separate from source/component acceptance. Missing provider
 access or activation prerequisites are reported, never bypassed with a local
 live-target command. Real-release acceptance remains on #3268 and the parent
 #3237. Delivery follows the repository's [delivery boundary](../AGENTS.md#delivery-boundary).
+
+## Typed website settings
+
+The release decision supplies both the candidate and retained production website
+snapshots. They are persisted in the immutable cutover plan and bound into the
+native maintenance payload digest; a retry cannot substitute mutable prepared
+intent. Preparation of website intent remains inert for two-slot lanes.
+
+`run_planned_slot_maintenance` applies the candidate snapshot with Launchplane's
+native website consumer after the credential boundary and module work pass,
+before releasing the web startup guard. The receipt includes the committed
+settings digest and the independently read-back durable startup digest. Missing
+or mismatched evidence blocks readiness, route switching and writer activation,
+including recovery from persisted intermediate steps. The deployment bridge
+records the verified applied baseline separately from pending preparation.
+
+The installed host adapter must bind `configure_startup` and the driver's
+`website_settings` capability. The former fences an already-running retained
+slot as needed, merges the selected snapshot and its legacy indexing parameter
+into that slot's durable managed startup payload, preserves unrelated settings
+and secrets, and returns the digest only after readback. It must keep the slot
+fenced on failure. `run_slot_website_settings` checks the immutable runner image,
+merges the native execution payload without exporting secrets, and requires the
+consumer's post-commit digest. Missing capability refuses the release before
+candidate preparation; there is no in-place fallback. Source support does not
+configure those installed host capabilities or activate a lane.
+
+Compatible switch-back applies the retained production snapshot before old-slot
+readiness/traffic/writer activation. If the release has no historical snapshot,
+it disables analytics and indexing across websites while preserving native
+consent/embedding controls. The startup configuration must agree even for legacy
+images, so a restart cannot re-enable forward indexing. The rollback receipt and
+intent survive an uncertain switch; replay reads authority and repeats only the
+idempotent settings operation. Database-changing rollback still requires the
+existing authorized coherent-tuple restore path.

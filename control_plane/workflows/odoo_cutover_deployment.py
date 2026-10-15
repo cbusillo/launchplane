@@ -8,6 +8,8 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -31,6 +33,32 @@ class OdooCutoverApplyResult(BaseModel):
     health_status: Literal["pass", "fail", "skipped"]
     error_message: str = ""
     release_tuple_id: str = ""
+
+
+def record_website_application(
+    store: DeploymentStore,
+    plan: OdooCutoverPlan,
+    intent: OdooWebsiteSettingsIntent | None,
+    *,
+    verified: bool,
+) -> None:
+    if intent is None:
+        return
+    now = datetime.now(UTC).isoformat()
+    store.update_odoo_instance_override_apply_result(
+        context_name=plan.new.runtime_identity.context,
+        instance_name=plan.new.binding.environment_id,
+        last_apply=OdooOverrideApplyResult(
+            attempted=True,
+            status="pass" if verified else "pending",
+            applied_at=now if verified else "",
+            detail="Two-slot decision-bound website settings.",
+            website_settings=intent,
+            website_settings_verified=verified,
+        ),
+        updated_at=now,
+        source_label="odoo-cutover-driver",
+    )
 
 
 def execute_odoo_cutover_deployment(
@@ -65,6 +93,7 @@ def execute_odoo_cutover_deployment(
         ),
     )
     store = DeploymentCutoverStore(record_store, deployment)
+    record_website_application(record_store, plan, plan.website_settings, verified=False)
     record = execute_odoo_cutover(
         plan,
         store,
@@ -74,6 +103,7 @@ def execute_odoo_cutover_deployment(
     )
     if record.step != "complete" or record.readiness is None or record.route is None:
         raise ValueError("cutover does not have verified completed traffic/writer evidence")
+    record_website_application(record_store, plan, plan.website_settings, verified=True)
     persisted = record_store.read_deployment_record(deployment_id)
     persisted.deploy.status = "pass"
     persisted.deploy.started_at = record.began_at.isoformat()
@@ -110,7 +140,13 @@ def execute_odoo_cutover_rollback_deployment(
     if record is None or artifact_id != record.plan.production.artifact_id:
         raise ValueError("cutover rollback requires its exact retained production artifact")
     store = DeploymentCutoverStore(record_store, deployment)
+    record_website_application(
+        record_store, record.plan, record.plan.rollback_website_settings, verified=False
+    )
     rolled = rollback_compatible_cutover(store, provider, record.record_id)
+    record_website_application(
+        record_store, record.plan, record.plan.rollback_website_settings, verified=True
+    )
     rollback_started_at = rolled.rollback_started_at or rolled.updated_at
     old = rolled.plan.old
     finished_at = rolled.updated_at.isoformat()

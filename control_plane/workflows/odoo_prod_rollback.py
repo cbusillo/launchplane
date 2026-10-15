@@ -40,6 +40,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
 )
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
     OdooCutoverApplyResult,
@@ -60,7 +61,7 @@ class _RollbackSource:
     detail: str
 
 
-class OdooProdRollbackStore(OdooStableTargetReplacementStore, Protocol):
+class OdooProdRollbackStore(OdooStableTargetReplacementStore, DeploymentStore, Protocol):
     def list_deployment_records(
         self,
         *,
@@ -447,6 +448,15 @@ def execute_odoo_prod_rollback(
     )
     try:
         if current_deployment is not None and current_deployment.odoo_cutover is not None:
+            plan = current_deployment.odoo_cutover.plan
+            if release_decision is not None and (
+                plan.website_settings != release_decision.checklist.website_settings
+                or plan.production_website_settings
+                != release_decision.checklist.production_website_settings
+            ):
+                raise click.ClickException(
+                    "Rollback website snapshots differ from the release decision."
+                )
             if current_deployment.odoo_cutover.plan.compatibility.classification != "compatible":
                 raise click.ClickException(
                     "Database-changing cutover recovery requires the authorized coherent image/DB/filestore backup restore workflow; image-only rollback is refused."

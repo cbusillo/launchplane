@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooMaintenanceReceipt
+from control_plane.dokploy.slot_website_settings import StartupSettings, run_slot_website_settings
 
 # The driver passes a transport executing argv and stdin on the bound provider
 # host. Secrets stay in the existing managed container environment.
@@ -13,7 +14,7 @@ ContainerCommand = Callable[[tuple[str, ...], str | None], str]
 
 
 def maintenance_payload(plan: OdooCutoverPlan) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "database": plan.new.binding.database,
         "database_uuid": plan.new.runtime_identity.database_uuid,
         "release": plan.compatibility.model_dump(mode="json"),
@@ -22,6 +23,17 @@ def maintenance_payload(plan: OdooCutoverPlan) -> dict[str, Any]:
         "cutover_binding": plan.new.binding.model_dump(mode="json"),
         "cutover_slot": plan.new.slot_id,
     }
+
+    if plan.website_settings is not None or plan.production_website_settings is not None:
+        payload["website_settings"] = (
+            plan.website_settings.model_dump(mode="json") if plan.website_settings else None
+        )
+        payload["production_website_settings"] = (
+            plan.production_website_settings.model_dump(mode="json")
+            if plan.production_website_settings
+            else None
+        )
+    return payload
 
 
 def payload_digest(payload: dict[str, Any]) -> str:
@@ -37,6 +49,7 @@ def run_planned_slot_maintenance(
     execute: ContainerCommand,
     python: str = "/venv/bin/python",
     workflow: str = "/volumes/scripts/run_odoo_data_workflows.py",
+    configure_startup: StartupSettings | None = None,
 ) -> OdooMaintenanceReceipt:
     """Read back before repeating; a running/failed attempt remains uncertain.
 
@@ -45,6 +58,8 @@ def run_planned_slot_maintenance(
     boundary and creates its registry once. Never invoke the legacy install
     pass, infer success from generic schedule text, or start candidate web here.
     """
+    if plan.website_settings is not None and configure_startup is None:
+        raise ValueError("website settings require the bound startup configuration capability")
     if not runner_container:
         raise ValueError("private maintenance requires an explicit runner/state directory")
     observed_image = execute(
@@ -156,6 +171,20 @@ print(json.dumps({'receipt': result, 'credential_commit_id': proof['credential_c
         module_readback=True,
         evidence_id=digest,
     )
+    if plan.website_settings is not None:
+        receipt = receipt.model_copy(
+            update={
+                "website_settings": run_slot_website_settings(
+                    plan,
+                    plan.new,
+                    plan.website_settings,
+                    runner_container=runner_container,
+                    execute=execute,
+                    configure_startup=configure_startup,
+                    python=python,
+                )
+            }
+        )
     # Only the validated full-run receipt releases the candidate's startup
     # guard. No registry-capable web process can precede the SQL commit.
     stamp = hashlib.sha256(plan.new.model_dump_json().encode()).hexdigest()

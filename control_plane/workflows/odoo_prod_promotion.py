@@ -16,6 +16,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
+from control_plane.odoo_cutover_storage import DeploymentStore
 from control_plane.odoo_cutover_plan import resolve_profile_cutover_plan, persisted_cutover
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 from control_plane.workflows.odoo_cutover_deployment import (
@@ -51,7 +52,7 @@ from control_plane.workflows.production_promotion_backup import (
 )
 
 
-class OdooProdPromotionStore(OdooStableTargetReplacementStore, Protocol):
+class OdooProdPromotionStore(OdooStableTargetReplacementStore, DeploymentStore, Protocol):
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
     def list_deployment_records(
         self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
@@ -189,16 +190,26 @@ def execute_odoo_prod_promotion(
                 # Existing approval/backup gates retain their original order for
                 # legacy records. Replacement still requires the real profile.
                 cutover_plan = None
-        if (
-            cutover_plan is not None
-            and release_decision is not None
-            and (
-                release_decision.checklist.website_settings is not None
-                or release_decision.checklist.production_website_settings is not None
+        if cutover_plan is not None:
+            candidate_settings = (
+                release_decision.checklist.website_settings if release_decision else None
             )
-        ):
-            raise click.ClickException(
-                "Typed website settings require the stopped-web maintenance driver; two-slot settings receipt support is unavailable."
+            production_settings = (
+                release_decision.checklist.production_website_settings if release_decision else None
+            )
+            if cutover_plan.website_settings not in (
+                None,
+                candidate_settings,
+            ) or cutover_plan.production_website_settings not in (None, production_settings):
+                raise click.ClickException(
+                    "Two-slot website snapshots differ from the release decision."
+                )
+            cutover_plan = OdooCutoverPlan.model_validate(
+                {
+                    **cutover_plan.model_dump(),
+                    "website_settings": candidate_settings,
+                    "production_website_settings": production_settings,
+                }
             )
         if cutover_plan is not None:
             from control_plane.odoo_cutover_plan import cutover_record_id

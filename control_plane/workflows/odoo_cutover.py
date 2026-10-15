@@ -14,11 +14,13 @@ from control_plane.contracts.odoo_cutover import (
     OdooRouteObservation,
     OdooSlot,
     OdooSlotReadiness,
+    OdooWebsiteSettingsReceipt,
 )
 from control_plane.contracts.prepared_public_site import (
     PreparedPublicSite,
     PublicPauseRecord,
 )
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.prepared_public_pause import PreparedPublicPause, PublicPauseProvider
 from control_plane.prepared_public_site import verify_snapshot
 
@@ -43,6 +45,10 @@ class OdooCutoverProvider(PublicPauseProvider, Protocol):
     def maintenance(self, plan: OdooCutoverPlan) -> OdooMaintenanceReceipt:
         """Complete planned devkit run; read an uncertain receipt before repeating."""
         ...
+
+    def website_settings(
+        self, plan: OdooCutoverPlan, slot: OdooSlot, intent: OdooWebsiteSettingsIntent
+    ) -> OdooWebsiteSettingsReceipt: ...
 
     def readiness(self, plan: OdooCutoverPlan, slot: OdooSlot) -> OdooSlotReadiness: ...
     def switch(self, plan: OdooCutoverPlan, slot: OdooSlot) -> OdooRouteObservation:
@@ -102,6 +108,25 @@ def _require_ready(
         raise ValueError("private readiness identity is wrong, stale or unavailable")
 
 
+def require_website_receipt(
+    receipt: OdooWebsiteSettingsReceipt | None,
+    slot: OdooSlot,
+    intent: OdooWebsiteSettingsIntent | None,
+) -> None:
+    if intent is None:
+        if receipt is not None:
+            raise ValueError("website receipt has no decision-bound snapshot")
+        return
+    if (
+        receipt is None
+        or receipt.binding != slot.binding
+        or receipt.image != slot.image
+        or receipt.settings_sha256 != intent.settings.digest
+        or receipt.startup_settings_sha256 != intent.settings.digest
+    ):
+        raise ValueError("website settings receipt is missing or differs from the slot snapshot")
+
+
 def execute_odoo_cutover(
     plan: OdooCutoverPlan,
     store: OdooCutoverStore,
@@ -131,6 +156,16 @@ def execute_odoo_cutover(
             raise ValueError("cannot change an uncertain cutover's immutable release plan")
         if record.step in {"complete", "rolled_back"}:
             slot = plan.new if record.step == "complete" else plan.old
+            if slot == plan.new:
+                if record.maintenance is None:
+                    raise ValueError("completed cutover lacks maintenance receipt")
+                require_website_receipt(
+                    record.maintenance.website_settings, slot, plan.website_settings
+                )
+            else:
+                require_website_receipt(
+                    record.rollback_website_settings, slot, plan.rollback_website_settings
+                )
             route = provider.current_route(plan)
             _require_route(route, plan, slot)
             record = record.model_copy(update={"route": route, "updated_at": clock()})
@@ -222,7 +257,14 @@ def execute_odoo_cutover(
                     )
                 ):
                     raise ValueError("maintenance receipt does not match complete candidate plan")
+                require_website_receipt(receipt.website_settings, plan.new, plan.website_settings)
                 advance("ready", maintenance=receipt)
+            if record.step in {"ready", "switching", "resuming", "draining"}:
+                if record.maintenance is None:
+                    raise ValueError("cutover progress lacks its persisted maintenance receipt")
+                require_website_receipt(
+                    record.maintenance.website_settings, plan.new, plan.website_settings
+                )
             if record.step == "ready":
                 readiness = provider.readiness(plan, plan.new)
                 _require_ready(readiness, plan, plan.new, clock())
@@ -274,12 +316,15 @@ def rollback_compatible_cutover(
     *,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> OdooCutoverRecord:
-    record = store.load(record_id)
+    record = OdooCutoverRecord.model_validate(store.load(record_id).model_dump())
     plan = record.plan
     if plan.compatibility.classification != "compatible":
         raise ValueError("database-changing rollback requires an authorized coherent tuple restore")
     with provider.exclusive(plan):
         if record.step == "rolled_back":
+            require_website_receipt(
+                record.rollback_website_settings, plan.old, plan.rollback_website_settings
+            )
             _require_route(provider.current_route(plan), plan, plan.old)
             return record
         if record.step != "rolling_back":
@@ -294,6 +339,14 @@ def rollback_compatible_cutover(
                     "rollback_started_at": started_at,
                 }
             )
+            store.save(record)
+        intent = plan.rollback_website_settings
+        if intent is not None:
+            # Reapply/read back after an interrupted rollback; never trust an
+            # in-memory acknowledgement or switch traffic before commit.
+            receipt = provider.website_settings(plan, plan.old, intent)
+            require_website_receipt(receipt, plan.old, intent)
+            record = record.model_copy(update={"rollback_website_settings": receipt})
             store.save(record)
         route = provider.current_route(plan)
         if route.slot_id != plan.old.slot_id:

@@ -1728,8 +1728,10 @@ export type OdooCutoverPlan = {
     new: OdooSlot;
     old: OdooSlot;
     production: ArtifactIdentityManifest;
+    production_website_settings: OdooWebsiteSettingsIntent | null;
     release_id: string;
     route_id: string;
+    website_settings: OdooWebsiteSettingsIntent | null;
     writers: Array<WriterTarget>;
 };
 
@@ -1747,6 +1749,7 @@ export type OdooCutoverRecord = {
     readiness: OdooSlotReadiness | null;
     record_id: string;
     rollback_started_at: string | null;
+    rollback_website_settings: OdooWebsiteSettingsReceipt | null;
     route: OdooRouteObservation | null;
     step: 'preparing' | 'prepared' | 'pausing' | 'backing_up' | 'maintaining' | 'ready' | 'switching' | 'resuming' | 'draining' | 'complete' | 'rolling_back' | 'rolled_back';
     updated_at: string;
@@ -1777,6 +1780,7 @@ export type OdooMaintenanceReceipt = {
     module_readback: true;
     release_id: string;
     update_modules: Array<string>;
+    website_settings: OdooWebsiteSettingsReceipt | null;
 };
 
 export type OdooOverrideApplyResult = {
@@ -2025,6 +2029,14 @@ export type OdooWebsiteSettings = {
 export type OdooWebsiteSettingsIntent = {
     artifact_id: string;
     settings: OdooWebsiteSettings;
+};
+
+export type OdooWebsiteSettingsReceipt = {
+    binding: PublicSiteBinding;
+    committed: true;
+    image: string;
+    settings_sha256: string;
+    startup_settings_sha256: string;
 };
 
 export type OrdinaryAgentDeliveryActivationExecutionEvidence = {

@@ -18947,6 +18947,16 @@
           "production": {
             "$ref": "#/components/schemas/ArtifactIdentityManifest"
           },
+          "production_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "release_id": {
             "minLength": 1,
             "title": "Release Id",
@@ -18956,6 +18966,16 @@
             "pattern": "^[a-zA-Z0-9_-]+$",
             "title": "Route Id",
             "type": "string"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsIntent"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "writers": {
             "items": {
@@ -18972,8 +18992,10 @@
           "new",
           "old",
           "production",
+          "production_website_settings",
           "release_id",
           "route_id",
+          "website_settings",
           "writers"
         ],
         "title": "OdooCutoverPlan",
@@ -19083,6 +19105,16 @@
             ],
             "title": "Rollback Started At"
           },
+          "rollback_website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "route": {
             "anyOf": [
               {
@@ -19132,6 +19164,7 @@
           "readiness",
           "record_id",
           "rollback_started_at",
+          "rollback_website_settings",
           "route",
           "step",
           "updated_at"
@@ -19290,6 +19323,16 @@
             },
             "title": "Update Modules",
             "type": "array"
+          },
+          "website_settings": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooWebsiteSettingsReceipt"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -19302,7 +19345,8 @@
           "install_modules",
           "module_readback",
           "release_id",
-          "update_modules"
+          "update_modules",
+          "website_settings"
         ],
         "title": "OdooMaintenanceReceipt",
         "type": "object"
@@ -20667,6 +20711,42 @@
           "settings"
         ],
         "title": "OdooWebsiteSettingsIntent",
+        "type": "object"
+      },
+      "OdooWebsiteSettingsReceipt": {
+        "additionalProperties": false,
+        "properties": {
+          "binding": {
+            "$ref": "#/components/schemas/PublicSiteBinding"
+          },
+          "committed": {
+            "const": true,
+            "title": "Committed",
+            "type": "boolean"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Settings Sha256",
+            "type": "string"
+          },
+          "startup_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Startup Settings Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding",
+          "committed",
+          "image",
+          "settings_sha256",
+          "startup_settings_sha256"
+        ],
+        "title": "OdooWebsiteSettingsReceipt",
         "type": "object"
       },
       "OrdinaryAgentDeliveryActivationExecutionEvidence": {

@@ -19,6 +19,7 @@ from control_plane.contracts.odoo_cutover import (
     OdooRouteObservation,
     OdooSlot,
     OdooSlotReadiness,
+    OdooWebsiteSettingsReceipt,
 )
 from control_plane.contracts.prepared_public_site import (
     PreparedPublicSite,
@@ -28,6 +29,7 @@ from control_plane.contracts.prepared_public_site import (
 )
 from control_plane.dokploy.traefik_cutover import TraefikFileRoute
 from control_plane.prepared_public_site import verify_snapshot
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 
 
 @dataclass(frozen=True)
@@ -57,6 +59,11 @@ class OdooSlotDriver:
     load_prepared: Callable[[str], PreparedPublicSite]
     lane: OdooCutoverLane
     verify_endpoint: Callable[[OdooCutoverPlan, OdooSlot], HealthcheckEvidence]
+
+    website_settings: (
+        Callable[[OdooCutoverPlan, OdooSlot, OdooWebsiteSettingsIntent], OdooWebsiteSettingsReceipt]
+        | None
+    ) = None
 
 
 class DokployOdooCutoverProvider:
@@ -91,6 +98,8 @@ class DokployOdooCutoverProvider:
         return self.driver.exclusive(plan)
 
     def prepare_candidate(self, plan: OdooCutoverPlan) -> None:
+        if plan.rollback_website_settings is not None and self.driver.website_settings is None:
+            raise ValueError("bound website settings/startup capability is unavailable")
         self.driver.prepare_candidate(plan)
         current = self.current_route(plan)
         if current.slot_id != plan.old.slot_id or current.binding != plan.old.binding:
@@ -148,6 +157,13 @@ class DokployOdooCutoverProvider:
 
     def maintenance(self, plan: OdooCutoverPlan) -> OdooMaintenanceReceipt:
         return self.driver.maintenance(plan)
+
+    def website_settings(
+        self, plan: OdooCutoverPlan, slot: OdooSlot, intent: OdooWebsiteSettingsIntent
+    ) -> OdooWebsiteSettingsReceipt:
+        if self.driver.website_settings is None:
+            raise ValueError("bound website settings/startup capability is unavailable")
+        return self.driver.website_settings(plan, slot, intent)
 
     def readiness(self, plan: OdooCutoverPlan, slot: OdooSlot) -> OdooSlotReadiness:
         ready = self.driver.readiness(plan, slot)
