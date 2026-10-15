@@ -25,6 +25,11 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy.api import JsonObject
 
 
+PROJECT_CREATE_PATH = "/api/project.create"
+ENVIRONMENT_CREATE_PATH = "/api/environment.create"
+COMPOSE_CREATE_PATH = "/api/compose.create"
+
+
 class DokployTargetAdoptionRecordStore(ProductAuthorityBundleStore, Protocol):
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None: ...
 
@@ -577,7 +582,7 @@ def create_dokploy_application_target(
         project_payload: JsonObject = {"name": normalized_project_name}
         if project_description.strip():
             project_payload["description"] = project_description.strip()
-        created_project = mutate_provider(host, token, "/api/project.create", project_payload)
+        created_project = mutate_provider(host, token, PROJECT_CREATE_PATH, project_payload)
         created_project_id = _extract_provider_id(created_project, "projectId", "project")
 
     created_environment_id = normalized_environment_id
@@ -589,7 +594,7 @@ def create_dokploy_application_target(
         if environment_description.strip():
             environment_payload["description"] = environment_description.strip()
         created_environment = mutate_provider(
-            host, token, "/api/environment.create", environment_payload
+            host, token, ENVIRONMENT_CREATE_PATH, environment_payload
         )
         created_environment_id = _extract_provider_id(
             created_environment, "environmentId", "environment"
@@ -810,7 +815,7 @@ def create_dokploy_compose_target(
         project_payload: JsonObject = {"name": normalized_project_name}
         if project_description.strip():
             project_payload["description"] = project_description.strip()
-        created_project = mutate_provider(host, token, "/api/project.create", project_payload)
+        created_project = mutate_provider(host, token, PROJECT_CREATE_PATH, project_payload)
         created_project_id = _extract_provider_id(created_project, "projectId", "project")
 
     created_environment_id = normalized_environment_id
@@ -822,7 +827,7 @@ def create_dokploy_compose_target(
         if environment_description.strip():
             environment_payload["description"] = environment_description.strip()
         created_environment = mutate_provider(
-            host, token, "/api/environment.create", environment_payload
+            host, token, ENVIRONMENT_CREATE_PATH, environment_payload
         )
         created_environment_id = _extract_provider_id(
             created_environment, "environmentId", "environment"
@@ -837,7 +842,7 @@ def create_dokploy_compose_target(
     }
     if compose_description.strip():
         compose_payload["description"] = compose_description.strip()
-    created_compose = mutate_provider(host, token, "/api/compose.create", compose_payload)
+    created_compose = mutate_provider(host, token, COMPOSE_CREATE_PATH, compose_payload)
     compose_id = _extract_provider_id(created_compose, "composeId", "compose")
 
     adoption_fetch = fetch_target_payload
@@ -1034,7 +1039,7 @@ def _planned_provider_requests(
         project_payload: dict[str, object] = {"name": project_name}
         if project_description.strip():
             project_payload["description"] = project_description.strip()
-        requests.append({"path": "/api/project.create", "payload": project_payload})
+        requests.append({"path": PROJECT_CREATE_PATH, "payload": project_payload})
     if not environment_id:
         environment_payload: dict[str, object] = {
             "name": environment_name,
@@ -1042,7 +1047,7 @@ def _planned_provider_requests(
         }
         if environment_description.strip():
             environment_payload["description"] = environment_description.strip()
-        requests.append({"path": "/api/environment.create", "payload": environment_payload})
+        requests.append({"path": ENVIRONMENT_CREATE_PATH, "payload": environment_payload})
     application_payload: dict[str, object] = {
         "name": target_name,
         "environmentId": environment_id or "<created-environment-id>",
@@ -1077,7 +1082,7 @@ def _planned_compose_provider_requests(
         project_payload: dict[str, object] = {"name": project_name}
         if project_description.strip():
             project_payload["description"] = project_description.strip()
-        requests.append({"path": "/api/project.create", "payload": project_payload})
+        requests.append({"path": PROJECT_CREATE_PATH, "payload": project_payload})
     if not environment_id:
         environment_payload: dict[str, object] = {
             "name": environment_name,
@@ -1085,7 +1090,7 @@ def _planned_compose_provider_requests(
         }
         if environment_description.strip():
             environment_payload["description"] = environment_description.strip()
-        requests.append({"path": "/api/environment.create", "payload": environment_payload})
+        requests.append({"path": ENVIRONMENT_CREATE_PATH, "payload": environment_payload})
     compose_payload: dict[str, object] = {
         "name": target_name,
         "appName": app_name.strip() or target_name,
@@ -1095,7 +1100,7 @@ def _planned_compose_provider_requests(
     }
     if compose_description.strip():
         compose_payload["description"] = compose_description.strip()
-    requests.append({"path": "/api/compose.create", "payload": compose_payload})
+    requests.append({"path": COMPOSE_CREATE_PATH, "payload": compose_payload})
     return tuple(requests)
 
 

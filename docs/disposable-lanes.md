@@ -282,3 +282,10 @@ No missing response or inventory entry alone permits repeating a dispatched call
 Host qualification resolves the Docker data-root path and permits read-only host
 monitoring binds; writable parent mounts and any exact existing named-volume
 consumer still refuse qualification. No backing directory or monitor is changed.
+
+Target adoption also snapshots the complete retained target record in allocation
+custody, in the same transaction as the new binding. Old domains, public hosts,
+pending effects and target settings remain recoverable there. Protection policies
+and the test gate carry onto the new target; old routes and writable settings do
+not. Current target overrides and secret bindings cannot replace qualified volume
+names when positive evidence is published.

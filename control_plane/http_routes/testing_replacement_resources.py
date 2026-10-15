@@ -26,6 +26,7 @@ from control_plane.testing_replacement_resources import (
     ROUTE,
     TestingReplacementResourceAdapter,
     TestingReplacementResourcesRequest,
+    TestingResourcePreparationRefused,
     resource_plan,
 )
 
@@ -92,6 +93,12 @@ def register_testing_replacement_resource_routes(
                     adapter=adapter,
                     in_progress_message="Testing resource preparation is running with the original key.",
                     reconcile_message="The original preparation has an unknown outcome; do not create another target.",
+                )
+            except TestingResourcePreparationRefused:
+                refuse(
+                    409,
+                    "testing_resources_refused",
+                    "Preparation was refused before provider work. Re-read the lane and prepare a new dry run.",
                 )
             except (ValueError, FileNotFoundError, click.ClickException, RuntimeError, OSError):
                 refuse(

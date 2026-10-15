@@ -182,15 +182,16 @@ def main():
                 continue
             if mount.get("Name") in volumes.values():
                 raise RuntimeError("Replacement storage is already used by a container")
-            if mount.get("Type") == "bind" and mount.get("RW") is False:
-                # Host monitoring may inspect a read-only root/data-root bind.
-                # It cannot write the new backing directory. An exact named
-                # volume consumer above still protects its usage, even read-only.
-                continue
             source = mount.get("Source")
             if not isinstance(source, str) or not source.startswith("/"):
                 raise RuntimeError("Container backing storage is unavailable")
             source = Path(source).resolve()
+            if mount.get("Type") == "bind" and mount.get("RW") is False and not any(
+                source == path or path in source.parents for path in paths
+            ):
+                # Only read-only parents are administrative host inspection.
+                # Exact paths or children are consumers of this resource.
+                continue
             if any(source == path or source in path.parents or path in source.parents for path in paths):
                 raise RuntimeError("Replacement backing storage overlaps an existing mount")
     print("testing_resources_binding_sha256=" + digest)

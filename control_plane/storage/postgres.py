@@ -6851,6 +6851,29 @@ class PostgresRecordStore(HumanSessionStore):
                     step_name="write_product_profile",
                 )
             for target_record in bundle.dokploy_targets:
+                adoption = getattr(self._disposable_authority_context, "adoption", None)
+                if adoption is not None:
+                    allocation = session.get(
+                        LaunchplaneDisposableTestingResourceAllocationRow,
+                        adoption.operation_id,
+                        with_for_update=True,
+                    )
+                    previous = session.get(
+                        LaunchplaneDokployTargetRow,
+                        (adoption.context, "testing"),
+                        with_for_update=True,
+                    )
+                    if allocation is None or previous is None:
+                        raise ValueError("Retained target custody is unavailable during adoption.")
+                    snapshot = allocation.payload.get("retained_target_record") or previous.payload
+                    retained = DokployTargetRecord.model_validate(snapshot)
+                    allocation.payload = {**allocation.payload, "retained_target_record": snapshot}
+                    target_record = target_record.model_copy(
+                        update={
+                            "policies": retained.policies,
+                            "require_test_gate": retained.require_test_gate,
+                        }
+                    )
                 self._merge_authority_row(
                     session,
                     self._dokploy_target_row(target_record),
@@ -6878,8 +6901,8 @@ class PostgresRecordStore(HumanSessionStore):
                         or (
                             DisposableTestingResourcePreparation.model_validate(
                                 {**custody.payload, **allocation.payload}
-                            )
-                            != adoption
+                            ).model_dump(exclude={"retained_target_record"})
+                            != adoption.model_dump(exclude={"retained_target_record"})
                         )
                     ):
                         raise ValueError("Resource allocation changed before adoption.")
@@ -10596,7 +10619,10 @@ class PostgresRecordStore(HumanSessionStore):
             session.merge(
                 LaunchplaneDisposableTestingResourceAllocationRow(
                     operation_id=expected.operation_id,
-                    payload=replacement.model_dump(mode="json", include=mutable),
+                    payload={
+                        **(allocation.payload if allocation else {}),
+                        **replacement.model_dump(mode="json", include=mutable),
+                    },
                 )
             )
             session.commit()

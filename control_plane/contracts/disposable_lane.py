@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 
 
 MAX_DISPOSABLE_LANE_SAFETY_SECONDS = 900
@@ -97,6 +98,7 @@ class DisposableTestingResourcePreparation(DisposableTestingReplacementPreparati
     replacement_target_id: str = ""
     resources_binding_sha256: str = ""
     reviewed_plan_sha256: str = ""
+    retained_target_record: DokployTargetRecord | None = None
 
 
 class DisposableTestingSupersession(BaseModel):
