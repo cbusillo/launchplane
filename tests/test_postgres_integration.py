@@ -28,7 +28,7 @@ from uuid import uuid4
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import create_engine, event, insert, inspect, select, text, update
+from sqlalchemy import create_engine, delete, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -1465,6 +1465,46 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_delivery_index_migration_backfills_existing_production_history(self) -> None:
+        from importlib import import_module
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+        from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
+
+        migration = import_module(
+            "control_plane.storage.migrations.versions.d3e7a1b5c9f2_index_delivery_evidence"
+        )
+        case = DeliveryEvidenceIndexTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.setup_store("sqlite")
+        record = case.deploy("historical", failed=True)
+        assert record.artifact_identity is not None
+        with _isolated_postgres_database() as database_url:
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, migration.down_revision)
+            engine = create_engine(database_url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    insert(LaunchplaneDeploymentRow).values(
+                        record_id=record.record_id,
+                        context=record.context,
+                        instance="prod",
+                        artifact_id=record.artifact_identity.artifact_id,
+                        source_git_ref=record.source_git_ref,
+                        deploy_started_at="",
+                        deploy_finished_at=record.deploy.finished_at,
+                        payload=record.model_dump(mode="json"),
+                    )
+                )
+            alembic_command.upgrade(config, "head")
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            with store.delivery_evidence_index() as index:
+                self.assertEqual(index.latest_deployment_id(record.context), record.record_id)
+                (work,) = index.pending(record.context, case.profile.product, limit=1)
+                self.assertEqual(work.source_id, record.record_id)
+
     def test_first_override_write_requires_the_reviewed_absence(self) -> None:
         from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 
@@ -4380,6 +4420,63 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_delivery_index_commits_with_source_and_fences_replica_acknowledgement(self) -> None:
+        from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
+        from control_plane.storage.delivery_evidence import sources
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+
+        case = DeliveryEvidenceIndexTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        with _store_for_fresh_head_database() as store:
+            case.store = store
+            store.write_product_profile_record(case.profile)
+            case.deploy("candidate")
+            case.monitor()
+            case.deploy("candidate", failed=True)
+            with store.delivery_evidence_index() as index:
+                (old,) = index.pending(case.lane.context, case.profile.product, limit=1)
+                with index.lane_lock(case.lane.context, case.profile.product) as first:
+                    self.assertTrue(first)
+                    with index.lane_lock(case.lane.context, case.profile.product) as second:
+                        self.assertFalse(second)
+                case.deploy("candidate", failed=True, code="later_stage_failed")
+                index.acknowledge(old, {})
+                self.assertTrue(index.pending(case.lane.context, case.profile.product, limit=1))
+                with index.engine.begin() as connection:
+                    connection.execute(
+                        delete(LaunchplaneDeploymentRow).where(
+                            LaunchplaneDeploymentRow.record_id == "candidate"
+                        )
+                    )
+                with index.engine.connect() as connection:
+                    self.assertFalse(connection.execute(select(sources.c.key)).all())
+            # Rollback includes the marker created by the mapper hook.
+            record = case.deploy("retained")
+            with store._session_factory() as session:
+                session.add(
+                    LaunchplaneDeploymentRow(
+                        record_id="rolled-back",
+                        context=record.context,
+                        instance="prod",
+                        artifact_id="image@rolled-back",
+                        source_git_ref="rolled-back",
+                        deploy_started_at="",
+                        deploy_finished_at=record.deploy.finished_at,
+                        payload={**record.model_dump(mode="json"), "record_id": "rolled-back"},
+                    )
+                )
+                session.flush()
+                session.rollback()
+            with store.delivery_evidence_index() as index:
+                self.assertNotIn(
+                    "deployment:rolled-back",
+                    {
+                        work.key
+                        for work in index.pending(case.lane.context, case.profile.product, limit=10)
+                    },
+                )
+
     def test_human_refresh_serializes_across_workers_and_preserves_csrf_consumption(self) -> None:
         from control_plane.service_human_auth import (
             GitHubOAuthClient,

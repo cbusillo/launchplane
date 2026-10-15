@@ -115,6 +115,9 @@ def restore_snapshot(
     validate_snapshot(snapshot, now=datetime.now(timezone.utc))
     command.upgrade(alembic_config(database_url), snapshot.database_schema_revision)
     with engine.begin() as connection:
+        from control_plane.storage.delivery_evidence import SOURCE_KINDS, source_changed, sources
+
+        has_delivery_index = sources.name in inspect(connection).get_table_names()
         tables = {
             row_type.__tablename__: Table(
                 row_type.__tablename__, MetaData(), autoload_with=connection
@@ -123,6 +126,8 @@ def restore_snapshot(
         }
         for name, row in iter_snapshot_rows(snapshot):
             connection.execute(insert(tables[name]), row)
+            if has_delivery_index and name in SOURCE_KINDS:
+                source_changed(connection, name, row["payload"])
     return migrate_schema(database_url=database_url)
 
 

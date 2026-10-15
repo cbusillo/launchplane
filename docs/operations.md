@@ -1913,6 +1913,30 @@ policy covers provider incidents when qualifying notification delivery. The
 route must have passed its existing product-scope authorization check; ordinary
 in-progress retries and idempotency-protocol errors do not open delivery incidents.
 
+Recurring delivery evidence reads use a derived storage index, not an event-time
+watermark. Each pass reads at most `DELIVERY_EVIDENCE_PAGE_SIZE` changed sources
+plus the latest deployment; recovery queries use the indexed matching successful
+candidate, including successes between polls. Source writes mark work in their
+transaction, so late/backdated records and changes to old steps remain visible.
+Release dependencies include unstarted steps and failure recovery; creating or
+updating a step wakes its decision. A per-lane monitor lock excludes overlapping
+scans, and acknowledgement compares the source version so concurrent updates
+remain pending. Failed persistence leaves work pending for retry after restart.
+This does not add release or authorization authority.
+
+The index has at most one row and one pending version per retained source.
+Acknowledged signatures are bounded by that source's fixed event/step plan, and
+DB retention deletes remove its row and release bindings, including bulk deletes.
+The per-product failure receipt stays constant size. The migration traverses old
+DB sources once; filesystem rehearsals do the same on first index use and mark
+pending work before atomic source replacement under the bundle lock. Existing
+processed identities are consumed during paged bootstrap and then removed from
+the checkpoint. The filesystem index lives at `.delivery-evidence.sqlite3` under
+the explicit state directory. Use store APIs for file-backed evidence writes;
+editing historical JSON files directly does not update its derived index.
+Storage outcomes and the incident/outbox remain the authorities; the index owns
+only discovery, ordering and deduplication bookkeeping.
+
 The same monitor compares each Live product's recorded default branch with
 production through the existing read-only source adapter. A durable pending
 source receipt raises attention after one hour (`PRODUCTION_DELIVERY_LAG_SECONDS`),
