@@ -4,6 +4,9 @@ import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 for (const view of ["products", "workspace", "environment"] as const) {
   for (const trigger of ["timer", "visibility"] as const) {
     test(`background ${view} ${trigger} expiry shows sign-in and recovers fresh evidence @responsive`, async ({ page }, testInfo) => {
+      const clockStart = Date.now();
+      await page.clock.install({ time: new Date(clockStart) });
+      await page.clock.pauseAt(new Date(clockStart + testInfo.timeout));
       await page.goto("/ui/products?fixture=products");
       const fixture = await page.evaluate(async () => {
         const modulePath = "/ui/src/dev-fixtures.ts";
@@ -12,8 +15,6 @@ for (const view of ["products", "workspace", "environment"] as const) {
         return { products, product: products[0], identity: module.fixtureIdentity,
           detail: module.environmentForFixture("products", products[0].product, "testing") };
       });
-      await page.clock.install();
-      await page.clock.pauseAt(new Date());
       let signedIn = false;
       let expired = false;
       let recovered = false;
@@ -65,6 +66,9 @@ for (const view of ["products", "workspace", "environment"] as const) {
       await signIn.click();
       await expect(page.locator(".control-shell")).toBeVisible();
       await expect(page.locator(".rail-products")).toContainText(fixture.product.display_name);
+      const renderedView = view === "products" ? ".product-directory-row"
+        : view === "workspace" ? ".product-workspace" : ".environment-workspace";
+      await expect(page.locator(renderedView).first()).toBeVisible();
       expect(sessionReads).toBeGreaterThan(1);
       const beforeExpirySessionReads = sessionReads;
       expired = true;
@@ -102,15 +106,16 @@ for (const view of ["products", "workspace", "environment"] as const) {
 }
 
 for (const status of [403, 503]) {
-  test(`${status} background failure keeps its meaning without signing out @responsive`, async ({ page }) => {
+  test(`${status} background failure keeps its meaning without signing out @responsive`, async ({ page }, testInfo) => {
+    const clockStart = Date.now();
+    await page.clock.install({ time: new Date(clockStart) });
+    await page.clock.pauseAt(new Date(clockStart + testInfo.timeout));
     await page.goto("/ui/products?fixture=products");
     const fixture = await page.evaluate(async () => {
       const modulePath = "/ui/src/dev-fixtures.ts";
       const module = await import(modulePath);
       return { products: module.productsForFixture("products"), identity: module.fixtureIdentity };
     });
-    await page.clock.install();
-    await page.clock.pauseAt(new Date());
     let failing = false;
     await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: fixture.identity } }));
     await page.route("**/v1/products", route => route.fulfill(failing
