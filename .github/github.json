@@ -3,8 +3,13 @@
   "projectType": "control-plane",
   "prWorkflow": {
     "preferredMergeMethod": "merge",
-    "allowedMergeMethods": ["merge"],
-    "requiredStatusChecks": ["ci-gate", "security-gate"],
+    "allowedMergeMethods": [
+      "merge"
+    ],
+    "requiredStatusChecks": [
+      "ci-gate",
+      "security-gate"
+    ],
     "mergePath": "launchplane.mergeTrain",
     "watchSkill": "babysit-pr"
   },
@@ -57,9 +62,13 @@
     "releaseReview": "docs/release-review.md",
     "productionBackupProvider": "docs/production-backup-provider.md",
     "odooOnlineBackups": "docs/odoo-online-backups.md",
-    "style": ["docs/style/python.md", "docs/style/testing.md"],
-    "policies": ["docs/policies/coding-standards.md"],
-    "odooWebsiteSettings": "docs/odoo-website-settings.md"
+    "style": [
+      "docs/style/python.md",
+      "docs/style/testing.md"
+    ],
+    "policies": [
+      "docs/policies/coding-standards.md"
+    ]
   },
   "qualityGate": {
     "test": {
@@ -118,13 +127,24 @@
         "python": {
           "version": "3.14",
           "moduleName": "launchplane-inspection",
-          "testRoots": ["tests"],
+          "testRoots": [
+            "tests"
+          ],
           "sync": true,
-          "extras": ["dev"],
-          "requiredGeneratedState": [".venv", ".idea"]
+          "extras": [
+            "dev"
+          ],
+          "requiredGeneratedState": [
+            ".venv",
+            ".idea"
+          ]
         }
       },
-      "scopePreference": ["changed_files", "directory", "whole_project"]
+      "scopePreference": [
+        "changed_files",
+        "directory",
+        "whole_project"
+      ]
     },
     "docsRequiredWhen": [
       "behavior changes",
@@ -156,8 +176,6 @@
     "Merge Train Runner",
     "Merge Train Stall Alert",
     "Odoo Config Parameter Override",
-    "Odoo Artifact Publish",
-    "Odoo Driver Route Smoke",
     "Odoo Prod Backup Verification",
     "Odoo Prod Backup Restore Plan",
     "Odoo Prod Backup Restore Apply",
@@ -172,9 +190,7 @@
     "Reusable Odoo Website Bootstrap Override",
     "Odoo Stable Bootstrap",
     "Reusable Stable Lane Repair",
-    "Reusable Odoo Artifact Publish",
     "Reusable Tracked Target Logs",
-    "Reusable Odoo Preview",
     "Reusable Generic Web Stable Deploy",
     "Reusable Generic Web Prod Promotion",
     "Reusable Generic Web Prod Rollback",
@@ -182,7 +198,6 @@
     "Reusable Generic Web Preview",
     "Reusable Generic Web Preview Lifecycle",
     "Reusable Generic Web Preview Verification",
-    "Reusable Product Driver Testing Deploy",
     "Reusable Product Driver App Maintenance",
     "Reusable Product Driver Post Deploy",
     "Reusable Product Driver Prod Promotion",

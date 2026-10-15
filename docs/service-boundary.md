@@ -564,8 +564,6 @@ records `already_absent` without claiming a GitHub mutation.
   - `POST /v1/drivers/generic-web/preview-readiness` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-verification` (native FastAPI)
   - `POST /v1/drivers/generic-web/preview-destroy` (native FastAPI)
-  - `POST /v1/drivers/odoo/artifact-publish-inputs` (native FastAPI)
-  - `POST /v1/drivers/odoo/artifact-publish` (native FastAPI)
   - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
   - `GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}`
     (native FastAPI)
@@ -3244,7 +3242,6 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/post-deploy` (native FastAPI)
 - `POST /v1/drivers/odoo/config-parameter-override` (native FastAPI)
 - `POST /v1/drivers/odoo/website-bootstrap-override` (native FastAPI)
-- `POST /v1/drivers/odoo/artifact-publish` (native FastAPI)
 - `POST /v1/drivers/odoo/stable-bootstrap` (native FastAPI)
 - `POST /v1/drivers/odoo/target-replacement-plan` (native FastAPI)
 - `POST /v1/drivers/odoo/target-replacement-apply` (native FastAPI)
@@ -3261,23 +3258,9 @@ VeriReel uses generic-web release and preview routes; its genuine application
 behavior is selected through the profile declarations. The old native release
 descriptor and endpoints are removed; historical evidence reads remain.
 
-`Odoo Driver Route Smoke` is the Launchplane-owned route exposure gate for Odoo
-preview and artifact-publish handoff routes. It first sends unauthenticated
-public probes and fails when a registered route returns the Launchplane
-route-missing response. It then uses the shared request action and GitHub OIDC to
-resolve `/v1/drivers/odoo/artifact-publish-inputs` for the caller's product,
-context, instance, and source ref. That response includes the image publish
-coordinates plus the Odoo devkit, shared-addons, and product repository
-identities resolved from Launchplane runtime records. Launchplane-held build
-settings are retired (see `DIRECTION.md`); these inputs remain only until the
-product builds its own artifacts. Missing runtime records
-for those artifact-publish inputs are classified as
-`driver_route_dependency_not_found`, not as route-missing or generic invalid
-requests. The artifact-publish and artifact-publish inputs routes are owned by
-native FastAPI; product-specific artifact publish calls validate the requested
-context and instance against the DB-backed product profile lane before
-authorization. Native FastAPI owns the paths. Failed publish evidence is not
-cached as an idempotent success. Odoo post-deploy, config-parameter override,
+Product Builds and source-control provenance are the artifact ingress path.
+Launchplane does not publish Odoo images or return their build inputs.
+Odoo post-deploy, config-parameter override,
 and website-bootstrap override are native FastAPI routes too. They preserve
 product-profile driver validation, lane-scoped authorization, optional
 `Idempotency-Key` replay/conflict behavior, post-deploy transition records, and
@@ -3290,9 +3273,7 @@ persisted as identity-scoped issued plans; blocked inputs remain unstored so a
 retry can observe recovered runtime/provider state. Preview apply requires the
 service-issued plan id as its `Idempotency-Key`, validates exact plan and artifact
 continuity, and recomputes current plan authority before a fresh provider effect.
-The smoke also
-sends authenticated GitHub OIDC probes to `/v1/drivers/odoo/preview-apply-inputs`,
-`/v1/drivers/odoo/preview-apply`, and `/v1/previews/pr-feedback`.
+
 
 `POST /v1/drivers/odoo/stable-bootstrap` is owned by native FastAPI. It
 preserves product-profile driver validation before authorization,

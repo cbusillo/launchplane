@@ -28,8 +28,6 @@ from control_plane.drivers.generic_web_preview_dispatch import (
 from control_plane.drivers.registry import list_driver_descriptors
 from control_plane.drivers.route_paths import INGRESS_ROUTE_APPLY_ROUTE
 from control_plane.odoo_app_maintenance_http import ODOO_APP_MAINTENANCE_ROUTE
-from control_plane.odoo_artifact_publish_http import ODOO_ARTIFACT_PUBLISH_ROUTE
-from control_plane.odoo_artifact_publish_inputs_http import ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE
 from control_plane.odoo_post_deploy_http import (
     ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
     ODOO_POST_DEPLOY_ROUTE,
@@ -78,9 +76,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
         _GENERIC_WEB_ROLLBACK_ROUTE.route_path,
         _GENERIC_WEB_STABLE_VERIFICATION_ROUTE.route_path,
         INGRESS_ROUTE_APPLY_ROUTE,
-        ODOO_ARTIFACT_PUBLISH_ROUTE,
         ODOO_APP_MAINTENANCE_ROUTE,
-        ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
         ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
         ODOO_POST_DEPLOY_ROUTE,
         ODOO_PREVIEW_APPLY_INPUTS_ROUTE,

@@ -373,56 +373,20 @@ inventory before proving absence or reusing a match. Missing or malformed nested
 relations fail cleanup without deleting provider state or marking a preview
 destroyed; a fully enumerated empty inventory remains valid absence.
 
-Launchplane also owns the reusable request-shape builders for Odoo tenant
-preview workflows. Tenant repos may keep thin adapter jobs for checkout, image
-publication, runner selection, and product smoke facts, but the route paths,
-payload skeletons, JSON-file bindings, fail-result paths, run-scoped inputs
-keys, and service-issued apply key for `artifact-publish-inputs`,
-`preview-apply-inputs`, and `preview-apply` are Launchplane contract fixtures.
-New or migrated tenant
-preview workflows should install
-`cbusillo/launchplane/.github/actions/setup-odoo-preview-request-client@<launchplane-sha>`
-and either use its `request-kind` render mode or import the generated ESM client
-to render `launchplane-request` inputs instead of copying inline route paths,
-JSON request bodies, file bindings, fail paths, or idempotency key templates.
-Render mode accepts primitive workflow facts and emits `route-path`, `payload`,
-`payload-json-files`, `fail-result-paths`, `response-output-path`, and
-`idempotency-key` outputs shaped for direct handoff to the existing
-`launchplane-request` action. The generated request object exposes the same
-contract as `routePath`, `payloadInput`, `payloadJsonFilesInput`,
-`failResultPathsInput`, `responseOutputPath`, and `idempotencyKey` fields.
-`reusable-odoo-preview.yml` is the Launchplane-owned next step above those
-rendered requests: it keeps tenant repos responsible for event triggers,
-runner selection, and source facts, while Launchplane owns the refresh/destroy
-publish-inputs, preview-apply-inputs, preview-apply, and feedback-result
-handoff chain. Tenant workflows migrating to it should pass only the product,
-context, operation, PR number, source ref, optional runner selector, and the
-existing Odoo publish secrets; they should not copy Odoo preview route paths,
-JSON request bodies, JSON-file binding paths, fail paths, or idempotency key
-templates back into the tenant repo.
+Odoo preview builds and lifecycle reconciliation follow
+[event-driven deploys](event-driven-deploys.md). The product publishes an
+immutable artifact and Launchplane verifies its source-control provenance.
+Launchplane's reconciler plans and applies previews without a product workflow
+calling the service. The generic-web feedback wrappers below remain for
+products that have not completed their staged migration.
 
-The tenant caller also owns the reusable workflow's permission ceiling. Refresh
-callers grant `contents: read`, `id-token: write`, and `packages: write` because
-they publish the preview artifact. Destroy callers grant only `contents: read`
-and `id-token: write`. The reusable refresh job inherits that caller scope
-instead of declaring `packages: write` itself; a nested reusable workflow cannot
-elevate a least-privilege destroy caller, even when the refresh job would be
-skipped for that operation.
-
-Odoo CM is the exception where Launchplane now owns both the isolated provider
-apply planning inputs and the stage-preview smoke contract after refresh. Product
-workflows should call `POST /v1/drivers/odoo/preview-apply-inputs` with PR,
-image, and source facts, then pass a ready redacted dry-run plan to
-`POST /v1/drivers/odoo/preview-apply` instead of assembling runtime bindings,
-Dokploy environment ids, template compose ids, or Odoo database and volume names
-inside the tenant repo. The route discovers existing Odoo preview composes from
-provider inventory for refresh reuse and destroy planning, and it blocks destroy
-when the matching preview compose and hostname cannot be proven. After refresh,
-Launchplane owns `/launchplane/health`, `/web/health`, `/cm-website/health`, `/cell-mechanic`,
-artifact/revision evidence, and module install/update evidence. Product
-workflows should treat the Odoo refresh response's `result.status="pass"` (the
-reusable workflow aliases it to `refresh_status`) as the ready-to-comment signal
-instead of independently deciding readiness from raw health checks. A passing
+Launchplane owns isolated Odoo preview planning and smoke checks. The event
+reconciler supplies the verified manifest and PR facts, obtains a ready plan,
+and applies it inside the service. Runtime bindings, provider targets and
+per-preview data names come from Launchplane records. Existing preview discovery
+must prove the target and hostname before cleanup. The reconciler publishes
+readiness only after the preview's runtime identity and Odoo checks pass.
+A passing
 result persists the active preview, ready serving generation, immutable artifact
 identity, and verified runtime identity. The
 service requires an exact lowercase 40-character source commit and lowercase

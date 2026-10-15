@@ -520,24 +520,6 @@ from control_plane.http_routes.odoo_runtime import (
     OdooRuntimeReadDependencies,
     register_odoo_runtime_read_routes,
 )
-from control_plane.odoo_artifact_publish_inputs_http import (
-    ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE as _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-    OdooArtifactPublishInputsEnvelope,
-    OdooArtifactPublishInputsProductMismatchError,
-    OdooArtifactPublishInputsRouteDependencyError,
-    build_odoo_artifact_publish_inputs_result,
-    resolve_odoo_artifact_publish_inputs_profile,
-)
-from control_plane.odoo_artifact_publish_http import (
-    ODOO_ARTIFACT_PUBLISH_ROUTE as _ODOO_ARTIFACT_PUBLISH_ROUTE,
-    OdooArtifactPublishEnvelope,
-    OdooArtifactPublishProductMismatchError,
-    OdooArtifactPublishRouteDependencyError,
-    ingest_odoo_artifact_publish_evidence_result,
-    resolve_odoo_artifact_publish_product_route,
-    should_store_odoo_artifact_publish_idempotency,
-    validate_odoo_artifact_publish_product_evidence,
-)
 from control_plane.odoo_preview_apply_http import (
     ODOO_PREVIEW_APPLY_INPUTS_ROUTE as _ODOO_PREVIEW_APPLY_INPUTS_ROUTE,
     ODOO_PREVIEW_APPLY_ROUTE as _ODOO_PREVIEW_APPLY_ROUTE,
@@ -801,8 +783,13 @@ from control_plane.runtime_key_safety import (
     runtime_key_safety_environment_class,
 )
 from control_plane.contracts.disposable_lane import (
+    DISPOSABLE_LANE_OBSERVATION_ROUTE,
     DisposableLaneSafety,
     DisposableLaneObservationRequest,
+)
+from control_plane.disposable_lane_collection import (
+    collect_disposable_lane_facts,
+    disposable_collection_coverage,
 )
 
 from control_plane.disposable_lanes import (
@@ -6835,274 +6822,6 @@ def create_launchplane_fastapi_app(
                 "details": {"route_path": route_path},
             },
         )
-
-    async def write_odoo_artifact_publish(
-        request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
-        trace_id = next_trace_id()
-        try:
-            raw_payload = await request.json()
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request payload failed validation.",
-            ) from error
-        if not isinstance(raw_payload, dict):
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request payload failed validation.",
-            )
-        try:
-            publish_request = OdooArtifactPublishEnvelope.model_validate(raw_payload)
-        except ValidationError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request payload failed validation.",
-            ) from error
-        try:
-            product_profile = resolve_odoo_artifact_publish_product_route(
-                record_store=record_store,
-                product=publish_request.product,
-                context=publish_request.publish.context,
-                instance=publish_request.publish.instance,
-            )
-            validate_odoo_artifact_publish_product_evidence(
-                product_profile=product_profile,
-                request=publish_request,
-            )
-        except OdooArtifactPublishRouteDependencyError:
-            return driver_route_dependency_not_found_response(
-                trace_id=trace_id,
-                route_path=_ODOO_ARTIFACT_PUBLISH_ROUTE,
-            )
-        except OdooArtifactPublishProductMismatchError as error:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="product_driver_mismatch",
-                message="Product is not configured for the requested driver route.",
-            ) from error
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-
-        authorization_product = product_profile.product
-        if not native_routes.native_driver_route_authorization_allows(
-            endpoint=write_odoo_artifact_publish,
-            authorization_allows=resolved_authz_policy_runtime.allows,
-            identity=identity,
-            product=authorization_product,
-            context=publish_request.publish.context,
-            instances=(publish_request.publish.instance,),
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot write Odoo artifact publish evidence for the requested"
-                    " product/context."
-                ),
-            )
-
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_ODOO_ARTIFACT_PUBLISH_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replay_response is not None:
-            return replay_response
-
-        try:
-            records, driver_result = ingest_odoo_artifact_publish_evidence_result(
-                record_store=record_store,
-                request=publish_request,
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"No Launchplane route for {_ODOO_ARTIFACT_PUBLISH_ROUTE}.",
-            ) from error
-        except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={key: string_value(value) for key, value in records.items()},
-            result=driver_result,
-        )
-        if should_store_odoo_artifact_publish_idempotency(driver_result):
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_ODOO_ARTIFACT_PUBLISH_ROUTE,
-                idempotency_key=normalized_idempotency_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
-
-    async def write_odoo_artifact_publish_inputs(
-        request: Request,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
-        trace_id = next_trace_id()
-        try:
-            raw_payload = await request.json()
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request payload failed validation.",
-            ) from error
-        if not isinstance(raw_payload, dict):
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request payload failed validation.",
-            )
-        try:
-            inputs_request = OdooArtifactPublishInputsEnvelope.model_validate(raw_payload)
-        except ValidationError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request payload failed validation.",
-            ) from error
-        try:
-            product_profile = resolve_odoo_artifact_publish_inputs_profile(
-                record_store=record_store,
-                request=inputs_request,
-            )
-        except OdooArtifactPublishInputsRouteDependencyError:
-            return driver_route_dependency_not_found_response(
-                trace_id=trace_id,
-                route_path=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-            )
-        except OdooArtifactPublishInputsProductMismatchError as error:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="product_driver_mismatch",
-                message="Product is not configured for the requested driver route.",
-            ) from error
-        except ValueError as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-
-        if not native_routes.native_driver_route_authorization_allows(
-            endpoint=write_odoo_artifact_publish_inputs,
-            authorization_allows=resolved_authz_policy_runtime.allows,
-            identity=identity,
-            product=inputs_request.product,
-            context=inputs_request.inputs.context,
-            instances=(inputs_request.inputs.instance,),
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot read Odoo artifact publish inputs for the requested"
-                    " product/context."
-                ),
-            )
-
-        (
-            normalized_idempotency_key,
-            payload_fingerprint,
-            replay_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replay_response is not None:
-            return replay_response
-
-        try:
-            driver_result = build_odoo_artifact_publish_inputs_result(
-                control_plane_root=resolved_control_plane_root,
-                request=inputs_request,
-                product_profile=product_profile,
-            )
-        except OdooArtifactPublishInputsRouteDependencyError:
-            return driver_route_dependency_not_found_response(
-                trace_id=trace_id,
-                route_path=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"No Launchplane route for {_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE}.",
-            ) from error
-        except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records={},
-            result=driver_result,
-        )
-        store_apply_idempotency(
-            record_store=record_store,
-            identity=identity,
-            route_path=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-            idempotency_key=normalized_idempotency_key,
-            request_fingerprint_value=payload_fingerprint,
-            trace_id=trace_id,
-            response=response,
-        )
-        return response
 
     async def write_odoo_preview_apply_inputs(
         request: Request,
@@ -23282,11 +23001,59 @@ def create_launchplane_fastapi_app(
                         "usage": "unknown",
                         "data": "unknown",
                         "production_resources": "unknown",
-                        "automatic_fact_collection": "unavailable",
+                        "automatic_fact_collection": "limited_service_records",
+                        "source_coverage": disposable_collection_coverage(),
                     },
                 )
             if fingerprint != observation.expected_binding_sha256:
                 raise ValueError("Observed lane bindings changed; inspect them again.")
+            if observation.mode == "collect":
+                if observation.replaces_operation_id:
+                    raise ValueError("This collector does not qualify replacement resources.")
+                facts = collect_disposable_lane_facts(
+                    store,
+                    context=observation.context,
+                    instance=observation.instance,
+                    target=target,
+                    target_id=target_id,
+                    binding_sha256=fingerprint,
+                )
+                previous = store.read_disposable_lane_safety(
+                    profile.product, observation.context, observation.instance
+                )
+                now = datetime.now(timezone.utc)
+                evidence = DisposableLaneSafety.model_validate(
+                    {
+                        "product": profile.product,
+                        "context": observation.context,
+                        "instance": observation.instance,
+                        "binding_sha256": fingerprint,
+                        "observed_by": launchplane_identity_actor(identity),
+                        "observer_kind": "director_agent",
+                        "replaces_operation_id": previous.replaces_operation_id if previous else "",
+                        "replaced_target_id": previous.replaced_target_id if previous else "",
+                        "observed_at": now,
+                        "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
+                        **facts.payload(),
+                    }
+                )
+                store.write_disposable_lane_safety(evidence)
+                return accepted_evidence_response(
+                    trace_id=trace_id,
+                    records={"product_profile": profile.product},
+                    result={
+                        "mode": "collect",
+                        "binding_sha256": fingerprint,
+                        "observed_by": evidence.observed_by,
+                        "observer_kind": evidence.observer_kind,
+                        **facts.payload(),
+                        "observed_at": evidence.observed_at.isoformat(),
+                        "expires_at": evidence.expires_at.isoformat(),
+                        "provider_mutation": False,
+                        "automatic_fact_collection": "limited_service_records",
+                        "source_coverage": disposable_collection_coverage(),
+                    },
+                )
             operation = None
             if observation.replaces_operation_id:
                 operation = store.read_odoo_stable_target_replacement_operation_record(
@@ -26050,14 +25817,17 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
-        "/v1/disposable-lanes/observations",
+        DISPOSABLE_LANE_OBSERVATION_ROUTE,
         record_disposable_lane_safety,
         methods=["POST"],
         status_code=202,
         response_model=AcceptedEvidenceResponse,
         operation_id="record_disposable_lane_safety",
         responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
         },
     )
@@ -26645,64 +26415,6 @@ def create_launchplane_fastapi_app(
             401: {"model": LaunchplaneErrorResponse},
             403: {"model": LaunchplaneErrorResponse},
             409: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _ODOO_ARTIFACT_PUBLISH_ROUTE,
-        write_odoo_artifact_publish,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(OdooArtifactPublishEnvelope)
-                    }
-                },
-            }
-        },
-        operation_id="write_odoo_artifact_publish",
-        summary="Write Odoo artifact publish evidence",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-        write_odoo_artifact_publish_inputs,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(OdooArtifactPublishInputsEnvelope)
-                    }
-                },
-            }
-        },
-        operation_id="write_odoo_artifact_publish_inputs",
-        summary="Resolve Odoo artifact publish inputs",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
         },
     )
 

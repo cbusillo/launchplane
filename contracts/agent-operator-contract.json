@@ -46,6 +46,39 @@
     },
     "operations": [
       {
+        "idempotency": "none",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "inspect",
+          "collect",
+          "record",
+          "clear",
+          "prepare-rebuild"
+        ],
+        "operation_id": "record_disposable_lane_safety",
+        "path": "/v1/disposable-lanes/observations",
+        "purpose": "Inspect or collect exact-lane service safety evidence, record unknown assertions, clear evidence or prepare a retained testing replacement; unavailable facts stay unknown.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_binding_sha256"
+        ],
+        "schema_fingerprint_sha256": "544c4ee51320540564d30bcddd3d12450555631efa403b2ca519964b8a975458",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "body",
         "identity_dependencies": [
           "read_write_identity"
@@ -531,8 +564,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "2a5218d47a506e990b2132dd6613277980021e01"
+    "source_commit_sha": "0d836b3c06f0c4a4da48efa382b088d883beb8f4"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "39c7def885932bf0f86b10e735aef1a3d9395cdaa1e94e30529a7dbdaa2472db"
+  "semantic_digest_sha256": "d52c2d3100826e76c5de2b090a936b9244b4157e5f446916aba624b16c2d9e89"
 }

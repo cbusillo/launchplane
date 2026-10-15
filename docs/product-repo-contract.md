@@ -471,50 +471,14 @@ feedback delivery. The action appends a stable digest for each payload, requests
 GitHub OIDC per POST, and writes a JSON response array. Do not use shell loops
 or repo-local OIDC clients for those remaining connector calls.
 
-Transitional: the rest of this paragraph is the old call-in publish path, which
-the tenant's own `build.yml` and [artifact provenance](artifact-provenance.md)
-replace. #2606 deletes `reusable-odoo-artifact-publish.yml`, the publish and
-publish-inputs routes, and the Launchplane-held Odoo build settings.
-Odoo artifact publication follows the reusable workflow shape: tenant repos
-own the manual dispatch confirmation and the source workspace, while
-`reusable-odoo-artifact-publish.yml` owns the Launchplane publish-input request,
-artifact-record request, idempotency keys, and response mapping. The tenant
-workflow should not duplicate `/v1/drivers/odoo/artifact-publish-inputs` or
-`/v1/drivers/odoo/artifact-publish` wiring once it uses that workflow. The
-tenant workflow must pass the Launchplane product key explicitly; reusable
-workflows do not derive product identity from context names. An Odoo tenant's
-build inputs live in its own `workspace.toml`, not in Launchplane: the `[build]`
-table declares the Odoo version and base-image tags, `workspace.python` the
-Python version, and `[repos.devkit]` / `[repos.shared_addons]` name the
-`repository` the reusable workflows check out. The build resolves image tags to
-digests and records them, with every source commit, in the artifact manifest;
-the artifact, not a Launchplane setting, is the exact record of what was built
-(cbusillo/launchplane#2583). The devkit and shared-addons repositories must
-belong to the repository owner of the tenant repository, because the build runs their code with
-the source and registry tokens. During the rollout, a tenant revision that does
-not declare these values still gets them from the Launchplane
-`ODOO_DEVKIT_REPOSITORY`, `ODOO_SHARED_ADDONS_REPOSITORY`, `ODOO_VERSION` and
-base-image records, which publish-inputs keeps returning until those records
-are retired. When deploying an artifact whose manifest records the Odoo
-version, Launchplane sets the runtime `ODOO_VERSION` from the manifest rather
-than from its own setting. Reusable Odoo workflows read the
-Launchplane service URL from `LAUNCHPLANE_PUBLIC_URL` by default and derive the
-GitHub OIDC audience from that URL host unless the caller passes an explicit
-`launchplane_audience` input. The reusable jobs run on GitHub-hosted runners
-because they call the deployed Launchplane service over HTTPS; product repos do
-not need direct access to Launchplane self-hosted runners, and privileged
-provider mutations still run inside the Launchplane service boundary.
-
-Product-driver testing deploys follow the same ownership shape. Tenant repos own
-the manual dispatch confirmation and pass explicit `product`, `context`,
-`driver`, stored `artifact_id`, and `source_git_ref` into
-`reusable-product-driver-testing-deploy.yml@<launchplane-sha>`; Odoo callers must pass
-`driver: odoo`. The reusable workflow preserves the explicit product and context
-from the caller, dispatches Odoo requests to
-`/v1/drivers/odoo/target-replacement-apply`, and leaves the provider mutation,
-runtime identity injection, Odoo post-deploy extension, stable readiness checks,
-deployment and inventory records, and the testing release tuple inside the
-Launchplane service boundary.
+Odoo tenants build from their own `workspace.toml` and source files. The `[build]`
+table declares the Odoo version and base images, `[workspace].python` declares
+Python, and the manifest names the devkit/shared-addon repositories. The build
+records resolved image digests and source commits in its artifact manifest.
+Launchplane verifies the build's provenance and deploys previews and testing
+from source-control events. It supplies no build inputs and has no Odoo publish
+or artifact-record call-in route. Runtime `ODOO_VERSION` comes from the artifact
+when that manifest records it.
 
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,
@@ -795,13 +759,9 @@ to the full caller `owner/repo` slug, normalizes skipped or neutral smoke jobs t
 failure evidence, and maps service errors through the shared request-action
 `error_message` output.
 
-Odoo tenant preview workflows that still call Odoo driver routes directly should
-use `setup-odoo-preview-request-client@<launchplane-sha>` with `request-kind` set to
-`artifact-publish-inputs`, `preview-apply-inputs`, or `preview-apply` before
-calling `launchplane-request`. The action owns the route path, JSON payload
-shape, JSON-file binding list, fail-result paths, response output path, and
-run-scoped idempotency key. Tenant workflows supply only primitive product,
-context, PR, source, manifest, dry-run plan, and smoke/wait facts.
+Odoo previews use the event reconciler and the tenant's verified Build. The
+reconciler owns preview plans, runtime bindings and lifecycle evidence; no
+Odoo workflow request client is installed in a tenant repository.
 
 These reusable workflows intentionally do not accept provider targets, target
 ids, health URLs, preview URLs, feedback markdown, record ids, managed secrets,
@@ -844,7 +804,6 @@ The product-driver reusable surface is:
 
 - `reusable-product-driver-app-maintenance.yml@<launchplane-sha>`
 - `reusable-product-driver-post-deploy.yml@<launchplane-sha>`
-- `reusable-product-driver-testing-deploy.yml@<launchplane-sha>`
 - `reusable-product-driver-prod-promotion.yml@<launchplane-sha>`
 - `reusable-product-driver-prod-rollback.yml@<launchplane-sha>`
 

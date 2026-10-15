@@ -199,6 +199,229 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             self.store.read_disposable_lane_safety("example-site", self.context, "testing"), safety
         )
 
+    async def test_collector_resolves_service_holds_and_exact_target_aliases(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        held = target.model_copy(deep=True)
+        held.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+            reason="Staff are testing this lane.",
+            recorded_at=target.updated_at,
+            recorded_by="fixture-human",
+        )
+        self.store.write_dokploy_target_record(held)
+        testing_id = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            testing_id.model_copy(update={"instance": "prod"})
+        )
+        inspected = await self.observe()
+        collected = await self.observe(
+            mode="collect",
+            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            usage="unused",
+            data="reproducible",
+            production_resources="isolated",
+            usage_evidence="untrusted:unused",
+            data_evidence="untrusted:copy",
+            isolation_evidence="untrusted:isolated",
+        )
+        self.assertEqual(collected.status_code, 202, collected.text)
+        evidence = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert evidence is not None
+        self.assertEqual(evidence.usage, "in_use")
+        self.assertEqual(evidence.production_resources, "shared")
+        self.assertEqual(evidence.data, "unknown")
+        self.assertEqual(evidence.observer_kind, "director_agent")
+        self.assertNotIn("untrusted:", evidence.model_dump_json())
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            self.assertEqual(await self.sync(), 409)
+            driver.assert_not_called()
+
+    async def test_collector_never_infers_unused_reproducible_or_isolated_from_absence(
+        self,
+    ) -> None:
+        initial = self.store.read_product_profile_record("example-site")
+        inspected = await self.observe()
+        collected = await self.observe(
+            mode="collect",
+            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            usage="unused",
+            data="reproducible",
+            production_resources="isolated",
+        )
+        self.assertEqual(collected.status_code, 202, collected.text)
+        evidence = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert evidence is not None
+        self.assertEqual(
+            (evidence.usage, evidence.data, evidence.production_resources),
+            ("unknown", "unknown", "unknown"),
+        )
+        self.assertEqual(self.store.read_product_profile_record("example-site"), initial)
+        with patch(
+            "control_plane.http_app.control_plane_live_target_runtime.apply_live_target_runtime_environment"
+        ) as driver:
+            self.assertEqual(await self.sync(), 409)
+            self.assertEqual(await self.sync(instance="prod"), 403)
+            driver.assert_not_called()
+        with scoped_agent_transport():
+            refused = await self.observe(
+                mode="collect", expected_binding_sha256=evidence.binding_sha256
+            )
+        self.assertEqual(refused.status_code, 403)
+        self.assertEqual(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing"),
+            evidence,
+        )
+
+    async def test_collect_refuses_changed_bindings_and_replacement_qualification(self) -> None:
+        inspected = await self.observe()
+        digest = inspected.json()["result"]["binding_sha256"]
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            target_id.model_copy(update={"target_id": "replacement"})
+        )
+        refused = await self.observe(mode="collect", expected_binding_sha256=digest)
+        self.assertEqual(refused.status_code, 409)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        )
+        inspected = await self.observe()
+        refused = await self.observe(
+            mode="collect",
+            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            replaces_operation_id="retained-operation",
+        )
+        self.assertEqual(refused.status_code, 409)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        )
+
+    async def test_collect_preserves_existing_replacement_linkage_without_qualifying_it(
+        self,
+    ) -> None:
+        record_safety(
+            self.store,
+            "example-site",
+            self.context,
+            "testing",
+            replaces_operation_id="retained-operation",
+            replaced_target_id="retained-target",
+        )
+        inspected = await self.observe()
+        response = await self.observe(
+            mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        evidence = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert evidence is not None
+        self.assertEqual(evidence.replaces_operation_id, "retained-operation")
+        self.assertEqual(evidence.replaced_target_id, "retained-target")
+        self.assertEqual(
+            (evidence.usage, evidence.data, evidence.production_resources),
+            ("unknown", "unknown", "unknown"),
+        )
+
+    async def test_collect_does_not_confuse_other_lane_or_provider_kinds_with_production_alias(
+        self,
+    ) -> None:
+        testing_id = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            testing_id.model_copy(update={"instance": "pr-2"})
+        )
+        inspected = await self.observe()
+        response = await self.observe(
+            mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["production_resources"], "unknown")
+        self.store.write_dokploy_target_id_record(
+            testing_id.model_copy(update={"instance": "prod"})
+        )
+        production = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="prod"
+        )
+        production = production.model_copy(update={"target_type": "application"})
+        self.store.write_dokploy_target_record(production)
+        inspected = await self.observe()
+        response = await self.observe(
+            mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["production_resources"], "unknown")
+
+    async def test_collect_resolves_exact_preview_scope_without_changing_preview_history(
+        self,
+    ) -> None:
+        from control_plane.contracts.preview_record import PreviewRecord
+
+        profile = self.store.read_product_profile_record("example-site")
+        profile = profile.model_copy(
+            update={
+                "preview": profile.preview.model_copy(
+                    update={
+                        "context": "example-site-preview",
+                        "slug_template": "pr-{number}",
+                        "enabled": True,
+                    }
+                )
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        preview = PreviewRecord(
+            preview_id="fixture-preview",
+            context=profile.preview.context,
+            anchor_repo="example-site",
+            anchor_pr_number=1,
+            anchor_pr_url="https://github.com/example/example-site/pull/1",
+            preview_label="preview",
+            canonical_url="https://pr-1.example.invalid",
+            state="active",
+            created_at=profile.updated_at,
+            updated_at=profile.updated_at,
+            eligible_at=profile.updated_at,
+        )
+        self.store.write_preview_record(preview)
+        inspected = await self.observe(
+            context=preview.context, instance="pr-1", preview_id=preview.preview_id
+        )
+        self.assertEqual(inspected.status_code, 202, inspected.text)
+        response = await self.observe(
+            context=preview.context,
+            instance="pr-1",
+            preview_id=preview.preview_id,
+            mode="collect",
+            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        evidence = self.store.read_disposable_lane_safety("example-site", preview.context, "pr-1")
+        assert evidence is not None
+        self.assertEqual(evidence.data, "unknown")
+        self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
+        self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
+
+    async def test_collection_missing_product_and_invalid_request_keep_structured_refusals(
+        self,
+    ) -> None:
+        missing = await self.observe(mode="collect", product="absent-product")
+        self.assertEqual(missing.status_code, 404, missing.text)
+        self.assertTrue(missing.json()["trace_id"])
+        invalid = await self.observe(mode="not-a-mode")
+        self.assertEqual(invalid.status_code, 400, invalid.text)
+        self.assertTrue(invalid.json()["trace_id"])
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        )
+
     async def test_rebuild_preparation_captures_the_stored_target_once_under_the_agent_identity(
         self,
     ) -> None:
