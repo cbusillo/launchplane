@@ -5,6 +5,7 @@ import json
 from typing import Literal, TypeVar, TypedDict
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_CHUNK_BYTES
+from control_plane.contracts.odoo_testing_source import NATIVE_TESTING_COPY_ARTIFACT_BYTES
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductRuntimeConfigRequirement,
@@ -417,7 +418,7 @@ if path.exists():
 """
 
 
-NATIVE_TESTING_FILES_PROGRAM = r"""
+_NATIVE_TESTING_FILES_PROGRAM_TEMPLATE = r"""
 import base64,hashlib,json,os,re,sys,tarfile,tempfile
 from pathlib import Path,PurePosixPath
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
@@ -431,7 +432,7 @@ def path_for(part,index):
     return Path('/tmp')/('lp-native-'+identity+'-'+part+'-'+str(index))
 def chunks(part):
     record=capture[part]
-    if not 0 < record['size'] <= 128*1024*1024 or not re.fullmatch(r'[a-f0-9]{64}',record['sha256']):
+    if not 0 < record['size'] <= __LP_NATIVE_ARTIFACT_BYTES__ or not re.fullmatch(r'[a-f0-9]{64}',record['sha256']):
         raise RuntimeError('Invalid artifact receipt')
     return range((record['size']+chunk_size-1)//chunk_size)
 observed=[]
@@ -560,7 +561,16 @@ try:
 finally:
     for path in artifacts.values():
         path.unlink(missing_ok=True)
-""".replace("__LP_NATIVE_CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES))
+"""
+
+
+def render_native_testing_files_program() -> str:
+    return _NATIVE_TESTING_FILES_PROGRAM_TEMPLATE.replace(
+        "__LP_NATIVE_CHUNK_BYTES__", str(NATIVE_TESTING_COPY_CHUNK_BYTES)
+    ).replace("__LP_NATIVE_ARTIFACT_BYTES__", str(NATIVE_TESTING_COPY_ARTIFACT_BYTES))
+
+
+NATIVE_TESTING_FILES_PROGRAM = render_native_testing_files_program()
 
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = r"""

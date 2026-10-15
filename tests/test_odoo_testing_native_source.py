@@ -962,7 +962,12 @@ class NativeArtifactConsumptionTests(unittest.TestCase):
             },
         }
 
-    def consume(self, capture: dict[str, Any], mode: str = "prepare") -> None:
+    def consume(
+        self,
+        capture: dict[str, Any],
+        mode: str = "prepare",
+        program: str = NATIVE_TESTING_FILES_PROGRAM,
+    ) -> None:
         spec = {
             "mode": mode,
             "capture": capture,
@@ -981,7 +986,36 @@ class NativeArtifactConsumptionTests(unittest.TestCase):
             patch("pathlib.Path", side_effect=self.mapped_path),
             patch("tempfile.NamedTemporaryFile", side_effect=temporary_file),
         ):
-            exec(compile(NATIVE_TESTING_FILES_PROGRAM, "<native-files>", "exec"), {})
+            exec(compile(program, "<native-files>", "exec"), {})
+
+    def test_capacity_increase_accepts_the_exact_bound_for_inspection_and_restore(self) -> None:
+        from control_plane.odoo_testing_restore import render_native_testing_files_program
+
+        capture = self.stage()
+        capacity = max(capture[part]["size"] for part in ("database", "filestore"))
+        with patch(
+            "control_plane.odoo_testing_restore.NATIVE_TESTING_COPY_ARTIFACT_BYTES", capacity - 1
+        ):
+            with self.assertRaises(RuntimeError):
+                self.consume(capture, mode="inspect", program=render_native_testing_files_program())
+        with patch(
+            "control_plane.odoo_testing_restore.NATIVE_TESTING_COPY_ARTIFACT_BYTES", capacity
+        ):
+            program = render_native_testing_files_program()
+            output = io.StringIO()
+            with redirect_stdout(output), self.assertRaises(SystemExit) as stopped:
+                self.consume(capture, mode="inspect", program=program)
+            self.assertEqual(stopped.exception.code, 0)
+            self.assertEqual(
+                json.loads(output.getvalue())["artifacts"],
+                {part: capture[part] for part in ("database", "filestore")},
+            )
+            self.consume(capture, program=program)
+        self.assertEqual(self.mapped_path(self.dump_path).read_bytes(), b"custom database fixture")
+        self.assertEqual(
+            (self.root / "volumes/data/filestore" / self.database / self.name).read_bytes(),
+            self.attachment,
+        )
 
     def test_inspection_hashes_actual_complete_artifacts_and_excludes_missing_chunks(self) -> None:
         capture = self.stage()
