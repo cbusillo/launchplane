@@ -25,6 +25,12 @@ from control_plane.odoo_preview_apply_execution import (
     prepare_odoo_preview_apply_operation,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.generic_web_preview import (
+    effective_preview_app_name_prefix,
+    preview_application_name,
+    preview_pr_number_from_slug,
+    preview_slug_from_application_name,
+)
 from control_plane.workflows.odoo_preview_runtime import (
     ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
     OdooPreviewApplyInputsResult,
@@ -98,6 +104,27 @@ def classify_preview_reservation(
         number = intent.issued_plan.plan_request.pr_number
     except ValueError:
         pass
+    # Current target attribution can stop new planning; it cannot restore the
+    # missing original action, plan, attempt or schedule binding for settlement.
+    target_number = 0
+    prefix = f"dokploy:compose:{profile.preview.context.strip()}:"
+    key = reservation.reconciliation_key
+    if key.startswith(prefix) and profile.preview.context.strip():
+        name = key.removeprefix(prefix)
+        app_prefix = effective_preview_app_name_prefix(profile=profile)
+        slug = preview_slug_from_application_name(app_name_prefix=app_prefix, application_name=name)
+        candidate = preview_pr_number_from_slug(
+            preview_slug=slug, slug_template=profile.preview.slug_template
+        )
+        if (
+            candidate is not None
+            and candidate > 0
+            and profile.preview.slug_template.replace("{number}", str(candidate)) == slug
+            and preview_application_name(app_name_prefix=app_prefix, preview_slug=slug) == name
+            and reservation.provider_target_key
+            == "dokploy-provider-target:" + hashlib.sha256(key.encode()).hexdigest()
+        ):
+            target_number = candidate
     return {
         "reservation_id": reservation.record_id,
         "recovery_reference": preview_reservation_reference(reservation, retained_intent),
@@ -110,6 +137,7 @@ def classify_preview_reservation(
         "original_schedule_binding_available": bool(retained_intent.get("schedule_binding")),
         "action": action,
         "pull_request_number": number,
+        "target_pull_request_number": target_number,
         "classification": "original_available" if available else "original_evidence_unavailable",
         "next_action": "observe_original" if available else "retain_fence_missing_original_proof",
     }
