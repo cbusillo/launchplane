@@ -3728,6 +3728,13 @@ class LaunchplaneFreshOdooTestingGenerationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneTestingActivationRow(Base):
+    __tablename__ = "launchplane_testing_activations"
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneProductProfileRow(Base):
     __tablename__ = "launchplane_product_profiles"
     __table_args__ = (
@@ -10410,6 +10417,65 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
             return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
+
+    def read_testing_activation(self, product: str, context: str) -> dict[str, Any] | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneTestingActivationRow, (product, context))
+            return dict(row.payload) if row else None
+
+    def write_testing_activation(
+        self,
+        *,
+        expected: dict[str, Any] | None,
+        replacement: dict[str, Any],
+        bundle: ProductAuthorityBundle | None = None,
+    ) -> None:
+        """CAS custody and lane publication in one authority transaction."""
+        from control_plane.contracts.testing_activation import TestingActivationRecord
+
+        record = TestingActivationRecord.model_validate(replacement)
+        with self._session_factory() as session:
+            if bundle is not None:
+                self._write_product_authority_bundle(bundle, write_session=session, commit=False)
+            else:
+                self._begin_serialized_write(session)
+                self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneTestingActivationRow,
+                (record.product, record.context),
+                with_for_update=True,
+            )
+            if (TestingActivationRecord.model_validate(row.payload) if row else None) != (
+                TestingActivationRecord.model_validate(expected) if expected is not None else None
+            ):
+                raise ValueError("Testing activation custody changed.")
+            if expected is not None:
+                previous = TestingActivationRecord.model_validate(expected)
+                mutable = {
+                    "project_id",
+                    "environment_id",
+                    "target_id",
+                    "app_name",
+                    "phase",
+                    "published",
+                    "qualified_at",
+                    "published_target",
+                }
+                if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
+                    raise ValueError("Testing activation identities are immutable.")
+                for key in ("project_id", "environment_id", "target_id", "app_name"):
+                    if getattr(previous, key) and getattr(previous, key) != getattr(record, key):
+                        raise ValueError("Testing activation placement is immutable.")
+                if previous.published and not record.published:
+                    raise ValueError("Testing activation publication cannot be undone.")
+            session.merge(
+                LaunchplaneTestingActivationRow(
+                    product=record.product,
+                    context=record.context,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
 
     def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:
         with self._session_factory() as session:

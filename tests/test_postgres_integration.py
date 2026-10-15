@@ -19,6 +19,7 @@ import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
+from tests import test_testing_activation as testing_activation
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -10240,3 +10241,65 @@ class RealPostgresExistingPreviewQualificationTests(unittest.TestCase):
                         self.assertEqual(
                             first.read_preview_record(preview.preview_id).state, "paused"
                         )
+
+
+class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
+    def setUp(self) -> None:
+        database = _head_postgres_database()
+        self.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:testing-activation",
+                updated_at=self.preparation.fixture.now(),
+                policy=policy,
+            )
+        )
+
+    def test_concurrent_activation_keeps_one_recipient_and_preserves_the_old_executor_fence(
+        self,
+    ) -> None:
+        from dataclasses import replace
+        from control_plane.testing_activation import ROUTE
+        from control_plane.provider_operations import run_durable_provider_operation
+        from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+
+        second = PostgresRecordStore(database_url=self.database_url)
+        self.addCleanup(second.close)
+        other = replace(self.adapter, store=second)
+        outcomes = []
+        original = self.inspect
+
+        def inspect(*args: Any) -> None:
+            with second.testing_replacement_execution_lock(
+                testing_event_execution_lock_name(self.preparation.fixture.target_key)
+            ) as old_executor:
+                self.assertIsNone(old_executor)
+            outcome = run_durable_provider_operation(
+                store=second,
+                scope=self.scope,
+                route_path=ROUTE.format(product=self.product),
+                idempotency_key="competing-activation",
+                request_fingerprint="c" * 64,
+                lease_owner="second-worker",
+                response_trace_id="second-trace",
+                adapter=other,
+            )
+            outcomes.append(outcome.status)
+            original(*args)
+
+        with patch("control_plane.testing_activation.inspect_new_resources", side_effect=inspect):
+            self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertTrue(outcomes)
+        self.assertEqual(set(outcomes), {"target_busy"})
+        self.assertEqual(sum(path == "/api/compose.create" for path, _ in self.writes), 1)
+        self.assertEqual(
+            self.store.list_held_provider_target_reservations(), (self.preparation.original,)
+        )

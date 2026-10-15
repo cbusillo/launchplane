@@ -142,6 +142,7 @@ class TestingHoldApplyRequest(BaseModel):
     # The hold's reason when setting it; the audit reason when lifting it.
     reason: str
     reviewed_plan_sha256: str = ""
+    activation_plan_sha256: str = ""
 
     @model_validator(mode="after")
     def _validate_request(self) -> TestingHoldApplyRequest:
@@ -301,6 +302,11 @@ def build_testing_hold_plan(
                 "instance": request.instance,
                 "record_sha256_before": record_sha256_before,
                 "desired": _hold_terms(desired),
+                **(
+                    {"activation_plan_sha256": request.activation_plan_sha256}
+                    if request.activation_plan_sha256
+                    else {}
+                ),
             }
         ),
     )
@@ -382,7 +388,7 @@ def apply_testing_hold_plan(
     reconcile_requested = False
     if (
         stored_hold is None
-        and request.purpose != "isolation_staging"
+        and (request.purpose != "isolation_staging" or bool(request.activation_plan_sha256))
         and read_back_matches
         and isinstance(record_store, ProductReconcileRequester)
     ):
