@@ -718,6 +718,9 @@ from its own event reconciler. Recovery applies only to testing,
 `recreate-in-place`, existing-data attempts with the service reconcile grant.
 Production, Client releases and caller-started operations keep their existing
 recovery rules.
+Those other manual cancellation routes trust the authorized caller's external
+provider attestation; timestamp validation alone is not service-owned inspection
+or proof that an external executor has stopped.
 
 Manual cancellation of a held service-owned testing replacement returns
 `409 service_testing_recovery_required`. A caller's timestamped provider
