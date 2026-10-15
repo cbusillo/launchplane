@@ -2039,7 +2039,7 @@ def _python_candidates(
     return candidates, ""
 
 
-def _python_fixed_authorization_actions(tree: ast.Module) -> dict[str, str]:
+def _python_fixed_authorization_actions(tree: ast.Module) -> dict[tuple[int, str], str]:
     """Recognize declarations consumed only as an authorization check's action.
 
     Name or dotted-string shape alone cannot distinguish a permission from a
@@ -2059,7 +2059,7 @@ def _python_fixed_authorization_actions(tree: ast.Module) -> dict[str, str]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Name):
             references.setdefault(node.id, []).append(node)
-    actions: dict[str, str] = {}
+    actions: dict[tuple[int, str], str] = {}
     for statement in tree.body:
         value_node: ast.expr | None
         if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
@@ -2082,7 +2082,7 @@ def _python_fixed_authorization_actions(tree: ast.Module) -> dict[str, str]:
             and all(id(node) in action_uses for node in loads)
             and all(node is target or isinstance(node.ctx, ast.Load) for node in uses)
         ):
-            actions[target.id] = value
+            actions[statement.lineno, target.id] = value
     return actions
 
 
@@ -2708,6 +2708,7 @@ def _build_finding(
         key=key,
         value=value,
         allow_context=allow_context,
+        line=line,
     )
     classification = "allowed" if allow_reason else "needs_classification"
     severity = "info" if allow_reason else _severity(rule_id=rule_id, key=key)
@@ -2919,6 +2920,7 @@ def _allow_reason(
     key: str,
     value: object,
     allow_context: Mapping[str, object] | None = None,
+    line: int = 0,
 ) -> str:
     allow_context = allow_context or {}
     normalized = path.replace("\\", "/")
@@ -2947,8 +2949,8 @@ def _allow_reason(
     if (
         normalized.endswith(".py")
         and isinstance(fixed_actions, dict)
-        and key in fixed_actions
-        and fixed_actions[key] == value
+        and (line, key) in fixed_actions
+        and fixed_actions[line, key] == value
     ):
         return ALLOW_REASON_SCHEMA_ONLY
     if (

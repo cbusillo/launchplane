@@ -75,11 +75,31 @@ class AuthorizationActionIdentifierTests(unittest.TestCase):
                 audit = self.audit(source)
                 self.assertEqual(evaluate_config_authority_gate(audit)["status"], "fail")
                 self.assertTrue(
-                    any(
+                    all(
                         finding["classification"] == "needs_classification"
                         for finding in _findings(audit)
                     )
                 )
+
+    def test_same_named_runtime_binding_does_not_inherit_declaration_allowance(self) -> None:
+        for target in (
+            "settings.OBSERVATION_AUTHZ_ACTION",
+            'os.environ["OBSERVATION_AUTHZ_ACTION"]',
+        ):
+            with self.subTest(target=target):
+                audit = self.audit(
+                    'OBSERVATION_AUTHZ_ACTION = "synthetic_service.inspect"\n'
+                    + f'{target} = "synthetic_service.inspect"\n'
+                    + "authorization_allows(action=OBSERVATION_AUTHZ_ACTION)\n"
+                )
+                findings = _findings(audit)
+                self.assertTrue(findings)
+                for finding in findings:
+                    self.assertEqual(
+                        finding["classification"],
+                        "allowed" if finding["line"] == 1 else "needs_classification",
+                    )
+                self.assertEqual(evaluate_config_authority_gate(audit)["status"], "fail")
 
 
 if __name__ == "__main__":
