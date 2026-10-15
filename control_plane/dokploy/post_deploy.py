@@ -44,16 +44,29 @@ from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
 ODOO_POST_DEPLOY_SCHEDULE_UPSERT = "post_deploy_schedule_upsert"
+ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY = Path("/var/lock")
 
 
 def odoo_testing_schedule_lock_script(compose_app_name: str) -> str:
     """Hold the host execution lock through SQL, readback and web restart."""
     digest = hashlib.sha256(compose_app_name.encode()).hexdigest()
-    return f"""exec 9>/var/lock/launchplane-odoo-{digest}.lock
+    lock_path = ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY / f"launchplane-odoo-{digest}.lock"
+    return f"""exec 9>{shlex.quote(str(lock_path))}
 if ! flock -n 9; then
     printf 'integration_readback_refused=testing_resources/workflow_active\\n' >&2
     exit 1
 fi
+"""
+
+
+def odoo_testing_idle_runner_script(container_variable: str) -> str:
+    if container_variable not in {"runner", "script_runner_container_id"}:
+        raise ValueError("Unknown runner variable")
+    return f"""runner_execs=$(docker inspect -f '{{{{json .ExecIDs}}}}' "${{{container_variable}}}")
+case "$runner_execs" in
+    null|'[]') ;;
+    *) printf 'integration_readback_refused=testing_resources/runner_exec_active\\n' >&2; exit 1 ;;
+esac
 """
 
 
@@ -2684,6 +2697,7 @@ exit_trap() {{
 database_container_id=$(resolve_single_container_any_state "database")
 script_runner_container_id=$(resolve_single_running_container "script-runner")
 web_container_id=$(resolve_single_container_any_state "web")
+{odoo_testing_idle_runner_script("script_runner_container_id") if hold_web_until_integration_readback else ""}
 
 ensure_running "${{database_container_id}}" "database"
 web_image_id=$(docker inspect -f '{{{{.Image}}}}' "${{web_container_id}}")

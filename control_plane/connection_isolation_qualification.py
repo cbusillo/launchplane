@@ -138,7 +138,8 @@ def qualify_resources(snapshot, project, database, context, runtime_identity):
                 own_path = PurePosixPath(own["Source"])
                 if path == own_path or path in own_path.parents or own_path in path.parents:
                     raise ValueError("testing_resources/shared_storage")
-    # State/health and unrelated containers do not change the reviewed resources.
+    # Health alone and unrelated containers do not alter the reviewed resources;
+    # changed network membership still invalidates their physical binding.
     binding = {
         "containers": {
             service: {

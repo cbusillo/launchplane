@@ -88,6 +88,9 @@ def main(argv):
         return 0
     if command == "inspect":
         template, container_id = argv[2], argv[3]
+        if ".ExecIDs" in template:
+            print('["orphaned-exec"]' if os.environ.get("FAKE_RUNNER_EXEC_ACTIVE") == "1" else "null")
+            return 0
         if '"kind"' in template:
             kind = "environment" if '"environment"' in template else "container"
             rows = json.loads(os.environ["FAKE_RESOURCE_ROWS"])
@@ -534,11 +537,39 @@ def _render_post_deploy_script(
 
 @unittest.skipIf(BASH is None, "bash 4 or newer is required to run the rendered script")
 class DataWorkflowScriptExecutionTests(unittest.TestCase):
+    def test_runner_exec_left_after_transport_exit_blocks_repair_and_restore(self) -> None:
+        from control_plane.dokploy.connection_isolation import isolation_script
+
+        policy = integration_readback_policy(
+            instance_name="testing", policies=_policies(), workflow_mode="maintenance"
+        )
+        scripts = (
+            isolation_script(
+                compose_app_name="example-testing-app",
+                database_name="example_testing",
+                instance="testing",
+                mode="apply",
+                readback_spec=policy.encoded_spec(),
+                context="example",
+                runtime_identity=self.runtime_identity,
+                reviewed_resource_sha256=self.resource_digest,
+            ),
+            _render_post_deploy_script(None),
+            _render_post_deploy_script(None, run_destructive_restore=True),
+        )
+        for index, script in enumerate(scripts):
+            with self.subTest(index=index):
+                run = self._run(script, FAKE_RUNNER_EXEC_ACTIVE="1")
+                self.assertNotEqual(run.returncode, 0)
+                self.assertNotIn(f"stop {WEB_CONTAINER_ID}", run.docker_log)
+                self.assertFalse(run.web_restarted)
+                self.assertFalse(run.readback_ran)
+                self.assertNotIn("exec workflow", run.docker_log)
+
     def test_running_isolation_excludes_restore_and_maintenance_until_remote_exit(self) -> None:
         from control_plane.dokploy.connection_isolation import isolation_script
 
         prefix = dokploy_post_deploy.odoo_testing_schedule_lock_script("example-testing-app")
-        prefix = prefix.replace("/var/lock/launchplane-odoo-", f"{self.root}/launchplane-odoo-")
         ready = self.root / "lock-held"
         holder = subprocess.Popen(
             [
@@ -741,6 +772,9 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         temporary_directory = tempfile.TemporaryDirectory()
         self.addCleanup(temporary_directory.cleanup)
         self.root = Path(temporary_directory.name)
+        self.enterContext(
+            patch.object(dokploy_post_deploy, "ODOO_TESTING_SCHEDULE_LOCK_DIRECTORY", self.root)
+        )
         bin_dir = self.root / "bin"
         bin_dir.mkdir()
         docker = bin_dir / "docker"
@@ -791,11 +825,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
             (self.root / marker).unlink(missing_ok=True)
         (self.root / f"{WEB_CONTAINER_ID}.state").write_text(web_status)
         script_path = self.root / "script.sh"
-        # Each test's directory stands in for its own provider host filesystem.
-        script_path.write_text(
-            script.replace("/var/lock/launchplane-odoo-", f"{self.root}/launchplane-odoo-"),
-            encoding="utf-8",
-        )
+        script_path.write_text(script, encoding="utf-8")
         completed = subprocess.run(
             [self.bash, str(script_path)],
             capture_output=True,

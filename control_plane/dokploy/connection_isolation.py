@@ -87,6 +87,7 @@ resolve() {{
 }}
 runner=$(resolve script-runner)
 web=$(resolve web)
+{post_deploy.odoo_testing_idle_runner_script("runner")}
 {resource_inventory_script(program=RESOURCE_QUALIFICATION_PROGRAM)}
 if [ "$mode" = apply ]; then
     [ "$(docker inspect -f '{{{{.Image}}}}' "$web")" = "$(docker inspect -f '{{{{.Image}}}}' "$runner")" ] || exit 1
@@ -279,6 +280,83 @@ def connection_isolation_plan_sha256(
     )
 
 
+def reviewed_isolation_script_matches(
+    script: object,
+    *,
+    target: DokployTargetDefinition,
+    operation_digest: str,
+    reviewed_plan_sha256: str,
+    reviewed_resource_sha256: str,
+) -> bool:
+    """Verify the original provider artifact, independent of later lane/source changes."""
+    if target.instance != "testing" or not isinstance(script, str) or len(script) > 1024 * 1024:
+        return False
+    fields: dict[str, str] = {}
+    names = {
+        "project",
+        "database",
+        "mode",
+        "context",
+        "runtime_identity",
+        "reviewed_resources",
+        "operation_digest",
+    }
+    for line in script.split("resolve() {", 1)[0].splitlines():
+        name = line.partition("=")[0]
+        if name not in names:
+            continue
+        try:
+            words = shlex.split(line)
+        except ValueError:
+            return False
+        if name in fields or len(words) != 1:
+            return False
+        fields[name] = words[0].split("=", 1)[1]
+    if (
+        set(fields) != names
+        or fields["mode"] != "apply"
+        or fields["context"] != target.context
+        or not fields["database"]
+        or fields["operation_digest"] != operation_digest
+        or fields["reviewed_resources"] != reviewed_resource_sha256
+    ):
+        return False
+    runtime = parse_runtime_identity_payload(fields["runtime_identity"])
+    if runtime is None or (runtime.context, runtime.instance) != (target.context, "testing"):
+        return False
+    canonical_script = script
+    for name in ("reviewed_resources", "operation_digest"):
+        assignment = f"{name}={shlex.quote(fields[name])}\n"
+        if canonical_script.count(assignment) != 1:
+            return False
+        canonical_script = canonical_script.replace(assignment, f"{name}=''\n", 1)
+    specifications = []
+    for line in script.splitlines():
+        if line.startswith("docker exec ") and line.endswith("|| readback_status=$?"):
+            try:
+                words = shlex.split(line)
+                index = words.index("python3")
+            except ValueError:
+                return False
+            if len(words) <= index + 3 or words[index + 1 : index + 3] != ["-", "$database"]:
+                return False
+            specifications.append(words[index + 3])
+    if len(specifications) != 1:
+        return False
+    return reviewed_plan_sha256 == canonical_json_sha256(
+        {
+            "context": target.context,
+            "instance": "testing",
+            "target_id": target.target_id,
+            "database": fields["database"],
+            "app_name": fields["project"],
+            "runtime_identity": fields["runtime_identity"],
+            "execution_program": hashlib.sha256(canonical_script.encode()).hexdigest(),
+            "readback_spec": specifications[0],
+        }
+    )
+
+
 @dataclass(frozen=True)
 class ConnectionIsolationObservation:
     outcome: Literal["present", "absent", "unknown"]
@@ -308,14 +386,12 @@ def observe_connection_isolation_operation(
             target_type="compose",
             target_id=target_definition.target_id,
         )
-        schedule_type, lookup_id, compose_app_name, _ = (
-            post_deploy._resolve_dokploy_schedule_runtime(
-                host=host,
-                token=token,
-                compose_id=target_definition.target_id,
-                compose_name=target_definition.target_name,
-                target_payload=payload,
-            )
+        schedule_type, lookup_id, _, _ = post_deploy._resolve_dokploy_schedule_runtime(
+            host=host,
+            token=token,
+            compose_id=target_definition.target_id,
+            compose_name=target_definition.target_name,
+            target_payload=payload,
         )
         schedule = api.find_matching_dokploy_schedule(
             host=host,
@@ -355,6 +431,7 @@ def observe_connection_isolation_operation(
             return unknown
         expected = hashlib.sha256(provider_operation_key.encode()).hexdigest()
         matching: dict[str, tuple[api.JsonObject, dict[str, str]]] = {}
+        logs_fetched = False
         for deployment in deployments:
             deployment_id = api.deployment_key(deployment)
             if not deployment_id:
@@ -367,13 +444,26 @@ def observe_connection_isolation_operation(
                 deployment_id=deployment_id,
                 deployment=deployment,
             )
+            logs_fetched = evidence.get("log_available") == "true"
             if evidence.get("connection_isolation_operation_sha256") == expected:
                 matching[deployment_id] = deployment, evidence
         if len(matching) == 1:
             deployment, evidence = next(iter(matching.values()))
             status = api._deployment_status(deployment)
             success = status in post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
-            terminal = success or status in api._DEPLOYMENT_FAILURE_STATUSES
+            # Interrupted transports may leave container execs behind. A normal
+            # error settles only after the readback program closed its SQL connection.
+            terminal = success or (
+                status in {"failed", "error"}
+                and evidence.get("connection_isolation_resources_ok") == "true"
+                and all(
+                    evidence.get(key) in {"true", "false"}
+                    for key in (
+                        "connection_isolation_ok",
+                        "integration_readback_ok",
+                    )
+                )
+            )
             if terminal:
                 passed = success and all(
                     evidence.get(key) == "true"
@@ -396,34 +486,20 @@ def observe_connection_isolation_operation(
             and len(deployments) == 1
             and schedule is not None
             and schedule.get("enabled") is False
+            and logs_fetched
             and provider_effect_phase == post_deploy.ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
             and api._deployment_status(deployments[0])
-            in (post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES | api._DEPLOYMENT_FAILURE_STATUSES)
+            in post_deploy.DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES
         ):
-            environment = api.parse_dokploy_env_text(str(payload.get("env") or ""))
-            policy = integration_readback_policy(
-                instance_name="testing",
-                policies=target_definition.policies,
-                workflow_mode="maintenance",
-            )
-            expected_script = isolation_script(
-                compose_app_name=compose_app_name,
-                database_name=environment.get("ODOO_DB_NAME", "").strip(),
-                instance="testing",
-                mode="apply",
-                readback_spec=policy.encoded_spec(),
-                context=target_definition.context,
-                runtime_identity=environment.get("LAUNCHPLANE_RUNTIME_IDENTITY_JSON", ""),
-                reviewed_resource_sha256=reviewed_resource_sha256,
+            if reviewed_isolation_script_matches(
+                schedule.get("script"),
+                target=target_definition,
                 operation_digest=expected,
-            )
-            if (
-                reviewed_plan_sha256
-                == connection_isolation_plan_sha256(target_definition, payload, environment, policy)
-                and schedule.get("script") == expected_script
+                reviewed_plan_sha256=reviewed_plan_sha256,
+                reviewed_resource_sha256=reviewed_resource_sha256,
             ):
-                # A unique completed job on the exact dedicated reviewed script
-                # proves quiescence, but missing logs never prove repair success.
+                # Positive normal completion and the original reviewed artifact
+                # permit failure settlement, never success without log evidence.
                 return ConnectionIsolationObservation(
                     "present",
                     {"connection_isolation_terminal_unverified": "true"},

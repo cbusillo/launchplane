@@ -28,6 +28,7 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
         )
         self.operation = "stable-fixture-operation"
         self.markers = {
+            "log_available": "true",
             "connection_isolation_operation_sha256": hashlib.sha256(
                 self.operation.encode()
             ).hexdigest(),
@@ -126,6 +127,15 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
         self.find_matching_dokploy_schedule.return_value = None
         self.assertEqual(self.observe().outcome, "unknown")
 
+    def test_interrupted_jobs_and_sql_incomplete_errors_remain_fenced(self) -> None:
+        for status in ("canceled", "cancelled", "killed", "timeout", "unhealthy"):
+            with self.subTest(status=status):
+                self.dokploy_request.return_value = [{"deploymentId": "original", "status": status}]
+                self.assertEqual(self.observe().outcome, "unknown")
+        self.dokploy_request.return_value = [{"deploymentId": "original", "status": "error"}]
+        self.markers.pop("integration_readback_ok")
+        self.assertEqual(self.observe().outcome, "unknown")
+
     def test_upsert_only_checkpoint_is_a_known_non_triggered_failure(self) -> None:
         self.dokploy_request.return_value = []
         observed = self.observe(post_deploy.ODOO_POST_DEPLOY_SCHEDULE_UPSERT)
@@ -182,10 +192,21 @@ class ConnectionIsolationRecoveryTests(unittest.TestCase):
             "script": script,
             "enabled": False,
         }
-        self.logs.return_value = {}
+        self.logs.return_value = {"log_available": "true"}
         observed = self.observe(**review)
         self.assertEqual(observed.outcome, "present")
         self.assertFalse(observed.passed)
+        self.logs.return_value = {"log_available": "false"}
+        self.assertEqual(self.observe(**review).outcome, "unknown")
+        self.logs.return_value = {"log_available": "true"}
+        # The dedicated artifact retains the reviewed inputs after a redeploy.
+        self.fetch_dokploy_target_payload.return_value = {
+            "env": "ODOO_DB_NAME=redeployed-copy",
+            "appName": "app",
+        }
+        recovered_after_redeploy = self.observe(**review)
+        self.assertEqual(recovered_after_redeploy.outcome, "present")
+        self.assertFalse(recovered_after_redeploy.passed)
         for change in ("script", "plan", "resource", "enabled"):
             with self.subTest(change=change):
                 self.find_matching_dokploy_schedule.return_value = {

@@ -2846,7 +2846,9 @@ inside the reservation and immediately before dispatching the provider repair.
 Testing/preview data workflows and isolation use the same host `flock` through
 SQL, readback and web restart. The supported Linux schedule host needs `flock`
 and a writable `/var/lock`; a busy execution refuses before Docker or SQL.
-The remote job retains this lock when the service's wait times out. Isolation
+The remote job retains this lock when the service's wait times out. Each new
+testing job also refuses while Docker reports existing runner execs, covering
+container work left behind after a transport exits. Isolation
 also refuses an existing shared workflow admitted before this lock was deployed.
 It operates on the current tracked target and database. No SQL,
 credentials, carrier requests, notification probes, staff-account changes,
@@ -2880,10 +2882,14 @@ To reconcile, repeat exactly the original apply request with its original
 receipt and key. This reads schedule history for the original operation marker;
 it does not dispatch the repair again. A unique terminal matching job settles
 success only with qualified resources, isolation and complete integration
-readback. A terminal failed job settles failure, allowing a newly reviewed
-dry-run and new key. A single terminal job with missing logs can settle failure
-only when its disabled, operation-specific script and reviewed plan still match;
-this does not establish isolation success. A reservation checkpointed only at
+readback. A normal failed job can settle failure only with SQL-completion
+readback evidence. Cancelled, killed, timed-out and SQL-incomplete jobs stay
+fenced. A normally completed job with successfully fetched but missing log
+markers can settle failure only when the original disabled per-key script
+verifies against its reviewed plan and resource digest; later runtime, policy
+or service-code changes do not replace that original artifact. A log-fetch
+failure remains unknown. Failure settlement permits a fresh dry-run/new key
+and never establishes isolation success. A reservation checkpointed only at
 disabled schedule upsert can settle as not triggered only with empty history.
 Missing, queued, active, ambiguous or unverified
 trigger evidence keeps the fence. A lease lost before any provider checkpoint
