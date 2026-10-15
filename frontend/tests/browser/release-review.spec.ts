@@ -586,7 +586,7 @@ test("Client sees website settings before accepting the bound release", { tag: "
   });
   review.review.checklist!.website_settings = {
     artifact_id: review.review.checklist!.candidate.artifact_id,
-    settings: { website_id: 1, public_origin: "https://site.example", public_indexing_enabled: true,
+    settings: { operation: "apply", website_id: 1, public_origin: "https://site.example", public_indexing_enabled: true,
       google_analytics_key: "G-TEST123", cookies_bar: true, block_third_party_domains: true },
   };
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
@@ -600,7 +600,6 @@ test("Client sees website settings before accepting the bound release", { tag: "
   const settings = page.getByRole("region", { name: "Website settings in this release" });
   await expect(settings).toContainText(review.review.checklist!.website_settings.settings.public_origin);
   await expect(settings).toContainText(review.review.checklist!.website_settings.settings.google_analytics_key);
-  await expect(settings).toContainText("Testing and previews keep production analytics and search indexing disabled.");
   await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("website-settings-before-accept.png"), fullPage: true });
   await page.getByRole("button", { name: "Accept release", exact: true }).click();

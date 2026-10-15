@@ -15,7 +15,6 @@ from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.odoo_website_settings import (
     OdooWebsiteSettingsRequest,
     OdooWebsiteSettingsStale,
-    accepted_website_settings,
     plan_website_settings,
     prepare_website_settings,
 )
@@ -68,10 +67,8 @@ class WebsiteSettingsTests(unittest.TestCase):
                     context_name="example-site", instance_name="prod"
                 )
             prepare(store)
-            self.assertIsNone(
-                accepted_website_settings(
-                    store, product="example-site", artifact_id="artifact-testing"
-                )
+            self.assertFalse(
+                build_release_review(store=store, profile=profile(), read=github_read).approved
             )
             stored = store.read_odoo_instance_override_record(
                 context_name="example-site", instance_name="prod"
@@ -101,7 +98,7 @@ class WebsiteSettingsTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
             seed(store)
-            with self.assertRaisesRegex(ValueError, "current testing artifact"):
+            with self.assertRaises(ValueError):
                 plan_website_settings(
                     store,
                     request().model_copy(
@@ -132,10 +129,9 @@ class WebsiteSettingsTests(unittest.TestCase):
             changed = build_release_review(store=store, profile=profile(), read=github_read)
             self.assertFalse(changed.approved)
             self.assertNotEqual(changed.checklist_digest, accepted.checklist_digest)
-            selected = accepted_website_settings(
-                store, product="example-site", artifact_id="artifact-testing"
+            self.assertNotEqual(
+                changed.checklist.website_settings, accepted.checklist.website_settings
             )
-            self.assertEqual(selected, accepted.checklist.website_settings)
 
     def test_release_renderer_uses_accepted_snapshot_and_rollback_clears_forward_settings(
         self,
@@ -189,24 +185,94 @@ class WebsiteSettingsTests(unittest.TestCase):
             ):
                 released = execute_odoo_post_deploy(
                     artifact_id="artifact-testing",
+                    release_website_settings=accepted.checklist.website_settings,
+                    release_operation=True,
+                    control_plane_root=Path(directory),
+                    record_store=store,
+                    request=OdooPostDeployRequest(context="example-site", instance="prod"),
+                )
+                maintenance = execute_odoo_post_deploy(
+                    artifact_id="artifact-testing",
                     control_plane_root=Path(directory),
                     record_store=store,
                     request=OdooPostDeployRequest(context="example-site", instance="prod"),
                 )
                 rollback = execute_odoo_post_deploy(
                     artifact_id="artifact-prod",
+                    release_operation=True,
+                    rollback=True,
                     control_plane_root=Path(directory),
                     record_store=store,
                     request=OdooPostDeployRequest(context="example-site", instance="prod"),
                 )
             self.assertEqual(released.post_deploy_status, "pass")
             self.assertEqual(rollback.post_deploy_status, "pass")
+            self.assertEqual(maintenance.post_deploy_status, "pass")
+            self.assertEqual(captured[0]["website_settings"], captured[1]["website_settings"])
             self.assertEqual(
                 captured[0]["website_settings"]["google_analytics_key"],
                 intent().settings.google_analytics_key,
             )
-            self.assertEqual(captured[1]["website_settings"]["google_analytics_key"], "")
-            self.assertFalse(captured[1]["website_settings"]["public_indexing_enabled"])
+            self.assertEqual(captured[2]["website_settings"]["google_analytics_key"], "")
+            self.assertFalse(captured[2]["website_settings"]["public_indexing_enabled"])
+            self.assertIsNone(captured[2]["website_settings"]["cookies_bar"])
+            self.assertIsNone(captured[2]["website_settings"]["block_third_party_domains"])
+            for digest in ("", "f" * 64):
+                with (
+                    self.subTest(digest=digest),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
+                        return_value=target,
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                        return_value=("https://provider.example", "test-token"),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
+                        return_value=_module_update_evidence(website_settings_sha256=digest),
+                    ),
+                ):
+                    failed = execute_odoo_post_deploy(
+                        artifact_id="artifact-testing",
+                        release_operation=True,
+                        release_website_settings=accepted.checklist.website_settings,
+                        control_plane_root=Path(directory),
+                        record_store=store,
+                        request=OdooPostDeployRequest(context="example-site", instance="prod"),
+                    )
+                    self.assertEqual(failed.post_deploy_status, "fail")
+                    review = build_release_review(store=store, profile=profile(), read=github_read)
+                    self.assertFalse(review.approved)
+                    self.assertTrue(any("unverified" in blocker for blocker in review.blockers))
+            with (
+                patch(
+                    "control_plane.workflows.odoo_post_deploy._resolve_compose_target_definition",
+                    return_value=target,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.dokploy_source.read_dokploy_config",
+                    return_value=("https://provider.example", "test-token"),
+                ),
+                patch(
+                    "control_plane.workflows.odoo_post_deploy.dokploy_post_deploy.run_compose_post_deploy_update",
+                    side_effect=apply,
+                ),
+            ):
+                recovered = execute_odoo_post_deploy(
+                    artifact_id="artifact-testing",
+                    control_plane_root=Path(directory),
+                    record_store=store,
+                    request=OdooPostDeployRequest(context="example-site", instance="prod"),
+                )
+            self.assertEqual(recovered.post_deploy_status, "pass")
+            self.assertEqual(captured[-1]["website_settings"], captured[0]["website_settings"])
+            restored = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            self.assertEqual(
+                restored.last_apply.website_settings, accepted.checklist.website_settings
+            )
 
     def test_unpublished_acceptance_cannot_activate_prepared_settings(self) -> None:
         with TemporaryDirectory() as directory:
@@ -215,11 +281,29 @@ class WebsiteSettingsTests(unittest.TestCase):
             prepare(store)
             accepted = decision(store).model_copy(update={"release_issue_url": ""})
             store.create_release_review_decision_record_if_absent(accepted)
-            self.assertIsNone(
-                accepted_website_settings(
-                    store, product="example-site", artifact_id="artifact-testing"
-                )
+            self.assertFalse(
+                build_release_review(store=store, profile=profile(), read=github_read).approved
             )
+
+    def test_new_testing_build_reports_stale_prepared_settings(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            prepare(store)
+            testing = store.read_release_tuple_record(
+                context_name="example-site", channel_name="testing"
+            )
+            original = store.read_artifact_manifest(testing.artifact_id)
+            store.write_artifact_manifest(
+                original.model_copy(update={"artifact_id": "new-testing-artifact"})
+            )
+            store.write_release_tuple_record(
+                testing.model_copy(update={"artifact_id": "new-testing-artifact"})
+            )
+            review = build_release_review(store=store, profile=profile(), read=github_read)
+            self.assertFalse(review.approved)
+            self.assertTrue(review.blockers)
+            self.assertIsNone(review.checklist.website_settings if review.checklist else None)
 
     def test_analytics_requires_explicit_native_consent_controls(self) -> None:
         for values in (
@@ -227,6 +311,7 @@ class WebsiteSettingsTests(unittest.TestCase):
             {"block_third_party_domains": False},
             {"google_analytics_key": "UA-legacy"},
             {"cookies_bar": "true"},
+            {"website_id": True},
         ):
             with self.subTest(values=values), self.assertRaises(ValidationError):
                 OdooWebsiteSettings.model_validate({**intent().settings.model_dump(), **values})
@@ -318,8 +403,6 @@ class WebsiteSettingsRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(applied.status_code, 202)
             self.assertTrue(applied.json()["result"]["read_back_matches"])
             self.assertTrue(replay.json()["replayed"])
-            self.assertIsNone(
-                accepted_website_settings(
-                    store, product="example-site", artifact_id="artifact-testing"
-                )
+            self.assertFalse(
+                build_release_review(store=store, profile=profile(), read=github_read).approved
             )

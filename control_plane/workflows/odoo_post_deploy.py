@@ -110,6 +110,7 @@ def _write_odoo_instance_override_apply_result(
     detail: str,
     source_label: str = "odoo-post-deploy-driver",
     applied_website_settings: OdooWebsiteSettingsIntent | None = None,
+    settings_attempted: bool = False,
 ) -> OdooInstanceOverrideRecord:
     now = utc_now_timestamp()
     return record_store.update_odoo_instance_override_apply_result(
@@ -121,7 +122,7 @@ def _write_odoo_instance_override_apply_result(
             applied_at=now if status in {"pass", "fail"} else "",
             detail=detail,
             website_settings=applied_website_settings
-            if status == "pass"
+            if status == "pass" or settings_attempted
             else record.last_apply.website_settings,
         ),
         updated_at=now,
@@ -189,6 +190,9 @@ def execute_odoo_post_deploy(
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
     artifact_id: str = "",
+    release_website_settings: OdooWebsiteSettingsIntent | None = None,
+    release_operation: bool = False,
+    rollback: bool = False,
 ) -> OdooPostDeployResult:
     typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
@@ -238,51 +242,44 @@ def execute_odoo_post_deploy(
     )
 
     accepted_settings: OdooWebsiteSettingsIntent | None = None
-    if rendering_record is not None and rendering_record.website_settings is not None:
+    if rendering_record is not None:
         if control_plane_odoo_instance_overrides.odoo_instance_is_production(request.instance):
-            from control_plane.odoo_website_settings import accepted_website_settings
-            from control_plane.odoo_post_deploy_http import resolve_odoo_post_deploy_product_route
-
-            profiles = getattr(record_store, "list_product_profile_records")()
-            owners = [
-                profile
-                for profile in profiles
-                if any(
-                    lane.context == request.context and lane.instance == request.instance
-                    for lane in profile.lanes
-                )
-            ]
-            if len(owners) != 1:
-                raise click.ClickException(
-                    "Website settings require unambiguous product lane ownership."
-                )
-            profile = resolve_odoo_post_deploy_product_route(
-                record_store=record_store,
-                product=owners[0].product,
-                context=request.context,
-                instance=request.instance,
-            )
             if not artifact_id:
-                release_reader = getattr(record_store, "read_release_tuple_record")
+                release_reader = getattr(record_store, "read_release_tuple_record", None)
+                if not callable(release_reader):
+                    raise click.ClickException(
+                        "Website settings require recorded artifact identity."
+                    )
                 artifact_id = release_reader(
                     context_name=request.context, channel_name=request.instance
                 ).artifact_id
-            accepted_settings = accepted_website_settings(
-                record_store, product=profile.product, artifact_id=artifact_id
-            )
+            if release_operation:
+                if (
+                    release_website_settings is not None
+                    and release_website_settings.artifact_id != artifact_id
+                ):
+                    raise click.ClickException(
+                        "Website settings differ from the operation artifact."
+                    )
+                accepted_settings = release_website_settings
+            else:
+                applied = rendering_record.last_apply.website_settings
+                accepted_settings = (
+                    applied if applied is not None and applied.artifact_id == artifact_id else None
+                )
         rendered_settings = accepted_settings
-        if (
-            control_plane_odoo_instance_overrides.odoo_instance_is_production(request.instance)
-            and rendered_settings is None
-        ):
-            # A historical accepted artifact predates this contract. Rollback to it
-            # clears collection/indexing; it cannot inherit the forward release.
+        if rollback and rendered_settings is None and rendering_record.website_settings is not None:
+            # This is an explicit historical rollback, never preparation or maintenance.
             rendered_settings = rendering_record.website_settings.model_copy(
                 update={
+                    "artifact_id": artifact_id,
                     "settings": rendering_record.website_settings.settings.model_copy(
                         update={
+                            "operation": "disable_collection",
                             "google_analytics_key": "",
                             "public_indexing_enabled": False,
+                            "cookies_bar": None,
+                            "block_third_party_domains": None,
                         }
                     ),
                 }
@@ -396,6 +393,10 @@ def execute_odoo_post_deploy(
                 record=odoo_override_record,
                 status="fail",
                 detail=str(error),
+                applied_website_settings=rendering_record.website_settings
+                if rendering_record
+                else None,
+                settings_attempted=bool(override_payload and override_payload.website_settings),
             )
         if isinstance(
             error, (OdooProviderSafetyRefusedError, DurableOperationAuthorizationDeniedError)

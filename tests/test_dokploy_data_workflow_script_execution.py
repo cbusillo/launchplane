@@ -484,6 +484,7 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         (modules / "run_odoo_startup.py").write_text(
             "import os\n"
             "def _load_settings(arguments): return arguments\n"
+            "def _write_runtime_config(settings): pass\n"
             "def _run_odoo_shell(settings, program, *, label):\n"
             "    if os.environ.get('FAKE_WEBSITE_SETTINGS_FAILURE') == '1': raise RuntimeError('native consumer failed')\n"
             "    print('website_settings_nonproduction_excluded=true')\n",

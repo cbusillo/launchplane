@@ -213,7 +213,9 @@ class OdooOverrideApplyResult(BaseModel):
     applied_at: str = ""
     detail: str = ""
     website_settings: OdooWebsiteSettingsIntent | None = Field(
-        default=None, exclude_if=lambda value: value is None
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
 
     @model_validator(mode="after")
@@ -242,7 +244,9 @@ class OdooInstanceOverrideRecord(BaseModel):
     addon_settings: tuple[OdooAddonSettingOverride, ...] = ()
     website_bootstrap: OdooWebsiteBootstrapPayload | None = None
     website_settings: OdooWebsiteSettingsIntent | None = Field(
-        default=None, exclude_if=lambda value: value is None
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
     last_apply: OdooOverrideApplyResult = Field(default_factory=OdooOverrideApplyResult)
     updated_at: str

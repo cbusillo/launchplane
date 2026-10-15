@@ -2,6 +2,8 @@
 
 import base64
 import io
+import configparser
+from pathlib import Path
 import os
 import sys
 import types
@@ -67,6 +69,7 @@ def run_legacy_shell(
 ) -> str:
     startup = types.ModuleType("run_odoo_startup")
     startup._load_settings = lambda arguments: arguments  # type: ignore[attr-defined]
+    startup._write_runtime_config = lambda settings: None  # type: ignore[attr-defined]
 
     def shell(settings: object, program: str, *, label: str) -> None:
         exec(program, {"env": env})
@@ -115,3 +118,55 @@ class GeneratedWebsiteConsumerTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             run_legacy_shell(env, output=output)
         self.assertNotIn(intent().settings.digest, output.getvalue())
+
+    def test_native_shell_uses_the_legacy_runtime_config_and_addons_contract(self) -> None:
+        source = Path(__file__).parent / "fixtures/website-settings/legacy_startup.txt"
+        startup = types.ModuleType("legacy_startup_fixture")
+        admin = types.ModuleType("odoo_admin_password")
+        admin.validate_admin_password = lambda value: None  # type: ignore[attr-defined]
+        fake_psycopg = types.ModuleType("psycopg2")
+        env = NativeEnvironment()
+        payload = OdooPostDeployPayload(
+            context="example-site", instance="prod", website_settings=intent().settings
+        )
+        encoded = base64.b64encode(payload.to_wire_json_bytes()).decode()
+
+        def shell(command: list[str], **kwargs: object) -> None:
+            config_file = command[command.index("-c") + 1]
+            configuration = configparser.ConfigParser(interpolation=None)
+            configuration.read(config_file)
+            self.assertIn("/opt/fixture/addons", configuration["options"]["addons_path"].split(","))
+            self.assertEqual(configuration["options"]["db_name"], "fixture-db")
+            self.assertEqual(configuration["options"]["admin_passwd"], "fixture-master")
+            program = kwargs["input"]
+            assert isinstance(program, bytes)
+            exec(program.decode(), {"env": env})
+
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "psycopg2": fake_psycopg,
+                    "legacy_startup_fixture": startup,
+                    "odoo_admin_password": admin,
+                },
+            ),
+            patch.object(sys, "path", list(sys.path)),
+            patch.object(sys, "argv", ["program", "fixture-db", "prod"]),
+            patch.dict(
+                os.environ,
+                {
+                    "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": encoded,
+                    "ODOO_MASTER_PASSWORD": "fixture-master",
+                    "ODOO_ADDONS_PATH": "/opt/fixture/addons",
+                    "PLATFORM_INSTANCE": "prod",
+                    "ODOO_ADMIN_PASSWORD": "fixture-admin",
+                },
+            ),
+            patch("subprocess.run", side_effect=shell),
+            redirect_stdout(io.StringIO()),
+        ):
+            exec(compile(source.read_text(), str(source), "exec"), startup.__dict__)
+            with patch.dict(sys.modules, {"run_odoo_startup": startup}):
+                exec(WEBSITE_SETTINGS_PROGRAM, {})
+        self.assertEqual(env.site.google_analytics_key, intent().settings.google_analytics_key)

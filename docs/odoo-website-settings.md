@@ -27,7 +27,7 @@ no protected workflow or installed helper binding.
 The Client release checklist shows these exact settings and includes their
 digest in the candidate identity. Changing a setting invalidates that release's
 acceptance even when the artifact is unchanged. Production application selects
-the saved accepted decision's snapshot for the artifact being deployed; newer
+the exact decision authorizing the durable operation (including a recorded hotfix or override) for the artifact being deployed; newer
 prepared settings cannot alter an accepted release. The native consumer checks
 that the selected website's domain equals the reviewed public origin, writes
 and reads back native analytics/consent fields and
@@ -38,11 +38,18 @@ runtime's native Odoo shell; rollback images need not contain the new consumer.
 A failed consumer, including the recovery path after a failed workflow, keeps
 web stopped. No new credential or provider interface is introduced.
 
-Rollback selects the previous artifact's saved accepted settings. Historical
+Rollback selects the production snapshot retained in that operation's decision. Historical
 artifacts without a website snapshot disable indexing and analytics; they do
-not retain forward-release settings. Successful readback retains the actually
+not retain forward-release settings. Collection-only historical rollback preserves existing cookie and third-party controls. Successful readback retains the actually
 applied snapshot separately from pending intent, so subsequent review compares
-against production's applied settings.
+against production's applied settings. A failed maintenance retains its exact attempted snapshot as unverified, outside the production checklist; the existing maintenance or durable operation retry must verify it before a new release review.
+
+The supported application path is the stopped-web stable-target replacement driver.
+The two-slot host provider currently has no website-settings maintenance receipt;
+promotion with website snapshots refuses before provider effects. Preparation
+and release review remain supported, and existing products configured for the
+stable-target driver use the path above. Two-slot activation requires adding that
+provider capability; never change a live product's driver to bypass the refusal.
 
 The devkit consumer runs on data workflows and every web startup, clearing
 every copied website's native GA key and disabling
@@ -55,7 +62,7 @@ custom-script trackers are outside this native-GA4 path.
 Maintain the generated maintenance program from one committed source with
 `uv run python scripts/generate_odoo_website_settings_program.py --devkit-repo
 <checkout> --revision <commit>`. It reads the Git blob at that immutable commit,
-not the working tree. Commit the generated module with its source revision;
+not the working tree. Add `--check` to verify exact agreement with the generated module. Commit the generated module with its source revision;
 include consumer changes, native-shell/transport tests and review in the same
 delivery. Values still come only from the accepted runtime payload.
 

@@ -22,6 +22,7 @@ from control_plane.contracts.artifact_identity import (
     artifact_manifest_matches_image_repository,
 )
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.runtime_platform_credentials import PlatformCredentialRefusedError
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -1742,6 +1743,8 @@ def execute_odoo_stable_target_replacement_apply(
     before_records_commit: Callable[[], None] | None = None,
     hold_uncertain_effects: bool = False,
     rollback: bool = False,
+    release_website_settings: OdooWebsiteSettingsIntent | None = None,
+    release_operation: bool = False,
 ) -> OdooStableTargetReplacementApplyResult:
     with _failure_stage("plan_build_failed"):
         plan = build_odoo_stable_target_replacement_plan(
@@ -2620,6 +2623,9 @@ def execute_odoo_stable_target_replacement_apply(
                     phase=post_deploy_phase,
                 ),
                 artifact_id=artifact_id,
+                release_website_settings=release_website_settings,
+                release_operation=release_operation,
+                rollback=rollback,
                 run_destructive_restore=plan.data_source_mode == "upstream_restore",
                 provider_effect_checkpoint=(
                     restore_effect_checkpoint
@@ -2711,6 +2717,9 @@ def execute_odoo_stable_target_replacement_apply(
                     phase="deploy",
                 ),
                 artifact_id=artifact_id,
+                release_website_settings=release_website_settings,
+                release_operation=release_operation,
+                rollback=rollback,
                 run_destructive_restore=False,
                 allow_historical_sender_contract=allow_historical_sender_contract,
                 provider_effect_checkpoint=provider_effect_checkpoint,

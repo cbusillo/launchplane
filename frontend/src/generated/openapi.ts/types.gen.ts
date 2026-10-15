@@ -1761,7 +1761,7 @@ export type OdooInstanceOverrideRecord = {
     source_label: string;
     updated_at: string;
     website_bootstrap: OdooWebsiteBootstrapPayload | null;
-    website_settings: OdooWebsiteSettingsIntent | null;
+    website_settings?: OdooWebsiteSettingsIntent | null;
 };
 
 export type OdooMaintenanceReceipt = {
@@ -1782,7 +1782,7 @@ export type OdooOverrideApplyResult = {
     attempted: boolean;
     detail: string;
     status: 'skipped' | 'pending' | 'pass' | 'fail';
-    website_settings: OdooWebsiteSettingsIntent | null;
+    website_settings?: OdooWebsiteSettingsIntent | null;
 };
 
 export type OdooOverrideValue = {
@@ -2010,9 +2010,10 @@ export type OdooWebsiteBootstrapRoute = {
 };
 
 export type OdooWebsiteSettings = {
-    block_third_party_domains: boolean;
-    cookies_bar: boolean;
+    block_third_party_domains: boolean | null;
+    cookies_bar: boolean | null;
     google_analytics_key: string;
+    operation: 'apply' | 'disable_collection';
     public_indexing_enabled: boolean;
     public_origin: string;
     website_id: number;
@@ -4356,6 +4357,7 @@ export type ReleaseChecklist = {
     owner_github_id: string;
     product: string;
     production: ReleaseVersion;
+    production_website_settings?: OdooWebsiteSettingsIntent | null;
     repository: string;
     shared_sources?: Array<SharedSourceReview>;
     testing_url: string;

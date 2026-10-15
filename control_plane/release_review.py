@@ -188,6 +188,8 @@ def release_website_settings(
         record: OdooInstanceOverrideRecord = reader(context_name=prod.context, instance_name="prod")
     except FileNotFoundError:
         return None
+    if instance == "prod" and record.last_apply.status == "fail":
+        return None
     settings = record.last_apply.website_settings if instance == "prod" else record.website_settings
     return settings if settings is not None and settings.artifact_id == artifact_id else None
 
@@ -272,7 +274,24 @@ def build_release_review(
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-    if production == candidate:
+    stale_settings = False
+    settings_readback_failed = False
+    prod_lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    reader = getattr(store, "read_odoo_instance_override_record", None)
+    if profile.driver_id == "odoo" and prod_lane is not None and callable(reader):
+        try:
+            intent_record = reader(context_name=prod_lane.context, instance_name="prod")
+            settings_readback_failed = bool(
+                intent_record.last_apply.status == "fail"
+                and (intent_record.website_settings or intent_record.last_apply.website_settings)
+            )
+            stale_settings = (
+                intent_record.website_settings is not None
+                and intent_record.website_settings.artifact_id != candidate.artifact_id
+            )
+        except FileNotFoundError:
+            pass
+    if production == candidate and not (stale_settings or settings_readback_failed):
         # The complete recorded identity already runs in production. There is
         # nothing to compare or accept; prior decisions/runs remain unchanged.
         checklist = ReleaseChecklist(
@@ -282,6 +301,12 @@ def build_release_review(
             testing_url=lane.base_url,
             production=production,
             candidate=candidate,
+            website_settings=release_website_settings(
+                store=store, profile=profile, artifact_id=candidate.artifact_id, instance="testing"
+            ),
+            production_website_settings=release_website_settings(
+                store=store, profile=profile, artifact_id=production.artifact_id, instance="prod"
+            ),
             items=(),
         )
         return ReleaseReviewStatus(
@@ -365,6 +390,9 @@ def build_release_review(
         untracked_commits=untracked,
         shared_sources=shared_sources,
         additional_changes=additional_changes,
+        production_website_settings=release_website_settings(
+            store=store, profile=profile, artifact_id=production.artifact_id, instance="prod"
+        ),
         website_settings=release_website_settings(
             store=store, profile=profile, artifact_id=candidate.artifact_id, instance="testing"
         ),
@@ -434,6 +462,16 @@ def build_release_review(
             and latest_decision.decision in ("accepted", "temporary_hotfix")
         )
     )
+    if stale_settings:
+        blockers += (
+            "Website settings were prepared for an older testing build. Prepare them for the current artifact before release.",
+        )
+        approved = False
+    if settings_readback_failed:
+        blockers += (
+            "Website settings readback is unverified after a failed workflow. Retry the recorded maintenance/release before reviewing current settings.",
+        )
+        approved = False
     if latest_decision and not latest_decision.release_issue_url:
         blockers += (RELEASE_RECORD_PENDING,)
     if not approved and not blockers:
@@ -599,7 +637,7 @@ def require_release_approval(
     product: str,
     artifact_id: str = "",
     source_commit: str = "",
-) -> None:
+) -> ReleaseReviewDecisionRecord | None:
     profile = cast(ReleaseReviewStore, record_store).read_product_profile_record(product)
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=record_store, profile=profile
@@ -609,7 +647,7 @@ def require_release_approval(
             "Production already runs the testing version; no new release to promote."
         )
     if not review.required:
-        return
+        return None
     if not review.approved or review.checklist is None:
         raise click.ClickException(
             " ".join(review.blockers) or "Client release approval is required."
@@ -619,6 +657,7 @@ def require_release_approval(
         source_commit and source_commit != candidate.source_commit
     ):
         raise click.ClickException("Promotion no longer matches the approved testing release.")
+    return review.latest_decision
 
 
 class ProductionChangeRequiresPromotion(click.ClickException):

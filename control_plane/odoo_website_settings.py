@@ -30,6 +30,10 @@ class OdooWebsiteSettingsRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_review(self) -> OdooWebsiteSettingsRequest:
+        if self.website_settings.settings.operation != "apply":
+            raise ValueError(
+                "Preparation accepts full website settings; collection-only rollback is driver-owned."
+            )
         if self.mode == "apply" and (
             len(self.reviewed_plan_sha256) != 64
             or any(c not in "0123456789abcdef" for c in self.reviewed_plan_sha256)
@@ -64,9 +68,12 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
     testing = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if testing is None:
         raise ValueError("Website settings require the product's testing candidate.")
-    candidate = store.read_release_tuple_record(
-        context_name=testing.context, channel_name="testing"
-    )
+    try:
+        candidate = store.read_release_tuple_record(
+            context_name=testing.context, channel_name="testing"
+        )
+    except FileNotFoundError as error:
+        raise ValueError("Website settings require the current testing release record.") from error
     if candidate.artifact_id != request.website_settings.artifact_id:
         raise ValueError("Website settings must name this product's current testing artifact.")
     existing = _existing(store, request.context, request.instance)
@@ -153,26 +160,3 @@ def prepare_website_settings(
     if read_back is None or read_back.website_settings != request.website_settings:
         raise ValueError("Website settings preparation readback failed.")
     return {**plan, "applied": bool(plan["changed"]), "read_back_matches": True}
-
-
-def accepted_website_settings(
-    store: Any,
-    *,
-    product: str,
-    artifact_id: str,
-) -> OdooWebsiteSettingsIntent | None:
-    """Use the saved decision snapshot, including when rolling back an artifact.
-
-    A newer prepared intent never changes an already accepted release. Historical
-    decisions have no settings snapshot and therefore cannot enable collection.
-    """
-    decisions = store.list_release_review_decision_records(product=product)
-    matching = [
-        decision
-        for decision in decisions
-        if decision.decision == "accepted"
-        and decision.release_issue_url
-        and decision.checklist.candidate.artifact_id == artifact_id
-    ]
-    latest = max(matching, key=lambda item: (item.decided_at, item.record_id), default=None)
-    return latest.checklist.website_settings if latest else None

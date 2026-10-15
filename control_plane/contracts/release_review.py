@@ -69,6 +69,11 @@ class ReleaseChecklist(BaseModel):
         exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    production_website_settings: OdooWebsiteSettingsIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     # Preserve the serialized shape and digest of historical website-only decisions.
     shared_sources: tuple[SharedSourceReview, ...] = Field(
         default=(),
@@ -83,14 +88,17 @@ class ReleaseChecklist(BaseModel):
 
     @model_validator(mode="after")
     def validate_database_compatibility(self) -> "ReleaseChecklist":
-        settings = self.website_settings
-        if settings is not None and (
-            settings.artifact_id != self.candidate.artifact_id
-            or settings.settings.digest != self.candidate.website_settings_sha256
+        for settings, version in (
+            (self.website_settings, self.candidate),
+            (self.production_website_settings, self.production),
         ):
-            raise ValueError(
-                "Website settings must match the reviewed candidate artifact and digest."
-            )
+            if (settings is None) != (not version.website_settings_sha256):
+                raise ValueError("Website settings snapshot and digest must be present together.")
+            if settings is not None and (
+                settings.artifact_id != version.artifact_id
+                or settings.settings.digest != version.website_settings_sha256
+            ):
+                raise ValueError("Website settings must match the reviewed artifact and digest.")
         compatibility = self.database_compatibility
         if compatibility is not None and (
             compatibility.production_artifact_id != self.production.artifact_id

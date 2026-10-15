@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 from urllib.parse import urlsplit
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
@@ -13,15 +14,28 @@ from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 class OdooWebsiteSettings(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    website_id: int = Field(ge=1)
+    operation: Literal["apply", "disable_collection"] = "apply"
+    website_id: int = Field(ge=1, strict=True)
     public_origin: str
     public_indexing_enabled: StrictBool = False
     google_analytics_key: str = ""
-    cookies_bar: StrictBool = True
-    block_third_party_domains: StrictBool = True
+    cookies_bar: StrictBool | None = True
+    block_third_party_domains: StrictBool | None = True
 
     @model_validator(mode="after")
     def validate_settings(self) -> OdooWebsiteSettings:
+        if self.operation == "disable_collection":
+            if (
+                self.google_analytics_key
+                or self.public_indexing_enabled
+                or self.cookies_bar is not None
+                or self.block_third_party_domains is not None
+            ):
+                raise ValueError(
+                    "Collection-only rollback must disable collection and preserve consent controls."
+                )
+        elif self.cookies_bar is None or self.block_third_party_domains is None:
+            raise ValueError("Website apply requires explicit consent choices.")
         origin = urlsplit(self.public_origin)
         if (
             origin.scheme != "https"

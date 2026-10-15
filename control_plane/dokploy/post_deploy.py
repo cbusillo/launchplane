@@ -2606,7 +2606,11 @@ exit_trap() {{
         echo "odoo_restore_completed=false"
     fi
     if [ "${{web_restart_blocked}}" != "1" ] && [ "${{start_web_after_workflow}}" = "1" ]; then
-        if ! enforce_website_settings; then
+        if [ "${{website_settings_instance}}" = "prod" ] || [ "${{website_settings_instance}}" = "production" ]; then
+            if [ "${{website_settings_succeeded}}" != "1" ]; then
+                web_restart_blocked=1
+            fi
+        elif ! enforce_website_settings; then
             web_restart_blocked=1
         fi
     fi
@@ -2621,7 +2625,7 @@ exit_trap() {{
         fi
     fi
     if [ "${{web_restart_blocked}}" = "1" ]; then
-        echo "Leaving web container ${{web_container_id}} stopped: the integration read-back did not pass." >&2
+        echo "Leaving web container ${{web_container_id}} stopped: settings verification did not pass." >&2
         exit "${{exit_status}}"
     fi
     if ! start_web_container; then
