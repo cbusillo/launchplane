@@ -3,6 +3,21 @@
   background: var(--bg);
 }
 
+.owner-review-settings {
+  width: 100%;
+  table-layout: fixed;
+  border-collapse: collapse;
+}
+.owner-review-settings th,
+.owner-review-settings td {
+  padding: 0.5rem;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border-soft);
+}
+.owner-review-settings small { display: block; color: var(--muted); }
+
 .owner-review-header {
   display: flex;
   align-items: center;

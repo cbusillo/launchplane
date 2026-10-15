@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -150,6 +152,7 @@ def execute_odoo_prod_promotion_run(
     provider_effect_checkpoint: Callable[[str], None] | None = None,
     hold_uncertain_effects: bool = False,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooProdPromotionRunResult:
     """Run one promotion; the durable worker passes checkpoints, the sync route does not.
 
@@ -294,6 +297,7 @@ def execute_odoo_prod_promotion_run(
         hold_uncertain_effects=hold_uncertain_effects,
         cutover_provider=cutover_provider,
         cutover_plan=cutover_plan,
+        release_decision=release_decision,
     )
     run_status: Literal["pass", "fail"] = (
         "pass"
