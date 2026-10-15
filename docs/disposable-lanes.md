@@ -186,6 +186,60 @@ analytics and similar connections must be removed or neutralized and verified
 without exposing their values. A successful policy readback does not prove that
 work happened or permit apply while required physical isolation is unknown.
 
+## Independent storage under a retained generic-web hold and deploy fence
+
+`POST /v1/products/{product}/testing-separation-resources` provides preparation
+when the old testing recipient cannot be changed. It accepts only the exact
+owned generic-web testing context, a reason, mode and reviewed plan digest.
+The Director agent must be the existing hold's recorded caller. An omitted
+legacy purpose remains a staff hold; no reason text is interpreted, no hold is
+converted or lifted, and even a genuine staff hold continues protecting the old
+lane. Other callers' holds and production aliases refuse preparation.
+
+Apply requires PostgreSQL, complete current provider/executor exclusion, the
+reviewed configuration/secret-metadata/hold/reservation snapshot and a stable
+idempotency key. It acquires the original executor lock, but never settles or
+releases the original deployment reservation. The only new effect is a disabled,
+manual host schedule with a fixed storage program. A separate preparation fence
+protects that create-only effect; no old-recipient writer or deploy may use it.
+The service derives two new volume identities from the snapshot. No volume name,
+path, port, credential, source code or provider placement is accepted from the
+caller. The program creates only local volumes without backing options, then
+qualifies their labels, empty backing directories, distinct filesystem identities
+and absence of overlap with every container's mounts, including stopped ones.
+It starts no container, publishes no host port, installs no credential, copies no
+data and changes no lane record or provider environment.
+
+Use the existing supported same-identity repository client:
+
+```bash
+uv run python scripts/stage-testing-separation.py resources-dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <testing-context> --reason '<reason>' \
+  --evidence-file <private-review-file>
+```
+
+After reviewing that receipt, repeat with `resources-apply`,
+`--reviewed-dry-run` and the original `--idempotency-key`. The client saves the
+qualified volume roles (`database`, `config`) and resource digest in an adjacent
+private `.receipt.json`; it prints no topology. A completed same-key replay
+returns the original receipt without another schedule dispatch. Uncertain
+schedule submission or execution retains both fences and the original key;
+queue absence, an unchanged desired build or newer configuration cannot prove
+no effect. Do not delete partial volumes or schedules to make a retry pass.
+
+This is empty-resource preparation, not activation, rendered application
+isolation or permission to lift a hold. The original hold, request, target and
+unknown outcome remain unchanged. A later supported continuation must bind only
+independently qualified resources, verify its actual render and safe keys, and
+meet every retained protection before dispatch. The original env-staging route
+still refuses legacy/staff holds and the historical deployment fence. Actual
+separation, rebuild, health, exact runtime identity and naturally resolved
+incidents remain with the operational consumer; preparation is not green proof.
+No new schema migration is needed. Retain the qualified image and both original
+receipts for recovery; roll forward on uncertainty instead of removing storage
+or restoring unsafe settings.
+
 ## Fresh Odoo testing replacement resources
 
 `POST /v1/products/{product}/testing-replacement-resources` prepares a separate,

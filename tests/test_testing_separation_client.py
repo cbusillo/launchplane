@@ -13,6 +13,82 @@ from urllib.error import HTTPError
 
 
 class TestingSeparationClientTests(unittest.TestCase):
+    def test_independent_resources_preserve_review_and_save_a_private_replayable_receipt(
+        self,
+    ) -> None:
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
+        )
+        plan = {
+            "plan_sha256": "a" * 64,
+            "retained_target_preserved": True,
+            "hold_preserved": True,
+            "historical_settlement": "not_evaluated",
+            "configuration_updated": False,
+            "deployment_requested": False,
+            "published_host_ports": False,
+            "credentials_installed": False,
+            "applied": False,
+        }
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / "launchplane-write-action.py"
+            helper.touch()
+            evidence = root / "prepare.json"
+            completed = {
+                **plan,
+                "applied": True,
+                "resources_verified": True,
+                "volumes": {"database": "private-volume"},
+            }
+            call = Mock(
+                side_effect=[
+                    {"status": "accepted", "trace_id": "fixture", "result": plan},
+                    {"status": "accepted", "trace_id": "fixture", "result": completed},
+                    {"status": "accepted", "trace_id": "fixture", "result": completed},
+                ]
+            )
+            transport = {
+                "resolve_settings": lambda args: {
+                    "service_url": "https://service.invalid",
+                    "token": "fixture",
+                },
+                "validate_service_url": lambda value: None,
+                "public_trace_id": lambda value: value,
+                "request_launchplane": call,
+            }
+            common = [
+                "--operator-helper",
+                str(helper),
+                "--product",
+                "example",
+                "--context",
+                "example",
+                "--reason",
+                "Prepare empty resources.",
+                "--evidence-file",
+                str(evidence),
+            ]
+            for mode in ("resources-dry-run", "resources-apply", "resources-apply"):
+                args = ["client", mode, *common]
+                if mode.endswith("apply"):
+                    args += ["--reviewed-dry-run", "--idempotency-key", "original-resource-key"]
+                output = io.StringIO()
+                with (
+                    patch("runpy.run_path", return_value=transport),
+                    patch("sys.argv", args),
+                    redirect_stdout(output),
+                ):
+                    self.assertEqual(client["main"](), 0, output.getvalue())
+                self.assertNotIn("private-volume", output.getvalue())
+            receipt = evidence.with_name(evidence.name + ".receipt.json")
+            self.assertEqual(json.loads(receipt.read_text())["result"], completed)
+            self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+            self.assertEqual(json.loads(evidence.read_text())["result"], plan)
+            self.assertEqual(
+                call.call_args.kwargs["body"]["reviewed_plan_sha256"], plan["plan_sha256"]
+            )
+
     def test_reviewed_apply_reports_uncertain_409_and_never_retries(self) -> None:
         self._exercise_apply("mutation_reconciliation_required", unknown=True)
 

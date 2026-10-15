@@ -11,6 +11,7 @@ import sys
 import urllib.error
 
 from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
+from control_plane.testing_separation_resources import ROUTE, SeparationResourcesRequest
 from control_plane.testing_lane_hold import (
     TESTING_HOLD_APPLY_ROUTE,
     TESTING_HOLD_ROUTE,
@@ -31,6 +32,8 @@ def main() -> int:
             "lift-apply",
             "dry-run",
             "apply",
+            "resources-dry-run",
+            "resources-apply",
         ),
     )
     parser.add_argument("--operator-helper", type=Path, required=True)
@@ -44,7 +47,8 @@ def main() -> int:
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
-    applying = args.mode in {"hold-apply", "lift-apply", "apply"}
+    applying = args.mode in {"hold-apply", "lift-apply", "apply", "resources-apply"}
+    resources = args.mode.startswith("resources-")
     holding = args.mode.startswith(("hold-", "lift-"))
     lifting = args.mode.startswith("lift-")
     if applying and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
@@ -91,6 +95,11 @@ def main() -> int:
     )
     body = draft.model_dump(mode="json")
     path = TESTING_HOLD_APPLY_ROUTE if holding else "/v1/live-target-runtime/apply"
+    if resources:
+        body = SeparationResourcesRequest(context=args.context, reason=args.reason).model_dump(
+            mode="json"
+        )
+        path = ROUTE.replace("{product}", args.product)
     submitted = False
     try:
         if args.mode == "hold-read":
@@ -119,11 +128,13 @@ def main() -> int:
             if saved["request"] != body or saved["path"] != path:
                 raise ValueError("Review belongs to another operation.")
             body["mode"] = "apply"
-            field = "reviewed_plan_sha256" if holding else "reviewed_binding_sha256"
-            source = "plan_sha256" if holding else "separation_binding_sha256"
+            field = "reviewed_plan_sha256" if holding or resources else "reviewed_binding_sha256"
+            source = "plan_sha256" if holding or resources else "separation_binding_sha256"
             body[field] = saved["result"][source]
             body = (
-                TestingHoldApplyRequest.model_validate(body)
+                SeparationResourcesRequest.model_validate(body)
+                if resources
+                else TestingHoldApplyRequest.model_validate(body)
                 if holding
                 else LiveTargetRuntimeApplyEnvelope.model_validate(body)
             ).model_dump(mode="json")
@@ -135,7 +146,7 @@ def main() -> int:
             path=path,
             settings=settings,
             body=body,
-            timeout=60,
+            timeout=360 if resources else 60,
             **({"idempotency_key": args.idempotency_key} if applying else {}),
         )
         if response["status"] != "accepted":
@@ -148,6 +159,7 @@ def main() -> int:
             raise ValueError("Staging interlock readback or no-deploy result did not verify.")
         if (
             not holding
+            and not resources
             and applying
             and (
                 not result["apply"]["applied"]
@@ -155,13 +167,49 @@ def main() -> int:
             )
         ):
             raise ValueError("Staging persistence did not verify.")
-        if not holding and (result["deploy"]["requested"] or result["deploy"]["triggered"]):
+        if (
+            not holding
+            and not resources
+            and (result["deploy"]["requested"] or result["deploy"]["triggered"])
+        ):
             raise ValueError("Unexpected deployment result.")
+        if resources and (
+            result.get("retained_target_preserved") is not True
+            or result.get("hold_preserved") is not True
+            or result.get("historical_settlement") != "not_evaluated"
+            or any(
+                result.get(field) is not False
+                for field in (
+                    "deployment_requested",
+                    "configuration_updated",
+                    "published_host_ports",
+                    "credentials_installed",
+                )
+            )
+            or (applying and result.get("resources_verified") is not True)
+        ):
+            raise ValueError("Independent resource preparation was not verified.")
         if not applying:
             with os.fdopen(
                 os.open(evidence, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
             ) as output:
                 json.dump({"request": body, "path": path, "result": result}, output)
+        elif resources:
+            receipt = evidence.with_name(evidence.name + ".receipt.json")
+            completed = {
+                "request": body,
+                "path": path,
+                "result": result,
+                "idempotency_key": args.idempotency_key,
+            }
+            if receipt.exists():
+                if receipt.is_symlink() or json.loads(receipt.read_text()) != completed:
+                    raise ValueError("Preserve the existing resource receipt.")
+            else:
+                with os.fdopen(
+                    os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
+                ) as output:
+                    json.dump(completed, output)
         print(
             json.dumps(
                 {
