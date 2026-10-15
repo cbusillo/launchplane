@@ -70,9 +70,11 @@ Standalone preview reconciliation and preview evidence ingress honor the same
 fence so they cannot replace its reviewed records during recovery.
 
 The Director agent may plan preview-inclusive testing retirement without an
-action grant. Apply additionally requires the product to be recorded `prelaunch`
-and current [disposable-lane safety evidence](disposable-lanes.md) for testing
-and every affected preview. Other machine identities and Client agents retain
+action grant. Apply requires the product to be recorded `prelaunch`, exact
+testing/preview ownership and no recorded protected-use exception. Before each
+provider effect it also requires a fresh, exact application inspection with an
+explicitly empty mount inventory; missing inventory and mounted applications
+refuse this bounded agent path. Other machine identities and Client agents retain
 their existing scopes; an instance grant does not authorize product-wide preview
 retirement.
 Standalone preview destroy/reconciliation retains its existing authorization.
@@ -92,9 +94,40 @@ retention decisions remain in force.
 Use the supported service operation under the existing Director-agent identity:
 plan first, then apply the same reviewed plan, digest, confirmation and original
 idempotency key. A plan does not supply execution authority or safety evidence.
-The service rechecks usage, data custody and isolation before provider effects.
+The service rechecks staff holds, recorded protected use, target aliases,
+cross-lane secret consumers and the exact application's mounts before provider effects.
 Never assume the absence of people or unique data, and never use another identity
 or a workflow when a safety check refuses.
+
+### Direction and retirement eligibility
+
+The overall direction's exceptions remain conditions; the previous universal
+positive-observation requirement was a stricter tool rule. Retirement stops
+the reviewed owned application and removes its lane authority. It does not
+start a replacement, restore data, change an external database, revoke a
+provider credential or reconfigure another service's port. Runtime sync and
+rebuild retain their existing positive safety-evidence requirements.
+
+| Fact | Direction's condition | Retirement check |
+| --- | --- | --- |
+| Usage | Leave a lane someone is using alone. | A staff-testing hold or recorded `in_use` blocks; a complete occupancy inventory is not required by direction. Resolve uncertain real use with the person who knows before applying. |
+| Needed copy | Leave the only copy of something needed alone. | Recorded `only_copy` blocks. Reproducing every disposable output is not required; confirm unknown needed-copy facts with the person who knows. |
+| Production resources | Nothing shared with production changes. | Keep ownership and target-alias fences; refuse mounted applications or incomplete mount inspection, recorded sharing and scoped secrets consumed outside the lane. Full physical independence of databases, ports and credentials that deletion never changes is not an additional prerequisite. |
+| Production use | Whole-product agent retirement is for a product that never went live. | The existing authoritative `production_use=prelaunch` classification is required; `unknown` and `live` refuse. Never infer this from a name or missing production history. |
+
+Protective observations remain holds even after their timestamps expire or their
+binding changes: age cannot make known users, needed data or sharing disappear.
+The retirement consumer checks such retained rows, but the current observation
+API has no supported writer for needed-copy facts: `record` stores unknowns,
+and `collect` produces only staff holds and target aliases. Those two sources
+are independently checked live. Observation refresh and clear can replace old
+rows; they are evidence maintenance, not resolution of a person's use or needed
+data. Resolve that knowledge with the person before applying. Missing or unknown
+observations do not override the product's explicit prelaunch classification;
+they are neither positive facts nor a way to qualify runtime sync or rebuild.
+The Director's answer on the operational issue supplies missing human knowledge;
+the existing reviewed production-use surface records classification. A reply
+does not waive resource, ownership, executor, review or recovery checks.
 
 Source tests and a merge do not establish deployed capability or retirement.
 The Supervisor routes the source PR and separately briefs actual lane operations.
