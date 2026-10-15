@@ -18,6 +18,7 @@ from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
 from tests import test_testing_runtime_separation as testing_separation
+from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -959,6 +960,13 @@ def _owner_acceptance_system_event(
 )
 class RealPostgresIntegratedProductRetirementTests(
     integrated_retirement_tests.IntegratedProductRetirementTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresHistoricalEffectRepositoryFenceTests(
+    historical_storage_tests.HistoricalEffectRepositoryFenceTests
 ):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
