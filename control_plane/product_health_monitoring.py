@@ -6,7 +6,9 @@ import re
 from typing import Literal
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
@@ -51,6 +53,9 @@ class ProductHealthMonitoringApplyRequest(BaseModel):
     enabled: bool = True
     require_runtime_identity: bool = False
     private_endpoint_key: str = ""
+    expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] | None = Field(
+        default=None, max_length=16
+    )
     mode: ProductHealthMonitoringMode = "dry-run"
     reason: str
     reviewed_plan_sha256: str = ""
@@ -64,6 +69,8 @@ class ProductHealthMonitoringApplyRequest(BaseModel):
         self.private_endpoint_key = self.private_endpoint_key.strip()
         self.reason = self.reason.strip()
         self.reviewed_plan_sha256 = self.reviewed_plan_sha256.strip().lower()
+        if self.expected_dns_targets is not None and self.check_kind != "public_http":
+            raise ValueError("DNS expectations are only supported on public HTTP checks")
         if not self.product:
             raise ValueError("Product health monitoring request requires product.")
         if not self.context:
@@ -112,6 +119,16 @@ class ProductHealthMonitoringPlan(BaseModel):
     current_private_endpoint_key: str | None = None
     private_endpoint_key: str = ""
     resolved_url: str
+    current_expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    requested_expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     changed: bool
     applied: bool = False
     reason: str
@@ -189,6 +206,7 @@ def build_product_health_monitoring_plan(
         lane=lane,
         check=candidate_check,
         resolved_url=resolved_url,
+        validate_dns_scope=request.expected_dns_targets is not None,
     )
     # Dry-run must reject the same full-profile conflicts as apply.
     updated_product_health_monitoring_profile(
@@ -247,6 +265,10 @@ def build_product_health_monitoring_plan(
         ),
         private_endpoint_key=candidate_check.private_endpoint_key,
         resolved_url=resolved_url,
+        current_expected_dns_targets=(
+            existing_check.expected_dns_targets if existing_check else ()
+        ),
+        requested_expected_dns_targets=candidate_check.expected_dns_targets,
         changed=changed,
         reason=request.reason,
         profile_updated_at_before=profile.updated_at,
@@ -282,6 +304,7 @@ def updated_product_health_monitoring_profile(
         lane=lane,
         check=candidate_check,
         resolved_url=resolved_url,
+        validate_dns_scope=request.expected_dns_targets is not None,
     )
     updated_lane = lane.model_copy(update={"health_monitoring": candidate_policy})
     updated_lanes = tuple(
@@ -358,6 +381,7 @@ def _candidate_check(
             enabled=request.enabled,
             private_endpoint_key=request.private_endpoint_key,
             require_runtime_identity=request.require_runtime_identity,
+            expected_dns_targets=request.expected_dns_targets or (),
         )
     else:
         candidate = existing_check.model_copy(
@@ -369,6 +393,11 @@ def _candidate_check(
                     else ""
                 ),
                 "require_runtime_identity": request.require_runtime_identity,
+                "expected_dns_targets": (
+                    request.expected_dns_targets
+                    if request.expected_dns_targets is not None
+                    else existing_check.expected_dns_targets
+                ),
             }
         )
     if (
@@ -410,6 +439,7 @@ def _validate_resolved_target(
     lane: ProductLaneProfile,
     check: ProductLaneHealthCheck,
     resolved_url: str,
+    validate_dns_scope: bool,
 ) -> None:
     if not check.enabled:
         return
@@ -423,6 +453,13 @@ def _validate_resolved_target(
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
         raise ProductHealthMonitoringTargetError(
             "Enabled public HTTP health monitoring requires an existing lane-owned URL."
+        )
+    target_hosts = {_url_host(lane.base_url), _url_host(resolved_url)}
+    if validate_dns_scope and any(
+        target.public_name not in target_hosts for target in check.expected_dns_targets
+    ):
+        raise ProductHealthMonitoringTargetError(
+            "DNS expectations must name a host probed by this public HTTP check."
         )
     if not check.require_runtime_identity:
         return
