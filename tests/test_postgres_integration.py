@@ -4341,6 +4341,86 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_never_live_classification_waits_for_concurrent_production_history(self) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.promotion_record import DeploymentEvidence
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+        from tests.support.profiles import _odoo_preview_profile_payload
+
+        with _head_postgres_database() as url:
+            store = PostgresRecordStore(database_url=url)
+            self.addCleanup(store.close)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _odoo_preview_profile_payload()
+            )
+            store.write_product_profile_record(profile)
+            replacement = profile.model_copy(update={"production_use": "prelaunch"})
+            history = DeploymentRecord(
+                record_id="concurrent-production",
+                context=profile.lanes[0].context,
+                instance="prod",
+                source_git_ref="history",
+                deploy=DeploymentEvidence(
+                    status="pass", deploy_mode="compose", target_name="prod", target_type="compose"
+                ),
+            )
+            written = threading.Event()
+            release = threading.Event()
+
+            def pause_writer(
+                _connection: Any,
+                _cursor: Any,
+                _statement: Any,
+                _parameters: Any,
+                context: Any,
+                _many: Any,
+            ) -> None:
+                if (
+                    context.isinsert
+                    and getattr(getattr(context.compiled.statement, "table", None), "name", "")
+                    == LaunchplaneDeploymentRow.__tablename__
+                ):
+                    written.set()
+                    if not release.wait(10):
+                        raise AssertionError("History writer was not resumed")
+
+            event.listen(store._engine, "after_cursor_execute", pause_writer)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    writer = workers.submit(store.write_deployment_record, history)
+                    try:
+                        self.assertTrue(written.wait(5))
+                        classify = workers.submit(
+                            store.compare_and_write_product_profile_record,
+                            expected_record=profile,
+                            replacement_record=replacement,
+                            require_never_live_history=True,
+                        )
+                        deadline = time.monotonic() + 5
+                        # Observe any database wait only to control the interleaving.
+                        # The assertions below check refusal and preserved records,
+                        # not a particular locking implementation.
+                        while not classify.done() and time.monotonic() < deadline:
+                            with store._engine.connect() as observer:
+                                waiting = observer.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                                    )
+                                )
+                            if waiting:
+                                break
+                            time.sleep(0.01)
+                    finally:
+                        release.set()
+                    writer.result(timeout=5)
+                    result = classify.result(timeout=5)
+            finally:
+                release.set()
+                event.remove(store._engine, "after_cursor_execute", pause_writer)
+            self.assertEqual(result.status, "changed")
+            self.assertEqual(store.read_product_profile_record(profile.product), profile)
+            self.assertEqual(store.read_deployment_record(history.record_id), history)
+
     def test_expired_event_hold_blocks_only_while_its_execution_owner_is_present(self) -> None:
         from control_plane.generic_web_deploy_http import GENERIC_WEB_DEPLOY_ROUTE
         from control_plane.product_reconcile import reconcile_reservation_scope

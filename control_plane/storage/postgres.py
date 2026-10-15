@@ -36861,6 +36861,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
         expected_dokploy_targets: tuple[DokployTargetRecord, ...] = (),
         expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = (),
+        require_never_live_history: bool = False,
     ) -> ProductProfileCompareWriteResult:
         if expected_record.product != replacement_record.product:
             raise ValueError("Product profile compare-and-write requires matching products.")
@@ -36887,6 +36888,7 @@ class PostgresRecordStore(HumanSessionStore):
                     expected_provider_targets=expected_provider_targets,
                     expected_dokploy_targets=expected_dokploy_targets,
                     expected_dokploy_target_ids=expected_dokploy_target_ids,
+                    require_never_live_history=require_never_live_history,
                 )
 
         reservation_insert_error: IntegrityError | None = None
@@ -36924,6 +36926,7 @@ class PostgresRecordStore(HumanSessionStore):
                     expected_provider_targets=expected_provider_targets,
                     expected_dokploy_targets=expected_dokploy_targets,
                     expected_dokploy_target_ids=expected_dokploy_target_ids,
+                    require_never_live_history=require_never_live_history,
                 )
 
         with self._session_factory() as session:
@@ -37008,6 +37011,7 @@ class PostgresRecordStore(HumanSessionStore):
                 expected_provider_targets=expected_provider_targets,
                 expected_dokploy_targets=expected_dokploy_targets,
                 expected_dokploy_target_ids=expected_dokploy_target_ids,
+                require_never_live_history=require_never_live_history,
             )
 
     def _compare_and_write_product_profile_locked(
@@ -37023,6 +37027,7 @@ class PostgresRecordStore(HumanSessionStore):
         expected_provider_targets: tuple[ProviderTargetRecord, ...] = (),
         expected_dokploy_targets: tuple[DokployTargetRecord, ...] = (),
         expected_dokploy_target_ids: tuple[DokployTargetIdRecord, ...] = (),
+        require_never_live_history: bool = False,
     ) -> ProductProfileCompareWriteResult:
         if expected_provider_targets or expected_dokploy_targets or expected_dokploy_target_ids:
             self._lock_product_authority_bundle_write(session)
@@ -37045,6 +37050,20 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="changed")
+        if require_never_live_history:
+            self._lock_product_authority_bundle_write(session)
+        if require_never_live_history and self._engine.dialect.name == "postgresql":
+            session.execute(text("SET LOCAL lock_timeout = '5s'"))
+            # Include concurrent history insertions, not only existing rows.
+            tables = ", ".join(
+                model.__tablename__
+                for model in (
+                    LaunchplaneDeploymentRow,
+                    LaunchplanePromotionRow,
+                    LaunchplanePreviewRow,
+                )
+            )
+            session.execute(text(f"LOCK TABLE {tables} IN SHARE ROW EXCLUSIVE MODE"))
         self._lock_landing_authority(
             session, landing_authority.product_profile(expected_record.product)
         )
@@ -37060,6 +37079,65 @@ class PostgresRecordStore(HumanSessionStore):
                 session.delete(reservation_row)
                 session.commit()
             return ProductProfileCompareWriteResult(status="changed")
+        if require_never_live_history:
+            from control_plane.product_production_use_setting import (
+                ProductProductionUseApplyRequest,
+                require_never_live_classification,
+            )
+
+            contexts = {
+                current_record.preview.context,
+                *(lane.context for lane in current_record.lanes),
+            } - {""}
+            try:
+                require_never_live_classification(
+                    profile=current_record,
+                    request=ProductProductionUseApplyRequest(
+                        production_use=replacement_record.production_use,
+                        reason="Recheck reviewed classification at the atomic write.",
+                    ),
+                    deployments=(
+                        self._read_payload(model_type=DeploymentRecord, payload=history.payload)
+                        for history in session.scalars(
+                            select(LaunchplaneDeploymentRow).where(
+                                or_(
+                                    LaunchplaneDeploymentRow.context.in_(contexts),
+                                    LaunchplaneDeploymentRow.payload["runtime_identity"][
+                                        "product"
+                                    ].as_string()
+                                    == current_record.product,
+                                )
+                            )
+                        )
+                    ),
+                    promotions=(
+                        self._read_payload(model_type=PromotionRecord, payload=history.payload)
+                        for history in session.scalars(
+                            select(LaunchplanePromotionRow).where(
+                                or_(
+                                    LaunchplanePromotionRow.context.in_(contexts),
+                                    LaunchplanePromotionRow.payload["destination_health"][
+                                        "observed_runtime_identity"
+                                    ]["product"].as_string()
+                                    == current_record.product,
+                                )
+                            )
+                        )
+                    ),
+                    previews=(
+                        self._read_payload(model_type=PreviewRecord, payload=history.payload)
+                        for history in session.scalars(
+                            select(LaunchplanePreviewRow).where(
+                                LaunchplanePreviewRow.context == current_record.preview.context
+                            )
+                        )
+                    ),
+                )
+            except ValueError:
+                if reservation_row is not None:
+                    session.delete(reservation_row)
+                    session.commit()
+                return ProductProfileCompareWriteResult(status="changed")
         row.display_name = replacement_record.display_name
         row.repository = replacement_record.repository
         row.driver_id = replacement_record.driver_id

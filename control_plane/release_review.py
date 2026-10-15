@@ -430,7 +430,7 @@ def build_release_review(
             # must not turn that refusal into a missing release checklist.
             pass
     return ReleaseReviewStatus(
-        required=profile.production_use != "prelaunch",
+        required=not profile.prelaunch_bootstrap_authorized,
         approved=approved,
         checklist_complete=complete,
         checklist=checklist,
@@ -493,7 +493,7 @@ def current_release_review(
     trace_id: str = "",
 ) -> ReleaseReviewStatus:
     with ExitStack() as credentials:
-        if profile.production_use == "prelaunch" and not include_prelaunch:
+        if profile.prelaunch_bootstrap_authorized and not include_prelaunch:
             return ReleaseReviewStatus(required=False, approved=True)
         try:
             lane = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
@@ -606,7 +606,7 @@ def require_unchanged_production_artifact(
         return
     store = cast(ReleaseReviewStore, record_store)
     profile = store.read_product_profile_record(product)
-    if profile.production_use == "prelaunch":
+    if profile.prelaunch_bootstrap_authorized:
         return
     try:
         production = release_version(store=store, profile=profile, instance="prod")

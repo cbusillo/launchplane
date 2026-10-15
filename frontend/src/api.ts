@@ -120,6 +120,12 @@ export class LaunchplaneApiError extends Error {
 }
 
 let browserMutationQueue: Promise<void> = Promise.resolve();
+const sessionExpiryListeners = new Set<() => void>();
+
+export function subscribeToSessionExpiry(listener: () => void): () => void {
+  sessionExpiryListeners.add(listener);
+  return () => { sessionExpiryListeners.delete(listener); };
+}
 
 async function requestJson<T>(
   path: string,
@@ -199,6 +205,10 @@ async function performJsonRequest<T>(
       "error" in errorPayload && errorPayload.error
         ? (errorPayload.error.code ?? "")
         : "";
+    if (method === "GET" && response.status === 401 &&
+        errorCode === "authentication_required" && !signal?.aborted) {
+      sessionExpiryListeners.forEach(listener => listener());
+    }
     throw new LaunchplaneApiError(
       errorMessage,
       response.status,
