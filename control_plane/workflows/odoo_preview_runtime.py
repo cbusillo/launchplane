@@ -16,6 +16,11 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.integration_readback import web_held_until_integration_readback
+from control_plane.product_secret_copy import ProductSecretCopyFrom
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetIntegrationAllowance,
+    DokployTargetPolicies,
+)
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.odoo_preview_runtime_plan import (
@@ -145,9 +150,16 @@ class OdooPreviewApplyInputsRequest(BaseModel):
     source: str = "odoo-preview-apply-inputs"
     timeout_seconds: int = Field(default=300, ge=1)
     no_cache: bool = False
+    fishbowl_source: ProductSecretCopyFrom | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _normalize_request(self) -> "OdooPreviewApplyInputsRequest":
+        if self.fishbowl_source is not None and self.operation != "refresh":
+            raise ValueError("Only preview refresh accepts a Fishbowl source.")
         self.product = _required_text(self.product, "Odoo preview apply inputs requires product")
         if self.preview_slug.strip():
             self.preview_slug = self.preview_slug.strip()
@@ -211,6 +223,11 @@ class OdooPreviewApplyInputsResult(BaseModel):
     # key-safety rule allows them on previews. Key names only, never values.
     omitted_integration_credential_keys: tuple[str, ...] = ()
     source: str
+    fishbowl_source_sha256: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     error_message: str = ""
 
     @model_validator(mode="after")
@@ -1076,6 +1093,7 @@ def execute_odoo_preview_dokploy_apply(
     provider_lease_check: Callable[[], None] | None = None,
     expected_runtime_identity: RuntimeIdentity | None = None,
     propagate_domain_lookup_error: bool = False,
+    integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     if plan.status != "ready":
@@ -1118,6 +1136,7 @@ def execute_odoo_preview_dokploy_apply(
         provider_effect_checkpoint=provider_effect_checkpoint,
         provider_lease_check=provider_lease_check,
         expected_runtime_identity=expected_runtime_identity,
+        integration_allowances=integration_allowances,
     )
 
 
@@ -1426,6 +1445,7 @@ def _execute_refresh(
     provider_effect_checkpoint: Callable[[str], None] | None,
     provider_lease_check: Callable[[], None] | None,
     expected_runtime_identity: RuntimeIdentity | None,
+    integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = (),
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     creating_compose = plan.compose_ref.startswith("${created.composeId:")
@@ -1577,6 +1597,7 @@ def _execute_refresh(
                 target_id=compose_id,
                 target_name=plan.compose_name,
                 deploy_timeout_seconds=request.timeout_seconds,
+                policies=DokployTargetPolicies(integration_allowances=integration_allowances),
             ),
             env_file=None,
             workflow_environment_overrides=runtime_override_environment,

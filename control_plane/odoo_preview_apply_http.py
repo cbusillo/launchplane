@@ -13,6 +13,13 @@ from control_plane import odoo_instance_overrides as control_plane_odoo_instance
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import runtime_platform_credentials
+from control_plane.product_secret_copy import ProductSecretCopyFrom
+from control_plane.contracts.dokploy_target_record import DokployTargetIntegrationAllowance
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.odoo_preview_import_source import (
+    PreviewImportSourceStore,
+    resolve_fishbowl_preview_source,
+)
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     evaluate_preview_copied_runtime_key_safety,
@@ -186,13 +193,21 @@ def _build_odoo_preview_apply_inputs(
             plan=result.dry_run_plan,
             manifest=result.plan_request.manifest,
             database_url=database_url,
+            fishbowl_source=request.fishbowl_source,
         )
     except (FileNotFoundError, ValueError, click.ClickException):
+        if request.fishbowl_source is not None:
+            raise
         # Apply resolves the same environment before any provider change and refuses
         # there with the details, so the plan only lists what it can resolve now.
         return result
     omitted_keys = environment.omitted_integration_credential_keys
-    return result.model_copy(update={"omitted_integration_credential_keys": omitted_keys})
+    return result.model_copy(
+        update={
+            "omitted_integration_credential_keys": omitted_keys,
+            "fishbowl_source_sha256": environment.fishbowl_source_sha256,
+        }
+    )
 
 
 def build_odoo_preview_plan_id(*, scope: str, idempotency_key: str) -> str:
@@ -398,14 +413,21 @@ def execute_odoo_preview_apply_result(
     )
     if current_request.apply.dry_run_plan.repository.strip() != profile.repository.strip():
         raise ValueError("Odoo preview apply repository does not match product profile.")
-    resolved_environment_values = _odoo_preview_service_environment(
+    resolved_environment = _odoo_preview_service_environment(
         control_plane_root_path=control_plane_root_path,
         record_store=record_store,
         profile=profile,
         plan=current_request.apply.dry_run_plan,
         manifest=current_request.apply.manifest,
         database_url=database_url,
-    ).values
+        fishbowl_source=issued_plan.plan_request.fishbowl_source,
+    )
+    if resolved_environment.fishbowl_source_sha256 != issued_plan.fishbowl_source_sha256:
+        raise OdooPreviewPlanProvenanceError(
+            code="odoo_preview_plan_stale",
+            message="Preview import source changed; request a fresh plan.",
+        )
+    resolved_environment_values = resolved_environment.values
     if current_request.apply.dry_run_plan.operation == "refresh":
         from control_plane.lane_movement import LaneBuild, require_forward_preview_build
 
@@ -459,6 +481,7 @@ def execute_odoo_preview_apply_result(
         provider_lease_check=provider_lease_check,
         expected_runtime_identity=resolved_runtime_identity,
         propagate_domain_lookup_error=propagate_domain_lookup_error,
+        integration_allowances=resolved_environment.integration_allowances,
     )
     return driver_result.model_dump(mode="json")
 
@@ -965,6 +988,8 @@ def driver_result_contains_status(
 class _OdooPreviewServiceEnvironment:
     values: dict[str, str]
     omitted_integration_credential_keys: tuple[str, ...] = ()
+    integration_allowances: tuple[DokployTargetIntegrationAllowance, ...] = ()
+    fishbowl_source_sha256: str = ""
 
 
 def _odoo_preview_service_environment(
@@ -975,6 +1000,7 @@ def _odoo_preview_service_environment(
     plan: OdooPreviewDokployDryRunPlan,
     manifest: ArtifactIdentityManifest | None,
     database_url: str | None,
+    fishbowl_source: ProductSecretCopyFrom | None = None,
 ) -> _OdooPreviewServiceEnvironment:
     if plan.operation == "destroy":
         return _OdooPreviewServiceEnvironment(values={})
@@ -1072,8 +1098,36 @@ def _odoo_preview_service_environment(
     )
     for key in omitted_keys:
         environment_values[key] = ""
+    import_source = None
+    if fishbowl_source is not None:
+        import_source = resolve_fishbowl_preview_source(
+            store=cast(PreviewImportSourceStore, record_store),
+            profile=profile,
+            preview_slug=plan.preview_slug,
+            copy_from=fishbowl_source,
+        )
+        bootstrap_record = OdooInstanceOverrideRecord(
+            context=preview_profile.context,
+            instance=plan.preview_slug,
+            config_parameters=import_source.parameters,
+            website_bootstrap=(
+                preview_bootstrap_environment.payload.website_bootstrap
+                if preview_bootstrap_environment is not None
+                else None
+            ),
+            updated_at=profile.updated_at,
+        )
+        environment_values.update(
+            control_plane_odoo_instance_overrides.build_post_deploy_environment(
+                bootstrap_record, clear_undeclared_shopify=False
+            ).inline_environment
+        )
+        environment_values.update(import_source.environment)
     return _OdooPreviewServiceEnvironment(
-        values=environment_values, omitted_integration_credential_keys=omitted_keys
+        values=environment_values,
+        omitted_integration_credential_keys=omitted_keys,
+        integration_allowances=(import_source.allowance,) if import_source else (),
+        fishbowl_source_sha256=import_source.authority_sha256 if import_source else "",
     )
 
 

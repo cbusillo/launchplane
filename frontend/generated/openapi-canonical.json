@@ -59811,6 +59811,17 @@
                   "OdooPreviewApplyInputsRequest": {
                     "additionalProperties": false,
                     "properties": {
+                      "fishbowl_source": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/ProductSecretCopyFrom"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "x-launchplane-optional-response": true
+                      },
                       "image_reference": {
                         "default": "",
                         "title": "Image Reference",
@@ -59887,6 +59898,30 @@
                       "pr_number"
                     ],
                     "title": "OdooPreviewApplyInputsRequest",
+                    "type": "object"
+                  },
+                  "ProductSecretCopyFrom": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "context": {
+                        "title": "Context",
+                        "type": "string"
+                      },
+                      "instance": {
+                        "title": "Instance",
+                        "type": "string"
+                      },
+                      "version_id": {
+                        "title": "Version Id",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "context",
+                      "instance",
+                      "version_id"
+                    ],
+                    "title": "ProductSecretCopyFrom",
                     "type": "object"
                   },
                   "ReleaseInputFile": {

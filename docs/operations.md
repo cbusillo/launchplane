@@ -4426,3 +4426,46 @@ reporter and manual break-glass link. It explicitly reports zero replacement
 dispatch; the rollback dispatch classifier still treats that refusal as
 pre-effect. Installation and later live settlement remain separate proof from
 source tests or a merge.
+
+### Fishbowl import proof on an exact PR artifact
+
+The existing Odoo `POST /v1/drivers/odoo/preview-apply-inputs` route accepts an
+optional `inputs.fishbowl_source` reference: `context`, `instance` and
+`version_id`, using the managed `copy_from` reference shape. Obtain the version
+from `product-secret-bindings-read`; select the product's existing **testing**
+Fishbowl password binding, never production's binding or a plaintext value.
+This option is for a disposable PR preview nobody is using. It does not touch
+the testing database, import history, promote or release anything.
+
+The service requires an exact testing binding classified `shared_safe`, with
+`read_only_source` sharing evidence, plus testing's existing Fishbowl
+`read_only_source` integration allowance. Classification is recorded grant
+verification, not an active database permission probe: verify the source's
+`SHOW GRANTS` readback before the normal importer invocation and stop if it can
+write. Both plan and apply retain managed-copy source-value read authority;
+ordinary metadata-read authority alone is insufficient. No grant, user,
+credential reclassification or external secret copy is part of this route.
+
+Supply the exact PR manifest and digest-pinned image through the normal preview
+inputs. The issued plan fingerprints the selected source settings, binding
+version and allowance. Apply that service-issued plan through the existing
+`POST /v1/drivers/odoo/preview-apply` route with its plan id as the idempotency
+key. Changed source authority requires a new plan. Plaintext source settings
+and passwords are never accepted as caller input or returned in the plan.
+The preview receives only Fishbowl's connection settings through the normal
+instance-overrides payload and the existing managed-secret transport. Its
+post-deploy readback allows only this selected source before web starts;
+other integrations remain fenced. Normal previews inherit no allowances.
+
+Once deployed, verify the serving generation's artifact, source commit and image
+digest against the PR head. Activate the artifact's importer through Apps if
+needed, check `SHOW GRANTS` using its configured connection without printing
+connection values, and invoke its normal parts-only entrypoint. Report parts,
+supplier-cost rows, copied-field/conflict/unmapped counts and familiar-part QA
+on the product issue and PR before asking the Client to accept. Source reads
+stay read-only; writes belong only to the disposable Odoo database. Do not
+substitute fixtures, set connection parameters by hand or enable a recurring
+import. Preserve the preview through Client review. When it is no longer
+needed, the ordinary preview lifecycle removes its isolated resources; a fresh
+preview without `fishbowl_source` is again source-free. There is no production
+or stable-lane rollback because neither was changed.
