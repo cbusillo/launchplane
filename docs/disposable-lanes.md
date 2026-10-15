@@ -24,6 +24,14 @@ Recording or refreshing an observation changes no profile or ownership digest.
 Actual ownership and runtime/secret authority still must match, and each
 destructive checkpoint validates fresh facts.
 
+[Product retirement](product-retirement.md#direction-and-retirement-eligibility)
+uses the existing prelaunch classification and protected-use exceptions instead
+of requiring positive unused/reproducible/isolated observations. Its bounded
+agent executor checks exact applications with empty mount inventories and
+preserves production target and secret consumers. The positive-observation
+requirements below continue to govern runtime sync and rebuild, which can
+start or change a lane.
+
 The bounded service API `POST /v1/disposable-lanes/observations` accepts only the
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
