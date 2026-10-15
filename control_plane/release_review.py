@@ -13,6 +13,8 @@ from urllib.parse import unquote
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
@@ -171,6 +173,38 @@ def checklist_digest(checklist: ReleaseChecklist) -> str:
     ).hexdigest()
 
 
+def release_website_settings(
+    *,
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    artifact_id: str,
+    instance: str,
+) -> OdooWebsiteSettingsIntent | None:
+    prod = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    reader = getattr(store, "read_odoo_instance_override_record", None)
+    if profile.driver_id != "odoo" or prod is None or not callable(reader):
+        return None
+    try:
+        record: OdooInstanceOverrideRecord = reader(context_name=prod.context, instance_name="prod")
+    except FileNotFoundError:
+        return None
+    if instance == "prod" and not record.last_apply.website_settings_verified:
+        return None
+    settings = record.last_apply.website_settings if instance == "prod" else record.website_settings
+    if (
+        instance != "prod"
+        and settings is None
+        and record.last_apply.website_settings_verified
+        and record.last_apply.website_settings is not None
+    ):
+        # Withdrawal removes the pending change, not the verified baseline.
+        # Review and re-apply that baseline explicitly for the new artifact.
+        settings = record.last_apply.website_settings.model_copy(
+            update={"artifact_id": artifact_id}
+        )
+    return settings if settings is not None and settings.artifact_id == artifact_id else None
+
+
 def release_version(
     *, store: ReleaseReviewStore, profile: LaunchplaneProductProfileRecord, instance: str
 ) -> ReleaseVersion:
@@ -206,6 +240,18 @@ def release_version(
                 artifact_id=release.artifact_id,
                 source_commit=artifact.source_commit,
                 shared_addons_digest=shared_digest,
+                website_settings_sha256=(
+                    settings.settings.digest
+                    if (
+                        settings := release_website_settings(
+                            store=store,
+                            profile=profile,
+                            artifact_id=release.artifact_id,
+                            instance=instance,
+                        )
+                    )
+                    else ""
+                ),
             )
         except ValueError as error:
             raise _identity_missing(instance) from error
@@ -239,7 +285,24 @@ def build_release_review(
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
     lane = next(lane for lane in profile.lanes if lane.instance == "testing")
-    if production == candidate:
+    stale_settings = False
+    settings_readback_failed = False
+    prod_lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    reader = getattr(store, "read_odoo_instance_override_record", None)
+    if profile.driver_id == "odoo" and prod_lane is not None and callable(reader):
+        try:
+            intent_record = reader(context_name=prod_lane.context, instance_name="prod")
+            settings_readback_failed = bool(
+                not intent_record.last_apply.website_settings_verified
+                and (intent_record.website_settings or intent_record.last_apply.website_settings)
+            )
+            stale_settings = (
+                intent_record.website_settings is not None
+                and intent_record.website_settings.artifact_id != candidate.artifact_id
+            )
+        except FileNotFoundError:
+            pass
+    if production == candidate and not (stale_settings or settings_readback_failed):
         # The complete recorded identity already runs in production. There is
         # nothing to compare or accept; prior decisions/runs remain unchanged.
         checklist = ReleaseChecklist(
@@ -249,6 +312,12 @@ def build_release_review(
             testing_url=lane.base_url,
             production=production,
             candidate=candidate,
+            website_settings=release_website_settings(
+                store=store, profile=profile, artifact_id=candidate.artifact_id, instance="testing"
+            ),
+            production_website_settings=release_website_settings(
+                store=store, profile=profile, artifact_id=production.artifact_id, instance="prod"
+            ),
             items=(),
         )
         return ReleaseReviewStatus(
@@ -332,6 +401,12 @@ def build_release_review(
         untracked_commits=untracked,
         shared_sources=shared_sources,
         additional_changes=additional_changes,
+        production_website_settings=release_website_settings(
+            store=store, profile=profile, artifact_id=production.artifact_id, instance="prod"
+        ),
+        website_settings=release_website_settings(
+            store=store, profile=profile, artifact_id=candidate.artifact_id, instance="testing"
+        ),
         database_compatibility=(
             classify_release_database_compatibility(
                 production=store.read_artifact_manifest(production.artifact_id),
@@ -398,6 +473,16 @@ def build_release_review(
             and latest_decision.decision in ("accepted", "temporary_hotfix")
         )
     )
+    if stale_settings:
+        blockers += (
+            "Website settings were prepared for an older testing build. Prepare them for the current artifact before release.",
+        )
+        approved = False
+    if settings_readback_failed:
+        blockers += (
+            "Website settings readback is unverified after a failed workflow. Retry the recorded maintenance/release before reviewing current settings.",
+        )
+        approved = False
     if latest_decision and not latest_decision.release_issue_url:
         blockers += (RELEASE_RECORD_PENDING,)
     if not approved and not blockers:
@@ -563,7 +648,7 @@ def require_release_approval(
     product: str,
     artifact_id: str = "",
     source_commit: str = "",
-) -> None:
+) -> ReleaseReviewDecisionRecord | None:
     profile = cast(ReleaseReviewStore, record_store).read_product_profile_record(product)
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=record_store, profile=profile
@@ -573,7 +658,7 @@ def require_release_approval(
             "Production already runs the testing version; no new release to promote."
         )
     if not review.required:
-        return
+        return None
     if not review.approved or review.checklist is None:
         raise click.ClickException(
             " ".join(review.blockers) or "Client release approval is required."
@@ -583,6 +668,7 @@ def require_release_approval(
         source_commit and source_commit != candidate.source_commit
     ):
         raise click.ClickException("Promotion no longer matches the approved testing release.")
+    return review.latest_decision
 
 
 class ProductionChangeRequiresPromotion(click.ClickException):

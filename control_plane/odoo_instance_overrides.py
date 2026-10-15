@@ -2,6 +2,8 @@ import base64
 from dataclasses import dataclass
 
 import click
+from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettings
 
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
@@ -231,6 +233,7 @@ def render_post_deploy_payload(
     protected_shopify_store_keys: tuple[str, ...] = (),
     clear_undeclared_shopify: bool = True,
     record_store: object | None = None,
+    selected_website_settings: OdooWebsiteSettings | None = None,
 ) -> OdooPostDeployPayload:
     try:
         runtime_values = runtime_values_for_override(record, record_store)
@@ -285,6 +288,28 @@ def render_post_deploy_payload(
             )
         )
     website_bootstrap = record.website_bootstrap if workflow_intent != "restore" else None
+    # Pending record intent is never a deploy/ship payload. Only the release
+    # maintenance driver supplies a decision-bound or previously verified choice.
+    website_settings = (
+        selected_website_settings if odoo_instance_is_production(record.instance) else None
+    )
+    if record.website_settings is not None or record.last_apply.website_settings is not None:
+        config_parameters = [
+            item for item in config_parameters if item.key != WEBSITE_INDEXING_PARAMETER
+        ]
+    if website_settings is not None:
+        # The legacy settings addon runs on every startup, even on rollback images.
+        # Keep its parameter path in agreement with the typed native consumer.
+        indexing_parameter = WEBSITE_INDEXING_PARAMETER
+        config_parameters = [item for item in config_parameters if item.key != indexing_parameter]
+        config_parameters.append(
+            OdooPostDeployConfigParameter(
+                key=indexing_parameter,
+                value=OdooPostDeployRenderedValue(
+                    source="literal", value="1" if website_settings.public_indexing_enabled else "0"
+                ),
+            )
+        )
     return OdooPostDeployPayload(
         schema_version=1,
         context=record.context,
@@ -293,6 +318,7 @@ def render_post_deploy_payload(
         config_parameters=tuple(config_parameters),
         addon_settings=tuple(addon_settings),
         website_bootstrap=website_bootstrap,
+        website_settings=website_settings,
     )
 
 
@@ -383,6 +409,7 @@ def build_post_deploy_environment(
     protected_shopify_store_keys: tuple[str, ...] = (),
     clear_undeclared_shopify: bool = True,
     record_store: object | None = None,
+    selected_website_settings: OdooWebsiteSettings | None = None,
 ) -> PostDeployOverrideEnvironment:
     payload = render_post_deploy_payload(
         record,
@@ -390,6 +417,7 @@ def build_post_deploy_environment(
         protected_shopify_store_keys=protected_shopify_store_keys,
         clear_undeclared_shopify=clear_undeclared_shopify,
         record_store=record_store,
+        selected_website_settings=selected_website_settings,
     )
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),
@@ -419,6 +447,7 @@ def build_preview_website_bootstrap_environment(
         update={
             "config_parameters": (),
             "addon_settings": (),
+            "website_settings": None,
             "website_bootstrap": record.website_bootstrap.model_copy(
                 update={"canonical_url": normalized_preview_url}
             ),

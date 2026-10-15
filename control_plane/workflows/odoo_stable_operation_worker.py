@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
 from control_plane.workflows.odoo_cutover import OdooCutoverProvider
 
@@ -376,6 +377,10 @@ class OdooStableOperationWorkerStore(Protocol):
 class OdooProdPromotionOperationWorkerStore(Protocol):
     """Database-backed stores also run queued Odoo prod promotions."""
 
+    def read_release_review_decision_record(
+        self, *, product: str, record_id: str
+    ) -> ReleaseReviewDecisionRecord: ...
+
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
 
     def list_odoo_prod_promotion_operation_records(
@@ -443,6 +448,10 @@ def _promotion_store(record_store: object) -> OdooProdPromotionOperationWorkerSt
 
 class OdooProdRollbackOperationWorkerStore(Protocol):
     """Database-backed stores also run queued Odoo prod rollbacks."""
+
+    def read_release_review_decision_record(
+        self, *, product: str, record_id: str
+    ) -> ReleaseReviewDecisionRecord: ...
 
     def list_odoo_prod_rollback_operation_records(
         self,
@@ -1753,6 +1762,12 @@ def _execute_prod_promotion_operation(
             provider_effect_checkpoint=before_effect,
             hold_uncertain_effects=True,
             cutover_provider_factory=cutover_provider_factory,
+            release_decision=record_store.read_release_review_decision_record(
+                product=operation.product,
+                record_id=operation.authorization.release_decision_record_id,
+            )
+            if operation.authorization.release_decision_record_id
+            else None,
         )
 
     def terminal(
@@ -1850,6 +1865,12 @@ def _execute_prod_rollback_operation(
             provider_effect_checkpoint=before_effect,
             hold_uncertain_effects=True,
             cutover_provider_factory=cutover_provider_factory,
+            release_decision=record_store.read_release_review_decision_record(
+                product=operation.product,
+                record_id=operation.authorization.release_decision_record_id,
+            )
+            if operation.authorization.release_decision_record_id
+            else None,
         )
 
     def terminal(

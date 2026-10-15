@@ -1,3 +1,4 @@
+from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
 import base64
 import json
 import re
@@ -146,7 +147,9 @@ ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
     {"website_bootstrap_website_id", INTEGRATION_READBACK_CHECKED_MARKER}
 )
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
-    ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+    ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS
+    | ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS
+    | {"website_settings_sha256"}
 )
 ODOO_MODULE_UPDATE_REQUIRED_READBACK_MARKERS = (
     "odoo_module_update_completed",
@@ -305,6 +308,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key == "website_settings_sha256":
+        return bool(re.fullmatch(r"[0-9a-f]{64}", value))
     if key == "website_bootstrap_company_email_skip_reason":
         return value == ODOO_COMPANY_EMAIL_SKIP_REASON
     if key in ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS:
@@ -524,6 +529,10 @@ def run_compose_post_deploy_update(
         desired_env_map.pop("ODOO_ADDONS_PATH", None)
     resolved_workflow_environment_overrides = dict(workflow_environment_overrides or {})
     require_company_email = False
+    apply_website_settings = target_definition.instance.strip().lower() not in {
+        "prod",
+        "production",
+    }
     encoded_payload = resolved_workflow_environment_overrides.get(
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, ""
     )
@@ -534,6 +543,9 @@ def run_compose_post_deploy_update(
             )
         except ValueError as error:
             raise click.ClickException("Odoo post-deploy override payload is invalid.") from error
+        apply_website_settings = (
+            apply_website_settings or override_payload.website_settings is not None
+        )
         require_company_email = bool(
             override_payload.website_bootstrap and override_payload.website_bootstrap.company_email
         )
@@ -722,6 +734,9 @@ def run_compose_post_deploy_update(
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
         clear_preview_fishbowl_source=clear_preview_fishbowl_source,
+        website_settings_instance=target_definition.instance.strip().lower()
+        if apply_website_settings
+        else "",
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -2457,6 +2472,7 @@ def _build_dokploy_data_workflow_script(
     bootstrap_missing_database: bool = False,
     probe_company_email_contract: bool = False,
     clear_preview_fishbowl_source: bool = False,
+    website_settings_instance: str = "",
 ) -> str:
     """The schedule's bash script.
 
@@ -2524,6 +2540,8 @@ data_workflow_lock_path={quoted_lock_path}
 integration_readback_passed_path={shlex.quote(INTEGRATION_READBACK_PASSED_PATH) if hold_web_until_integration_readback else "''"}
 start_web_after_workflow=0
 workflow_completed=0
+website_settings_succeeded=0
+website_settings_instance={shlex.quote(website_settings_instance)}
 readback_succeeded=0
 web_restart_blocked=0
 module_update_modules_configured={module_update_modules_configured}
@@ -2627,6 +2645,20 @@ enforce_integration_readback() {{
     readback_succeeded=1
 }}
 
+enforce_website_settings() {{
+    if [ -z "${{website_settings_instance}}" ] || [ "${{website_settings_succeeded}}" = "1" ]; then
+        return 0
+    fi
+    local settings_status=0
+    docker exec -i "${{workflow_environment[@]}}" "${{script_runner_container_id}}" \
+        python3 - "${{database_name}}" "${{website_settings_instance}}" <<'PY' || settings_status=$?
+{WEBSITE_SETTINGS_PROGRAM}PY
+    if [ "${{settings_status}}" -ne 0 ]; then
+        return "${{settings_status}}"
+    fi
+    website_settings_succeeded=1
+}}
+
 neutralize_copy_connections() {{
     if [ "{int(hold_web_until_integration_readback)}" != "1" ]; then
         return 0
@@ -2641,6 +2673,11 @@ exit_trap() {{
     if [ "${{restore_mode}}" = "1" ] && [ "${{restore_completed}}" != "1" ]; then
         echo "odoo_restore_completed=false"
     fi
+    if [ "${{web_restart_blocked}}" != "1" ] && [ "${{start_web_after_workflow}}" = "1" ]; then
+        if ! enforce_website_settings; then
+            web_restart_blocked=1
+        fi
+    fi
     if [ "${{web_restart_blocked}}" != "1" ] \
         && [ "${{start_web_after_workflow}}" = "1" ] \
         && [ "${{readback_succeeded}}" != "1" ] \
@@ -2652,7 +2689,7 @@ exit_trap() {{
         fi
     fi
     if [ "${{web_restart_blocked}}" = "1" ]; then
-        echo "Leaving web container ${{web_container_id}} stopped: the integration read-back did not pass." >&2
+        echo "Leaving web container ${{web_container_id}} stopped: settings verification did not pass." >&2
         exit "${{exit_status}}"
     fi
     if ! start_web_container; then
@@ -2717,7 +2754,7 @@ if [ "${{web_status}}" = "running" ]; then
     start_web_after_workflow=1
     echo "Stopping web container ${{web_container_id}}"
     docker stop "${{web_container_id}}" >/dev/null
-elif [ "${{integration_readback_required}}" = "1" ]; then
+elif [ "${{integration_readback_required}}" = "1" ] || [ -n "${{website_settings_instance}}" ]; then
     # An earlier read-back refusal leaves web stopped. Once the setting is cleared
     # or allowed, this run brings web back only if the read-back passes.
     start_web_after_workflow=1
@@ -2847,6 +2884,11 @@ fi
 if [ "{int(clear_preview_fishbowl_source)}" = "1" ]; then
     docker exec -i "${{script_runner_container_id}}" python3 - "${{database_name}}" <<'PY'
 {preview_fishbowl_clear_program()}PY
+fi
+
+if ! enforce_website_settings; then
+    web_restart_blocked=1
+    exit 1
 fi
 
 neutralization_status=0

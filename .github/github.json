@@ -68,7 +68,8 @@
     ],
     "policies": [
       "docs/policies/coding-standards.md"
-    ]
+    ],
+    "odooWebsiteSettings": "docs/odoo-website-settings.md"
   },
   "qualityGate": {
     "test": {

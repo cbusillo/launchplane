@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import { openUrgentReleaseReview, readReleaseReview, writeReleaseReviewDecision } from "./api";
 import { loadDevFixtures, type DevFixtureMode } from "./dev-fixture-loader";
-import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem } from "./generated/openapi.ts";
+import type { ClientReleaseRunView, ReleaseReviewDecisionEnvelope, ReleaseReviewResponse, ReleaseReviewItem, OdooWebsiteSettings } from "./generated/openapi.ts";
 import { groupReleaseItems, untestedReason } from "./release-review-model";
 import { safeExternalUrl } from "./url";
 
@@ -24,6 +24,32 @@ const RELEASE_STEP_STATUS: Record<ClientReleaseRunView["steps"][number]["status"
 // A started release advances in a background worker after the decision response.
 export const RELEASE_PROGRESS_REFRESH_MS = 10_000;
 const ACTIVE_RELEASE_RUN_STATES: ReadonlySet<ClientReleaseRunView["state"]> = new Set(["waiting", "running"]);
+
+const WEBSITE_SETTING_FIELDS = [
+  ["public_origin", "Website address"],
+  ["public_indexing_enabled", "Search indexing"], ["google_analytics_key", "Google Analytics"],
+  ["cookies_bar", "Cookie consent bar"], ["block_third_party_domains", "Third-party blocking"],
+] as const;
+
+function websiteSettingValue(value: boolean | string | null | undefined): string {
+  return value == null ? "Not recorded" : typeof value === "boolean" ? value ? "enabled" : "disabled" : value || "disabled";
+}
+
+function WebsiteSettingsComparison({ candidate, production }: { candidate: OdooWebsiteSettings; production?: OdooWebsiteSettings }) {
+  return <table className="owner-review-settings">
+    <thead><tr><th scope="col">Setting</th><th scope="col">Current</th><th scope="col">This release</th></tr></thead>
+    <tbody>{WEBSITE_SETTING_FIELDS.map(([key, label]) => {
+      const next = candidate[key];
+      const current = production?.[key];
+      const change = next == null || current != null && next === current ? "kept" : current == null ? "unknown" : "changed";
+      const state = key === "public_origin" ? "specified" : next == null ? "preserved" : next ? "enabled" : "disabled";
+      return <tr key={key} data-setting={key} data-state={state} data-change={change}>
+        <th scope="row">{label}</th><td data-column="current">{websiteSettingValue(current)}</td>
+        <td data-column="candidate">{next == null ? "unchanged" : websiteSettingValue(next)}<small>{change === "kept" ? "Kept" : change === "changed" ? "Changes" : "Current value not recorded"}</small></td>
+      </tr>;
+    })}</tbody>
+  </table>;
+}
 
 const RELEASE_RUN_STATE: Record<ClientReleaseRunView["state"], string> = {
   waiting: "Starting",
@@ -250,6 +276,12 @@ export function OwnerReleaseReviewRoute({ product, fixtureMode }: { product: str
       </section> : null}
       {response.release_run ? <ReleaseRunProgress run={response.release_run} refreshFailed={refreshFailed} /> : null}
       {checklist && !noNewRelease ? <>
+        {checklist.website_settings ? <section data-website-settings aria-label="Website settings in this release">
+          <h3>Website settings</h3>
+          <p>Accepting this release applies these settings to {checklist.website_settings.settings.public_origin}.</p>
+          <WebsiteSettingsComparison candidate={checklist.website_settings.settings} production={checklist.production_website_settings?.settings} />
+          <p>Testing and previews keep production analytics and search indexing disabled.</p>
+        </section> : null}
         <h3>What to test</h3>
         <ReleaseItems items={checklist.items} viewerIsOwner={response.viewer_is_owner} emptyMessage={(checklist.shared_sources ?? []).length ? "No website-repository changes. Review the shared components below." : undefined} />
         {(checklist.shared_sources ?? []).map(source => <section key={source.repository} aria-label={`Shared website components from ${source.repository}`}>
