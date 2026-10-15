@@ -500,11 +500,97 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         self.assertEqual(decision.controller_action, "idle")
         self.assertEqual(decision.controller_landing_plan_record_id, "")
 
+    def test_diagnostic_idle_preserves_persisted_unfinished_controller_progress(self) -> None:
+        candidate = _candidate_record(status="passed")
+        cases = (
+            (_candidate_record(status="ready_for_checks"), None, None, "observe_candidate"),
+            (_candidate_record(status="failed"), None, None, "candidate_failed"),
+            (candidate, None, None, "plan_landing"),
+            (candidate, _landing_plan_record(candidate), None, "land_batch"),
+            (None, None, _stack_collapse_record(status="planned"), "execute_stack_collapse"),
+            (
+                None,
+                None,
+                _stack_collapse_record(status="waiting_for_root_checks"),
+                "wait_for_root_checks",
+            ),
+        )
+        for candidate_record, landing, collapse, action in cases:
+            with TemporaryDirectory() as directory:
+                stores = (
+                    FilesystemRecordStore(Path(directory) / "files"),
+                    PostgresRecordStore(
+                        database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
+                    ),
+                )
+                stores[1].ensure_schema()
+                self.addCleanup(stores[1].close)
+                for store in stores:
+                    with self.subTest(store=type(store).__name__, action=action):
+                        if candidate_record is not None:
+                            store.write_merge_train_batch_candidate_record(candidate_record)
+                        if landing is not None:
+                            store.write_merge_train_batch_landing_plan_record(landing)
+                        if collapse is not None:
+                            store.write_merge_train_stack_collapse_plan_record(collapse)
+                        latest_run = _idle_run_record(recorded_at="2026-05-09T02:10:00Z")
+                        store.write_merge_train_run_record(latest_run)
+                        for policy_sha256 in (candidate.candidate.policy_sha256, ""):
+                            with self.subTest(policy_sha256=policy_sha256):
+                                decision = evaluate_merge_train_admission_from_store(
+                                    store=store,
+                                    repository=latest_run.repository,
+                                    base_branch=latest_run.base_branch,
+                                    requested_at=latest_run.recorded_at,
+                                    current_policy_key=latest_run.policy_key
+                                    if policy_sha256
+                                    else "",
+                                    current_policy_sha256=policy_sha256,
+                                )
+                                self.assertTrue(decision.admitted)
+                                self.assertEqual(decision.reason_code, "dry_run_history_only")
+                                self.assertEqual(decision.controller_action, action)
+                                self.assertEqual(
+                                    decision.controller_candidate_record_id,
+                                    candidate_record.record_id
+                                    if candidate_record is not None and landing is None
+                                    else "",
+                                )
+                                self.assertEqual(
+                                    decision.controller_landing_plan_record_id,
+                                    landing.record_id if landing is not None else "",
+                                )
+                                self.assertEqual(
+                                    decision.controller_stack_collapse_plan_record_id,
+                                    collapse.record_id if collapse is not None else "",
+                                )
+                                status = build_merge_train_controller_status_read_model(
+                                    store=store,
+                                    repository=latest_run.repository,
+                                    base_branch=latest_run.base_branch,
+                                    generated_at=latest_run.recorded_at,
+                                    current_policy_key=latest_run.policy_key
+                                    if policy_sha256
+                                    else "",
+                                    current_policy_sha256=policy_sha256,
+                                )
+                                self.assertEqual(status.admission, decision)
+                                self.assertEqual(status.latest_run, latest_run)
+                                self.assertIsNotNone(status.latest_dry_run)
+                                self.assertEqual(
+                                    {summary.record_id for summary in status.controller_records},
+                                    {
+                                        record.record_id
+                                        for record in (candidate_record, landing, collapse)
+                                        if record is not None
+                                    },
+                                )
+
     def test_latest_idle_run_supersedes_older_controller_records_for_admission(self) -> None:
         candidate_record = _candidate_record(status="passed")
         landing_plan_record = _landing_plan_record(candidate_record)
         stack_collapse_record = _stack_collapse_record(status="waiting_for_root_checks")
-        latest_run = _idle_run_record(recorded_at="2026-05-09T02:10:00Z")
+        latest_run = _idle_run_record(recorded_at="2026-05-09T02:10:00Z", mutate=True)
         store = _RunHistoryStore(
             latest_run,
             candidate_records=(candidate_record,),
@@ -516,7 +602,7 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             store=store,
             repository="cbusillo/sellyouroutboard",
             base_branch="main",
-            requested_at="2026-05-09T02:10:00Z",
+            requested_at="2026-05-09T02:15:00Z",
             current_policy_key=candidate_record.candidate.policy_key,
             current_policy_sha256=candidate_record.candidate.policy_sha256,
         )
@@ -530,7 +616,7 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         candidate_record = _candidate_record(status="passed")
         landing_plan_record = _landing_plan_record(candidate_record)
         stack_collapse_record = _stack_collapse_record(status="waiting_for_root_checks")
-        latest_run = _idle_run_record(recorded_at="2026-05-09T02:00:00Z")
+        latest_run = _idle_run_record(recorded_at="2026-05-09T02:00:00Z", mutate=True)
         store = _RunHistoryStore(
             latest_run,
             candidate_records=(candidate_record,),
@@ -848,7 +934,7 @@ class MergeTrainAdmissionTests(unittest.TestCase):
         landing_plan_record = _landing_plan_record(candidate_record)
         stack_collapse_record = _stack_collapse_record(status="waiting_for_root_checks")
         store = _RunHistoryStore(
-            _idle_run_record(recorded_at="2026-05-09T02:10:00Z"),
+            _idle_run_record(recorded_at="2026-05-09T02:10:00Z", mutate=True),
             candidate_records=(candidate_record,),
             landing_plan_records=(landing_plan_record,),
             stack_collapse_plan_records=(stack_collapse_record,),
@@ -1458,41 +1544,32 @@ def _run_record(
     )
 
 
-def _idle_run_record(*, recorded_at: str) -> MergeTrainRunRecord:
-    run_record = _run_record(recorded_at=recorded_at)
-    queue = run_record.dry_run_result.get("queue")
-    idle_queue = (
-        tuple(
-            {
-                **entry,
-                "eligible": False,
-                "ineligible_reasons": ("missing ready-to-merge label",),
-                "labels": (),
-            }
-            for entry in queue
-            if isinstance(entry, dict)
-        )
-        if isinstance(queue, (list, tuple))
-        else ()
+def _idle_run_record(*, recorded_at: str, mutate: bool = False) -> MergeTrainRunRecord:
+    policy = build_test_merge_train_policy()
+    snapshot = MergeTrainDryRunSnapshot(
+        repository="cbusillo/sellyouroutboard",
+        base_branch="main",
+        base_sha="base-main",
+        pull_requests=(_pull_request(42).model_copy(update={"labels": (), "label_actors": {}}),),
     )
-    dry_run_result = {
-        **run_record.dry_run_result,
-        "intended_next_action": "idle",
-        "next_action_detail": "No eligible pull requests are queued.",
-        "queue_order": [],
-        "queue": idle_queue,
-        "selected_pr": None,
-    }
-    return run_record.model_copy(
-        update={
-            "status": "idle",
-            "intended_next_action": "idle",
-            "selected_pr_number": None,
-            "selected_head_sha": "",
-            "selected_mergeable": "",
-            "selected_required_checks_status": "",
-            "dry_run_result": dry_run_result,
-        }
+    noop_client = _NoopClient()
+    return build_merge_train_run_record(
+        recorded_at=recorded_at,
+        trace_id="launchplane_req_idle_admission_test",
+        policy_sha256=policy.policy_sha256,
+        snapshot=snapshot,
+        dry_run_result=build_merge_train_dry_run_result(policy=policy, snapshot=snapshot),
+        worker_step_result=run_merge_train_worker_step(
+            policy=policy,
+            snapshot=snapshot,
+            clients=MergeTrainWorkerClients(
+                label_client=noop_client,
+                branch_client=noop_client,
+                merge_client=_FakeMergeClient(),
+            ),
+        )
+        if mutate
+        else None,
     )
 
 

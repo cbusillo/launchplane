@@ -1749,8 +1749,12 @@ they do not write Level 1 run history. An older Level 1 run can therefore
 appear alongside newer controller activity. Its timestamp and age describe
 that historical evidence, not the last controller pass or a current queue
 observation. Admission continues to use that Level 1 history for its existing
-poll/backoff rules; a newer idle Level 1 run also supersedes older controller
-records before current-policy filtering produces the action hint.
+poll/backoff rules; a newer idle Level 1 mutation run also supersedes older
+controller records before current-policy filtering produces the action hint.
+Diagnostic dry-run evidence never supersedes unfinished controller progress:
+an idle queue observation can coexist with a candidate, landing or collapse
+that still requires action. Its queue summary stays visible alongside the
+controller action hint, which retains the existing policy-binding filters.
 If an imported dry-run record has an unparseable timestamp, its age is null;
 the stored history and existing scheduling decision remain visible.
 

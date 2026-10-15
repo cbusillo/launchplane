@@ -1277,6 +1277,7 @@ def _latest_idle_run_supersedes_controller_records(
 ) -> bool:
     if (
         latest_run is None
+        or latest_run.mode != "mutate"
         or latest_run.status != "idle"
         or latest_run.intended_next_action != "idle"
     ):
