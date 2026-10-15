@@ -157,12 +157,30 @@ def require_drill_use_unprotected(store: PostgresRecordStore, product: str, cont
 
 
 def collect_drill_admission(
-    store: PostgresRecordStore, generation: FreshOdooTestingGeneration, now: float
+    store: PostgresRecordStore,
+    generation: FreshOdooTestingGeneration,
+    now: float,
+    *,
+    history_generation: FreshOdooTestingGeneration | None = None,
+    history_database: str = "",
 ) -> DisposableLaneSafety:
     """Q347 evidence belongs to this drill, never the universal observation API."""
     require_drill_use_unprotected(store, generation.product, generation.context)
+    if (
+        read_current_testing_generation(
+            store, product=generation.product, context=generation.context, instance="testing"
+        )
+        != generation
+    ):
+        raise DrillSkipped("drill_admission_snapshot_changed")
     try:
-        used = read_drill_recent_signins(store, generation, now)
+        used = read_drill_recent_signins(
+            store,
+            generation,
+            now,
+            history_generation=history_generation,
+            history_database=history_database,
+        )
     except Exception as error:
         raise DrillSkipped("successful_login_check_unreadable") from error
     if used:
@@ -211,7 +229,7 @@ def prepare_drill(
     database: str = "",
     prepared_at: str = "",
 ) -> PreparedDrill:
-    """Called under lane/authority locks; provider reads never change the lane."""
+    """Build a read-only candidate; the caller revalidates it under authority locks."""
     require_drill_use_unprotected(store, product, context)
     profile = store.read_product_profile_record(product)
     if profile.driver_id != "odoo" or not profile.is_active:

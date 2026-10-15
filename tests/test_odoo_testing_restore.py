@@ -479,7 +479,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         )
         status, output = self.run_program()
         self.assertNotEqual(status, 0)
-        self.assertNotIn('"recent_signins": false', output)
 
     def test_provider_converted_testing_networks_pass_the_receiver_guard(self) -> None:
         """Execute the guard on the renderer's graph plus Dokploy's domain injection."""

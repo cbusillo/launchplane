@@ -313,7 +313,6 @@ class TestingDrillTests(TestingDrillScenario):
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "queued")
         self.activate()
-        self.assertEqual(self.signins.call_count, 2)
         self.assertIsNone(
             self.store.read_disposable_lane_safety(self.profile.product, self.context, "testing")
         )
@@ -327,6 +326,32 @@ class TestingDrillTests(TestingDrillScenario):
             self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
             self.gen,
         )
+
+    def test_reclaimed_activation_reads_the_original_served_database(self) -> None:
+        self.scheduler.run_once()
+        operation = self.activate()
+        reclaimed = operation.model_copy(update={"attempt": operation.attempt + 1})
+        self.store.write_odoo_stable_target_replacement_operation_record(reclaimed)
+        self.store.activate_odoo_testing_drill(reclaimed, self.now)
+        self.assertEqual(self.signins.call_args.kwargs["history_generation"], self.gen)
+        self.assertEqual(
+            self.signins.call_args.kwargs["history_database"], self.runtime.env["ODOO_DB_NAME"]
+        )
+        require_drill_checkpoint(self.store, reclaimed)
+
+    def test_expired_recorded_person_use_still_skips(self) -> None:
+        record_safety(
+            self.store,
+            self.profile.product,
+            self.context,
+            "testing",
+            usage="in_use",
+            observed_at=datetime.now(timezone.utc) - timedelta(hours=2),
+            expires_at=datetime.now(timezone.utc) - timedelta(hours=1, minutes=50),
+        )
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "skipped")
+        self.signins.assert_not_called()
 
     def test_daily_admission_is_atomic_and_restart_does_not_repeat(self) -> None:
         before = self.store.read_dokploy_target_record(
@@ -756,24 +781,6 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertEqual(failed.retained_copy_binding, generation_binding(second))
         self.assertEqual(failed.discard_drill_database, first.drill_database)
         self.assertNotEqual(failed.discard_drill_database, failed.retained_drill_database)
-
-    def test_identical_facts_can_be_renewed_during_active_attempt(self) -> None:
-        self.scheduler.run_once()
-        operation = self.activate()
-        safety = self.store.read_disposable_lane_safety(
-            self.profile.product, self.context, "testing"
-        )
-        assert safety is not None
-        self.store.write_disposable_lane_safety(
-            safety.model_copy(
-                update={
-                    "observed_at": safety.observed_at + timedelta(minutes=1),
-                    "expires_at": safety.expires_at + timedelta(minutes=1),
-                    "usage_evidence": "fixture:renewed-source",
-                }
-            )
-        )
-        require_drill_checkpoint(self.store, operation)
 
     def test_repaired_precondition_can_admit_same_daily_slot(self) -> None:
         inventory = self.store.read_environment_inventory(

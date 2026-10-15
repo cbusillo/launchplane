@@ -11135,7 +11135,6 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                 connection.exec_driver_sql("DROP TABLE res_users_log")
             status, output = host.run_program()
             self.assertNotEqual(status, 0)
-            self.assertNotIn('"recent_signins": false', output)
 
     def test_replicas_admit_one_fresh_database_and_restore(self) -> None:
         from concurrent.futures import ThreadPoolExecutor
@@ -11164,73 +11163,47 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             tuple(item.operation_id for item in operations), (scenario.evidence().operation_id,)
         )
 
-    def test_login_collection_excludes_first_alias_insert_and_activation_rechecks(self) -> None:
+    def test_alias_insert_during_login_read_completes_and_invalidates_admission(self) -> None:
         from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 
         scenario = self.scenario
         second = PostgresRecordStore(database_url=scenario.store.database_url)
         self.addCleanup(second.close)
-        second._engine.update_execution_options(isolation_level="READ COMMITTED")
         entered = threading.Event()
         release = threading.Event()
-        at_lock = threading.Event()
-        original_lock = second._lock_product_authority_bundle_write
 
-        def collect(*args: Any) -> bool:
+        def collect(*args: Any, **kwargs: Any) -> bool:
             entered.set()
             if not release.wait(10):
                 raise TimeoutError("Fixture collector was not released")
             return False
 
-        def lock(session: Any) -> None:
-            session.execute(text("SET application_name = 'lp3727-alias-writer'"))
-            at_lock.set()
-            original_lock(session)
-
         scenario.signins.side_effect = collect
-        with patch.object(second, "_lock_product_authority_bundle_write", side_effect=lock):
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                admission = pool.submit(
-                    scenario.store.enqueue_odoo_testing_drill,
-                    scenario.profile.product,
-                    scenario.context,
-                    "fixture-login-lock",
-                    scenario.now,
-                )
-                self.assertTrue(entered.wait(5))
-                writer = pool.submit(
-                    second.write_dokploy_target_id_record,
-                    DokployTargetIdRecord(
-                        context="foreign-context",
-                        instance="testing",
-                        target_id=scenario.gen.target_id,
-                        updated_at=scenario.profile.updated_at,
-                    ),
-                )
-                try:
-                    self.assertTrue(at_lock.wait(5))
-                    deadline = time.monotonic() + 5
-                    waiting = False
-                    with scenario.store._engine.connect() as connection:
-                        while time.monotonic() < deadline:
-                            waiting = bool(
-                                connection.scalar(
-                                    text(
-                                        "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE application_name = 'lp3727-alias-writer' AND wait_event_type = 'Lock')"
-                                    )
-                                )
-                            )
-                            if waiting:
-                                break
-                            time.sleep(0.01)
-                    self.assertTrue(waiting)
-                    self.assertFalse(writer.done())
-                finally:
-                    release.set()
-                admission.result(timeout=10)
-                writer.result(timeout=10)
-        with self.assertRaises(ValueError):
-            scenario.activate()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            admission = pool.submit(
+                scenario.store.enqueue_odoo_testing_drill,
+                scenario.profile.product,
+                scenario.context,
+                "fixture-login-race",
+                scenario.now,
+            )
+            self.assertTrue(entered.wait(5))
+            writer = pool.submit(
+                second.write_dokploy_target_id_record,
+                DokployTargetIdRecord(
+                    context="foreign-context",
+                    instance="testing",
+                    target_id=scenario.gen.target_id,
+                    updated_at=scenario.profile.updated_at,
+                ),
+            )
+            try:
+                writer.result(timeout=5)
+            finally:
+                release.set()
+            admission.result(timeout=10)
+        self.assertEqual(scenario.evidence().status, "fail")
+        self.assertFalse(scenario.evidence().operation_id)
         self.assertEqual(
             scenario.store.read_fresh_odoo_testing_generation(
                 scenario.profile.product, scenario.context

@@ -727,9 +727,10 @@ def restore_main():
             if configuration.get("Image") != spec["image_reference"]:
                 raise RuntimeError("Testing artifact identity changed")
             environment = dict(item.split("=", 1) for item in configuration.get("Env", []) if "=" in item)
-            if environment.get("PLATFORM_INSTANCE") != "testing" or environment.get("ODOO_DB_HOST") != "database" or environment.get("ODOO_DB_NAME") != database:
+            allowed_databases = spec.get('usage_database_names',[database]) if spec.get('usage_only') else [database]
+            if environment.get("PLATFORM_INSTANCE") != "testing" or environment.get("ODOO_DB_HOST") != "database" or environment.get("ODOO_DB_NAME") not in allowed_databases:
                 raise RuntimeError("Testing database endpoint is not local")
-            if environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "") != spec["expected_overrides_payload"]:
+            if not spec.get('usage_only') and environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "") != spec["expected_overrides_payload"]:
                 raise RuntimeError("Testing settings changed after execution preflight")
             if environment.get("ODOO_MAX_CRON_THREADS") != "0":
                 raise RuntimeError("Fresh testing must have no cron workers")

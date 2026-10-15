@@ -3,14 +3,10 @@
 from datetime import datetime, timedelta, timezone
 
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
+from control_plane.dokploy import api, source
 from control_plane.dokploy.native_copy_stream import inspect_native_testing_receiver
 from control_plane.launchplane_mutations import control_plane_root
-from control_plane.odoo_runtime_reads import (
-    assert_selection_current,
-    connect_runtime,
-    inspect_runtime_container,
-    select_stable_runtime,
-)
+from control_plane.odoo_runtime_reads import assert_selection_current, select_stable_runtime
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     generation_binding,
@@ -23,48 +19,67 @@ DRILL_RECENT_USE_SECONDS = 24 * 60 * 60
 
 
 def read_drill_recent_signins(
-    store: PostgresRecordStore, generation: FreshOdooTestingGeneration, now: float
+    store: PostgresRecordStore,
+    generation: FreshOdooTestingGeneration,
+    now: float,
+    *,
+    history_generation: FreshOdooTestingGeneration | None = None,
+    history_database: str = "",
 ) -> bool:
     profile = store.read_product_profile_record(generation.product)
     selection = select_stable_runtime(store, profile, "testing")
     if selection.identity.context != generation.context:
         raise ValueError("Testing runtime belongs to another context.")
-    connection = connect_runtime(
-        store=store,
-        selection=selection,
-        control_plane_root=control_plane_root(),
-        database_url=store.database_url,
+    target = store.read_dokploy_target_record(
+        context_name=generation.context, instance_name="testing"
     )
-    if connection.evidence.target_id != generation.target_id:
+    target_id = store.read_dokploy_target_id_record(
+        context_name=generation.context, instance_name="testing"
+    )
+    if target.target_type != "compose" or target_id.target_id != generation.target_id:
         raise ValueError("Testing runtime belongs to another target.")
-    environment = inspect_runtime_container(
-        connection.host,
-        connection.token,
-        connection.server_id,
-        connection.evidence.container_id,
-        connection.app_name,
-        selection.identity,
+    host, token = source.read_dokploy_config(
+        control_plane_root=control_plane_root(), database_url=store.database_url
     )
+    provider = api.fetch_dokploy_target_payload(
+        host=host, token=token, target_type="compose", target_id=target_id.target_id
+    )
+    if str(provider.get("name") or "") != target.target_name:
+        raise ValueError("Testing provider target changed.")
+    environment: dict[str, str] = {}
+    for scope in ("context", "instance"):
+        for record in store.list_runtime_environment_records(context_name=generation.context):
+            if record.scope == scope and record.instance == (
+                "testing" if scope == "instance" else ""
+            ):
+                environment.update({key: str(value) for key, value in record.env.items()})
+    environment.update({key: str(value) for key, value in target.env.items()})
+    database = environment.get("ODOO_DB_NAME", "")
+    history = history_generation or generation
+    history_database = history_database or database
+    # Imported production sign-ins predate completion of this testing copy.
+    completed = datetime.fromisoformat(history.completed_at.replace("Z", "+00:00"))
+    if completed.utcoffset() is None or completed.timestamp() > now:
+        raise ValueError("Testing copy completion has no timezone.")
     frames: list[dict[str, object]] = []
     inspect_native_testing_receiver(
-        host=connection.host,
-        token=connection.token,
-        server_id=connection.server_id,
+        host=host,
+        token=token,
+        server_id=str(provider.get("serverId") or ""),
         spec={
             "generation": generation.model_dump(mode="json"),
-            "compose_project": connection.app_name,
+            "compose_project": str(provider.get("appName") or ""),
             "image_reference": selection.identity.image_reference,
-            "database_name": connection.credentials["ODOO_DB_NAME"],
+            "database_name": history_database,
+            "usage_database_names": [database, history_database],
             "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
-            "expected_overrides_payload": environment.get(
-                "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", ""
-            ),
-            "copy_binding_sha256": generation_binding(generation),
+            "copy_binding_sha256": generation_binding(history),
             "workflow_environment": {},
             "usage_only": True,
-            "usage_since": (
+            "usage_since": max(
+                completed,
                 datetime.fromtimestamp(now, timezone.utc)
-                - timedelta(seconds=DRILL_RECENT_USE_SECONDS)
+                - timedelta(seconds=DRILL_RECENT_USE_SECONDS),
             ).isoformat(),
         },
         receive=frames.append,

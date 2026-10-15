@@ -783,10 +783,12 @@ with `late_completion`; the original deadline failure remains alertable.
 
 Admission requires a completed qualified fresh testing generation. Under Director
 decision Q347, the service reads successful-login history (`res_users_log`) on
-that exact testing database over the preceding 24 hours and the existing staff
+that exact testing database over the preceding 24 hours, starting no earlier
+than completion of the testing copy, and the existing staff
 hold. Every account counts, including staff, Client, portal and administrator
 accounts; no maintained account list or current-use registry is required. The
-read uses a read-only SQL transaction, creates no Odoo login, and returns only a
+read excludes inherited production logins, uses a read-only SQL transaction,
+creates no Odoo login, and returns only a
 boolean. Recent sign-ins, a hold or an unreadable check skip the daily slot with
 a value-free reason on the lane's drill evidence. Missing tables/databases,
 runtime mismatch, provider refusal, incomplete reads and unavailable credentials
@@ -809,7 +811,9 @@ path: read and preserve the current complete profile, change only that testing
 lane's flag, and post the updated profile with its normal idempotency key and
 existing `product_profile.write` authority. No new grant is needed. The service
 collects this drill's current evidence before queueing and again at worker
-activation against the exact lane/configuration/resource snapshot. Production
+activation against the exact lane/configuration/resource snapshot. Provider reads
+run outside shared authority locks; the short locked commit rechecks the snapshot,
+holds, credentials and aliases, and refuses a changed or expired observation. Production
 lanes cannot enable the flag. An unchanged failed prerequisite produces no
 repeated admission; corrected facts/configuration can retry the same daily slot
 before an operation has been queued.
@@ -823,11 +827,14 @@ source/configuration refuses before selection. General collector rows are never
 rebound or renewed. Its accepted snapshot is stored on the active worker attempt;
 an unchanged snapshot
 does not expire in the middle of that continuously leased restore. A reclaimed
-attempt requires fresh admission against the selected database. Every provider
-checkpoint rechecks the generation, admitted use/custody/isolation facts and
+attempt requires fresh admission. It reads login history from the original served database and its committed
+copy witness, including when web is stopped or the new copy is incomplete;
+copied production login rows in the new database cannot stand in for testing use.
+An unavailable original database still skips rather than assuming non-use.
+Every provider checkpoint rechecks the generation, admitted use/custody/isolation facts and
 current hold. Routine renewal of the same facts does not cancel a running copy;
-changed bindings require fresh current proof. A person starting a test session
-or placing a hold therefore protects the lane even after queueing. Protect a
+changed bindings require fresh current proof. A sign-in before activation
+or a staff hold therefore protects the lane even after queueing. Protect a
 lane through the existing staff-testing hold before starting a session. Unknown
 or expired observations cannot substitute for that hold.
 
