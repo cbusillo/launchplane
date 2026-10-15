@@ -6,14 +6,13 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.ordinary_agent import OrdinaryAgentTarget
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationEvent,
     OrdinaryAgentDeliveryActivationRecord,
-    OrdinaryAgentDeliveryActivationRequest,
     OrdinaryAgentDeliveryActivationScope,
     OrdinaryAgentDeliveryActivationSetupRequest,
     OrdinaryAgentDeliveryInventoryReference,
@@ -127,7 +126,7 @@ class OrdinaryAgentDeliveryActivationContractTests(unittest.TestCase):
             )
         )
 
-    def test_request_union_rejects_mixed_or_caller_asserted_setup_fields(self) -> None:
+    def test_historical_setup_rejects_mixed_or_caller_asserted_fields(self) -> None:
         payload = {
             "action": "setup",
             "policy_operation_id": "privileged-operation-policy-package",
@@ -135,9 +134,7 @@ class OrdinaryAgentDeliveryActivationContractTests(unittest.TestCase):
             "activation_expires_at": "2026-09-11T21:00:00Z",
             "reason": "Prepare one qualification-only activation.",
         }
-        request: OrdinaryAgentDeliveryActivationRequest = TypeAdapter(
-            OrdinaryAgentDeliveryActivationRequest
-        ).validate_python(payload)
+        request = OrdinaryAgentDeliveryActivationSetupRequest.model_validate(payload)
 
         self.assertIsInstance(request, OrdinaryAgentDeliveryActivationSetupRequest)
         for forbidden_field, value in (
@@ -148,7 +145,7 @@ class OrdinaryAgentDeliveryActivationContractTests(unittest.TestCase):
             ("expected_revision", 1),
         ):
             with self.subTest(field=forbidden_field), self.assertRaises(ValidationError):
-                TypeAdapter(OrdinaryAgentDeliveryActivationRequest).validate_python(
+                OrdinaryAgentDeliveryActivationSetupRequest.model_validate(
                     {**payload, forbidden_field: value}
                 )
 

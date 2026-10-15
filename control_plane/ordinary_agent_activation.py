@@ -17,7 +17,6 @@ from control_plane.contracts.authz_policy_record import (
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRecord,
     OrdinaryAgentDeliveryActivationEvent,
-    OrdinaryAgentDeliveryActivationReference,
     OrdinaryAgentDeliveryActivationScope,
     OrdinaryAgentDeliveryInventoryReference,
     OrdinaryAgentDeliveryPolicyPackageReference,
@@ -63,18 +62,6 @@ from control_plane.storage.schema_invariants import RUNTIME_COMPATIBLE_ALEMBIC_R
 
 class OrdinaryAgentDeliveryActivationPlanningError(ValueError):
     """Raised when referenced server-owned setup data does not resolve exactly."""
-
-
-def _same_activation_scope_identity(
-    left: OrdinaryAgentDeliveryActivationScope,
-    right: OrdinaryAgentDeliveryActivationScope,
-) -> bool:
-    return (
-        left.target.repository_id == right.target.repository_id
-        and left.target.base_branch == right.target.base_branch
-        and left.managed_set_id == right.managed_set_id
-        and left.managed_rule_id == right.managed_rule_id
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,15 +436,6 @@ def resolve_authz_policy_schema_v3_enable_evidence(
     )
 
 
-def ordinary_agent_delivery_activation_plan_sha256(payload: dict[str, object]) -> str:
-    return canonical_json_sha256(
-        {
-            "domain": "ordinary-agent-delivery-activation-plan-v1",
-            **payload,
-        }
-    )
-
-
 def _model_schema_version(model_type: type[BaseModel]) -> int:
     version = model_type.model_fields["schema_version"].default
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
@@ -643,70 +621,4 @@ def _activation_records(record_store: object) -> tuple[OrdinaryAgentDeliveryActi
         if isinstance(record, OrdinaryAgentDeliveryActivationRecord)
         else OrdinaryAgentDeliveryActivationRecord.model_validate(record)
         for record in records
-    )
-
-
-def _scope_predecessor(
-    record_store: object,
-    *,
-    scope: OrdinaryAgentDeliveryActivationScope,
-    requested: OrdinaryAgentDeliveryActivationReference | None,
-    observed_at: datetime,
-) -> OrdinaryAgentDeliveryActivationReference | None:
-    matching = tuple(
-        record
-        for record in _activation_records(record_store)
-        if _same_activation_scope_identity(record.scope, scope)
-    )
-    if not matching:
-        if requested is not None:
-            raise OrdinaryAgentDeliveryActivationPlanningError(
-                "Activation setup supplied a predecessor for an empty scope."
-            )
-        return None
-    newest_time = max(datetime.fromisoformat(record.installed_at) for record in matching)
-    newest = tuple(
-        record for record in matching if datetime.fromisoformat(record.installed_at) == newest_time
-    )
-    if len(newest) != 1:
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation history does not have one newest intent."
-        )
-    record = newest[0]
-    structurally_current = not record.revoked_at and not record.superseded_by_activation_id
-    if structurally_current and observed_at < datetime.fromisoformat(record.activation_expires_at):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation scope already has an unexpired guarded intent."
-        )
-    expected = OrdinaryAgentDeliveryActivationReference(
-        activation_id=record.activation_id,
-        revision=record.revision,
-        activation_sha256=record.activation_sha256,
-    )
-    if requested != expected:
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation setup requires the exact latest predecessor reference."
-        )
-    return expected
-
-
-def _read_activation(
-    record_store: object,
-    activation_id: str,
-) -> OrdinaryAgentDeliveryActivationRecord:
-    reader = getattr(record_store, "read_ordinary_agent_delivery_activation_record", None)
-    if not callable(reader):
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation revocation requires activation storage."
-        )
-    try:
-        record = reader(activation_id)
-    except FileNotFoundError as error:
-        raise OrdinaryAgentDeliveryActivationPlanningError(
-            "Activation revocation target was not found."
-        ) from error
-    return (
-        record
-        if isinstance(record, OrdinaryAgentDeliveryActivationRecord)
-        else OrdinaryAgentDeliveryActivationRecord.model_validate(record)
     )
