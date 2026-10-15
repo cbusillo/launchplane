@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
@@ -353,7 +353,7 @@ test("An open review page follows the release it started", async ({ page }, test
   let reads = 0;
   let failReads = false;
   const writes: string[] = [];
-  await page.clock.install();
+
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", route => {
     reads++;
@@ -411,7 +411,7 @@ test("Blocked release progress keeps completed steps and resumes after a hold is
     ],
   };
   const writes: string[] = [];
-  await page.clock.install();
+
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", route => route.fulfill({ json: { ...response, release_run: run } }));
   await page.route("**/v1/release-review/decisions", route => { writes.push(route.request().method()); return route.abort(); });
@@ -455,12 +455,15 @@ test("A stopped release stops refreshing and a newer decision discards an older 
   let reads = 0;
   let holdRead: Promise<void> | undefined;
   let releaseHeldRead: (() => void) | undefined;
-  await page.clock.install();
+  let heldReadSettled = false;
+
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", async route => {
     reads++;
-    if (holdRead) await holdRead;
+    const held = holdRead;
+    if (held) await held;
     await route.fulfill({ json: current }).catch(() => undefined);
+    if (held) heldReadSettled = true;
   });
   await page.route("**/v1/release-review/decisions", route => route.fulfill({ json: { ...changesRequested, release_run: run("stopped", "fail") } }));
   await page.goto("/ui/owner-review?product=example-site");
@@ -470,18 +473,19 @@ test("A stopped release stops refreshing and a newer decision discards an older 
   holdRead = new Promise<void>(resolve => { releaseHeldRead = resolve; });
   const readsBeforeHold = reads;
   await page.clock.runFor(RELEASE_PROGRESS_REFRESH_MS);
-  await expect.poll(() => reads).toBe(readsBeforeHold + 1);
+  await waitForState(() => reads).toBe(readsBeforeHold + 1);
   await page.getByRole("textbox").first().fill("Keep the old label.");
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(progress.getByRole("heading")).toHaveText("Release progress: Stopped");
   releaseHeldRead?.();
   holdRead = undefined;
-  await page.clock.runFor(1000);
+  await waitForState(() => heldReadSettled).toBe(true);
   await expect(progress.getByRole("heading")).toHaveText("Release progress: Stopped");
   await expect(progress).toContainText("The live site did not answer its checks.");
 
   const stoppedReads = reads;
   await page.clock.runFor(3 * RELEASE_PROGRESS_REFRESH_MS);
+  await expect(progress.getByRole("heading")).toHaveText("Release progress: Stopped");
   expect(reads).toBe(stoppedReads);
 });
 
@@ -612,7 +616,7 @@ test("Client sees website settings before accepting the bound release", { tag: "
   await expect(page.getByRole("button", { name: "Accept release", exact: true })).toBeEnabled();
   await page.screenshot({ path: testInfo.outputPath("website-settings-before-accept.png"), fullPage: true });
   await page.getByRole("button", { name: "Accept release", exact: true }).click();
-  await expect.poll(() => submittedDigest).toBe(review.review.checklist_digest);
+  await waitForState(() => submittedDigest).toBe(review.review.checklist_digest);
   review.review.checklist!.website_settings.settings = {
     ...review.review.checklist!.website_settings.settings, operation: "disable_collection",
     public_indexing_enabled: false, google_analytics_key: "",

@@ -1,4 +1,4 @@
-import { chromium, expect, test } from "@playwright/test";
+import { chromium, expect, freezeClock, test } from "./state";
 
 const reviewPath = "/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308";
 
@@ -40,6 +40,7 @@ test("a reopened browser profile remembers both explicit choices", async ({ base
   for (const theme of ["light", "dark"] as const) {
     const choosing = await chromium.launchPersistentContext(profile, { baseURL });
     try {
+      await freezeClock(choosing);
       const page = await choosing.newPage();
       await page.goto(reviewPath);
       await page.getByRole("button", { name: `Use ${theme} theme`, exact: true }).click();
@@ -48,6 +49,7 @@ test("a reopened browser profile remembers both explicit choices", async ({ base
     }
     const returning = await chromium.launchPersistentContext(profile, { baseURL });
     try {
+      await freezeClock(returning);
       const page = await returning.newPage();
       await page.goto("/ui/products?fixture=products");
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);

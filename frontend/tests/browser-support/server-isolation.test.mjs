@@ -30,21 +30,20 @@ export default {
   outputDir: ${JSON.stringify(join(root, "results"))},
   workers: 1,
   projects: [original.projects[0]],
-  webServer: { ...original.webServer, cwd: ${JSON.stringify(frontendRoot)}, timeout: 15_000 },
+  webServer: { ...original.webServer, cwd: ${JSON.stringify(frontendRoot)} },
 };
 `);
       await writeFile(join(root, "isolation.spec.ts"), `
-import { test, expect } from ${JSON.stringify(join(frontendRoot, "node_modules/@playwright/test/index.mjs"))};
+import { test, expect, waitForState } from ${JSON.stringify(join(frontendRoot, "tests/browser/state.ts"))};
 import { writeFile, access } from "node:fs/promises";
 test("serves this run while its peer is alive", async ({ page, baseURL }) => {
-  test.setTimeout(45_000);
   await page.goto("/ui/?fixture=products");
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
   await writeFile(${JSON.stringify(receipt)}, JSON.stringify({ baseURL }));
-  await expect.poll(async () => {
+  await waitForState(async () => {
     try { await access(${JSON.stringify(receipts[1 - index])}); return true; }
     catch { return false; }
-  }, { timeout: 30_000 }).toBe(true);
+  }).toBe(true);
 });
 `);
       return new Promise((resolveRun, rejectRun) => {

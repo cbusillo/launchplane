@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 for (const outcome of ["rebound", "denied", "lost-response", "read-only"]) {
   test(`backup credential references handle ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
@@ -62,7 +62,7 @@ for (const outcome of ["rebound", "denied", "lost-response", "read-only"]) {
       await page.reload();
       await expect(credential).toBeDisabled();
       await panel.getByRole("button", { name: "Retry original credential rebinding" }).click();
-      await expect.poll(() => requests.filter(item => item.body.mode === "apply").length).toBe(2);
+      await waitForState(() => requests.filter(item => item.body.mode === "apply").length).toBe(2);
       const attempts = requests.filter(item => item.body.mode === "apply"); expect(attempts[0]).toEqual(attempts[1]);
     }
     await expect(panel.getByRole("status", { name: "Backup credential result" })).toBeVisible();
