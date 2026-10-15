@@ -112,17 +112,29 @@ uv run python scripts/stage-testing-separation.py dry-run \
 
 Review the runtime `dry-run` receipt and repeat with `apply --reviewed-dry-run`
 and a stable `--idempotency-key`. A refusal stays refused; the client never
-switches identity, uses a workflow, lifts a hold or resets a fence. Keep the
+switches identity, uses a workflow or resets a fence. Staging apply never lifts
+a hold. Keep the
 original request, key and evidence after an uncertain response. The env
 persistence readback does not establish that new volumes exist or testing is
 healthy. Do not roll testing back to shared-production settings. Retain the
 staging hold and old containers until the separately authorized recovery/deploy
-gates are met. An authorized admin lifting a staging interlock uses the existing
-reviewed testing-hold API with `hold=false` and `purpose=isolation_staging`.
+gates are met. The same repo client supports `hold-read` without review-file
+arguments, and `lift-dry-run` followed by reviewed `lift-apply` using a separate
+private review file. Only an already authorized admin can apply that explicit
+staging lift; the Director agent's apply denial remains enforced. The client
+keeps the same configured identity and offers no fallback.
 That lift, including a repeated/no-op lift, requests no reconciliation or deploy;
 ordinary staff holds retain their existing reconcile-on-lift behavior. A lift
 without the staging purpose refuses while that interlock is present. No
 production rollback or volume deletion is part of this procedure.
+
+The maintained catalog hold commands do not yet accept staging purpose; their
+projection/option update is tracked in
+[codex-skills#1881](https://github.com/cbusillo/codex-skills/issues/1881).
+Use the repo client's tested read/plan/apply modes with the installed transport;
+do not substitute hand-built authenticated calls or advertise catalog support
+before that companion lands. Existing staff and legacy hold commands retain
+their original shape and behavior.
 
 The added hold purpose is read-compatible with existing records in this image.
 Older images cannot read purpose-tagged holds; after using one, retain this

@@ -227,7 +227,7 @@ def _desired_hold(
     if (
         existing is not None
         and request.purpose == "isolation_staging"
-        and (existing.purpose != "isolation_staging" or existing.recorded_by != actor)
+        and existing.recorded_by != actor
     ):
         raise TestingHoldRefusal(
             "protected_hold",

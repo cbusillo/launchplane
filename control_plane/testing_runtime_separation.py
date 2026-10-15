@@ -27,6 +27,10 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 
 
+class TestingSeparationRefused(ValueError):
+    """A staging attempt was rejected before any provider effect."""
+
+
 def separation_binding(
     store: PostgresRecordStore, request: runtime.LiveTargetRuntimeApplyEnvelope, actor: str
 ) -> tuple[str, str]:
@@ -223,7 +227,11 @@ class TestingRuntimeSeparation:
             )
         except Exception as error:
             if not effect_started:
-                raise ProviderMutationRejectedError(error) from error
+                raise ProviderMutationRejectedError(
+                    TestingSeparationRefused(
+                        "Testing separation was rejected before any provider effect."
+                    )
+                ) from error
             raise ProviderMutationUnknownError(
                 "Testing environment staging outcome is unknown."
             ) from error

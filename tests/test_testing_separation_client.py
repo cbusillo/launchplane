@@ -22,7 +22,7 @@ class TestingSeparationClientTests(unittest.TestCase):
     def test_pre_effect_conflict_stays_a_refusal(self) -> None:
         self._exercise_apply("testing_separation_stale", unknown=False)
 
-    def _exercise_apply(self, code: str, *, unknown: bool) -> None:
+    def _exercise_apply(self, code: str, *, unknown: bool, status_code: int = 409) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
         )
@@ -33,7 +33,7 @@ class TestingSeparationClientTests(unittest.TestCase):
             evidence = root / "review.json"
             refused = HTTPError(
                 "https://service.invalid",
-                409,
+                status_code,
                 "Conflict",
                 Message(),
                 io.BytesIO(json.dumps({"error": {"code": code}}).encode()),
@@ -51,7 +51,14 @@ class TestingSeparationClientTests(unittest.TestCase):
                     refused,
                 ]
             )
-            emit = Mock()
+            reported = []
+
+            def emit_error(**kwargs: object) -> None:
+                error = kwargs["exc"]
+                assert isinstance(error, HTTPError)
+                reported.append(json.loads(error.read())["error"]["code"])
+
+            emit = Mock(side_effect=emit_error)
             transport = {
                 "resolve_settings": lambda args: {
                     "service_url": "https://service.invalid",
@@ -109,6 +116,136 @@ class TestingSeparationClientTests(unittest.TestCase):
                 emit.assert_not_called()
             else:
                 emit.assert_called_once()
-                self.assertEqual(
-                    json.loads(emit.call_args.kwargs["exc"].read())["error"]["code"], code
-                )
+                self.assertEqual(reported, [code])
+
+    def test_staging_hold_read_uses_the_supported_transport_and_keeps_evidence(self) -> None:
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / "launchplane-write-action.py"
+            helper.touch()
+            evidence = root / "review.json"
+            evidence.write_text("existing evidence")
+            read = Mock(
+                return_value={
+                    "trace_id": "fixture-trace",
+                    "private_debug": "private-fixture",
+                    "result": {
+                        "status": "ok",
+                        "product": "example",
+                        "context": "example",
+                        "instance": "testing",
+                        "record_sha256": "a" * 64,
+                        "hold": {"purpose": "isolation_staging", "reason": "private-fixture"},
+                    },
+                }
+            )
+            write = Mock()
+            transport = {
+                "resolve_settings": lambda args: {
+                    "service_url": "https://service.invalid",
+                    "token": "fixture-token",
+                },
+                "validate_service_url": lambda value: None,
+                "public_trace_id": lambda value: value,
+                "request_launchplane_read": read,
+                "request_launchplane": write,
+            }
+            output = io.StringIO()
+            args = [
+                "client",
+                "hold-read",
+                "--operator-helper",
+                str(helper),
+                "--product",
+                "example",
+                "--context",
+                "example",
+            ]
+            with (
+                patch("runpy.run_path", return_value=transport),
+                patch("sys.argv", args),
+                redirect_stdout(output),
+            ):
+                self.assertEqual(client["main"](), 0)
+            self.assertEqual(json.loads(output.getvalue())["purpose"], "isolation_staging")
+            self.assertNotIn("private-fixture", output.getvalue())
+            self.assertEqual(evidence.read_text(), "existing evidence")
+            read.assert_called_once()
+            write.assert_not_called()
+
+    def test_reviewed_staging_lift_sends_its_purpose_without_deployment(self) -> None:
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
+        )
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / "launchplane-write-action.py"
+            helper.touch()
+            evidence = root / "lift.json"
+            call = Mock(
+                side_effect=[
+                    {
+                        "status": "accepted",
+                        "trace_id": "fixture-trace",
+                        "result": {"plan_sha256": "a" * 64, "reconcile_requested": False},
+                    },
+                    {
+                        "status": "accepted",
+                        "trace_id": "fixture-trace",
+                        "result": {"read_back_matches": True, "reconcile_requested": False},
+                    },
+                ]
+            )
+            transport = {
+                "resolve_settings": lambda args: {
+                    "service_url": "https://service.invalid",
+                    "token": "fixture-token",
+                },
+                "validate_service_url": lambda value: None,
+                "public_trace_id": lambda value: value,
+                "request_launchplane": call,
+            }
+            common = [
+                "--operator-helper",
+                str(helper),
+                "--product",
+                "example",
+                "--context",
+                "example",
+                "--reason",
+                "Qualified interlock release.",
+                "--evidence-file",
+                str(evidence),
+            ]
+            with (
+                patch("runpy.run_path", return_value=transport),
+                patch("sys.argv", ["client", "lift-dry-run", *common]),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(client["main"](), 0)
+            with (
+                patch("runpy.run_path", return_value=transport),
+                patch(
+                    "sys.argv",
+                    [
+                        "client",
+                        "lift-apply",
+                        *common,
+                        "--reviewed-dry-run",
+                        "--idempotency-key",
+                        "original-lift",
+                    ],
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(client["main"](), 0)
+            sent = call.call_args.kwargs
+            self.assertFalse(sent["body"]["hold"])
+            self.assertEqual(sent["body"]["purpose"], "isolation_staging")
+            self.assertEqual(sent["idempotency_key"], "original-lift")
+
+    def test_server_failure_after_submission_preserves_the_original_key(self) -> None:
+        self._exercise_apply("completion_failed", unknown=True, status_code=503)

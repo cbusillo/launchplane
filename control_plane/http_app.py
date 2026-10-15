@@ -20747,6 +20747,7 @@ def create_launchplane_fastapi_app(
         if live_target_runtime_request.separation_only:
             from control_plane.testing_runtime_separation import (
                 TestingRuntimeSeparation,
+                TestingSeparationRefused,
                 separation_binding,
             )
 
@@ -20845,13 +20846,7 @@ def create_launchplane_fastapi_app(
                         in_progress_message="Testing separation is in progress.",
                         reconcile_message="Separation outcome is unknown; retain the original key and fence.",
                     )
-                except (
-                    ValueError,
-                    FileNotFoundError,
-                    click.ClickException,
-                    SQLAlchemyError,
-                    control_plane_live_target_runtime.LiveTargetRuntimeError,
-                ) as error:
+                except TestingSeparationRefused as error:
                     raise _launchplane_http_error(
                         status_code=409,
                         trace_id=trace_id,

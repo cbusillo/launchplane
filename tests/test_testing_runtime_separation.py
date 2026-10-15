@@ -447,9 +447,15 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 
         effects = []
+        reads = []
 
         def write_and_drift(**kwargs: object) -> dict[str, object]:
-            self.assertTrue(kwargs["apply_changes"])
+            if not kwargs["apply_changes"]:
+                reads.append("readback")
+                return {
+                    "runtime_environment": {"changed_keys": []},
+                    "deploy": {"requested": False, "triggered": False},
+                }
             callback = kwargs["before_provider_mutation"]
             assert callable(callback)
             callback()
@@ -481,6 +487,7 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
                     response.json()["error"]["code"], "mutation_reconciliation_required"
                 )
         self.assertEqual(effects, ["env-only"])
+        self.assertEqual(reads, [])
         self.assertEqual(len(self.store.list_held_provider_target_reservations()), 1)
 
     async def test_last_key_safety_checkpoint_refuses_before_write(self) -> None:
@@ -509,3 +516,37 @@ class TestingRuntimeSeparationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(effects, [])
         self.assertEqual(self.store.list_held_provider_target_reservations(), ())
+
+    async def test_post_write_database_failure_is_not_misreported_as_a_safe_refusal(self) -> None:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        effects = []
+
+        def write(**kwargs: object) -> dict[str, object]:
+            callback = kwargs["before_provider_mutation"]
+            assert callable(callback)
+            callback()
+            effects.append("env-only")
+            return {"status": "ok"}
+
+        with (
+            patch(
+                "control_plane.live_target_runtime.apply_live_target_runtime_environment",
+                side_effect=write,
+            ),
+            patch.object(
+                self.store,
+                "complete_mutation_reservation",
+                side_effect=SQLAlchemyError("database completion lost"),
+            ),
+        ):
+            with self.assertRaises(SQLAlchemyError):
+                await self.stage()
+        self.assertEqual(effects, ["env-only"])
+        self.assertTrue(self.store.list_held_provider_target_reservations())
+        retry = await self.stage()
+        self.assertEqual(retry.status_code, 409, retry.text)
+        self.assertIn(
+            retry.json()["error"]["code"],
+            {"mutation_in_progress", "mutation_reconciliation_required"},
+        )

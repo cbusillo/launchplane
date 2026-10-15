@@ -11,31 +11,55 @@ import sys
 import urllib.error
 
 from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
-from control_plane.testing_lane_hold import TESTING_HOLD_APPLY_ROUTE, TestingHoldApplyRequest
+from control_plane.testing_lane_hold import (
+    TESTING_HOLD_APPLY_ROUTE,
+    TESTING_HOLD_ROUTE,
+    TestingHoldApplyRequest,
+    TestingHoldReadResult,
+)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("hold-dry-run", "hold-apply", "dry-run", "apply"))
+    parser.add_argument(
+        "mode",
+        choices=(
+            "hold-read",
+            "hold-dry-run",
+            "hold-apply",
+            "lift-dry-run",
+            "lift-apply",
+            "dry-run",
+            "apply",
+        ),
+    )
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--product", required=True)
     parser.add_argument("--context", required=True)
-    parser.add_argument("--reason", required=True)
-    parser.add_argument("--evidence-file", type=Path, required=True)
+    parser.add_argument("--reason", default="")
+    parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--idempotency-key", default="")
     parser.add_argument("--config")
     parser.add_argument("--env-config")
     parser.add_argument("--url")
     args = parser.parse_args()
-    applying = args.mode in {"hold-apply", "apply"}
-    holding = args.mode.startswith("hold-")
+    applying = args.mode in {"hold-apply", "lift-apply", "apply"}
+    holding = args.mode.startswith(("hold-", "lift-"))
+    lifting = args.mode.startswith("lift-")
     if applying and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
         parser.error("Apply requires saved review evidence and its stable idempotency key.")
-    evidence = args.evidence_file.expanduser().resolve()
+    reading = args.mode == "hold-read"
+    if not reading and (not args.reason.strip() or args.evidence_file is None):
+        parser.error("Planning and apply require a reason and private review evidence file.")
+    evidence = args.evidence_file.expanduser().resolve() if args.evidence_file else None
     if (
-        evidence.is_relative_to(Path(__file__).resolve().parents[1])
-        or args.evidence_file.is_symlink()
+        not reading
+        and evidence is not None
+        and (
+            evidence.is_relative_to(Path(__file__).resolve().parents[1])
+            or args.evidence_file.is_symlink()
+        )
     ):
         parser.error("Keep private review evidence outside the checkout.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
@@ -52,9 +76,9 @@ def main() -> int:
             context=args.context,
             instance="testing",
             mode="dry-run",
-            hold=True,
+            hold=not lifting,
             purpose="isolation_staging",
-            reason=args.reason,
+            reason=args.reason or "Inspect testing interlock.",
         )
         if holding
         else LiveTargetRuntimeApplyEnvelope(
@@ -69,6 +93,27 @@ def main() -> int:
     path = TESTING_HOLD_APPLY_ROUTE if holding else "/v1/live-target-runtime/apply"
     submitted = False
     try:
+        if args.mode == "hold-read":
+            response = transport["request_launchplane_read"](
+                service_url=settings["service_url"],
+                path=TESTING_HOLD_ROUTE,
+                settings=settings,
+                query={"product": args.product, "context": args.context, "instance": "testing"},
+                timeout=30,
+            )
+            held = TestingHoldReadResult.model_validate(response["result"])
+            print(
+                json.dumps(
+                    {
+                        "status": "verified",
+                        "held": held.hold is not None,
+                        "purpose": held.hold.purpose if held.hold else None,
+                        "trace_id": transport["public_trace_id"](response["trace_id"]),
+                    }
+                )
+            )
+            return 0
+        assert evidence is not None
         if applying:
             saved = json.loads(evidence.read_text())
             if saved["request"] != body or saved["path"] != path:
@@ -96,8 +141,11 @@ def main() -> int:
         if response["status"] != "accepted":
             raise ValueError("Operation was not accepted.")
         result = response["result"]
-        if holding and applying and not result["read_back_matches"]:
-            raise ValueError("Staging interlock readback did not verify.")
+        if holding and (
+            result.get("reconcile_requested") is not False
+            or (applying and not result["read_back_matches"])
+        ):
+            raise ValueError("Staging interlock readback or no-deploy result did not verify.")
         if (
             not holding
             and applying
@@ -127,22 +175,23 @@ def main() -> int:
         return 0
     except urllib.error.HTTPError as error:
         raw_error = error.read()
+        error.close()
         try:
             code = json.loads(raw_error).get("error", {}).get("code", "")
         except (ValueError, AttributeError):
             code = ""
-        error = urllib.error.HTTPError(
+        with urllib.error.HTTPError(
             error.url, error.code, error.reason, error.headers, io.BytesIO(raw_error)
-        )
-        if submitted and (
-            error.code >= 500
-            or code in {"mutation_reconciliation_required", "mutation_in_progress"}
-        ):
-            print(json.dumps({"status": "outcome_unknown", "retain_original_key": True}))
-        else:
-            transport["emit_http_error_payload"](
-                operation="testing-separation", request={"mode": args.mode}, exc=error
-            )
+        ) as error:
+            if submitted and (
+                error.code >= 500
+                or code in {"mutation_reconciliation_required", "mutation_in_progress"}
+            ):
+                print(json.dumps({"status": "outcome_unknown", "retain_original_key": True}))
+            else:
+                transport["emit_http_error_payload"](
+                    operation="testing-separation", request={"mode": args.mode}, exc=error
+                )
     except (
         KeyError,
         TypeError,
