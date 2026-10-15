@@ -4783,6 +4783,9 @@ class FastApiOdooTargetReplacementApplyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.status_code, 409)
             self.assertEqual(response.json()["error"]["code"], "promotion_required")
             self.assertEqual(store.list_odoo_stable_target_replacement_operation_records(), ())
+            incidents = store.list_public_ingress_incident_records(status="open")
+            self.assertEqual(len(incidents), 1)
+            self.assertIn(response.json()["trace_id"], incidents[0].summary)
 
     async def test_odoo_target_replacement_apply_never_takes_a_reconcile_grant_from_a_request(
         self,

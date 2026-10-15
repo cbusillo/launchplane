@@ -1105,6 +1105,9 @@ def _monitoring_reconciliation_observations(
                 status="open",
             )
             for incident in open_incidents:
+                # Delivery has its own recovery evidence; HTTP target retirement cannot resolve it.
+                if incident.check_name.startswith("production-delivery-"):
+                    continue
                 target_key = _incident_target_key(incident)
                 monitored = monitored_check_identity(incident.check_name)
                 if monitored is not None:
@@ -3845,12 +3848,17 @@ def _deliver_discord_notification(
             error_message=f"Discord webhook URL is not public: {public_url_error}",
         )
     color = 0x2E7D32 if event == "resolved" else 0xC62828
+    title = (
+        "Production delivery"
+        if incident.check_name.startswith("production-delivery-")
+        else "Public ingress"
+    )
     discord_sender(
         webhook_url,
         {
             "embeds": [
                 {
-                    "title": f"Public ingress {event}: {incident.product}/{incident.instance}",
+                    "title": f"{title} {event}: {incident.product}/{incident.instance}",
                     "description": notification_body
                     or public_ingress_incident_notification_body(
                         event=event, incident=incident, observation=observation
@@ -3870,8 +3878,13 @@ def public_ingress_incident_notification_body(
     observation: PublicIngressObservationRecord,
     marker: str = "",
 ) -> str:
+    subject = (
+        "production delivery"
+        if incident.check_name.startswith("production-delivery-")
+        else "public ingress"
+    )
     lines = [
-        f"Launchplane public ingress incident {event}: {incident.product}/{incident.instance}",
+        f"Launchplane {subject} incident {event}: {incident.product}/{incident.instance}",
         "",
         f"- status: {incident.status}",
         f"- incident_id: {incident.incident_id}",
