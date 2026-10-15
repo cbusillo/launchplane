@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./state";
 import type { ProductPreviewSummary } from "../../src/generated/openapi.ts";
 
 const cases: Array<{ name: string; enabled: boolean; count: number;

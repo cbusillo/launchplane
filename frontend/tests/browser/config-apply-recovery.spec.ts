@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { waitForState, expect, test } from "./state";
 
 for (const form of ["runtime-settings", "managed-secrets"] as const) {
   for (const storageFailure of [false, true]) {
@@ -59,7 +59,7 @@ for (const form of ["runtime-settings", "managed-secrets"] as const) {
       };
     });
     await page.getByRole("button", { name: "Run dry-run" }).click();
-    await expect.poll(() => plans.length).toBe(2);
+    await waitForState(() => plans.length).toBe(2);
     if (form === "managed-secrets") await valueInput.fill("inert-secret");
     const confirmation = page.getByRole("region", { name: "Apply confirmation" });
     await confirmation.getByRole("checkbox").check();
@@ -93,7 +93,7 @@ for (const form of ["runtime-settings", "managed-secrets"] as const) {
     await expect(page.getByRole("button", { name: "Run dry-run" })).toBeDisabled();
     await page.screenshot({ path: testInfo.outputPath(`${form}-original-reentry.png`) });
     await recovery.getByRole("button", { name: "Retry original Apply" }).click();
-    await expect.poll(() => applies.length).toBe(2);
+    await waitForState(() => applies.length).toBe(2);
     expect(applies[1]).toEqual(applies[0]);
     await expect(page.getByLabel("Change reason")).toBeEnabled();
     await expect(page.getByLabel("Change reason")).toHaveValue("");
