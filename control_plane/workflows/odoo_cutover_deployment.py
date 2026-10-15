@@ -94,17 +94,15 @@ def execute_odoo_cutover_deployment(
     )
     store = DeploymentCutoverStore(record_store, deployment)
 
-    def before_step(step: str) -> None:
-        checkpoint(step)
-        if step == "planned_maintenance":
-            record_website_application(record_store, plan, plan.website_settings, verified=False)
-
     record = execute_odoo_cutover(
         plan,
         store,
         provider,
         record_id=record_id,
-        checkpoint=before_step,
+        checkpoint=checkpoint,
+        settings_checkpoint=lambda: record_website_application(
+            record_store, plan, plan.website_settings, verified=False
+        ),
     )
     if record.step != "complete" or record.readiness is None or record.route is None:
         raise ValueError("cutover does not have verified completed traffic/writer evidence")

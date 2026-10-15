@@ -138,6 +138,7 @@ def execute_odoo_cutover(
     record_id: str,
     clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     checkpoint: Callable[[str], None] = lambda _step: None,
+    settings_checkpoint: Callable[[], None] = lambda: None,
 ) -> OdooCutoverRecord:
     """The caller supplies existing accepted-release/worker and backup authority.
 
@@ -255,6 +256,7 @@ def execute_odoo_cutover(
                         update={"website_settings_attempted": True}
                     )
                     store.save(record)
+                    settings_checkpoint()
                 receipt = provider.maintenance(plan)
                 if (
                     receipt.release_id != plan.release_id
@@ -332,6 +334,7 @@ def rollback_compatible_cutover(
 ) -> OdooCutoverRecord:
     record = OdooCutoverRecord.model_validate(store.load(record_id).model_dump())
     plan = record.plan
+    rollback_pause_id = record_id + "-rollback"
     if plan.compatibility.classification != "compatible":
         raise ValueError("database-changing rollback requires an authorized coherent tuple restore")
     with provider.exclusive(plan):
@@ -370,23 +373,26 @@ def rollback_compatible_cutover(
             pause = record.rollback_pause
             if pause is None:
                 pause = PublicPauseRecord(
-                    pause_id=record_id,
+                    pause_id=rollback_pause_id,
                     binding=plan.old.binding,
                     content_digest=record.public_site.content_digest,
                     began_at=clock(),
                 )
                 pause_store.save(pause)
             if pause.state == "fencing":
-                if provider.publish(record.public_site, record_id) != pause.content_digest:
+                if provider.publish(record.public_site, rollback_pause_id) != pause.content_digest:
                     raise ValueError("rollback prepared serving publication was not read back")
                 PreparedPublicPause(record.public_site, pause_store, provider, clock=clock).drain(
-                    record_id
+                    rollback_pause_id
                 )
             if record.rollback_website_settings is None:
                 # A crash before the durable receipt reuses the idempotent native
                 # operation under prepared serving; a saved receipt avoids
                 # changing the DB again after an uncertain successful switch.
-                if provider.observed_public_copy(record_id) != record.public_site.content_digest:
+                if (
+                    provider.observed_public_copy(rollback_pause_id)
+                    != record.public_site.content_digest
+                ):
                     raise ValueError("rollback settings require prepared serving authority")
                 settings_checkpoint()
                 receipt = provider.website_settings(plan, plan.old, intent)
@@ -400,7 +406,10 @@ def rollback_compatible_cutover(
         if route.slot_id != plan.old.slot_id:
             if intent is not None:
                 assert record.public_site is not None
-                if provider.observed_public_copy(record_id) != record.public_site.content_digest:
+                if (
+                    provider.observed_public_copy(rollback_pause_id)
+                    != record.public_site.content_digest
+                ):
                     raise ValueError("rollback lost prepared serving authority")
             elif (
                 record.public_site is None
@@ -418,7 +427,7 @@ def rollback_compatible_cutover(
                 _PauseStore(store, record_id, rollback=True),
                 provider,
                 clock=clock,
-            ).finish(record_id, expected=plan.old.binding)
+            ).finish(rollback_pause_id, expected=plan.old.binding)
         elif (
             record.public_site is not None
             and record.pause is not None

@@ -66,19 +66,6 @@ class WebsiteProvider(IsolatedCutoverProvider):
             committed=True,
         )
 
-    def recover_and_resume(self, site: Any, pause_id: str, expected: Any) -> Any:
-        from control_plane.contracts.prepared_public_site import PublicRecoveryObservation
-
-        if self.target.binding != expected:
-            raise ValueError("wrong serving target")
-        self.handoff_writers(self.cutover, self.target)
-        return PublicRecoveryObservation(
-            binding=expected,
-            pause_id=pause_id,
-            serving_evidence_id="fixture-serving",
-            writer_owners=tuple((writer.writer_id, 1) for writer in self.cutover.writers),
-        )
-
     def maintenance(self, plan: OdooCutoverPlan) -> Any:
         receipt = super().maintenance(plan)
         assert plan.website_settings is not None
@@ -171,6 +158,17 @@ class CutoverWebsiteTests(unittest.TestCase):
         self.assertIsNone(intent.settings.block_third_party_domains)
         assert result.rollback_website_settings is not None
         self.assertEqual(result.rollback_website_settings.settings_sha256, intent.settings.digest)
+        assert result.rollback_pause is not None
+        assert result.pause is not None
+        self.assertNotEqual(result.rollback_pause.pause_id, result.pause.pause_id)
+        self.assertEqual(
+            self.provider.resume_receipts[result.pause.pause_id].binding,
+            self.provider.cutover.new.binding,
+        )
+        self.assertEqual(
+            self.provider.resume_receipts[result.rollback_pause.pause_id].binding,
+            self.provider.cutover.old.binding,
+        )
         self.assertLess(
             self.provider.actions.index("website:old"), self.provider.actions.index("switch")
         )
@@ -397,6 +395,8 @@ class CutoverWebsiteTests(unittest.TestCase):
         result = rollback_compatible_cutover(self.store, self.provider, self.record_id)
         self.assertEqual(result.step, "rolled_back")
         assert result.rollback_pause is not None
+        assert result.pause is not None
+        self.assertNotEqual(result.rollback_pause.pause_id, result.pause.pause_id)
         self.assertEqual(result.rollback_pause.state, "complete")
         self.assertEqual(self.provider.target, self.provider.cutover.old)
 
@@ -449,3 +449,68 @@ class CutoverWebsiteTests(unittest.TestCase):
         )
         self.assertEqual(result.last_apply.website_settings, baseline)
         self.assertTrue(result.last_apply.website_settings_verified)
+
+    def test_crash_after_pending_write_retains_attempt_and_recovers_verified_baseline(self) -> None:
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooInstanceOverrideRecord,
+            OdooOverrideApplyResult,
+        )
+        from control_plane.workflows.odoo_cutover_deployment import (
+            execute_odoo_cutover_deployment,
+            execute_odoo_cutover_rollback_deployment,
+        )
+
+        baseline = snapshot(self.provider.cutover, production=True)
+        self.provider.cutover = self.provider.cutover.model_copy(
+            update={"production_website_settings": baseline}
+        )
+        plan = self.provider.cutover
+        self.records.write_odoo_instance_override_record(
+            OdooInstanceOverrideRecord(
+                context=plan.new.runtime_identity.context,
+                instance=plan.new.binding.environment_id,
+                updated_at="2026-10-15T15:00:00Z",
+                website_settings=plan.website_settings,
+                last_apply=OdooOverrideApplyResult(website_settings=baseline),
+            )
+        )
+        write = self.records.update_odoo_instance_override_apply_result
+
+        def crash_after_write(**kwargs: Any) -> Any:
+            result = write(**kwargs)
+            if not kwargs["last_apply"].website_settings_verified:
+                raise TimeoutError("fixture crash after pending write")
+            return result
+
+        with patch.object(
+            self.records,
+            "update_odoo_instance_override_apply_result",
+            side_effect=crash_after_write,
+        ):
+            with self.assertRaises(TimeoutError):
+                execute_odoo_cutover_deployment(
+                    plan=plan,
+                    record_store=self.records,
+                    provider=self.provider,
+                    context=plan.new.runtime_identity.context,
+                    instance=plan.new.binding.environment_id,
+                    checkpoint=lambda _step: None,
+                )
+        deployment = self.records.read_deployment_record(
+            plan.new.runtime_identity.deployment_record_id
+        )
+        assert deployment.odoo_cutover is not None
+        self.assertTrue(deployment.odoo_cutover.website_settings_attempted)
+        self.assertFalse(self.provider.website_receipts)
+        execute_odoo_cutover_rollback_deployment(
+            deployment=deployment,
+            record_store=self.records,
+            provider=self.provider,
+            artifact_id=plan.production.artifact_id,
+        )
+        restored = self.records.read_odoo_instance_override_record(
+            context_name=plan.new.runtime_identity.context,
+            instance_name=plan.new.binding.environment_id,
+        )
+        self.assertTrue(restored.last_apply.website_settings_verified)
+        self.assertEqual(restored.last_apply.website_settings, baseline)

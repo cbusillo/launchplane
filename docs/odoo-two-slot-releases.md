@@ -189,3 +189,9 @@ receipt, repeating the idempotent settings operation only when its receipt was
 not persisted. An abort before maintenance leaves the verified baseline and
 collection unchanged. Database-changing rollback still requires the
 existing authorized coherent-tuple restore path.
+
+Forward and rollback writer pauses use distinct persisted provider idempotency
+keys. A cached forward fence/resume receipt cannot stand in for the rollback's
+fresh drain or old-slot resumption. The maintenance attempt marker is persisted
+before the applied baseline is marked pending, so an interrupted pending write
+still takes the settings recovery path.
