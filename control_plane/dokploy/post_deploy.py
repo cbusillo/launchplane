@@ -25,6 +25,7 @@ from control_plane.dokploy.source import (
     DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS,
     DokployTargetDefinition,
 )
+from control_plane.odoo_preview_import_source import preview_fishbowl_clear_program
 from control_plane.integration_readback import (
     INTEGRATION_READBACK_CHECKED_MARKER,
     INTEGRATION_READBACK_OK_MARKER,
@@ -42,6 +43,7 @@ from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     build_fresh_testing_restore_script,
 )
+from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MARKER
 
 
 ODOO_POST_DEPLOY_SCHEDULE_TRIGGER = "post_deploy_schedule_trigger"
@@ -144,7 +146,7 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         INTEGRATION_READBACK_OK_MARKER,
         "connection_isolation_ok",
         "testing_resources_ok",
-        "testing_resources_incomplete",
+        TESTING_RESOURCES_INCOMPLETE_MARKER,
         "testing_copy_runtime_isolated",
         "testing_copy_pre_registry_sanitized",
         "testing_copy_sanitized",
@@ -501,7 +503,13 @@ def run_compose_post_deploy_update(
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
+    clear_preview_fishbowl_source: bool = False,
 ) -> dict[str, str]:
+    if (
+        clear_preview_fishbowl_source
+        and runtime_key_safety_environment_class(target_definition.instance) != "preview"
+    ):
+        raise ValueError("Fishbowl source cleanup is limited to previews.")
     compose_id = target_definition.target_id.strip()
     compose_name = (
         target_definition.target_name.strip()
@@ -728,6 +736,7 @@ def run_compose_post_deploy_update(
         ),
         bootstrap_missing_database=bootstrap_missing_database and not run_destructive_restore,
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
+        clear_preview_fishbowl_source=clear_preview_fishbowl_source,
     )
     if fresh_testing_generation is not None:
         if (
@@ -2488,6 +2497,7 @@ def _build_dokploy_data_workflow_script(
     hold_web_until_integration_readback: bool,
     bootstrap_missing_database: bool = False,
     probe_company_email_contract: bool = False,
+    clear_preview_fishbowl_source: bool = False,
 ) -> str:
     """The schedule's bash script.
 
@@ -2873,6 +2883,11 @@ if [ "{int(probe_company_email_contract)}" = "1" ]; then
     # still pass; without it the caller's strict readback check fails closed.
     docker exec -i "${{script_runner_container_id}}" python3 - /volumes/scripts/odoo_website_bootstrap.py <<'PY' || true
 {ODOO_COMPANY_EMAIL_CONTRACT_PROGRAM}PY
+fi
+
+if [ "{int(clear_preview_fishbowl_source)}" = "1" ]; then
+    docker exec -i "${{script_runner_container_id}}" python3 - "${{database_name}}" <<'PY'
+{preview_fishbowl_clear_program()}PY
 fi
 
 neutralization_status=0

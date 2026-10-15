@@ -40,7 +40,11 @@ from control_plane.dokploy_target_setup_http import (
     execute_dokploy_target_setup,
     fetch_dokploy_compose_domains_for_target_setup,
 )
-from control_plane.odoo_testing_resources import OdooTestingResources, resource_readback_passes
+from control_plane.odoo_testing_resources import (
+    OdooTestingResources,
+    resource_readback_passes,
+    TESTING_RESOURCES_INCOMPLETE_MARKER,
+)
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -55,6 +59,7 @@ from control_plane.storage.product_authority_bundle import (
 )
 from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.dokploy_target_adoption import adopt_dokploy_target
 
 ROUTE = TESTING_REPLACEMENT_RESOURCES_ROUTE
 
@@ -248,7 +253,11 @@ def run_resource_schedule(
         )
         or payload.get("env") not in (None, "")
         or api.list_deployments_for_target(
-            host=host, token=token, target_type="compose", target_id=resources.target_id
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=resources.target_id,
+            require_complete=True,
         )
     ):
         raise ValueError("Resource preparation requires the service-created empty compose.")
@@ -305,7 +314,7 @@ def run_resource_schedule(
             before_provider_mutation=lambda _phase: checkpoint(),
         )
     except post_deploy.OdooPostDeployReadbackFailure as error:
-        if mode == "readback" and error.evidence.get("testing_resources_incomplete") == "true":
+        if mode == "readback" and error.evidence.get(TESTING_RESOURCES_INCOMPLETE_MARKER) == "true":
             raise IncompleteTestingResources("Fresh storage preparation is incomplete.") from error
         raise
     checkpoint()
@@ -329,6 +338,148 @@ class TestingReplacementResourceAdapter:
         return canonical_json_sha256(
             {"operation": self.request.operation_id, "product": self.product}
         )
+
+    def created_placement(self, namespace: str) -> tuple[str, str, str]:
+        """Read the uniquely named creation, including incomplete placement.
+
+        Absence alone never proves a dispatched create finished. The caller
+        combines this inventory with the exact last dispatched phase.
+        """
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        matches = [
+            project
+            for project in api.fetch_dokploy_projects(host=host, token=token)
+            if project.get("name") == namespace
+        ]
+        if not matches:
+            return "", "", ""
+        if len(matches) != 1 or not matches[0].get("projectId"):
+            raise ValueError("Fresh project inventory is ambiguous.")
+        project = matches[0]
+        environments = project.get("environments")
+        if not isinstance(environments, list):
+            raise ValueError("Fresh project placement is not empty.")
+        matching = []
+        for candidate in environments:
+            if not isinstance(candidate, dict):
+                raise ValueError("Fresh environment inventory is malformed.")
+            for key in ("applications", "postgres", "mysql", "mariadb", "mongo", "redis"):
+                if candidate.get(key):
+                    raise ValueError("Fresh placement contains another resource.")
+            if candidate.get("name") == namespace:
+                matching.append(candidate)
+            elif candidate.get("composes") not in (None, []):
+                raise ValueError("Fresh project contains another compose.")
+        if not matching:
+            return str(project["projectId"]), "", ""
+        if len(matching) != 1 or not matching[0].get("environmentId"):
+            raise ValueError("Fresh environment inventory is ambiguous.")
+        environment = matching[0]
+        composes = environment.get("composes")
+        if not isinstance(composes, list) or len(composes) > 1:
+            raise ValueError("Fresh compose inventory is incomplete or ambiguous.")
+        compose_id = ""
+        if composes:
+            compose = composes[0]
+            if (
+                not isinstance(compose, dict)
+                or compose.get("name") != namespace
+                or not compose.get("composeId")
+            ):
+                raise ValueError("Fresh compose inventory has another identity.")
+            compose_id = str(compose["composeId"])
+        return str(project["projectId"]), str(environment["environmentId"]), compose_id
+
+    def capture_checkpoint(self, old_check: Callable[[], None]) -> None:
+        old_check()
+        with self.store.serialize_disposable_testing_resources():
+            resource_context(self.store, product=self.product, request=self.request)
+
+    def recover_created_target(self, phase: str) -> ProviderObservation | None:
+        preparation = self.store.read_disposable_resource_preparation(self.request.operation_id)
+        if preparation is None or preparation.replacement_target_id:
+            return None
+        with self.store.testing_replacement_execution_lock(self.request.operation_id) as old_check:
+            if old_check is None:
+                return ProviderObservation("unknown")
+            self.capture_checkpoint(old_check)
+            project_id, environment_id, compose_id = self.created_placement(
+                preparation.resource_namespace
+            )
+            if not compose_id:
+                terminal = (
+                    not phase
+                    and not project_id
+                    or phase == "/api/project.create"
+                    and bool(project_id)
+                    and not environment_id
+                    or phase == "/api/environment.create"
+                    and bool(environment_id)
+                )
+                return (
+                    ProviderObservation("absent", retry_safe=True)
+                    if terminal
+                    else ProviderObservation("unknown")
+                )
+            if any(
+                item.target_id == compose_id for item in self.store.list_dokploy_target_id_records()
+            ) or any(
+                item.provider_id == "dokploy" and item.target_id == compose_id
+                for item in self.store.list_physical_provider_target_records()
+            ):
+                raise ValueError("Unrecorded creation is already bound to another target.")
+            profile, _, _, _, _, provider = resource_context(
+                self.store, product=self.product, request=self.request
+            )
+            host, token = source.read_dokploy_config(control_plane_root=self.root)
+            payload = api.fetch_dokploy_target_payload(
+                host=host, token=token, target_type="compose", target_id=compose_id
+            )
+            require_empty_compose_source(payload, compose_id)
+            if (
+                payload.get("environmentId") != environment_id
+                or payload.get("env") not in (None, "")
+                or not re.fullmatch(
+                    re.escape(preparation.resource_namespace) + r"(?:-[a-z0-9]{6})?",
+                    str(payload.get("appName") or ""),
+                )
+            ):
+                raise ValueError("Unrecorded creation has changed or acquired credentials.")
+            if api.list_deployments_for_target(
+                host=host,
+                token=token,
+                target_type="compose",
+                target_id=compose_id,
+                require_complete=True,
+            ) or fetch_dokploy_compose_domains_for_target_setup(
+                host=host, token=token, compose_id=compose_id
+            ):
+                raise ValueError("Unrecorded creation has runtime or route history.")
+
+            def check() -> None:
+                self.capture_checkpoint(old_check)
+
+            with self.store.capture_disposable_resource_adoption(preparation, checkpoint=check):
+                adopt_dokploy_target(
+                    record_store=self.store,
+                    host=host,
+                    token=token,
+                    context=self.request.context,
+                    instance="testing",
+                    target_type="compose",
+                    target_id=compose_id,
+                    project_name=preparation.resource_namespace,
+                    target_name=preparation.resource_namespace,
+                    expected_current_provider_target=provider.to_deployed_target_reference(),
+                    source_label="service:testing-replacement-resources:recovered-capture",
+                    apply=True,
+                    fetch_target_payload=lambda h, t, k, i: api.fetch_dokploy_target_payload(
+                        host=h, token=t, target_type=k, target_id=i
+                    ),
+                    required_context_owner=(self.product, self.request.context),
+                    expected_product_profile=profile,
+                )
+        return None
 
     def configuration_sha256(self) -> str:
         return canonical_json_sha256(
@@ -495,6 +646,9 @@ class TestingReplacementResourceAdapter:
         # Observation never repeats a provider write. Completed host work can be
         # adopted without its lost HTTP/metadata receipt, using actual readback.
         try:
+            recovered = self.recover_created_target(provider_effect_phase)
+            if recovered is not None:
+                return recovered
             verified = self.readback()
         except IncompleteTestingResources:
             preparation = self.store.read_disposable_resource_preparation(self.request.operation_id)
@@ -509,7 +663,7 @@ class TestingReplacementResourceAdapter:
                 # non-use; an active remote schedule refused before this proof.
                 return ProviderObservation("absent", retry_safe=True)
             return ProviderObservation("unknown")
-        except (ValueError, FileNotFoundError, click.ClickException):
+        except (ValueError, FileNotFoundError, click.ClickException, RuntimeError, OSError):
             return ProviderObservation("unknown")
         return ProviderObservation(
             "present",
@@ -577,6 +731,11 @@ class TestingReplacementResourceAdapter:
                 self.checkpoint(expected, old_check)
 
             if not preparation.replacement_target_id:
+                placement = self.created_placement(preparation.resource_namespace)
+                if placement[2]:
+                    raise ValueError(
+                        "Existing fresh compose requires original-key observation before capture."
+                    )
                 host, token = source.read_dokploy_config(control_plane_root=self.root)
                 old_payload = api.fetch_dokploy_target_payload(
                     host=host, token=token, target_type="compose", target_id=target_id.target_id
@@ -586,8 +745,14 @@ class TestingReplacementResourceAdapter:
                     raise ProviderMutationRejectedError(
                         ValueError("Explicit testing placement is unavailable.")
                     )
-                lease.checkpoint_effect("create_empty_replacement")
-                with self.store.capture_disposable_resource_adoption(preparation, checkpoint=check):
+
+                def capture_check() -> None:
+                    lease.assert_current()
+                    self.capture_checkpoint(old_check)
+
+                with self.store.capture_disposable_resource_adoption(
+                    preparation, checkpoint=capture_check
+                ):
                     execute_dokploy_target_setup(
                         control_plane_root_path=self.root,
                         record_store=self.store,
@@ -605,7 +770,9 @@ class TestingReplacementResourceAdapter:
                             reason=self.request.reason,
                         ),
                         required_context_owner=(self.product, self.request.context),
-                        disposable_checkpoint=check,
+                        disposable_checkpoint=capture_check,
+                        disposable_before_create=lease.checkpoint_effect,
+                        disposable_placement=placement[:2],
                     )
                 captured = self.store.read_disposable_resource_preparation(operation.operation_id)
                 if captured is None or not captured.replacement_target_id:

@@ -10165,6 +10165,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
     def test_partial_empty_resources_resume_only_on_the_recorded_target(self) -> None:
         self._fresh_resource_preparation_case("partial")
 
+    def test_created_compose_is_recovered_after_adoption_transaction_was_lost(self) -> None:
+        self._fresh_resource_preparation_case("lost-adoption")
+
     def test_alias_insert_during_provider_io_refuses_positive_publication(self) -> None:
         self._fresh_resource_preparation_case("alias")
 
@@ -10192,6 +10195,41 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             )
             calls: list[tuple[str, dict[str, Any]]] = []
             phases: list[str] = []
+            adoption_lost = False
+            original_merge = fixture.store._merge_authority_row
+
+            def merge(session: Any, row: Any, *, step_name: str) -> None:
+                nonlocal adoption_lost
+                if (
+                    fault == "lost-adoption"
+                    and step_name == "write_dokploy_target_id"
+                    and not adoption_lost
+                ):
+                    adoption_lost = True
+                    raise RuntimeError("fixture lost adoption transaction")
+                original_merge(session, row, step_name=step_name)
+
+            def projects(**kwargs: Any) -> Any:
+                project = next(
+                    (payload for path, payload in calls if path == "/api/project.create"), None
+                )
+                if project is None:
+                    return ()
+                namespace = project["name"]
+                return (
+                    {
+                        "projectId": "fresh-projectId",
+                        "name": namespace,
+                        "environments": [
+                            {
+                                "name": namespace,
+                                "environmentId": "fresh-environmentId",
+                                "applications": [],
+                                "composes": [{"composeId": "fresh-composeId", "name": namespace}],
+                            }
+                        ],
+                    },
+                )
 
             def mutate(host: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
                 calls.append((path, payload))
@@ -10205,10 +10243,15 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
 
             def fetch(host: str, token: str, target_type: str, target_id: str) -> dict[str, Any]:
                 self.assertEqual(target_type, "compose")
+                namespace = next(
+                    (payload["name"] for path, payload in calls if path == "/api/compose.create"),
+                    "fixture-compose",
+                )
                 return {
                     "composeId": target_id,
-                    "name": "fixture-compose",
-                    "appName": "fixture-compose",
+                    "name": namespace,
+                    "appName": namespace + "-abc123",
+                    "environmentId": "fresh-environmentId",
                     "serverId": "fixture-server",
                     "sourceType": "raw",
                     "env": "",
@@ -10248,7 +10291,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                         )
                     )
                     kwargs["checkpoint"]()
-                if fault != "normal" and phases == ["prepare"]:
+                if fault in {"lost-receipt", "partial"} and phases == ["prepare"]:
                     # Remote work completed (or is partially prepared) but the
                     # request died before the allocation receipt publication.
                     raise RuntimeError("fixture lost schedule reply")
@@ -10276,6 +10319,19 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
                 }
                 with (
+                    patch.object(fixture.store, "_merge_authority_row", side_effect=merge),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.fetch_dokploy_projects",
+                        side_effect=projects,
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.api.list_deployments_for_target",
+                        return_value=(),
+                    ),
+                    patch(
+                        "control_plane.testing_replacement_resources.fetch_dokploy_compose_domains_for_target_setup",
+                        return_value=(),
+                    ),
                     patch(
                         "control_plane.testing_replacement_resources.source.read_dokploy_config",
                         return_value=("provider.invalid", "fixture-token"),
@@ -10304,8 +10360,8 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     ),
                 ):
                     if fault == "alias":
-                        with self.assertRaises(ValueError):
-                            await fixture.post(**body)
+                        refused = await fixture.post(**body)
+                        self.assertEqual(refused.status_code, 409, refused.text)
                         self.assertIsNone(
                             fixture.store.read_disposable_lane_safety(
                                 fixture.profile.product, fixture.context, "testing"
@@ -10319,18 +10375,21 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                         )
                         return
                     if fault != "normal":
-                        with self.assertRaises(RuntimeError):
-                            await fixture.post(**body)
+                        interrupted = await fixture.post(**body)
+                        self.assertEqual(interrupted.status_code, 409, interrupted.text)
                         captured = fixture.store.read_disposable_resource_preparation(
                             fixture.operation.operation_id
                         )
                         assert captured is not None
-                        self.assertEqual(
-                            captured.replacement_target_id,
-                            fixture.store.read_dokploy_target_id_record(
-                                context_name=fixture.context, instance_name="testing"
-                            ).target_id,
-                        )
+                        if fault == "lost-adoption":
+                            self.assertFalse(captured.replacement_target_id)
+                        else:
+                            self.assertEqual(
+                                captured.replacement_target_id,
+                                fixture.store.read_dokploy_target_id_record(
+                                    context_name=fixture.context, instance_name="testing"
+                                ).target_id,
+                            )
                         self.assertFalse(captured.resources_binding_sha256)
                         count = len(calls)
                     applied = await fixture.post(**body)

@@ -10,6 +10,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane.contracts.canonical_json import canonical_json_sha256
 
 
+TESTING_RESOURCES_INCOMPLETE_MARKER = "testing_resources_incomplete"
+
+
 class OdooTestingResources(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -67,7 +70,9 @@ def validate_resource_namespace(namespace: str) -> None:
 # container. It accepts no paths, credentials, driver options or existing names.
 # Failed or interrupted preparation retains its volumes for same-spec readback;
 # it never deletes a volume to make a retry pass.
-ODOO_TESTING_RESOURCE_PROGRAM = r"""
+ODOO_TESTING_RESOURCE_PROGRAM = (
+    f"INCOMPLETE_MARKER = {TESTING_RESOURCES_INCOMPLETE_MARKER!r}\n"
+    + r"""
 import base64
 import hashlib
 import json
@@ -144,10 +149,11 @@ def main():
         ):
             raise RuntimeError("Existing volume cannot be adopted as a new testing resource")
         path = Path(volume["Mountpoint"])
+        if not path.is_absolute():
+            raise RuntimeError("Unsupported volume backing directory")
+        path = path.resolve(strict=True)
         if (
-            not path.is_absolute()
-            or path.resolve() != path
-            or path.name != "_data"
+            path.name != "_data"
             or path.parent.name != name
             or not path.is_dir()
         ):
@@ -176,6 +182,11 @@ def main():
                 continue
             if mount.get("Name") in volumes.values():
                 raise RuntimeError("Replacement storage is already used by a container")
+            if mount.get("Type") == "bind" and mount.get("RW") is False:
+                # Host monitoring may inspect a read-only root/data-root bind.
+                # It cannot write the new backing directory. An exact named
+                # volume consumer above still protects its usage, even read-only.
+                continue
             source = mount.get("Source")
             if not isinstance(source, str) or not source.startswith("/"):
                 raise RuntimeError("Container backing storage is unavailable")
@@ -184,7 +195,7 @@ def main():
                 raise RuntimeError("Replacement backing storage overlaps an existing mount")
     print("testing_resources_binding_sha256=" + digest)
     if missing:
-        print("testing_resources_incomplete=true")
+        print(INCOMPLETE_MARKER + "=true")
         print("testing_resources_ok=false")
         sys.exit(1)
     print("testing_resources_ok=true")
@@ -197,3 +208,4 @@ except Exception:
     print("testing_resources_ok=false")
     sys.exit(1)
 """
+)
