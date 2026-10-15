@@ -17,16 +17,12 @@ from control_plane.storage.postgres import (
     LaunchplaneOrdinaryAgentAuthenticationCredentialRow,
     PostgresRecordStore,
 )
-from tests.support.ordinary_agent_lifecycle import (
-    TEST_ISSUER_KEY,
-    enrollment_envelope,
-    prepare_test_issuance,
-    setup_ordinary_agent_authority,
-)
 
 
 class OrdinaryAgentDeliveryTests(unittest.TestCase):
     def setUp(self) -> None:
+        import time
+
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.store = PostgresRecordStore(
@@ -34,17 +30,70 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
         )
         self.addCleanup(self.store.close)
         self.store.ensure_schema()
-        self.policy, inventory = setup_ordinary_agent_authority(self.store)
-        self.envelope = enrollment_envelope(policy_record=self.policy, inventory=inventory)
-        self.prepared, self.bundle = prepare_test_issuance(self.envelope)
-        self.decrypt = self.enterContext(
-            patch(
-                "control_plane.secrets._decrypt_secret_value",
-                side_effect=lambda ciphertext, key_id: (
-                    Fernet(TEST_ISSUER_KEY).decrypt(ciphertext.encode()).decode()
-                ),
+        self.issuer_key = Fernet.generate_key()
+        now = int(time.time())
+        payload = {
+            "schema_version": 1,
+            "record_id": "legacy-authentication-record",
+            "principal_id": "agent_one",
+            "credential_id": "legacy-credential",
+            "credential_version": 1,
+            "credential_digest": "a" * 64,
+            "status": "active",
+            "valid_from": now - 100,
+            "expires_at": now + 3600,
+            "revoked_at": None,
+            "issuance_evidence_sha256": "b" * 64,
+            "recorded_at": "2026-09-08T00:00:00Z",
+            "policy": {
+                "record_id": "legacy-policy",
+                "revision": 1,
+                "policy_sha256": "c" * 64,
+                "managed_set_id": "legacy-set",
+                "managed_rule_id": "legacy-rule",
+                "target": {
+                    "repository_id": 123,
+                    "repository": "example/repo",
+                    "base_branch": "main",
+                },
+            },
+        }
+        self.credential = OrdinaryAgentAuthenticationCredentialRecord.model_validate(
+            {**payload, "record_sha256": canonical_json_sha256(payload)}
+        )
+        self.delivery = LaunchplaneOrdinaryAgentDeliveryRow(
+            operation_id="legacy-enrollment",
+            principal_id=self.credential.principal_id,
+            credential_id=self.credential.credential_id,
+            credential_version=self.credential.credential_version,
+            credential_digest=self.credential.credential_digest,
+            issuance_evidence_sha256=self.credential.issuance_evidence_sha256,
+            intent_sha256="d" * 64,
+            receiver_claim_sha256="e" * 64,
+            ciphertext=Fernet(self.issuer_key).encrypt(b"historical test capsule").decode(),
+            ciphertext_sha256="f" * 64,
+            key_id="test-issuer",
+            delivery_expires_at=now + 600,
+            delivery_status="never_attempted",
+        )
+
+    def seed_legacy_delivery(self) -> None:
+        credential = self.credential
+        self.store._write_row(
+            LaunchplaneOrdinaryAgentAuthenticationCredentialRow(
+                record_id=credential.record_id,
+                principal_id=credential.principal_id,
+                credential_id=credential.credential_id,
+                credential_version=credential.credential_version,
+                lifecycle_status=credential.status,
+                is_current=True,
+                credential_digest=credential.credential_digest,
+                recorded_at=credential.recorded_at,
+                record_sha256=credential.record_sha256,
+                payload=credential.model_dump(mode="json"),
             )
         )
+        self.store._write_row(self.delivery)
 
     def test_privileged_worker_cleanup_preserves_key_retirement_of_legacy_ciphertext(self) -> None:
         from control_plane.secrets import KeyRing, reencrypt_secrets
@@ -54,7 +103,7 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
         self.seed_legacy_delivery()
         key_ring = KeyRing(
             active_key_id="new-key",
-            keys={"new-key": Fernet(Fernet.generate_key()), "test-issuer": Fernet(TEST_ISSUER_KEY)},
+            keys={"new-key": Fernet(Fernet.generate_key()), "test-issuer": Fernet(self.issuer_key)},
             active_hmac_key=b"h" * 32,
         )
         with (
@@ -67,7 +116,7 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
             with patch.object(
                 self.store,
                 "_ordinary_agent_database_epoch",
-                return_value=self.envelope.delivery.expires_at + 1,
+                return_value=self.delivery.delivery_expires_at + 1,
             ):
                 with patch("control_plane.cli_service._store", return_value=self.store):
                     result = CliRunner().invoke(
@@ -97,20 +146,9 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
             keys={
                 "new-key": new_cipher,
                 "legacy-key": legacy_cipher,
-                "test-issuer": Fernet(TEST_ISSUER_KEY),
+                "test-issuer": Fernet(self.issuer_key),
             },
             active_hmac_key=b"h" * 32,
-        )
-        # Custody's existing version already uses the new root, so rotating an
-        # unrelated secret does not invalidate the pending enrollment CAS.
-        current = self.store.read_secret_version("ordinary-agent-app-key-v1")
-        self.store.write_secret_version(
-            current.model_copy(
-                update={
-                    "key_id": "new-key",
-                    "ciphertext": new_cipher.encrypt(b"test app key").decode(),
-                }
-            )
         )
         self.store.write_secret_version(
             SecretVersion(
@@ -166,62 +204,6 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
             self.assertIn("test-issuer", cast(list[str], replay["retirement_blocked_key_ids"]))
             self.assertNotIn("test-issuer", cast(list[str], replay["retirement_ready_key_ids"]))
 
-    def seed_legacy_delivery(self) -> None:
-        # Seed historical rows directly: retired enrollment is no longer executable.
-        candidate = self.bundle.candidate
-        payload = {
-            "schema_version": 1,
-            "revoked_at": None,
-            "record_id": "legacy-authentication-record",
-            "principal_id": candidate.principal_id,
-            "credential_id": candidate.credential_id,
-            "credential_version": self.bundle.credential_version,
-            "status": "active",
-            "credential_digest": candidate.credential_digest,
-            "valid_from": candidate.valid_from,
-            "expires_at": candidate.expires_at,
-            "issuance_evidence_sha256": candidate.issuance_evidence_sha256,
-            "policy": self.envelope.policy.model_dump(mode="json"),
-            "recorded_at": self.policy.updated_at,
-        }
-        credential = OrdinaryAgentAuthenticationCredentialRecord.model_validate(
-            {
-                **payload,
-                "record_sha256": canonical_json_sha256(payload),
-            }
-        )
-        self.store._write_row(
-            LaunchplaneOrdinaryAgentAuthenticationCredentialRow(
-                record_id=credential.record_id,
-                principal_id=credential.principal_id,
-                credential_id=credential.credential_id,
-                credential_version=credential.credential_version,
-                lifecycle_status=credential.status,
-                is_current=True,
-                credential_digest=credential.credential_digest,
-                recorded_at=credential.recorded_at,
-                record_sha256=credential.record_sha256,
-                payload=credential.model_dump(mode="json"),
-            )
-        )
-        self.store._write_row(
-            LaunchplaneOrdinaryAgentDeliveryRow(
-                operation_id=self.bundle.operation_id,
-                principal_id=candidate.principal_id,
-                credential_id=candidate.credential_id,
-                credential_version=self.bundle.credential_version,
-                credential_digest=candidate.credential_digest,
-                issuance_evidence_sha256=candidate.issuance_evidence_sha256,
-                intent_sha256=self.bundle.intent_sha256,
-                receiver_claim_sha256=self.bundle.receiver_claim_sha256,
-                ciphertext=self.bundle.ciphertext,
-                ciphertext_sha256=self.bundle.ciphertext_sha256,
-                key_id=self.bundle.key_id,
-                delivery_expires_at=self.bundle.delivery_expires_at,
-                delivery_status="never_attempted",
-            )
-        )
-
     def test_cleanup_failure_redacts_database_detail_and_chained_parameters(self) -> None:
         import traceback
         from sqlalchemy.exc import DBAPIError
@@ -262,14 +244,22 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
             LaunchplaneOrdinaryAgentEffectCustodyRow,
         )
 
-        for attempted, unknown_custody in ((False, False), (False, True), (True, True)):
-            with self.subTest(attempted=attempted, unknown_custody=unknown_custody):
-                if attempted or unknown_custody:
+        for attempted, unknown_custody, request_state in (
+            (False, False, "waiting"),
+            (False, True, "waiting"),
+            (True, True, "waiting"),
+            (False, True, "reconciliation_required"),
+            (False, False, "completed"),
+        ):
+            with self.subTest(
+                attempted=attempted, unknown_custody=unknown_custody, request_state=request_state
+            ):
+                if attempted or unknown_custody or request_state != "waiting":
                     self.setUp()
                 self.seed_legacy_delivery()
-                candidate = self.bundle.candidate
+                candidate = self.credential
                 start, expiry = candidate.valid_from, candidate.expires_at
-                target = self.policy.policy.ordinary_agents[0].target
+                target = self.credential.policy.target
                 session_record = OrdinaryAgentSessionRecord.model_validate(
                     {
                         "session_id": "legacy-session",
@@ -316,6 +306,7 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                 )
                 request = OrdinaryAgentFiniteRequestRecord.model_validate(
                     {
+                        "status": request_state,
                         "request_id": "legacy-request",
                         "idempotency_key": "legacy-request",
                         "principal_id": candidate.principal_id,
@@ -359,9 +350,9 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                             "lease_owner": "legacy-worker",
                             "lease_acquired_at": "legacy-acquisition",
                         },
-                        "policy_record_id": self.policy.record_id,
-                        "policy_revision": self.policy.revision,
-                        "policy_sha256": self.policy.policy_sha256,
+                        "policy_record_id": self.credential.policy.record_id,
+                        "policy_revision": self.credential.policy.revision,
+                        "policy_sha256": self.credential.policy.policy_sha256,
                         "credential_id": candidate.credential_id,
                         "credential_version": 1,
                         "credential_digest": candidate.credential_digest,
@@ -370,7 +361,9 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                     }
                 )
                 with self.store._session_factory() as db:
-                    delivery = db.get(LaunchplaneOrdinaryAgentDeliveryRow, self.bundle.operation_id)
+                    delivery = db.get(
+                        LaunchplaneOrdinaryAgentDeliveryRow, self.delivery.operation_id
+                    )
                     assert delivery is not None
                     delivery.delivery_status = (
                         "delivery_attempted" if attempted else "never_attempted"
@@ -427,9 +420,9 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                                 principal_id=candidate.principal_id,
                                 repository_id=target.repository_id,
                                 state="issue_unknown",
-                                mint_started_at=self.policy.updated_at,
-                                dispatch_deadline=self.policy.updated_at,
-                                updated_at=self.policy.updated_at,
+                                mint_started_at=self.credential.recorded_at,
+                                dispatch_deadline=self.credential.recorded_at,
+                                updated_at=self.credential.recorded_at,
                                 payload={},
                             )
                         )
@@ -442,7 +435,7 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                             )
                         )
                     db.commit()
-                now = self.bundle.delivery_expires_at + 1
+                now = self.delivery.delivery_expires_at + 1
                 with patch.object(self.store, "_ordinary_agent_database_epoch", return_value=now):
                     self.assertEqual(self.store.expire_ordinary_agent_deliveries(), 1)
                     self.assertEqual(self.store.expire_ordinary_agent_deliveries(), 0)
@@ -475,7 +468,10 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                         persisted_lease.payload["revoked_at"], None if attempted else now
                     )
                     self.assertEqual(
-                        persisted_request.payload["status"], "waiting" if attempted else "cancelled"
+                        persisted_request.payload["status"],
+                        request_state
+                        if attempted or request_state in {"reconciliation_required", "completed"}
+                        else "cancelled",
                     )
                     self.assertEqual(
                         persisted_effect.payload["state"],
@@ -486,7 +482,7 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                         else "not_dispatched",
                     )
                     persisted_delivery = db.get(
-                        LaunchplaneOrdinaryAgentDeliveryRow, self.bundle.operation_id
+                        LaunchplaneOrdinaryAgentDeliveryRow, self.delivery.operation_id
                     )
                     assert persisted_delivery is not None
                     self.assertIsNone(persisted_delivery.ciphertext)

@@ -20,11 +20,16 @@ from tests.support.profiles import _generic_site_profile_payload
 
 
 class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
+    database_url: str | None = None
+
     def setUp(self) -> None:
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         root = Path(self.temporary.name)
-        self.store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{root / 'state.db'}")
+        self.store = PostgresRecordStore(
+            database_url=getattr(self, "database_url", None)
+            or f"sqlite+pysqlite:///{root / 'state.db'}"
+        )
         self.store.ensure_schema()
         self.addCleanup(self.store.close)
         profile = LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
