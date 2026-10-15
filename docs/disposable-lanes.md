@@ -790,22 +790,43 @@ operation rather than recapturing or replacing it. Recurring lane slots are spre
 deterministically across the day. A late success updates the current evidence
 with `late_completion`; the original deadline failure remains alertable.
 
-Admission requires a completed qualified fresh testing generation and current
-unused/reproducible/isolated evidence, with its original expiry and exact binding.
+Admission requires a completed qualified fresh testing generation. Under Director
+decision Q347, the service reads successful-login history (`res_users_log`) on
+that exact testing database over the preceding 24 hours, starting no earlier
+than preparation of the testing copy, and the existing staff
+hold. Every account counts, including staff, Client, portal and administrator
+accounts; no maintained account list or current-use registry is required. The
+read excludes logins older than copy preparation, uses a read-only SQL transaction,
+creates no Odoo login, and returns only a
+boolean. Recent sign-ins, a hold or an unreadable check skip the daily slot with
+a value-free reason on the lane's drill evidence. Missing tables/databases,
+runtime mismatch, provider refusal, incomplete reads and unavailable credentials
+cannot mean idle. This is the agreed recent-use check, not proof that an old
+browser session has ended; staff should hold the lane before testing.
+Preparation is the earliest existing safe boundary: a testing sign-in before
+final health completion still counts. Production logins captured after preparation
+can also cause a conservative skip; no later timestamp is used to erase that
+uncertainty or testing activity.
 The same-product restore policy, existing lane-local credential separation,
 exclusive context/target ownership, actual storage/network inspection and
-pre-registry sanitization remain mandatory. A staff hold, recorded use,
-only-copy custody or another lane operation skips that day's drill. Missing,
-expired or conflicting safety facts record a failed prerequisite and alert;
-they never become inferred permission. The general positive-fact producer gap
-on #3611 therefore remains a real activation prerequisite. This feature cannot
-make an unqualified lane rebuild automatically.
+pre-registry sanitization remain mandatory. The same bounded receiver inspection
+used by restoration checks actual containers, storage backing paths, network
+isolation and the completed database's copy witness before the login read.
+Recorded use, only-copy custody, shared resources or another lane operation also
+skip that day's drill, even if the protective report expired. Failed source,
+artifact or restore prerequisites still fail and alert. Unknown or expired
+general observations do not block this scoped check and are never renewed or
+published as universal positive facts. The accepted evidence lives only in the
+private drill receipt; it cannot qualify other disposable-lane operations.
 Deployment leaves the per-lane `odoo_testing_drill_enabled` flag false. After
 landing, configure it through the existing authenticated `POST /v1/product-profiles`
 path: read and preserve the current complete profile, change only that testing
 lane's flag, and post the updated profile with its normal idempotency key and
-existing `product_profile.write` authority. No new grant is needed. Refresh the
-actual safety facts against the resulting binding before admission. Production
+existing `product_profile.write` authority. No new grant is needed. The service
+collects this drill's current evidence before queueing and again at worker
+activation against the exact lane/configuration/resource snapshot. Provider reads
+run outside shared authority locks; the short locked commit rechecks the snapshot,
+holds, credentials and aliases, and refuses a changed or expired observation. Production
 lanes cannot enable the flag. An unchanged failed prerequisite produces no
 repeated admission; corrected facts/configuration can retry the same daily slot
 before an operation has been queued.
@@ -814,15 +835,25 @@ Queueing archives the prior generation and planned copy in the private slot
 receipt without changing the running lane's settings. After its hold check,
 the worker atomically selects a new service-named testing database and matching
 filestore path and activates that exact generation under its current lease.
-It repeats usage, credential and resource admission; changed source/configuration
-refuses before selection. The original collector row is never rebound or renewed.
-Its accepted snapshot is stored on the active worker attempt; an unchanged snapshot
+It repeats login-history, hold, credential and resource admission; changed
+source/configuration refuses before selection. General collector rows are never
+rebound or renewed. Its accepted snapshot is stored on the active worker attempt;
+an unchanged snapshot
 does not expire in the middle of that continuously leased restore. A reclaimed
-attempt requires fresh admission against the selected database. Every provider
-checkpoint rechecks the generation, admitted use/custody/isolation facts and
-current hold. Routine renewal of the same facts does not cancel a running copy;
-changed bindings require fresh current proof. A person starting a test session
-or placing a hold therefore protects the lane even after queueing. Protect a
+attempt requires fresh admission. It reads login history from the original served database and its committed
+copy witness, including when web is stopped or the new copy is incomplete;
+copied production login rows in the new database cannot stand in for testing use.
+An unavailable original database still skips rather than assuming non-use.
+If the selected new copy already has its web-start gate, reclaim
+skips and preserves it: people may have used it before final completion was
+recorded. A stopped web process alone does not erase that gate's protection.
+A running container still waiting behind that gate can resume an unopened copy.
+Every provider checkpoint rechecks the generation, admitted use/custody/isolation facts and
+current hold. The normal replacement recovery guard also binds the profile,
+runtime configuration and source/secret metadata before provider effects and
+refuses authority drift. Routine renewal of the general observation does not
+cancel a running copy. A sign-in before activation
+or a staff hold therefore protects the lane even after queueing. Protect a
 lane through the existing staff-testing hold before starting a session. Unknown
 or expired observations cannot substitute for that hold.
 

@@ -15,10 +15,12 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
+    OdooStableTargetReplacementApplyResult,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
 )
+from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy import api
 from control_plane.contracts.odoo_testing_source import (
@@ -223,6 +225,184 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             self.assertEqual(
                 store.read_odoo_stable_target_replacement_operation_record(fenced.operation_id),
                 fenced,
+            )
+
+    def test_queued_maintenance_rechecks_restore_proof_before_execution(self) -> None:
+        from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+        from control_plane.contracts.promotion_record import (
+            DeploymentEvidence,
+            PostDeployUpdateEvidence,
+        )
+
+        for store, root in self.stores():
+            operation = self.running(store)
+            # A governed restore can fail after this automatic request was queued.
+            getattr(store, "write_deployment_record")(
+                DeploymentRecord(
+                    record_id="restore-after-queue",
+                    context=operation.context,
+                    instance=operation.instance,
+                    source_git_ref="fixture-source",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="compose", target_id="compose-123", target_name="fixture"
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="fixture",
+                        target_type="compose",
+                        deploy_mode="recreate-in-place",
+                        status="fail",
+                        started_at=stamp(-5),
+                        finished_at=stamp(),
+                    ),
+                    post_deploy_update=PostDeployUpdateEvidence(
+                        attempted=True, status="fail", evidence={"workflow_intent": "restore"}
+                    ),
+                )
+            )
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply"
+                ) as execute,
+                self.assertLogs(level="ERROR"),
+            ):
+                self.assertTrue(
+                    _execute_target_replacement_operation(
+                        record_store=cast(OdooStableOperationWorkerStore, store),
+                        control_plane_root_path=root,
+                        operation=operation,
+                        lease_owner="worker",
+                        lease_seconds=600,
+                        heartbeat_seconds=60,
+                    )
+                )
+            execute.assert_not_called()
+            failed = store.read_odoo_stable_target_replacement_operation_record(
+                operation.operation_id
+            )
+            self.assertEqual(failed.error_code, TESTING_RESTORE_REQUIRED_CODE)
+            self.assertEqual(failed.status, "fail")
+            self.assertIsNone(failed.recovery_journal)
+            from control_plane.operation_status_read import operation_status_read_view
+            from control_plane.contracts.odoo_target_replacement_failures import (
+                deploy_failure_description,
+            )
+
+            view = operation_status_read_view(failed, poll_url="/fixture")
+            self.assertTrue(view["error_description"])
+            self.assertEqual(
+                view["error_description"], deploy_failure_description(failed.error_code)
+            )
+
+    def test_execution_failure_survives_fence_and_automatic_cancellation(self) -> None:
+        from control_plane.operation_status_read import (
+            operation_status_read_view,
+            operation_result_read_view,
+        )
+        from control_plane.product_reconcile import _testing_failure_reason
+
+        for store, root in self.stores():
+            operation = self.running(store)
+            result = OdooStableTargetReplacementApplyResult(
+                product=operation.product,
+                context=operation.context,
+                instance=operation.instance,
+                strategy="recreate-in-place",
+                deploy_status="fail",
+                post_deploy_status="fail",
+                deployment_record_id="failed-deployment",
+                error_code="post_deploy_failed",
+                error_message="Private provider detail SECRET",
+            )
+
+            def execute(**_: object) -> OdooStableTargetReplacementApplyResult:
+                api.dokploy_request(
+                    host="https://provider.test",
+                    token="fixture-token",
+                    path="/api/compose.update",
+                    method="POST",
+                    payload={"composeId": "compose-123"},
+                )
+                return result
+
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                    side_effect=execute,
+                ),
+                patch.object(api, "_dokploy_request", return_value={}),
+            ):
+                self.assertTrue(
+                    _execute_target_replacement_operation(
+                        record_store=cast(OdooStableOperationWorkerStore, store),
+                        control_plane_root_path=root,
+                        operation=operation,
+                        lease_owner="worker",
+                        lease_seconds=600,
+                        heartbeat_seconds=60,
+                    )
+                )
+            held = store.read_odoo_stable_target_replacement_operation_record(
+                operation.operation_id
+            )
+            self.assertEqual(held.status, "reconciliation_required")
+            self.assertEqual(held.deployment_record_id, result.deployment_record_id)
+            assert held.execution_failure is not None
+            self.assertEqual(held.execution_failure.result, result)
+            with self.provider():
+                self.assertEqual(
+                    recover_stranded_testing_replacements(store, root), (operation.operation_id,)
+                )
+            cancelled = store.read_odoo_stable_target_replacement_operation_record(
+                operation.operation_id
+            )
+            self.assertEqual(cancelled.status, "cancelled")
+            self.assertEqual(cancelled.execution_failure, held.execution_failure)
+            code, summary = _testing_failure_reason(cancelled)
+            self.assertEqual(code, result.error_code)
+            self.assertNotIn(result.error_message, summary)
+            view = operation_status_read_view(cancelled, poll_url="/fixture")
+            self.assertEqual(view["error_code"], result.error_code)
+            self.assertNotEqual(
+                view["error_description"],
+                operation_status_read_view(
+                    cancelled.model_copy(update={"cancellation": None}), poll_url="/fixture"
+                )["error_description"],
+            )
+            self.assertNotIn("SECRET", json.dumps(view))
+            assert cancelled.execution_failure is not None
+            public_result = operation_result_read_view(cancelled.execution_failure.result)
+            assert public_result is not None
+            self.assertEqual(public_result["post_deploy_status"], result.post_deploy_status)
+            import asyncio
+            from control_plane.http_app import create_launchplane_fastapi_app
+            from tests.http_app_test_support import (
+                _asgi_get,
+                _odoo_operation_status_identity,
+                _odoo_operation_status_policy,
+            )
+            from tests.support.auth import _StubVerifier
+
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_odoo_operation_status_identity()),
+                authz_policy=_odoo_operation_status_policy(
+                    action="odoo_target_replacement_apply.execute",
+                    products=(operation.product,),
+                    contexts=(operation.context,),
+                    instances=(operation.instance,),
+                    schema_version=2,
+                ),
+                record_store_factory=lambda: store,
+            )
+            response = asyncio.run(
+                _asgi_get(
+                    app,
+                    f"/v1/drivers/odoo/target-replacement/operations/{operation.operation_id}",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(
+                response.json()["result"]["post_deploy_status"], result.post_deploy_status
             )
 
     def test_new_isolated_target_supersedes_a_journalless_testing_fence_without_past_effect_proof(

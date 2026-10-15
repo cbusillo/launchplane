@@ -17,6 +17,8 @@ DEPLOY_BLOCKED_PREFIX = "deploy_blocked."
 # Any other failure inside the deploy step, after the checks passed.
 DEPLOY_FAILED_CODE = "deploy_failed"
 _DEPLOY_FAILED_DESCRIPTION = "The deploy step failed."
+TESTING_RESTORE_REQUIRED_CODE = "testing_restore_required"
+TESTING_DRILL_DATABASE_KEY = "testing_drill_database"
 
 DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
     "backup_restore_proof_required": "The exact backup and restore proof is missing, invalid or changed.",
@@ -102,6 +104,8 @@ def deploy_failure_description(code: str) -> str:
     """The fixed description of ``code``, or "" when Launchplane does not describe it here."""
     if code == DEPLOY_FAILED_CODE:
         return _DEPLOY_FAILED_DESCRIPTION
+    if code == TESTING_RESTORE_REQUIRED_CODE:
+        return "Testing needs a completed governed restore before ordinary maintenance."
     if not code.startswith(DEPLOY_BLOCKED_PREFIX):
         return ""
     return DEPLOY_BLOCKED_DESCRIPTIONS.get(code.removeprefix(DEPLOY_BLOCKED_PREFIX), "")
