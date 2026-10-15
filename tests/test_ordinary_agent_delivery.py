@@ -221,3 +221,272 @@ class OrdinaryAgentDeliveryTests(unittest.TestCase):
                 delivery_status="never_attempted",
             )
         )
+
+    def test_cleanup_failure_redacts_database_detail_and_chained_parameters(self) -> None:
+        import traceback
+        from sqlalchemy.exc import DBAPIError
+        from control_plane.storage.postgres import OrdinaryAgentPersistenceError
+
+        private_detail = "synthetic-private-capsule-value"
+        failure = DBAPIError(
+            "SELECT private_payload",
+            {"capsule": private_detail},
+            RuntimeError(private_detail),
+        )
+        with patch.object(self.store, "_session_factory", side_effect=failure):
+            try:
+                self.store.expire_ordinary_agent_deliveries()
+            except OrdinaryAgentPersistenceError as error:
+                rendered = "".join(traceback.format_exception(error))
+                self.assertNotIn(private_detail, rendered)
+                self.assertTrue(error.__suppress_context__)
+            else:
+                self.fail("Database cleanup failure was not reported")
+
+    def test_expiry_preserves_credential_revocation_session_cancellation_and_unknown_custody(
+        self,
+    ) -> None:
+        from sqlalchemy import select
+        from control_plane.contracts.ordinary_agent_session_lifecycle import (
+            OrdinaryAgentSessionRecord,
+            OrdinaryAgentLeaseRecord,
+            OrdinaryAgentFiniteRequestRecord,
+        )
+        from control_plane.contracts.ordinary_agent_effect import OrdinaryAgentEffectRecord
+        from control_plane.storage.postgres import (
+            LaunchplaneOrdinaryAgentSessionRow,
+            LaunchplaneOrdinaryAgentLeaseRow,
+            LaunchplaneOrdinaryAgentFiniteRequestRow,
+            LaunchplaneOrdinaryAgentEffectRow,
+            LaunchplaneOrdinaryAgentCustodyIssueAttemptRow,
+            LaunchplaneOrdinaryAgentEffectCustodyRow,
+        )
+
+        for attempted, unknown_custody in ((False, False), (False, True), (True, True)):
+            with self.subTest(attempted=attempted, unknown_custody=unknown_custody):
+                if attempted or unknown_custody:
+                    self.setUp()
+                self.seed_legacy_delivery()
+                candidate = self.bundle.candidate
+                start, expiry = candidate.valid_from, candidate.expires_at
+                target = self.policy.policy.ordinary_agents[0].target
+                session_record = OrdinaryAgentSessionRecord.model_validate(
+                    {
+                        "session_id": "legacy-session",
+                        "principal_id": candidate.principal_id,
+                        "credential_id": candidate.credential_id,
+                        "credential_version": 1,
+                        "credential_digest": candidate.credential_digest,
+                        "valid_from": start,
+                        "expires_at": expiry,
+                        "delegation": {
+                            "operation_id": "legacy-approval",
+                            "approval_sha256": "a" * 64,
+                            "receiver_sha256": "b" * 64,
+                            "actions": ["guarded_merge"],
+                            "session_expires_at": expiry,
+                            "lease_expires_at": expiry,
+                            "action_limit": 1,
+                            "pull_request_limit": 1,
+                            "refresh_allowance": 0,
+                        },
+                    }
+                )
+                lease = OrdinaryAgentLeaseRecord.model_validate(
+                    {
+                        "lease_id": "legacy-lease",
+                        "session_id": session_record.session_id,
+                        "principal_id": candidate.principal_id,
+                        "target": target.model_dump(),
+                        "action": "guarded_merge",
+                        "managed_set_id": "legacy-set",
+                        "managed_rule_id": "legacy-rule",
+                        "effective_decision_fingerprint": "oae-fp-v1:" + "c" * 64,
+                        "valid_from": start,
+                        "expires_at": expiry,
+                        "budget": {
+                            "window_start": start,
+                            "window_end": expiry,
+                            "action_limit": 1,
+                            "actions_used": 0,
+                            "pull_request_limit": 1,
+                            "pull_requests_used": 0,
+                        },
+                    }
+                )
+                request = OrdinaryAgentFiniteRequestRecord.model_validate(
+                    {
+                        "request_id": "legacy-request",
+                        "idempotency_key": "legacy-request",
+                        "principal_id": candidate.principal_id,
+                        "session_id": session_record.session_id,
+                        "lease_id": lease.lease_id,
+                        "target": target.model_dump(),
+                        "base_sha": "a" * 40,
+                        "pull_requests": [{"number": 7, "head_sha": "b" * 40}],
+                        "permitted_stack_edit_pull_requests": [],
+                        "refresh_allowance_total": 0,
+                        "admitted_at": start,
+                        "expires_at": expiry,
+                    }
+                )
+                effect = OrdinaryAgentEffectRecord.model_validate(
+                    {
+                        "effect_id": "legacy-effect",
+                        "request_id": request.request_id,
+                        "session_id": session_record.session_id,
+                        "lease_id": lease.lease_id,
+                        "principal_id": candidate.principal_id,
+                        "scope_sha256": request.scope_sha256,
+                        "binding_revision": request.binding_revision,
+                        "semantic_ordinal": 1,
+                        "action_ordinal": 1,
+                        "command_sha256": "d" * 64,
+                        "command": {
+                            "kind": "candidate_ref_delete",
+                            "effect": {
+                                "lineage": {
+                                    "repository": target.repository,
+                                    "base_branch": target.base_branch,
+                                    "batch_id": "legacy-batch",
+                                },
+                                "candidate_ref": "refs/heads/legacy-candidate",
+                            },
+                        },
+                        "target": target.model_dump(),
+                        "controller_fence": {
+                            "controller_key": "legacy-controller",
+                            "lease_owner": "legacy-worker",
+                            "lease_acquired_at": "legacy-acquisition",
+                        },
+                        "policy_record_id": self.policy.record_id,
+                        "policy_revision": self.policy.revision,
+                        "policy_sha256": self.policy.policy_sha256,
+                        "credential_id": candidate.credential_id,
+                        "credential_version": 1,
+                        "credential_digest": candidate.credential_digest,
+                        "reserved_at": start,
+                        "updated_at": start,
+                    }
+                )
+                with self.store._session_factory() as db:
+                    delivery = db.get(LaunchplaneOrdinaryAgentDeliveryRow, self.bundle.operation_id)
+                    assert delivery is not None
+                    delivery.delivery_status = (
+                        "delivery_attempted" if attempted else "never_attempted"
+                    )
+                    db.add(
+                        LaunchplaneOrdinaryAgentSessionRow(
+                            session_id=session_record.session_id,
+                            operation_id=session_record.delegation.operation_id,
+                            principal_id=candidate.principal_id,
+                            credential_id=candidate.credential_id,
+                            credential_version=1,
+                            payload=session_record.model_dump(mode="json"),
+                        )
+                    )
+                    db.add(
+                        LaunchplaneOrdinaryAgentLeaseRow(
+                            lease_id=lease.lease_id,
+                            session_id=lease.session_id,
+                            revision=lease.revision,
+                            payload=lease.model_dump(mode="json"),
+                        )
+                    )
+                    db.add(
+                        LaunchplaneOrdinaryAgentFiniteRequestRow(
+                            request_id=request.request_id,
+                            principal_id=request.principal_id,
+                            session_id=request.session_id,
+                            lease_id=request.lease_id,
+                            idempotency_key=request.idempotency_key,
+                            intent_sha256="e" * 64,
+                            payload=request.model_dump(mode="json"),
+                        )
+                    )
+                    db.add(
+                        LaunchplaneOrdinaryAgentEffectRow(
+                            effect_id=effect.effect_id,
+                            request_id=effect.request_id,
+                            lease_id=effect.lease_id,
+                            scope_sha256=effect.scope_sha256,
+                            binding_revision=effect.binding_revision,
+                            action_ordinal=effect.action_ordinal,
+                            semantic_key="legacy",
+                            command_sha256=effect.command_sha256,
+                            revision=effect.revision,
+                            payload=effect.model_dump(mode="json"),
+                        )
+                    )
+                    if unknown_custody:
+                        db.add(
+                            LaunchplaneOrdinaryAgentCustodyIssueAttemptRow(
+                                attempt_id="legacy-custody",
+                                idempotency_key_sha256="f" * 64,
+                                request_sha256="e" * 64,
+                                principal_id=candidate.principal_id,
+                                repository_id=target.repository_id,
+                                state="issue_unknown",
+                                mint_started_at=self.policy.updated_at,
+                                dispatch_deadline=self.policy.updated_at,
+                                updated_at=self.policy.updated_at,
+                                payload={},
+                            )
+                        )
+                        db.add(
+                            LaunchplaneOrdinaryAgentEffectCustodyRow(
+                                attempt_id="legacy-custody",
+                                effect_id=effect.effect_id,
+                                purpose="dispatch",
+                                payload={},
+                            )
+                        )
+                    db.commit()
+                now = self.bundle.delivery_expires_at + 1
+                with patch.object(self.store, "_ordinary_agent_database_epoch", return_value=now):
+                    self.assertEqual(self.store.expire_ordinary_agent_deliveries(), 1)
+                    self.assertEqual(self.store.expire_ordinary_agent_deliveries(), 0)
+                with self.store._session_factory() as db:
+                    credential = db.scalar(
+                        select(LaunchplaneOrdinaryAgentAuthenticationCredentialRow)
+                    )
+                    persisted_session = db.get(
+                        LaunchplaneOrdinaryAgentSessionRow, session_record.session_id
+                    )
+                    persisted_lease = db.get(LaunchplaneOrdinaryAgentLeaseRow, lease.lease_id)
+                    persisted_request = db.get(
+                        LaunchplaneOrdinaryAgentFiniteRequestRow, request.request_id
+                    )
+                    persisted_effect = db.get(LaunchplaneOrdinaryAgentEffectRow, effect.effect_id)
+                    assert (
+                        credential
+                        and persisted_session
+                        and persisted_lease
+                        and persisted_request
+                        and persisted_effect
+                    )
+                    self.assertEqual(
+                        credential.lifecycle_status, "active" if attempted else "revoked"
+                    )
+                    self.assertEqual(
+                        persisted_session.payload["revoked_at"], None if attempted else now
+                    )
+                    self.assertEqual(
+                        persisted_lease.payload["revoked_at"], None if attempted else now
+                    )
+                    self.assertEqual(
+                        persisted_request.payload["status"], "waiting" if attempted else "cancelled"
+                    )
+                    self.assertEqual(
+                        persisted_effect.payload["state"],
+                        "reserved"
+                        if attempted
+                        else "reconciliation_required"
+                        if unknown_custody
+                        else "not_dispatched",
+                    )
+                    persisted_delivery = db.get(
+                        LaunchplaneOrdinaryAgentDeliveryRow, self.bundle.operation_id
+                    )
+                    assert persisted_delivery is not None
+                    self.assertIsNone(persisted_delivery.ciphertext)
