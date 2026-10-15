@@ -171,7 +171,10 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         )
         # Execute the host payload actually emitted for the schedule, with fake
         # provider commands below. A producer/consumer spec mismatch must fail.
-        encoded = shlex.split(script.splitlines()[2])[2]
+        command = next(
+            line for line in script.splitlines() if line.lstrip().startswith("python3 - ")
+        )
+        encoded = shlex.split(command)[2]
         self.spec: dict[str, Any] = json.loads(base64.b64decode(encoded))
         self.containers: dict[str, dict[str, Any]] = {}
         self.volumes: dict[str, dict[str, Any]] = {}
