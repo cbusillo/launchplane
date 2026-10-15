@@ -10965,6 +10965,11 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if generation_binding(prepared.generation) != generation_binding(planned):
                 raise DrillPrerequisite("drill_source_changed")
+            previous_runtime = self.list_runtime_environment_records(
+                scope="instance", context_name=operation.context, instance_name="testing"
+            )[0]
+            receipt.response_payload["previous_runtime"] = previous_runtime.model_dump(mode="json")
+            receipt.response_payload["activated_runtime"] = prepared.runtime.model_dump(mode="json")
             session.merge(self._runtime_environment_row(prepared.runtime))
             row.payload = self._payload_dict(planned)
             receipt.response_payload["activation_safety"] = prepared.safety.model_dump(mode="json")
@@ -11503,9 +11508,25 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         record: OdooStableTargetReplacementOperationRecord,
         lease_owner: str,
+        restore_unstarted_drill: bool = False,
     ) -> bool:
+        # The flag is used only by the continuously held recovery guard. Its
+        # mutation observer journals every dispatch before HTTP. It is never
+        # recovery proof for an abandoned attempt or an arbitrary stored record.
+        from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE
+        from control_plane.odoo_testing_restore import generation_binding
+
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            restore_unstarted_drill = (
+                restore_unstarted_drill and record.idempotency_scope == DRILL_SCOPE
+            )
+            if restore_unstarted_drill:
+                self._lock_odoo_stable_lane(
+                    session, product=record.product, context=record.context, instance="testing"
+                )
+                self._lock_product_authority_bundle_write(session)
+            else:
+                self._begin_serialized_write(session)
             statement = (
                 select(LaunchplaneOdooStableTargetReplacementOperationRow)
                 .where(
@@ -11539,6 +11560,56 @@ class PostgresRecordStore(HumanSessionStore):
                 record = record.model_copy(
                     update={"recovery_journal": current_record.recovery_journal}
                 )
+            if (
+                restore_unstarted_drill
+                and record.status in {"fail", "cancelled"}
+                and current_record.attempt == record.attempt
+                and (
+                    current_record.recovery_journal is None
+                    or not current_record.recovery_journal.effects
+                )
+            ):
+                receipt_row = session.scalar(
+                    self._idempotency_statement(
+                        scope=DRILL_SCOPE,
+                        route_path=DRILL_ROUTE,
+                        idempotency_key=record.idempotency_key,
+                        for_update=True,
+                    )
+                )
+                generation_row = session.get(
+                    LaunchplaneFreshOdooTestingGenerationRow,
+                    (record.product, record.context),
+                    with_for_update=True,
+                )
+                runtime_row = session.get(
+                    LaunchplaneRuntimeEnvironmentRow,
+                    ("instance", record.context, "testing"),
+                    with_for_update=True,
+                )
+                if (
+                    receipt_row is not None
+                    and generation_row is not None
+                    and runtime_row is not None
+                ):
+                    receipt = LaunchplaneIdempotencyRecord.model_validate(receipt_row.payload)
+                    payload = receipt.response_payload
+                    generation = FreshOdooTestingGeneration.model_validate(generation_row.payload)
+                    if (
+                        payload.get("operation_id") == record.operation_id
+                        and payload.get("activation_attempt") == record.attempt
+                        and generation_binding(generation) == payload.get("generation_binding")
+                        and not generation.completed_at
+                        and runtime_row.payload == payload.get("activated_runtime")
+                        and payload.get("previous_runtime")
+                    ):
+                        previous_runtime = RuntimeEnvironmentRecord.model_validate(
+                            payload["previous_runtime"]
+                        )
+                        session.merge(self._runtime_environment_row(previous_runtime))
+                        generation_row.payload = payload["previous_generation"]
+                        payload["selection_restored"] = True
+                        self._sync_idempotency_row(receipt_row, receipt)
             self._sync_odoo_stable_target_replacement_operation_row(row, record)
             session.commit()
             return True

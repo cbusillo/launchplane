@@ -458,7 +458,14 @@ class OdooTestingDrillScheduler:
                 )
                 payload.update(
                     status="fail" if activated else "skipped",
-                    step="protected_use_after_activation" if activated else "staff_testing_hold",
+                    step=(
+                        "protected_use_after_activation"
+                        if activated
+                        else operation.cancellation.reason
+                        if operation.cancellation is not None
+                        and operation.cancellation.reason.replace("_", "").isalnum()
+                        else "staff_testing_hold"
+                    ),
                 )
             else:
                 payload.update(

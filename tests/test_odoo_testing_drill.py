@@ -770,6 +770,52 @@ class TestingDrillTests(TestingDrillScenario):
         self.store.update_odoo_testing_drill_receipt(operation.idempotency_key, self.now, stale)
         require_drill_checkpoint(self.store, operation)
 
+    def test_guarded_worker_preflight_failure_restores_the_untouched_lane(self) -> None:
+        from control_plane.workflows.odoo_stable_operation_worker import (
+            _execute_target_replacement_with_checkpoint,
+        )
+
+        self.scheduler.run_once()
+        operation = self.activate()
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.DurableOperationAuthorizationGuard"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker._start_target_replacement_heartbeat"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.require_unchanged_production_artifact"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_operation_worker.execute_odoo_stable_target_replacement_apply",
+                side_effect=ValueError("fixture preflight"),
+            ),
+        ):
+            self.assertTrue(
+                _execute_target_replacement_with_checkpoint(
+                    record_store=self.store,
+                    control_plane_root_path=Path("/fixture/control-plane"),
+                    operation=operation,
+                    lease_owner=operation.lease_owner,
+                    lease_seconds=300,
+                    heartbeat_seconds=60,
+                    execution_checkpoint=lambda phase: None,
+                )
+            )
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(self.profile.product, self.context),
+            self.gen,
+        )
+        self.assertEqual(
+            self.store.list_runtime_environment_records(
+                scope="instance", context_name=self.context, instance_name="testing"
+            ),
+            (self.runtime,),
+        )
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "fail")
+
     def test_cancellation_after_activation_alerts_and_preserves_exact_incomplete_copy(self) -> None:
         from control_plane.testing_lane_hold import staff_testing_hold_cancellation
 

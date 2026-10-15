@@ -797,8 +797,15 @@ predecessor is retained through final web/health checks, including when those
 checks fail. Only the copy two generations behind can be disposed of, and it must carry
 its exact committed copy witness; DROP uses no FORCE, so an unexpected connection
 refuses disposal. The new copy is distinct and the initial bootstrap database
-is retained. This bounds steady-state drill storage to the initial copy, current
-copy, immediate predecessor and in-progress copy; failed partial captures/copies remain recovery custody.
+is retained. Successful cleanup bounds steady-state drill storage to the initial copy, current
+copy, immediate predecessor and in-progress copy. Cleanup runs after the sanitized
+new web process starts; a cleanup refusal preserves that working copy, emits
+`testing_drill_disposal_deferred=true` in the operation logs, and retains the old
+copy under the slot receipt's custody. Deferred cleanup and failed partial
+captures/copies require explicit disposition and can accumulate; admission does
+not establish available filesystem capacity. Durable deferred-disposal telemetry,
+capacity admission and bounded cleanup reconciliation are tracked in
+[#3729](https://github.com/cbusillo/launchplane/issues/3729).
 A failed copy never deletes its predecessor. Final web and health verification
 still gates a passing operation and generation completion.
 
@@ -836,9 +843,16 @@ Once a drill generation exists, older images cannot interpret its additional
 identity fields. Retain this image or a compatible successor and forward-fix;
 do not erase generation history or restore an old DB snapshot to clear a failure.
 Staff holds provide the supported per-lane maintenance pause. A held queued
-operation has not selected its new database; after activation, a late hold or
-failure keeps the exact generation for recovery rather than silently reverting
-managed settings. Private slot receipts retain prior generation identities;
+operation has not selected its new database. A refusal after selection but before
+any provider dispatch can restore the exact previous generation and runtime
+atomically with the terminal operation. This is limited to the continuously held
+worker recovery guard, the same live lease/attempt, empty dispatch history and
+unchanged selected settings; it never overwrites intervening settings. An
+abandoned attempt, dispatched effect or later hold/failure retains the exact
+generation for supported recovery rather than reverting possibly used settings.
+A hold arriving after destructive restore starts can therefore leave testing
+unavailable pending recovery; continuing provider writes past that protection
+is not authorized. Private slot receipts retain prior generation identities;
 they are provenance, not a promise that a successfully superseded drill database
 still exists after bounded disposal. Remove failed raw-copy evidence only under
 the existing custody procedure above. No production rollback is part of this drill.

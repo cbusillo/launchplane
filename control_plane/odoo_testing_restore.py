@@ -654,7 +654,7 @@ def discard_previous_drill(gen, database_container, runner, database):
             '_', previous, stdin=b"SELECT value FROM ir_config_parameter WHERE key='__LP_COPY_WITNESS__';\n").decode().strip()
         if observed != witness:
             raise RuntimeError('Prior database lacks its committed drill witness')
-        # No FORCE: an unexpected user/connection retains the database and fails the drill.
+        # No FORCE: an unexpected user/connection retains this old copy.
         docker('exec','-i',database_container,'sh','-c',
             'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
             '_', previous, stdin=b'DROP DATABASE :"database_name";\n')
@@ -865,7 +865,6 @@ def restore_main():
         readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
         if "integration_readback_ok=true" not in readback.splitlines():
             raise RuntimeError("Testing copy integration readback did not pass")
-        discard_previous_drill(gen, containers['database'][0], runner, database)
         # Emit only the established value-free protocol markers, never runner logs.
         for line in output.splitlines():
             if re.fullmatch(r"(?:website_bootstrap_[a-z_]+|odoo_[a-z_]+)=(?:true|false|[0-9]+)", line):
@@ -877,6 +876,12 @@ def restore_main():
         if spec.get('native_capture') is not None:
             docker('exec','-i','-u','root',runner,'python3','-',base64.b64encode(json.dumps({'capture':spec['native_capture'],'mode':'cleanup'}).encode()).decode(),stdin=spec['native_files_program'].encode())
         docker("start", web)
+        try:
+            discard_previous_drill(gen, containers['database'][0], runner, database)
+        except Exception:
+            # Cleanup cannot take a sanitized new lane offline. Keep exact
+            # custody in the slot receipt; never expose provider error values.
+            print("testing_drill_disposal_deferred=true", flush=True)
         for marker in ("testing_copy_pre_registry_sanitized", "testing_copy_sanitized", "integration_readback_ok", "odoo_module_update_image_match", "odoo_restore_completed"):
             print(marker + "=true")
     finally:

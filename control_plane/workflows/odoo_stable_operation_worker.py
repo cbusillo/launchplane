@@ -2241,11 +2241,11 @@ def _execute_target_replacement_with_checkpoint(
         )
         if authorization_guard.denial_error is not None:
             raise authorization_guard.denial_error
-    except (_StaffTestingHoldError, DrillSkipped):
+    except (_StaffTestingHoldError, DrillSkipped) as error:
         logging.info(
-            "Odoo stable target replacement operation %s was cancelled: its testing lane is "
-            "held for staff testing.",
+            "Odoo stable target replacement operation %s was cancelled by lane protection: %s",
             operation.operation_id,
+            str(error) if isinstance(error, DrillSkipped) else "staff_testing_hold",
         )
         finished_at = _utc_now_timestamp()
         terminal_operation = operation.model_copy(
@@ -2255,7 +2255,9 @@ def _execute_target_replacement_with_checkpoint(
                 "updated_at": finished_at,
                 "finished_at": finished_at,
                 "lease_owner": lease_owner,
-                "cancellation": staff_testing_hold_cancellation(finished_at),
+                "cancellation": staff_testing_hold_cancellation(finished_at).model_copy(
+                    update={"reason": str(error)} if isinstance(error, DrillSkipped) else {}
+                ),
             }
         )
     except DurableOperationAuthorizationDeniedError as error:
@@ -2334,6 +2336,10 @@ def _execute_target_replacement_with_checkpoint(
                     "error_message": "Testing provider effects require proved-safe reconciliation before retry.",
                 }
             )
+    if execution_checkpoint is not None and isinstance(record_store, PostgresRecordStore):
+        return record_store.complete_odoo_stable_target_replacement_operation_record(
+            record=terminal_operation, lease_owner=lease_owner, restore_unstarted_drill=True
+        )
     return record_store.complete_odoo_stable_target_replacement_operation_record(
         record=terminal_operation,
         lease_owner=lease_owner,

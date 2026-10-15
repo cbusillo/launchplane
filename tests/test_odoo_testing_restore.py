@@ -311,6 +311,28 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 status = int(error.code or 0)
         return status, output.getvalue()
 
+    def test_old_copy_cleanup_failure_leaves_new_copy_running(self) -> None:
+        previous = "lp_drill_" + "b" * 32
+        self.spec["generation"].update(
+            discard_drill_database=previous, discard_copy_binding="c" * 64
+        )
+        command = self.command
+
+        def refuse_cleanup(
+            arguments: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[bytes]:
+            if previous in arguments:
+                return subprocess.CompletedProcess(
+                    arguments, 1, stdout=b"", stderr=b"private cleanup error"
+                )
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=refuse_cleanup):
+            code, output = self.run_program()
+        self.assertEqual(code, 0, output)
+        self.assertIn(["docker", "start", "web"], self.calls)
+        self.assertNotIn("private cleanup error", output)
+
     def test_failed_new_copy_never_disposes_prior_drill(self) -> None:
         previous_drill = "lp_drill_" + "b" * 32
         self.spec["generation"].update(

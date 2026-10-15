@@ -11138,6 +11138,139 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             (scenario.runtime,),
         )
 
+    def test_guarded_pre_effect_refusal_restores_selection_atomically(self) -> None:
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.activate()
+        terminal = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": operation.updated_at,
+                "error_code": "fixture_preflight_refused",
+                "error_message": "Fixture preflight refused.",
+            }
+        )
+        with patch.object(
+            scenario.store,
+            "_sync_idempotency_row",
+            side_effect=RuntimeError("fixture receipt failure"),
+        ):
+            with self.assertRaises(RuntimeError):
+                scenario.store.complete_odoo_stable_target_replacement_operation_record(
+                    record=terminal,
+                    lease_owner=operation.lease_owner,
+                    restore_unstarted_drill=True,
+                )
+        self.assertNotEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+        self.assertTrue(
+            scenario.store.complete_odoo_stable_target_replacement_operation_record(
+                record=terminal,
+                lease_owner=operation.lease_owner,
+                restore_unstarted_drill=True,
+            )
+        )
+        self.assertEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+        self.assertEqual(
+            scenario.store.list_runtime_environment_records(
+                scope="instance", context_name=scenario.context, instance_name="testing"
+            ),
+            (scenario.runtime,),
+        )
+        self.assertEqual(scenario.operation().status, "fail")
+
+    def test_unstarted_rollback_preserves_intervening_runtime_settings(self) -> None:
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.activate()
+        runtime = scenario.store.list_runtime_environment_records(
+            scope="instance", context_name=scenario.context, instance_name="testing"
+        )[0]
+        changed = runtime.model_copy(
+            update={"env": {**runtime.env, "FIXTURE_NEW_SETTING": "retained"}}
+        )
+        scenario.store.write_runtime_environment_record(changed)
+        terminal = operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "finished_at": operation.updated_at,
+                "error_message": "Fixture preflight refusal.",
+            }
+        )
+        self.assertTrue(
+            scenario.store.complete_odoo_stable_target_replacement_operation_record(
+                record=terminal,
+                lease_owner=operation.lease_owner,
+                restore_unstarted_drill=True,
+            )
+        )
+        self.assertEqual(
+            scenario.store.list_runtime_environment_records(
+                scope="instance", context_name=scenario.context, instance_name="testing"
+            ),
+            (changed,),
+        )
+        self.assertNotEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+
+    def test_dispatched_effect_never_restores_previous_selection(self) -> None:
+        from control_plane.contracts.testing_replacement_recovery import (
+            TestingReplacementEffect,
+            TestingReplacementRecoveryJournal,
+        )
+
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.activate()
+        operation = operation.model_copy(
+            update={
+                "recovery_journal": TestingReplacementRecoveryJournal(
+                    attempt=operation.attempt,
+                    target_fingerprint="fixture-binding",
+                    target_id="fixture-target",
+                    effects=(
+                        TestingReplacementEffect(
+                            reference="fixture",
+                            path="/api/schedule.runManually",
+                            dispatched_at=operation.updated_at,
+                        ),
+                    ),
+                )
+            }
+        )
+        scenario.store.write_odoo_stable_target_replacement_operation_record(operation)
+        terminal = operation.model_copy(
+            update={"status": "fail", "phase": "failed", "finished_at": operation.updated_at}
+        )
+        self.assertTrue(
+            scenario.store.complete_odoo_stable_target_replacement_operation_record(
+                record=terminal,
+                lease_owner=operation.lease_owner,
+                restore_unstarted_drill=True,
+            )
+        )
+        self.assertNotEqual(
+            scenario.store.read_fresh_odoo_testing_generation(
+                scenario.profile.product, scenario.context
+            ),
+            scenario.gen,
+        )
+
     def test_prior_drill_disposal_executes_sql_and_refuses_foreign_witness_or_open_connection(
         self,
     ) -> None:
