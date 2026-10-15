@@ -778,6 +778,7 @@ def execute_odoo_prod_backup_restore_apply(
                 instance=plan.instance,
                 phase="deploy",
             ),
+            artifact_id=plan.expected_current_artifact_id,
             run_destructive_restore=False,
             allow_historical_sender_contract=True,
             provider_effect_checkpoint=provider_checkpoint("post_deploy_started"),
@@ -1140,6 +1141,7 @@ def execute_odoo_prod_backup_restore_verification_replay(
                 instance=plan.instance,
                 phase="deploy",
             ),
+            artifact_id=plan.expected_current_artifact_id,
             run_destructive_restore=False,
             allow_historical_sender_contract=True,
             provider_effect_checkpoint=lambda effect: provider_effect_checkpoint(

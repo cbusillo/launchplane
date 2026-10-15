@@ -209,6 +209,7 @@ def main(argv):
         environment = dict(os.environ)
         environment.update(exec_environment)
         environment["PYTHONPATH"] = str(state_dir / "modules")
+        environment.update(exec_environment)
         # Docker attaches the caller's stdin only with -i.
         stdin = None if interactive else subprocess.DEVNULL
         if program[2:] == ["/volumes/scripts/odoo_website_bootstrap.py"]:
@@ -498,6 +499,10 @@ def _render_post_deploy_script(
                     ODOO_UPSTREAM_DB_USER=odoo
                     ODOO_UPSTREAM_FILESTORE_PATH=/source/filestore
                     """
+                )
+                + "".join(
+                    f"\n{key}={value}"
+                    for key, value in (workflow_environment_overrides or {}).items()
                 ),
                 "appName": "example-testing-app",
                 "serverId": "server-123",
@@ -807,6 +812,15 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         modules = self.root / "modules"
         modules.mkdir()
         (modules / "psycopg2.py").write_text(_FAKE_PSYCOPG2, encoding="utf-8")
+        (modules / "run_odoo_startup.py").write_text(
+            "import os\n"
+            "def _load_settings(arguments): return arguments\n"
+            "def _write_runtime_config(settings): pass\n"
+            "def _run_odoo_shell(settings, program, *, label):\n"
+            "    if os.environ.get('FAKE_WEBSITE_SETTINGS_FAILURE') == '1': raise RuntimeError('native consumer failed')\n"
+            "    print('website_settings_nonproduction_excluded=true')\n",
+            encoding="utf-8",
+        )
         assert BASH is not None
         self.bash = BASH
         resource_snapshot, self.runtime_identity = resource_fixture()
@@ -1362,6 +1376,37 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertNotEqual(still_refused.returncode, 0)
         self.assertFalse(still_refused.web_restarted, still_refused.docker_log)
 
+    def test_native_settings_retry_can_start_previously_stopped_production_web(self) -> None:
+        import base64
+        from control_plane.contracts.odoo_post_deploy_payload import OdooPostDeployPayload
+        from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
+        from tests.test_odoo_website_settings import intent
+
+        payload = OdooPostDeployPayload(
+            context="example", instance="prod", website_settings=intent().settings
+        )
+        script = _render_post_deploy_script(
+            None,
+            instance="prod",
+            workflow_environment_overrides={
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: base64.b64encode(
+                    payload.to_wire_json_bytes()
+                ).decode()
+            },
+        )
+        for failed in ("0", "1"):
+            with self.subTest(failed=failed):
+                run = self._run(script, web_status="exited", FAKE_WEBSITE_SETTINGS_FAILURE=failed)
+                self.assertEqual(run.returncode == 0, failed == "0", run.stdout + run.stderr)
+                self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
+        for failed in ("0", "1"):
+            with self.subTest(workflow_failure=True, native_failure=failed):
+                run = self._run(
+                    script, FAKE_WORKFLOW_EXIT="7", FAKE_WEBSITE_SETTINGS_FAILURE=failed
+                )
+                self.assertEqual(run.returncode, 7, run.stdout + run.stderr)
+                self.assertEqual(run.web_restarted, failed == "0", run.docker_log)
+
     def test_stopped_web_without_a_readback_still_fails(self) -> None:
         run = self._run(_render_script(instance="prod"), web_status="exited")
 
@@ -1512,6 +1557,17 @@ class DataWorkflowScriptExecutionTests(unittest.TestCase):
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertNotIn("odoo_restore_completed", run.stdout)
         self.assertNotIn("odoo_restore_failure_logged", run.stdout)
+
+    def test_native_settings_failure_keeps_web_stopped_on_success_and_error_paths(self) -> None:
+        for workflow_exit in ("0", "7"):
+            with self.subTest(workflow_exit=workflow_exit):
+                run = self._run(
+                    _render_restore_script(),
+                    FAKE_WORKFLOW_EXIT=workflow_exit,
+                    FAKE_WEBSITE_SETTINGS_FAILURE="1",
+                )
+                self.assertNotEqual(run.returncode, 0)
+                self.assertFalse(run.web_restarted, run.docker_log)
 
 
 if __name__ == "__main__":

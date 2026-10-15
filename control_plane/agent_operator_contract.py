@@ -27,6 +27,7 @@ from control_plane.openapi_export import (
     canonical_openapi_document,
 )
 from control_plane.legacy_preview_reconciliation import LEGACY_PREVIEW_RECONCILIATION_ROUTE
+from control_plane.odoo_website_settings import ODOO_WEBSITE_SETTINGS_ROUTE
 
 
 SCHEMA_VERSION = 1
@@ -160,6 +161,15 @@ OPERATION_SPECS = (
         ("dry-run", "apply"),
         "apply",
         ("reviewed_dry_run",),
+    ),
+    OperationSpec(
+        "POST",
+        ODOO_WEBSITE_SETTINGS_ROUTE,
+        "Prepare artifact-bound website intent without changing the Odoo database.",
+        ("service_api",),
+        ("dry-run", "apply"),
+        "apply",
+        ("reviewed_plan_digest",),
     ),
     OperationSpec(
         "POST",

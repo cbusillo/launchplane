@@ -1,3 +1,4 @@
+from control_plane import odoo_website_settings as control_plane_odoo_website_settings
 from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
 from control_plane.odoo_connection_isolation import (
@@ -8224,6 +8225,211 @@ def create_launchplane_fastapi_app(
             trace_id=trace_id,
             records=records,
             result=applied_plan.model_dump(mode="json"),
+        )
+        store_apply_idempotency(
+            record_store=record_store,
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=normalized_idempotency_key,
+            request_fingerprint_value=payload_fingerprint,
+            trace_id=trace_id,
+            response=response,
+        )
+        return response
+
+    async def apply_odoo_website_settings(
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        route_path = control_plane_odoo_website_settings.ODOO_WEBSITE_SETTINGS_ROUTE
+        trace_id = next_trace_id()
+        try:
+            raw_payload = await request.json()
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Odoo website settings request failed validation.",
+            ) from error
+        if not isinstance(raw_payload, dict):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Odoo website settings request failed validation.",
+            )
+        try:
+            settings_request = (
+                control_plane_odoo_website_settings.OdooWebsiteSettingsRequest.model_validate(
+                    raw_payload
+                )
+            )
+        except ValidationError as error:
+            # Never echo pydantic input: a misplaced credential would be reflected back.
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Odoo website settings request failed validation.",
+            ) from error
+        if isinstance(identity, TerminalAgentIdentity):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Terminal agent credentials can only read redacted Launchplane context.",
+            )
+        action = (
+            "product_config.apply" if settings_request.mode == "apply" else "product_config.plan"
+        )
+        if not resolved_authz_policy_runtime.allows(
+            identity=identity,
+            action=action,
+            product=settings_request.product,
+            context=settings_request.context,
+            target=AuthorizationTarget(scope="instance", instances=(settings_request.instance,)),
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message=(
+                    "Workflow cannot plan or apply Odoo website settings for the requested"
+                    " product/context."
+                ),
+            )
+        try:
+            resolve_odoo_post_deploy_product_route(
+                record_store=record_store,
+                product=settings_request.product,
+                context=settings_request.context,
+                instance=settings_request.instance,
+            )
+        except OdooPostDeployRouteDependencyError as error:
+            raise _launchplane_http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="not_found",
+                message="Odoo product lane was not found for the requested website settings.",
+            ) from error
+        except OdooPostDeployProductMismatchError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="product_driver_mismatch",
+                message="Product is not configured for the requested driver route.",
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Request could not be completed.",
+            ) from error
+        typed_store = record_store
+        records = {
+            "product_profile": settings_request.product,
+            "context": settings_request.context,
+            "instance": settings_request.instance,
+        }
+        if settings_request.mode == "dry-run":
+            try:
+                plan = control_plane_odoo_website_settings.plan_website_settings(
+                    typed_store, settings_request
+                )
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="website_settings_invalid",
+                    message=str(error),
+                ) from error
+            return accepted_evidence_response(
+                trace_id=trace_id,
+                records=records,
+                result=plan,
+            )
+
+        if not idempotency_key.strip():
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="idempotency_key_required",
+                message="Odoo website settings apply requires an Idempotency-Key header.",
+            )
+        (
+            normalized_idempotency_key,
+            payload_fingerprint,
+            replay_response,
+        ) = await replay_apply_idempotency(
+            request=request,
+            record_store=record_store,
+            identity=identity,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            trace_id=trace_id,
+            check_replay=True,
+            request_payload=raw_payload,
+        )
+        if replay_response is not None:
+            return replay_response
+        try:
+            applied_plan = control_plane_odoo_website_settings.prepare_website_settings(
+                typed_store,
+                settings_request,
+                required_context_owner=(
+                    (settings_request.product, settings_request.context)
+                    if isinstance(identity, LocalOperatorIdentity)
+                    else None
+                ),
+                required_product_config_target=(
+                    settings_request.product,
+                    settings_request.context,
+                    settings_request.instance,
+                ),
+            )
+        except OdooInstanceOverrideConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Odoo overrides changed. Refresh and run a new dry-run.",
+            ) from error
+        except ProductProfileConflictError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="product_profile_conflict",
+                message="Product lane ownership changed. Refresh and run a new dry-run.",
+            ) from error
+        except ProductContextOwnershipError as error:
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="local_operator_lane_scope_required",
+                message="The context must belong to the named product only.",
+            ) from error
+        except control_plane_odoo_website_settings.OdooWebsiteSettingsStale as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message=str(error),
+            ) from error
+        except ValueError as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="website_settings_invalid",
+                message=str(error),
+            ) from error
+        response = accepted_evidence_response(
+            trace_id=trace_id,
+            records=records,
+            result=applied_plan,
         )
         store_apply_idempotency(
             record_store=record_store,
@@ -27034,6 +27240,37 @@ def create_launchplane_fastapi_app(
         },
         operation_id="apply_odoo_addon_settings",
         summary="Dry-run or apply Odoo instance-override addon settings",
+        responses={
+            400: {"model": LaunchplaneErrorResponse},
+            401: {"model": LaunchplaneErrorResponse},
+            403: {"model": LaunchplaneErrorResponse},
+            404: {"model": LaunchplaneErrorResponse},
+            409: {"model": LaunchplaneErrorResponse},
+            413: {"model": LaunchplaneErrorResponse},
+        },
+    )
+
+    app.add_api_route(
+        control_plane_odoo_website_settings.ODOO_WEBSITE_SETTINGS_ROUTE,
+        apply_odoo_website_settings,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        openapi_extra={
+            "requestBody": {
+                "required": True,
+                "content": {
+                    "application/json": {
+                        "schema": _openapi_model_schema(
+                            control_plane_odoo_website_settings.OdooWebsiteSettingsRequest
+                        )
+                    }
+                },
+            }
+        },
+        operation_id="apply_odoo_website_settings",
+        summary="Dry-run or apply Odoo instance-override website settings",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

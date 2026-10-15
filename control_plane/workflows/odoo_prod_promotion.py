@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+
 from collections.abc import Callable
 from pathlib import Path
 from control_plane.release_review import require_release_approval
@@ -146,16 +148,23 @@ def execute_odoo_prod_promotion(
     cutover_provider: OdooCutoverProvider | None = None,
     cutover_plan: OdooCutoverPlan | None = None,
     cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
+    release_decision: ReleaseReviewDecisionRecord | None = None,
 ) -> OdooProdPromotionResult:
     del state_dir, database_url
     product = _resolve_product_profile_key(product=request.product, context=request.context)
-    require_release_approval(
+    current_decision = require_release_approval(
         control_plane_root=control_plane_root,
         record_store=record_store,
         product=product,
         artifact_id=request.artifact_id,
         source_commit=request.source_git_ref,
     )
+    release_decision = release_decision or current_decision
+    if release_decision is not None and (
+        release_decision.product != product
+        or release_decision.checklist.candidate.artifact_id != request.artifact_id
+    ):
+        raise click.ClickException("Release decision differs from the promotion product/artifact.")
     promotion_record_id = _promotion_record_id(
         context=request.context,
         from_instance=request.from_instance,
@@ -180,6 +189,17 @@ def execute_odoo_prod_promotion(
                 # Existing approval/backup gates retain their original order for
                 # legacy records. Replacement still requires the real profile.
                 cutover_plan = None
+        if (
+            cutover_plan is not None
+            and release_decision is not None
+            and (
+                release_decision.checklist.website_settings is not None
+                or release_decision.checklist.production_website_settings is not None
+            )
+        ):
+            raise click.ClickException(
+                "Typed website settings require the stopped-web maintenance driver; two-slot settings receipt support is unavailable."
+            )
         if cutover_plan is not None:
             from control_plane.odoo_cutover_plan import cutover_record_id
 
@@ -290,6 +310,10 @@ def execute_odoo_prod_promotion(
                         health_timeout_seconds=request.health_timeout_seconds,
                         no_cache=request.no_cache,
                     ),
+                    release_website_settings=release_decision.checklist.website_settings
+                    if release_decision is not None
+                    else None,
+                    release_operation=True,
                     hold_uncertain_effects=hold_uncertain_effects,
                     provider_effect_checkpoint=_checkpoint_chain(
                         provider_effect_checkpoint, backup_checkpoint
