@@ -143,7 +143,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
-    async def classify(self, **changes: Any) -> Any:
+    async def classify(self, *, idempotency_key: str = "", **changes: Any) -> Any:
         payload = {
             "production_use": "prelaunch",
             "reason": "Record reviewed never-live facts.",
@@ -159,7 +159,7 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                 "mode": "apply",
                 "reviewed_plan_sha256": dry.json()["result"]["plan_sha256"],
             },
-            f"classification-{payload['production_use']}",
+            idempotency_key or f"classification-{payload['production_use']}",
         )
 
     def safety(self, **changes: Any) -> None:
@@ -192,6 +192,8 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.status_code, 202, second.text)
         actual = self.store.read_product_profile_record(self.profile.product)
         self.assertEqual(actual.production_use, payload["production_use"])
+        self.assertEqual(actual.production_use_authority, "director_agent")
+        self.assertFalse(actual.prelaunch_bootstrap_authorized)
         self.assertEqual(actual.release_on_acceptance, self.profile.release_on_acceptance)
         self.assertEqual(actual.lanes, self.profile.lanes)
         self.assertEqual(self.store.list_deployment_records(), ())
@@ -215,6 +217,36 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     self.store.read_product_profile_record(self.profile.product), updated
                 )
+
+    async def test_agent_classification_cannot_retire_later_production_ownership(self) -> None:
+        from control_plane.disposable_lanes import (
+            DisposableLaneSafetyUnknown,
+            require_disposable_lane,
+        )
+
+        response = await self.classify()
+        self.assertEqual(response.status_code, 202, response.text)
+        current = self.store.read_product_profile_record(self.profile.product)
+        lane = current.lanes[0]
+        self.store.write_product_profile_record(
+            current.model_copy(
+                update={
+                    "lanes": (
+                        lane,
+                        lane.model_copy(update={"instance": "prod"}),
+                    )
+                }
+            )
+        )
+        record_safety(self.store, current.product, lane.context, lane.instance)
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=current.product,
+                context=lane.context,
+                instance=lane.instance,
+                retirement=True,
+            )
 
     async def test_classification_never_changes_release_or_accepts_stale_review(self) -> None:
         for release in ("held", "promote_with_rollback_drill"):
@@ -428,6 +460,18 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                 ),
             )
         )
+        self.store.write_product_profile_record(
+            self.profile.model_copy(
+                update={
+                    "production_use": "prelaunch",
+                    "production_use_authority": "director_agent",
+                }
+            )
+        )
+        response = await self.classify(idempotency_key="explicit-reconfirmation")
+        self.assertEqual(response.status_code, 202, response.text)
+        current = self.store.read_product_profile_record(self.profile.product)
+        self.assertTrue(current.prelaunch_bootstrap_authorized)
         response = await self.classify(production_use="live", release_on_acceptance="held")
         self.assertEqual(response.status_code, 202, response.text)
         self.assertEqual(
@@ -565,6 +609,29 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 409, response.text)
         execute.assert_not_called()
 
+    async def test_key_safety_policy_change_invalidates_preview_safety(self) -> None:
+        from control_plane.contracts.runtime_key_safety_policy import (
+            RuntimeKeySafetyPolicyRecord,
+            RuntimeSecretSafetyRule,
+        )
+
+        self.safety()
+        self.store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="changed-preview-key-policy",
+                source="fixture",
+                updated_at=self.profile.updated_at,
+                rules=(
+                    RuntimeSecretSafetyRule(binding_key="SMTP_URL", secret_class="shared_safe"),
+                ),
+            )
+        )
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 409, response.text)
+        execute.assert_not_called()
+
+    async def test_bootstrap_override_change_invalidates_preview_safety(self) -> None:
         from control_plane.contracts.odoo_instance_override_record import (
             OdooInstanceOverrideRecord,
             OdooWebsiteBootstrapPayload,

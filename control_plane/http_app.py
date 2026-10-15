@@ -14271,10 +14271,18 @@ def create_launchplane_fastapi_app(
                     code="authorization_denied",
                     message=str(error),
                 ) from error
+        classification_authority: control_plane_product_production_use_setting.ProductionUseAuthority = "explicit"
+        if source_classification:
+            classification_authority = (
+                profile.production_use_authority
+                if profile.production_use == "prelaunch"
+                else "director_agent"
+            )
         try:
             plan = control_plane_product_production_use_setting.build_product_production_use_plan(
                 profile=profile,
                 request=production_use_request,
+                authority=classification_authority,
             )
         except (
             control_plane_product_production_use_setting.ProductProductionUseChangedError
@@ -14307,6 +14315,7 @@ def create_launchplane_fastapi_app(
                     production_use=plan.production_use_after,
                     release_on_acceptance=plan.release_on_acceptance_after,
                     updated_at=utc_now_timestamp(),
+                    authority=classification_authority,
                 )
             except ValueError as error:
                 raise _launchplane_http_error(

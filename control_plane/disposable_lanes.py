@@ -13,6 +13,15 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+
+LaneConfigurationRecord = (
+    RuntimeEnvironmentRecord
+    | SecretRecord
+    | SecretBinding
+    | OdooInstanceOverrideRecord
+    | RuntimeKeySafetyPolicyRecord
+)
 
 
 class DisposableLaneSafetyUnknown(ValueError):
@@ -20,6 +29,10 @@ class DisposableLaneSafetyUnknown(ValueError):
 
 
 class DisposableLaneStore(Protocol):
+    def list_runtime_key_safety_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
+
     def read_odoo_instance_override_record(
         self, *, context_name: str, instance_name: str
     ) -> OdooInstanceOverrideRecord: ...
@@ -74,9 +87,7 @@ def disposable_lane_binding_sha256(
     target: DokployTargetRecord | None,
     target_id: DokployTargetIdRecord | None,
     preview: PreviewRecord | None = None,
-    configuration: tuple[
-        RuntimeEnvironmentRecord | SecretRecord | SecretBinding | OdooInstanceOverrideRecord, ...
-    ] = (),
+    configuration: tuple[LaneConfigurationRecord, ...] = (),
 ) -> str:
     # The observation itself is not part of the binding it observes. Updating
     # timestamps or retirement lifecycle state does not change lane ownership.
@@ -129,6 +140,14 @@ def require_disposable_lane(
     if not ((instance == "testing" and len(stable) == 1) or owned_preview):
         raise DisposableLaneSafetyUnknown(
             "Disposable operation requires an exact owned testing or preview lane."
+        )
+    if (
+        retirement
+        and profile.production_use_authority == "director_agent"
+        and any(lane.instance != "testing" for lane in profile.lanes)
+    ):
+        raise DisposableLaneSafetyUnknown(
+            "Agent-attested never-live retirement requires testing-only ownership."
         )
     if retirement and profile.production_use != "prelaunch":
         raise DisposableLaneSafetyUnknown(
@@ -259,13 +278,12 @@ def resolve_disposable_preview(
 
 def disposable_lane_configuration(
     store: DisposableLaneStore, context: str, instance: str
-) -> tuple[
-    RuntimeEnvironmentRecord | SecretRecord | SecretBinding | OdooInstanceOverrideRecord, ...
-]:
+) -> tuple[LaneConfigurationRecord, ...]:
     # Odoo previews copy their template lane, including bootstrap overrides.
     # Bind the actual copied inputs, not just records under the preview slug.
     instances = {"", instance}
     overrides: list[OdooInstanceOverrideRecord] = []
+    policies: tuple[RuntimeKeySafetyPolicyRecord, ...] = ()
     profiles = [
         profile
         for profile in store.list_product_profile_records(driver_id="odoo")
@@ -273,6 +291,7 @@ def disposable_lane_configuration(
         and not any((lane.context, lane.instance) == (context, instance) for lane in profile.lanes)
     ]
     if len(profiles) == 1:
+        policies = store.list_runtime_key_safety_policy_records(status="active", limit=1)
         template = profiles[0].preview.template_instance
         instances.add(template)
         try:
@@ -305,4 +324,5 @@ def disposable_lane_configuration(
         ),
         *bindings,
         *overrides,
+        *policies,
     )

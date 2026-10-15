@@ -335,7 +335,12 @@ class ReleaseReviewTests(unittest.TestCase):
     def test_never_live_classification_does_not_remove_client_release_approval(self) -> None:
         for production_use in ("unknown", "prelaunch", "live"):
             with self.subTest(production_use=production_use):
-                current = profile().model_copy(update={"production_use": production_use})
+                current = profile().model_copy(
+                    update={
+                        "production_use": production_use,
+                        "production_use_authority": "director_agent",
+                    }
+                )
                 self.store.write_product_profile_record(current)
                 review = build_release_review(store=self.store, profile=current, read=github_read)
                 self.assertTrue(review.required)
@@ -395,6 +400,17 @@ class ReleaseReviewTests(unittest.TestCase):
             profile().model_copy(update={"production_use": "prelaunch"})
         )
         direct_deploy("prod", "artifact-testing")
+
+        self.store.write_product_profile_record(
+            profile().model_copy(
+                update={
+                    "production_use": "prelaunch",
+                    "production_use_authority": "director_agent",
+                }
+            )
+        )
+        with self.assertRaises(ProductionChangeRequiresPromotion):
+            direct_deploy("prod", "artifact-testing")
 
     def test_direct_deploy_cannot_establish_live_production(self) -> None:
         store = FilesystemRecordStore(Path(self.directory.name) / "empty")

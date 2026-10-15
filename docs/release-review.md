@@ -403,7 +403,11 @@ an unavailable checklist or a different artifact. The override is scoped to the
 same release digest as a Client decision and does not bypass backups.
 
 Product records declare `production_use` as `live`, `prelaunch`, or `unknown`.
-Only an explicitly recorded `prelaunch` product is exempt from the release gate.
+Only an explicitly authorized `prelaunch` product is exempt from the release gate.
+The bounded Director-agent never-live classification persists
+`production_use_authority=director_agent` and supplies no production exemption.
+Existing explicit classifications retain their behavior; a current authorized
+`product_profile.write` dry run and reviewed Apply can reconfirm one explicitly.
 Existing records default to `unknown`, which requires review. No real product
 names or classifications are supplied by code or checked-in configuration.
 The Director must review this distinction before deploying the gate; deployment
@@ -931,7 +935,7 @@ than the recorded one with `409 promotion_required` before any provider call.
 They can still redeploy the current artifact, for example after a settings
 change. A new release goes through promotion, which carries this gate and the
 backup gate; rollback stays the recovery path. Only a product recorded as
-`prelaunch` is exempt, which is also how an initial production lane is
+`prelaunch` with explicit authority is exempt, which is also how an initial production lane is
 bootstrapped.
 
 An initial product needs a verified prelaunch production-lane baseline before

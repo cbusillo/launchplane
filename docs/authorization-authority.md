@@ -203,9 +203,17 @@ through this path. The request's reason records the reviewed product facts; it
 cannot assert resource isolation or remove a usage hold. The metadata correction
 satisfies retirement's never-live prerequisite; retirement still performs its
 resource, ownership and protected-use checks. It creates no general provider,
-backup, release or promotion authority. Never-live classification does not
-waive the Client's required production release checklist; prelaunch and held
-products still cannot start an acceptance-triggered release.
+backup, release or promotion authority. The profile persists
+`production_use_authority=director_agent`: this bounded attestation cannot
+supply the existing prelaunch production-bootstrap exemption, even if a
+production lane is later added. Retirement with this provenance still requires
+testing-only ownership. Missing history alone is not evidence that a product
+never went live; the Director's reviewed fact is the input, and contradictory
+records refuse it. An already explicitly authorized prelaunch classification
+keeps its provenance. The existing `product_profile.write` review/apply path can
+explicitly reconfirm a classification for production bootstrap; this source path
+cannot do so. Prelaunch and held products still cannot start an
+acceptance-triggered release.
 
 Odoo preview apply uses the same source-owned Director identity boundary as
 [testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
@@ -217,7 +225,8 @@ effect. The frozen service plan must name the discovered preview compose and can
 alias a recorded stable target. Real previews need no synthetic stable target-ID
 record; the driver revalidates complete provider discovery before effects.
 Safety also binds the settings and bootstrap override copied from the template
-lane, so a template change invalidates older qualification. Completed same-key
+lane and the active runtime key-safety policy, so changes invalidate older
+qualification. Completed same-key
 replays and outcome reconciliation remain available after safety expires or
 lifecycle evidence changes; only a new effect needs fresh safety. Expired or changed safety, actual use,
 only-copy data, shared production resources and unknown isolation stop execution.
