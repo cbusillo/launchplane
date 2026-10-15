@@ -98,7 +98,10 @@ def register_testing_activation_routes(
                         # Diagnose the caller's persisted configuration without
                         # recovering placement, inspecting host resources or
                         # publishing/adopting an interrupted operation.
-                        if record.phase == "configure_new_recipient" and record.target_id:
+                        if (
+                            record.phase in {"configure_new_recipient", "materialize_new_recipient"}
+                            and record.target_id
+                        ):
                             adapter.verify_provider(record)
                         raise TestingActivationRefusal(
                             "Activation has no qualified published recipient.",
