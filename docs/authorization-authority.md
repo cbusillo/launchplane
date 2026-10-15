@@ -169,7 +169,9 @@ These paths consume [recorded disposable-lane facts](disposable-lanes.md). They
 are generic source behavior, not a new policy grant, administrator identity,
 credential, promotion right or Client-access expansion. Existing runtime key
 safety, transport isolation, reviewed retirement, provider fences and backup
-protection still apply. Missing facts produce `disposable_lane_safety_unknown`.
+protection still apply. Paths requiring positive recorded facts return
+`disposable_lane_safety_unknown` when those facts are missing. Existing Odoo
+preview refresh instead uses the direct resource inspection described below.
 The assertion API cannot produce positive facts while the authoritative
 collector is unavailable. Fixing that evidence producer is engineering;
 never ask for a grant to bypass it. Bounded empty testing replacement staging
@@ -249,29 +251,76 @@ classification keeps its existing response shape and supplies no exemption.
 Odoo preview apply uses the same source-owned Director identity boundary as
 [testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
 including preview destruction. It requires the caller's exact service-issued
-plan, an existing uniquely owned preview, and current disposable-lane facts.
-Stable lanes cannot be substituted for a preview. The route checks the binding
-under the durable reservation and immediately before the first provider
-effect. The frozen service plan must name the discovered preview compose and cannot
-alias a recorded stable target. Real previews need no synthetic stable target-ID
-record; the driver revalidates complete provider discovery before effects.
-Safety also binds the settings and bootstrap override copied from the template
-lane and the active runtime key-safety policy, so changes invalidate older
-qualification. Completed same-key
-replays and outcome reconciliation remain available after safety expires or
-lifecycle evidence changes; only a new effect needs fresh safety. Expired or changed safety, actual use,
-only-copy data, shared production resources and unknown isolation stop execution.
-Existing scoped callers retain their explicit policy rules; they inherit no
-Director authority. Source-read permission for an import credential is still
-separate from preview execution.
+plan and an existing uniquely owned preview. Stable lanes cannot be substituted
+for a preview. The frozen plan must name the discovered compose and cannot alias
+a recorded stable target. Completed same-key replay and read-only outcome
+reconciliation remain available after qualification expires or lifecycle changes.
+Scoped callers retain their explicit policy rules and inherit no Director authority.
+Source-read permission for an import credential remains separate from execution.
 
-The current conservative collector cannot establish positive usage, custody or
-physical-isolation facts for an existing preview. Such a preview returns
-`disposable_lane_safety_unknown` until the authoritative producer tracked by
-#3611 supplies them or the operation preserves protected resources by
-construction. Neither a ready preview plan nor an agent-supplied assertion
-supplies those facts. This source correction removes the wrong grant refusal;
-it does not claim that an unqualified copy can run or that an import succeeded.
+Existing **Odoo preview refresh** follows overall direction's disposable-preview
+rule rather than requiring positive `unused` or `reproducible` observations that
+no source produces. This does not publish either fact. An active, unique service
+preview is required. A staff hold or recorded `in_use`, `only_copy` or shared
+resource report refuses refresh even after that report expires or its binding
+changes. Resolve the real exception first through the existing target-policy or
+`/v1/disposable-lanes/observations` clear path; expiry never clears it. Positive reports confer no admission on this path and are not required.
+Destroy and stable testing retain their existing qualification requirements.
+
+Before changing an existing preview compose and again before deployment, the
+service runs a fixed read-only Docker inspector on that compose's actual server
+through its manual-only, disabled data schedule. Its spec contains only target,
+project and resource identifiers. It requires all three current/proposed volume
+names to agree, actual local volumes without external backing options, distinct
+Docker-reported backing directories, and complete container mount inventory (including
+stopped containers). Foreign consumers, writable parent mounts, unknown backing,
+host networking or published ports refuse. Read-only administrative parent mounts
+are allowed; exact/child consumers are protected. Existing data is inspected,
+never emptied or deleted. The qualified Director refresh generates a compose with no host ports or host
+SSH mounts. Existing scoped/source-reconciler SSH behavior is unchanged. Managed integration-key filtering and exact managed-source authority
+remain in force; no template source allowance is inherited.
+
+The schedule receipt binds the target/project/volumes, is consumed immediately,
+and is invalidated by a changed provider target readback. It is not a reusable
+positive usage/custody assertion. A new apply repeats collection automatically;
+no manual DB qualification or grant is required. Missing/failed/stale/conflicting
+inspection refuses before new application effects. The same operation/key observes
+an uncertain effect without redispatch; preserve it and use normal reconciliation.
+A refused or expired issued plan requires fresh plan/apply inputs.
+
+The inspector reads Docker's daemon metadata, not filesystem paths in the schedule's
+mount namespace. Only default local volumes without backing options qualify;
+image-declared anonymous volumes are inspected and checked for foreign consumers
+too. Docker's anonymous-volume marker must identify their provenance, including
+when Compose reuses them during recreation; a hash-like name alone is insufficient.
+Foreign volumes' backing device paths and bind sources are inspected for aliases,
+including parent directories and chains through unmounted local volumes. Missing
+intermediate metadata refuses qualification. Bulk, filtered
+container reads collect no environment values or arbitrary labels. Unrelated
+vanished containers and stale disjoint bind sources are not usage.
+There is no inode or arbitrary host-symlink attestation. Managed resource identities
+and Docker's reported backing/mount relationships are the inspection authority.
+
+PostgreSQL excludes managed configuration, first global/instance settings, aliases,
+secret metadata, bootstrap overrides, key policy, safety-evidence and preview-record
+writers for each bounded provider dispatch. It acquires after the executor, with a
+five-second lock wait. Deploy/job polling and smoke checks hold no authority fence.
+Guarded schedule triggers have a short request deadline and then use the existing
+exact-job observation without retriggering. Profile/configuration equality and
+protective reports are checked inside each dispatch guard and before lifecycle
+publication; a late refusal retains uncertain outcomes. Preview generation progress
+and housekeeping timestamps are left to existing supersession/finalization logic;
+preview identity/state, configuration and real protective reports stay bound. Direct external host
+administration is outside this transaction.
+
+Inspection commands time out and the fixed script exits within its own deadline.
+If the base inspection job remains running, collection uses a separately named,
+disabled inspection schedule, reused while that stale job persists. It preserves
+the old job for diagnosis.
+It neither cancels that job nor changes an application. An inspection-only refusal
+releases the pre-effect reservation. It never permits a second application dispatch to settle uncertainty.
+SQLite remains a rehearsal backend and cannot enable this live qualification.
+No production, backup, promotion or Client-access boundary changes.
 
 ## Current Transitional Model
 

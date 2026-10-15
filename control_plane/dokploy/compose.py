@@ -149,11 +149,12 @@ def render_odoo_raw_compose_file(
       - "${ODOO_WEB_HOST_PORT:-8069}:8069"
       - "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"
 """
-    workflow_ssh_mounts = ""
-    if mount_workflow_ssh:
-        workflow_ssh_mounts = """      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro
-      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro
-"""
+    workflow_ssh_mounts = (
+        "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/home/ubuntu/.ssh:ro\n"
+        "      - ${DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}:/root/.ssh:ro\n"
+        if mount_workflow_ssh
+        else ""
+    )
     web_networks = "    networks: [testing-data]" if isolated_testing and not domain_hosts else ""
     private_network = "    networks: [testing-data]" if isolated_testing else ""
     testing_networks = "  testing-data:\n    internal: true\n" if isolated_testing else ""

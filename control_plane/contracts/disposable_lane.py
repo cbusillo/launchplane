@@ -7,6 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 
 
+ODOO_PREVIEW_RESOURCES_OK_MARKER = "preview_resources_ok"
+ODOO_PREVIEW_RESOURCES_BINDING_MARKER = "preview_resources_binding_sha256"
+
 MAX_DISPOSABLE_LANE_SAFETY_SECONDS = 900
 DISPOSABLE_LANE_OBSERVATION_ROUTE = "/v1/disposable-lanes/observations"
 TESTING_REPLACEMENT_RESOURCES_ROUTE = "/v1/products/{product}/testing-replacement-resources"
