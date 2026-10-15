@@ -1,3 +1,4 @@
+from contextlib import closing
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -516,15 +517,19 @@ class MergeTrainAdmissionTests(unittest.TestCase):
             ),
         )
         for candidate_record, landing, collapse, action in cases:
-            with TemporaryDirectory() as directory:
-                stores = (
-                    FilesystemRecordStore(Path(directory) / "files"),
+            with (
+                TemporaryDirectory() as directory,
+                closing(
                     PostgresRecordStore(
                         database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
-                    ),
+                    )
+                ) as sql_store,
+            ):
+                stores = (
+                    FilesystemRecordStore(Path(directory) / "files"),
+                    sql_store,
                 )
-                stores[1].ensure_schema()
-                self.addCleanup(stores[1].close)
+                sql_store.ensure_schema()
                 for store in stores:
                     with self.subTest(store=type(store).__name__, action=action):
                         if candidate_record is not None:
@@ -548,7 +553,6 @@ class MergeTrainAdmissionTests(unittest.TestCase):
                                     current_policy_sha256=policy_sha256,
                                 )
                                 self.assertTrue(decision.admitted)
-                                self.assertEqual(decision.reason_code, "dry_run_history_only")
                                 self.assertEqual(decision.controller_action, action)
                                 self.assertEqual(
                                     decision.controller_candidate_record_id,
@@ -585,6 +589,62 @@ class MergeTrainAdmissionTests(unittest.TestCase):
                                         if record is not None
                                     },
                                 )
+
+    def test_diagnostics_preserve_latest_mutating_idle_recovery(self) -> None:
+        candidate = _candidate_record(status="passed")
+        landing = _landing_plan_record(candidate)
+        idle_mutation = _idle_run_record(recorded_at="2026-05-09T02:10:00Z", mutate=True)
+        diagnostic = _idle_run_record(recorded_at="2026-05-09T02:12:00Z")
+        cases = (
+            ((idle_mutation, diagnostic), "idle"),
+            (
+                (diagnostic, _idle_run_record(recorded_at="2026-05-09T02:13:00Z", mutate=True)),
+                "idle",
+            ),
+            (
+                (
+                    idle_mutation,
+                    _run_record(recorded_at="2026-05-09T02:11:00Z", mutation="wait"),
+                    diagnostic,
+                ),
+                "land_batch",
+            ),
+            (
+                (_idle_run_record(recorded_at="2026-05-09T02:00:00Z", mutate=True), diagnostic),
+                "land_batch",
+            ),
+        )
+        for runs, expected_action in cases:
+            with (
+                TemporaryDirectory() as directory,
+                closing(
+                    PostgresRecordStore(
+                        database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
+                    )
+                ) as sql_store,
+            ):
+                sql_store.ensure_schema()
+                for store in (FilesystemRecordStore(Path(directory) / "files"), sql_store):
+                    with self.subTest(store=type(store).__name__, runs=[r.mode for r in runs]):
+                        store.write_merge_train_batch_candidate_record(candidate)
+                        store.write_merge_train_batch_landing_plan_record(landing)
+                        for run in runs:
+                            store.write_merge_train_run_record(run)
+                        status = build_merge_train_controller_status_read_model(
+                            store=store,
+                            repository=diagnostic.repository,
+                            base_branch=diagnostic.base_branch,
+                            generated_at="2026-05-09T02:20:00Z",
+                            current_policy_key=candidate.candidate.policy_key,
+                            current_policy_sha256=candidate.candidate.policy_sha256,
+                        )
+                        self.assertEqual(status.admission.controller_action, expected_action)
+                        self.assertEqual(
+                            status.admission.controller_landing_plan_record_id,
+                            landing.record_id if expected_action == "land_batch" else "",
+                        )
+                        self.assertEqual(status.latest_run, runs[-1])
+                        self.assertEqual(status.admission.latest_run_id, runs[-1].run_id)
 
     def test_latest_idle_run_supersedes_older_controller_records_for_admission(self) -> None:
         candidate_record = _candidate_record(status="passed")

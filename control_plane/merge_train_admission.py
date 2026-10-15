@@ -1195,6 +1195,7 @@ def _filter_actionable_controller_records(
     if _latest_idle_run_supersedes_controller_records(
         latest_run=latest_run,
         controller_records=controller_records,
+        record_store=record_store,
     ):
         return MergeTrainControllerRecords(
             candidate_records=(),
@@ -1274,7 +1275,21 @@ def _latest_idle_run_supersedes_controller_records(
     *,
     latest_run: MergeTrainRunRecord | None,
     controller_records: MergeTrainControllerRecords,
+    record_store: object | None = None,
 ) -> bool:
+    if latest_run is not None and latest_run.mode == "dry_run":
+        # A diagnostic cannot erase the last mutating observation either.
+        list_runs: Callable[..., tuple[MergeTrainRunRecord, ...]] | None = getattr(
+            record_store, "list_merge_train_run_records", None
+        )
+        if callable(list_runs):
+            mutation_runs = list_runs(
+                repository=latest_run.repository,
+                base_branch=latest_run.base_branch,
+                mode="mutate",
+                limit=1,
+            )
+            latest_run = mutation_runs[0] if mutation_runs else None
     if (
         latest_run is None
         or latest_run.mode != "mutate"

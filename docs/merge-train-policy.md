@@ -1755,6 +1755,10 @@ Diagnostic dry-run evidence never supersedes unfinished controller progress:
 an idle queue observation can coexist with a candidate, landing or collapse
 that still requires action. Its queue summary stays visible alongside the
 controller action hint, which retains the existing policy-binding filters.
+When the latest run is diagnostic, the action hint uses the latest mutation
+run for supersession, so a diagnostic cannot undo a genuine idle recovery.
+The latest run and queue summary still describe the diagnostic; scheduling
+continues to use that latest run rather than the older mutation history.
 If an imported dry-run record has an unparseable timestamp, its age is null;
 the stored history and existing scheduling decision remain visible.
 
