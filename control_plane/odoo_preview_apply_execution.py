@@ -10,7 +10,8 @@ worker can run the same operation without a FastAPI request or a
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 import hashlib
 from pathlib import Path
@@ -81,9 +82,11 @@ class OdooPreviewProviderMutationAdapter:
         execute_apply: ExecuteOdooPreviewApply = execute_odoo_preview_apply_result,
         observe_apply: ObserveOdooPreviewApply = observe_odoo_preview_apply_result,
         pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
+        qualify_existing_refresh: bool = False,
     ) -> None:
         self._control_plane_root = control_plane_root
         self._pre_mutation_guard = pre_mutation_guard
+        self._qualify_existing_refresh = qualify_existing_refresh
         self._record_store = record_store
         self._profile = profile
         self._apply_request = apply_request
@@ -243,13 +246,50 @@ class OdooPreviewProviderMutationAdapter:
         def checkpoint_effect(phase: str) -> None:
             nonlocal effect_started
             self.execution_check()
-            if not effect_started and self._pre_mutation_guard is not None:
+            if (
+                not effect_started or self._qualify_existing_refresh
+            ) and self._pre_mutation_guard is not None:
                 try:
                     self._pre_mutation_guard()
                 except Exception as error:
-                    raise ProviderMutationRejectedError(error) from error
+                    if not effect_started:
+                        raise ProviderMutationRejectedError(error) from error
+                    raise ProviderMutationUnknownError(str(error)) from error
             lease.checkpoint_effect(phase)
             effect_started = True
+
+        @contextmanager
+        def mutation_guard() -> Iterator[None]:
+            from control_plane.storage.postgres import PostgresRecordStore
+            from sqlalchemy.exc import SQLAlchemyError
+            from control_plane.odoo_preview_apply_http import OdooPreviewPlanProvenanceError
+
+            stack = ExitStack()
+            try:
+                stack.enter_context(
+                    cast(
+                        PostgresRecordStore, self._record_store
+                    ).serialize_existing_preview_refresh()
+                )
+                if self._pre_mutation_guard is not None:
+                    self._pre_mutation_guard()
+            except Exception as error:
+                stack.close()
+                cause = (
+                    OdooPreviewPlanProvenanceError(
+                        code="odoo_preview_qualification_busy",
+                        message="Preview qualification is busy or unavailable; retry after the writer completes.",
+                    )
+                    if isinstance(error, SQLAlchemyError)
+                    else error
+                )
+                if not effect_started:
+                    raise ProviderMutationRejectedError(cause) from error
+                raise ProviderMutationUnknownError(str(cause)) from error
+            try:
+                yield
+            finally:
+                stack.close()
 
         try:
             driver_result = self._execute_apply(
@@ -264,6 +304,11 @@ class OdooPreviewProviderMutationAdapter:
                 provider_lease_check=lease.assert_current,
                 deployment_record_id=self._deployment_record_id,
                 runtime_identity=self._runtime_identity,
+                **(
+                    {"qualify_existing_refresh": True, "provider_mutation_guard": mutation_guard}
+                    if self._qualify_existing_refresh
+                    else {}
+                ),
             )
         except LaneMovementRefused as error:
             from control_plane.lane_movement import LaneBuild, record_preview_refusal
@@ -315,6 +360,11 @@ class OdooPreviewProviderMutationAdapter:
         records: dict[str, object] = {}
         lifecycle_finalized = driver_status == "pass"
         if lifecycle_finalized:
+            if self._qualify_existing_refresh and self._pre_mutation_guard is not None:
+                try:
+                    self._pre_mutation_guard()
+                except Exception as error:
+                    raise ProviderMutationUnknownError(str(error)) from error
             lease.assert_current()
             driver_result, records, response_status_code = self._finalize_successful_result(
                 driver_result
@@ -423,6 +473,7 @@ def prepare_odoo_preview_apply_operation(
         odoo_preview_supersession_is_quiescent
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
+    qualify_existing_refresh: bool = False,
 ) -> OdooPreviewApplyOperation:
     """Build the adapter and supersession policy for a service-issued plan.
 
@@ -447,6 +498,7 @@ def prepare_odoo_preview_apply_operation(
         execute_apply=execute_apply,
         observe_apply=observe_apply,
         pre_mutation_guard=pre_mutation_guard,
+        qualify_existing_refresh=qualify_existing_refresh,
     )
 
     def qualified_supersession(reservation: object) -> bool:
