@@ -71,8 +71,11 @@ cancellation. Historical activation reads, policy maintenance and its activation
 lock remain supported. Native merge-train records retain their finite-job
 bindings and refuse to overwrite a bound controller/progress record or bypass
 an unresolved ordinary effect. These fences are not removed with the retired
-execution methods. Remaining storage-bound contracts/domain helpers and table
-retirement continue under #2437; no data migration has run.
+execution methods. Unused issuers, eligibility/lifecycle calculators, worker
+compatibility descriptors, inspection setup and their unreferenced contracts
+are removed. Only contracts and helpers consumed by retained maintenance,
+native train fences and historical policy/activation reads remain. Table
+retirement continues under #2437; no data migration has run.
 
 ### Provider Delivery Inspection
 
