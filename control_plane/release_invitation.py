@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import argparse
 import hashlib
 import json
+import logging
 import re
 from pathlib import Path
 from time import monotonic
@@ -36,6 +37,7 @@ from control_plane.workflows.launchplane import (
 # How often a worker confirms that a decision on unchanged lane versions still covers
 # the current checklist. Changed test notes can invalidate it without a new candidate.
 SETTLED_DECISION_RECHECK_SECONDS = 1800
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -416,7 +418,12 @@ def _settle_completed_invitation(
                 ):
                     continue
                 if _timestamp(comment.get("created_at")) > _timestamp(decision.decided_at):
-                    pending = True
+                    pending = bool(
+                        pending
+                        or last_decision is None
+                        or _timestamp(comment.get("created_at"))
+                        > _timestamp(last_decision.decided_at)
+                    )
                     continue
                 if marker not in lines:
                     # Older decided reviews are historical, not outstanding tasks.
@@ -489,14 +496,26 @@ def publish_release_invitation(
         return False
     production = release_version(store=store, profile=profile, instance="prod")
     candidate = release_version(store=store, profile=profile, instance="testing")
-    _settle_completed_invitation(
-        store=store,
-        control_plane_root=control_plane_root,
-        profile=profile,
-        production=production,
-        candidate=candidate,
-        backoff=backoff,
-    )
+    if not urgent_reason:
+        try:
+            _settle_completed_invitation(
+                store=store,
+                control_plane_root=control_plane_root,
+                profile=profile,
+                production=production,
+                candidate=candidate,
+                backoff=backoff,
+            )
+        except Exception as error:
+            if production == candidate:
+                raise
+            # Historical completion must not prevent the next real review.
+            # As in the worker, log only bounded identities, not provider text.
+            _LOGGER.warning(
+                "release invitation completion unavailable product=%s error_type=%s",
+                profile.product,
+                type(error).__name__,
+            )
     if production == candidate:
         return False
     last_decision = _last_client_decision(store, profile)

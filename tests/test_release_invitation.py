@@ -1622,6 +1622,49 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(self.comments[-1], pending)
         self.assertEqual(self.issues[0]["state"], "open")
 
+    def test_newer_decided_request_does_not_keep_completed_issue_open(self) -> None:
+        self.publish()
+        accepted, _ = self.complete_release()
+        self.now += timedelta(minutes=1)
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        self.publish()
+        self.now += timedelta(minutes=1)
+        self.store.create_release_review_decision_record_if_absent(
+            decision(self.store, outcome="changes_requested", date=self.now.isoformat())
+        )
+        rejected_request = self.comments[-1].copy()
+        self.change_candidate(
+            artifact_id=accepted.checklist.candidate.artifact_id,
+            source_commit=accepted.checklist.candidate.source_commit,
+        )
+        self.publish()
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertEqual(self.comments[-1], rejected_request)
+
+    def test_completion_outage_cannot_block_new_review_or_deliberate_urgent_opening(self) -> None:
+        self.publish()
+        self.complete_release()
+        self.now += timedelta(minutes=1)
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        original = self.github
+        attempts = []
+
+        def completion_outage(**kwargs: Any) -> object:
+            if kwargs.get("method") == "PATCH" and kwargs["path"].endswith("/comments/1"):
+                attempts.append(kwargs["path"])
+                raise TimeoutError("completion unavailable")
+            return original(**kwargs)
+
+        with patch("control_plane.release_invitation.github_api_request", completion_outage):
+            with self.assertLogs("control_plane.release_invitation", level="WARNING"):
+                self.assertTrue(self.publish())
+            self.assertTrue(attempts)
+            prior_attempts = attempts.copy()
+            self.assertTrue(self.publish(urgent_reason="Release this repair now."))
+            self.assertEqual(attempts, prior_attempts)
+        self.assertEqual(self.issues[0]["state"], "open")
+        self.assertIn("@site-owner", self.comments[-1]["body"])
+
     def test_completed_release_rechecks_evidence_after_destination_lookup(self) -> None:
         self.publish()
         self.complete_release()
@@ -1653,6 +1696,15 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(self.edits, edits)
         self.assertEqual(self.issues[0]["state"], "closed")
         self.assertEqual(len(self.comments), 1)
+
+    def test_concurrent_workers_settle_one_invitation_and_close_once(self) -> None:
+        self.publish()
+        self.complete_release()
+        posts = self.posts.copy()
+        with ThreadPoolExecutor(max_workers=2) as workers:
+            list(workers.map(lambda _: self.publish(ReleaseInvitationBackoff()), range(2)))
+        self.assertEqual(self.edits, [{"body": self.comments[0]["body"]}, {"state": "closed"}])
+        self.assertEqual(self.posts, posts)
 
     def test_next_real_review_reopens_settled_destination(self) -> None:
         self.publish()
