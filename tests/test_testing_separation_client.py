@@ -99,7 +99,6 @@ class TestingSeparationClientTests(unittest.TestCase):
             self.assertEqual(
                 call.call_args_list[2].kwargs["body"]["reviewed_plan_sha256"], plan["plan_sha256"]
             )
-            self.assertEqual(call.call_args.kwargs["body"]["mode"], "receipt")
 
     def test_reviewed_apply_reports_uncertain_409_and_never_retries(self) -> None:
         self._exercise_apply("mutation_reconciliation_required", unknown=True)

@@ -72,6 +72,7 @@ class SeparationResourcesResult(SeparationResourcesPlan):
     resources_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     volumes: dict[str, str]
     schedule_id: str
+    readback_schedule_id: str = ""
     qualified_at: AwareDatetime
 
 
@@ -217,7 +218,10 @@ class SeparationResourcesAdapter:
             plan_sha256=resources.operation_id,
             resources_binding_sha256=resources.binding_sha256,
             volumes=resources.volumes,
-            schedule_id=evidence.get("schedule_id", ""),
+            schedule_id=evidence.get("creation_schedule_id", evidence.get("schedule_id", "")),
+            readback_schedule_id=(
+                evidence.get("schedule_id", "") if "creation_schedule_id" in evidence else ""
+            ),
             qualified_at=datetime.now(timezone.utc),
         ).model_dump(mode="json")
 
@@ -370,6 +374,8 @@ def run_preparation_schedule(
     )
     if mode == "readback":
         original_terminal()
+        assert original is not None
+        result["creation_schedule_id"] = api.schedule_key(original)
     return result
 
 

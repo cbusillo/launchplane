@@ -387,21 +387,29 @@ class SeparationResourceTests(unittest.TestCase):
             "startedAt": self.fixture.now(-10),
             "finishedAt": self.fixture.now(-5),
         }
-        self.fixture.responses["/api/deployment.allByType"] = [history]
-        with patch(
-            "control_plane.dokploy.post_deploy.run_manual_data_schedule",
-            return_value={
-                "testing_resources_ok": "true",
-                "testing_resources_binding_sha256": resources.binding_sha256,
-            },
-        ) as reader:
-            result = run_preparation_schedule(
-                root=self.root, resources=resources, mode="readback", before_effect=Mock()
-            )
-            self.assertEqual(
-                reader.call_args.kwargs["schedule_payload"]["script"], resources.script("readback")
-            )
-            self.assertEqual(result["testing_resources_binding_sha256"], resources.binding_sha256)
+        for status in ("done", "error"):
+            self.fixture.responses["/api/deployment.allByType"] = [{**history, "status": status}]
+            with patch(
+                "control_plane.dokploy.post_deploy.run_manual_data_schedule",
+                return_value={
+                    "schedule_id": "fixture-readback",
+                    "testing_resources_ok": "true",
+                    "testing_resources_binding_sha256": resources.binding_sha256,
+                },
+            ) as reader:
+                result = run_preparation_schedule(
+                    root=self.root, resources=resources, mode="readback", before_effect=Mock()
+                )
+                self.assertEqual(
+                    reader.call_args.kwargs["schedule_payload"]["script"],
+                    resources.script("readback"),
+                )
+                self.assertEqual(
+                    result["testing_resources_binding_sha256"], resources.binding_sha256
+                )
+                receipt = self.adapter.result(resources, result)
+                self.assertEqual(receipt["schedule_id"], history["scheduleId"])
+                self.assertEqual(receipt["readback_schedule_id"], result["schedule_id"])
         self.assertEqual(len(schedules), 1)
         for invalid in (
             [],
@@ -421,6 +429,56 @@ class SeparationResourceTests(unittest.TestCase):
                         root=self.root, resources=resources, mode="readback", before_effect=Mock()
                     )
                 reader.assert_not_called()
+        self.fixture.responses["/api/deployment.allByType"] = [history]
+        original = self.fixture.responses["/api/schedule.list"]
+        assert isinstance(original, list) and isinstance(original[0], dict)
+        for change in ({"script": resources.script("readback")}, {"enabled": True}):
+            self.fixture.responses["/api/schedule.list"] = [{**original[0], **change}]
+            with patch("control_plane.dokploy.post_deploy.run_manual_data_schedule") as reader:
+                with self.assertRaises(ValueError):
+                    run_preparation_schedule(
+                        root=self.root, resources=resources, mode="readback", before_effect=Mock()
+                    )
+                reader.assert_not_called()
+        self.fixture.responses["/api/schedule.list"] = [
+            original[0],
+            {
+                **original[0],
+                "name": str(original[0]["name"]) + " readback",
+                "script": resources.script("readback"),
+                "scheduleId": "active-readback",
+            },
+        ]
+
+        def read(**kwargs: object) -> object:
+            if kwargs["path"] == "/api/deployment.allByType":
+                query = kwargs["query"]
+                assert isinstance(query, dict)
+                return (
+                    [history]
+                    if query["id"] == history["scheduleId"]
+                    else [{**history, "scheduleId": query["id"], "status": "running"}]
+                )
+            return self.fixture.read(**kwargs)
+
+        with (
+            patch("control_plane.dokploy.api.dokploy_request", side_effect=read),
+            patch("control_plane.dokploy.post_deploy.run_manual_data_schedule") as reader,
+        ):
+            with self.assertRaises(ValueError):
+                run_preparation_schedule(
+                    root=self.root, resources=resources, mode="readback", before_effect=Mock()
+                )
+            reader.assert_not_called()
+        self.assert_retained()
+
+    def test_absent_effect_checkpoint_is_not_provider_absence_proof(self) -> None:
+        with patch("control_plane.dokploy.post_deploy.run_manual_data_schedule") as dispatch:
+            observed = self.adapter.observe(
+                "original-operation", "", self.body.reviewed_plan_sha256
+            )
+        self.assertEqual(observed.outcome, "unknown")
+        dispatch.assert_not_called()
         self.assert_retained()
 
     def test_provider_placement_drift_refuses_before_any_new_storage(self) -> None:
