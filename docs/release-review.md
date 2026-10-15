@@ -159,11 +159,14 @@ The marked issue closes only when testing matches production and there is no
 other outstanding invitation. Older decided invitations remain history;
 newer requests remain pending until the Client decides. A newer testing
 candidate keeps its own request open while the completed invitation settles.
+Renewed requests for the exact version that subsequently released also settle;
+earlier rejected requests keep their history rather than being marked released.
 Completion receipts make
 retries and replica restarts idempotent, and the product publication lock and
 fresh decision/run/lane checks protect concurrent workers. Workers throttle
-unchanged completion lookups to five minutes and stop looking up fully settled,
-closed requests until the profile or lane versions change; a restart recovers
+incomplete completion lookups to five minutes and stop looking up confirmed or
+absent historical invitations until the profile or lane versions change, even
+while a newer review waits; a restart recovers
 the durable completion receipts. They do not compile a new checklist for a
 release already completed. No acceptance or release record is
 changed by invitation reconciliation.

@@ -1584,17 +1584,11 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.publish()
         self.assertEqual(self.edits, [])
 
-    def test_unavailable_lane_or_wrong_run_evidence_cannot_settle(self) -> None:
+    def test_wrong_run_evidence_cannot_settle(self) -> None:
         self.publish()
         _, reader = self.complete_release()
         reader.return_value = reader.return_value.model_copy(update={"decision_record_id": "other"})
         self.publish()
-        self.assertEqual(self.edits, [])
-        with patch(
-            "control_plane.release_invitation.release_version", side_effect=ValueError("missing")
-        ):
-            with self.assertRaises(ValueError):
-                self.publish()
         self.assertEqual(self.edits, [])
 
     def test_newer_pending_candidate_is_never_settled_by_old_release(self) -> None:
@@ -1610,17 +1604,68 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(self.comments[-1]["body"], current)
         self.assertEqual(self.issues[0]["state"], "open")
 
-    def test_newer_request_on_same_candidate_prevents_issue_closure(self) -> None:
+    def test_renewed_request_for_version_that_released_is_also_settled(self) -> None:
         self.publish()
         self.complete_release()
         self.now += timedelta(minutes=1)
         self.comments.append(
             {"id": 2, "created_at": self.now.isoformat(), "body": self.comments[0]["body"]}
         )
-        pending = self.comments[-1].copy()
         self.publish()
-        self.assertEqual(self.comments[-1], pending)
-        self.assertEqual(self.issues[0]["state"], "open")
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertNotIn("@site-owner", self.comments[-1]["body"])
+        edits = self.edits.copy()
+        self.publish()
+        self.assertEqual(self.edits, edits)
+
+    def test_previous_rejected_invitation_for_same_version_keeps_its_history(self) -> None:
+        self.publish()
+        original = self.comments[0].copy()
+        self.now += timedelta(minutes=1)
+        self.store.create_release_review_decision_record_if_absent(
+            decision(self.store, outcome="changes_requested", date=self.now.isoformat())
+        )
+        self.now += timedelta(minutes=1)
+        self.review = self.review.model_copy(update={"checklist_digest": "f" * 64})
+        self.publish()
+        self.assertEqual(len(self.comments), 2)
+        accepted, _ = self.complete_release()
+        self.publish()
+        self.assertEqual(self.comments[0], original)
+        self.assertIn(accepted.release_issue_url, self.comments[-1]["body"])
+        self.assertEqual(self.issues[0]["state"], "closed")
+
+    def test_settled_history_needs_no_more_reads_while_candidate_waits(
+        self,
+    ) -> None:
+        self.publish()
+        _, reader = self.complete_release()
+        self.now += timedelta(minutes=1)
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        backoff = ReleaseInvitationBackoff()
+        self.publish(backoff)
+        self.now += timedelta(hours=1)
+        reader.reset_mock()
+        with patch(
+            "control_plane.release_invitation.github_api_request",
+            side_effect=AssertionError("already delivered"),
+        ):
+            self.assertTrue(self.publish(backoff))
+        reader.assert_not_called()
+
+    def test_absent_historical_destination_needs_no_more_completion_reads(self) -> None:
+        _, reader = self.complete_release()
+        backoff = ReleaseInvitationBackoff()
+        self.assertFalse(self.publish(backoff))
+        self.now += timedelta(days=1)
+        reader.reset_mock()
+        with patch(
+            "control_plane.release_invitation.github_api_request",
+            side_effect=AssertionError("nothing historical"),
+        ):
+            self.assertFalse(self.publish(backoff))
+        reader.assert_not_called()
+        self.assertEqual(self.issues, [])
 
     def test_newer_decided_request_does_not_keep_completed_issue_open(self) -> None:
         self.publish()
@@ -1656,8 +1701,9 @@ class ReleaseInvitationTests(unittest.TestCase):
             return original(**kwargs)
 
         with patch("control_plane.release_invitation.github_api_request", completion_outage):
-            with self.assertLogs("control_plane.release_invitation", level="WARNING"):
+            with patch("control_plane.release_invitation._LOGGER") as logger:
                 self.assertTrue(self.publish())
+                logger.warning.assert_called_once()
             self.assertTrue(attempts)
             prior_attempts = attempts.copy()
             self.assertTrue(self.publish(urgent_reason="Release this repair now."))

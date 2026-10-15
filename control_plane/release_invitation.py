@@ -204,6 +204,7 @@ def _last_client_decision(
     profile: LaunchplaneProductProfileRecord,
     *,
     candidate: ReleaseVersion | None = None,
+    before: ReleaseReviewDecisionRecord | None = None,
 ) -> ReleaseReviewDecisionRecord | None:
     return max(
         [
@@ -213,6 +214,11 @@ def _last_client_decision(
             and decision.checklist.owner_github_id == profile.owner.github_id
             and decision.decision in ("accepted", "changes_requested")
             and (candidate is None or decision.checklist.candidate == candidate)
+            and (
+                before is None
+                or (_timestamp(decision.decided_at), decision.record_id)
+                < (_timestamp(before.decided_at), before.record_id)
+            )
         ],
         key=lambda decision: (_timestamp(decision.decided_at), decision.record_id),
         default=None,
@@ -371,6 +377,7 @@ def _settle_completed_invitation(
 
         if not completed():
             return
+        previous_decision = _last_client_decision(store, profile, before=decision)
         lane = next(lane for lane in profile.lanes if lane.instance == "testing")
         with launchplane_github_token(
             token_resolver=resolve_launchplane_github_token,
@@ -392,6 +399,8 @@ def _settle_completed_invitation(
             if len(issues) > 1:
                 raise ValueError("Release invitation destination is ambiguous.")
             if not issues:
+                if backoff is not None:
+                    backoff.completions[profile.product] = (fingerprint, float("inf"))
                 return
             number = issues[0].get("number")
             if not isinstance(number, int) or number < 1:
@@ -417,16 +426,14 @@ def _settle_completed_invitation(
                     for line in lines
                 ):
                     continue
-                if _timestamp(comment.get("created_at")) > _timestamp(decision.decided_at):
-                    pending = bool(
-                        pending
-                        or last_decision is None
-                        or _timestamp(comment.get("created_at"))
-                        > _timestamp(last_decision.decided_at)
-                    )
-                    continue
-                if marker not in lines:
-                    # Older decided reviews are historical, not outstanding tasks.
+                created_at = _timestamp(comment.get("created_at"))
+                if marker not in lines or (
+                    previous_decision is not None
+                    and created_at <= _timestamp(previous_decision.decided_at)
+                ):
+                    # Preserve earlier rejected/decided requests as history.
+                    if last_decision is None or created_at > _timestamp(last_decision.decided_at):
+                        pending = True
                     continue
                 if not completed():
                     return
@@ -437,7 +444,7 @@ def _settle_completed_invitation(
                 # Neutralize historical mentions instead of notifying the Client again.
                 body = (
                     f"{completion}\n{marker}\n\n"
-                    "**Released** — this release was accepted and completed successfully. "
+                    "**Released** — this version reached production through its accepted release. "
                     "No action is needed on this invitation.\n\n"
                     f"[Saved acceptance]({decision.release_issue_url})\n\n"
                     "<details><summary>Original invitation and delivery receipts</summary>\n\n"
@@ -453,18 +460,24 @@ def _settle_completed_invitation(
                 if not isinstance(result, dict) or result.get("id") != comment_id:
                     raise ValueError("Release invitation completion was not confirmed.")
                 matched = True
-            if not matched or pending or production != candidate or not completed():
-                return
-            if issues[0].get("state") != "closed":
-                result = github_api_request(
-                    path=f"{path}/{number}", token=token, method="PATCH", body={"state": "closed"}
-                )
-                if (
-                    not isinstance(result, dict)
-                    or result.get("number") != number
-                    or result.get("state") != "closed"
-                ):
-                    raise ValueError("Release invitation issue closure was not confirmed.")
+            if matched and not pending and production == candidate:
+                if not completed():
+                    return
+                if issues[0].get("state") != "closed":
+                    result = github_api_request(
+                        path=f"{path}/{number}",
+                        token=token,
+                        method="PATCH",
+                        body={"state": "closed"},
+                    )
+                    if (
+                        not isinstance(result, dict)
+                        or result.get("number") != number
+                        or result.get("state") != "closed"
+                    ):
+                        raise ValueError("Release invitation issue closure was not confirmed.")
+            # Nothing remains to settle for this production snapshot, even when
+            # a different candidate waits for its own decision.
             if backoff is not None:
                 backoff.completions[profile.product] = (fingerprint, float("inf"))
 
