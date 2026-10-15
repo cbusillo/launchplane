@@ -96,6 +96,16 @@ def current_binding_fingerprint(
             context_name=operation.context, instance_name=operation.instance
         ),
     ]
+    from control_plane.odoo_testing_restore import (
+        read_current_testing_generation,
+        fresh_testing_authority_sha256,
+    )
+
+    generation = read_current_testing_generation(
+        store, product=operation.product, context=operation.context, instance=operation.instance
+    )
+    if generation is not None:
+        return fresh_testing_authority_sha256(store, generation)
     return recovery_binding_fingerprint(
         [item.model_dump(mode="json", exclude_none=True) for item in bindings]
     )
@@ -109,7 +119,7 @@ def service_testing_operation(operation: OdooStableTargetReplacementOperationRec
         and authorization.grant == "launchplane_reconcile"
         and not authorization.release_decision_record_id
         and operation.request.strategy == "recreate-in-place"
-        and operation.request.data_source_mode == "existing"
+        and operation.request.data_source_mode in {"existing", "upstream_restore"}
     )
 
 

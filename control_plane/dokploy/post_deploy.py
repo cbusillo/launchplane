@@ -39,6 +39,10 @@ from control_plane.integration_readback import (
 )
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PROGRAM
+from control_plane.odoo_testing_restore import (
+    FreshOdooTestingGeneration,
+    build_fresh_testing_restore_script,
+)
 from control_plane.odoo_testing_resources import TESTING_RESOURCES_INCOMPLETE_MARKER
 
 
@@ -143,6 +147,9 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "connection_isolation_ok",
         "testing_resources_ok",
         TESTING_RESOURCES_INCOMPLETE_MARKER,
+        "testing_copy_runtime_isolated",
+        "testing_copy_pre_registry_sanitized",
+        "testing_copy_sanitized",
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
@@ -495,6 +502,8 @@ def run_compose_post_deploy_update(
     deployment_title: str = "",
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
+    fresh_testing_generation: FreshOdooTestingGeneration | None = None,
+    fresh_restore_source_environment: dict[str, str] | None = None,
     clear_preview_fishbowl_source: bool = False,
 ) -> dict[str, str]:
     if (
@@ -553,7 +562,9 @@ def run_compose_post_deploy_update(
     desired_env_map.update(runtime_override_target_environment)
     if run_destructive_restore:
         upstream_restore_environment = resolve_upstream_restore_workflow_environment(
-            desired_env_map=desired_env_map,
+            desired_env_map=fresh_restore_source_environment or {}
+            if fresh_testing_generation is not None
+            else desired_env_map,
         )
         resolved_workflow_environment_overrides.update(upstream_restore_environment)
         environment_class = runtime_key_safety_environment_class(target_definition.instance)
@@ -707,7 +718,9 @@ def run_compose_post_deploy_update(
     )
     readback_policy = integration_readback_policy(
         instance_name=target_definition.instance,
-        policies=target_definition.policies,
+        policies=target_definition.policies.model_copy(update={"integration_allowances": ()})
+        if fresh_testing_generation is not None
+        else target_definition.policies,
         workflow_mode=workflow_mode,
     )
     schedule_script = _build_dokploy_data_workflow_script(
@@ -728,6 +741,26 @@ def run_compose_post_deploy_update(
         probe_company_email_contract=require_company_email and allow_historical_sender_contract,
         clear_preview_fishbowl_source=clear_preview_fishbowl_source,
     )
+    if fresh_testing_generation is not None:
+        if (
+            not run_destructive_restore
+            or target_definition.instance != "testing"
+            or target_definition.target_id != fresh_testing_generation.target_id
+        ):
+            raise ValueError("Fresh testing transport requires its exact restore generation.")
+        schedule_script = build_fresh_testing_restore_script(
+            generation=fresh_testing_generation,
+            compose_project=compose_app_name,
+            image_reference=desired_env_map["DOCKER_IMAGE_REFERENCE"],
+            database_name=database_name,
+            source_environment=fresh_restore_source_environment or {},
+            readback_spec=readback_policy.encoded_spec(),
+            readback_program=INTEGRATION_READBACK_PROGRAM,
+            workflow_environment=resolved_workflow_environment_overrides,
+            runtime_environment=desired_env_map,
+            clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
+            data_workflow_lock_path=data_workflow_lock_path,
+        )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
         "cronExpression": DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
@@ -755,6 +788,15 @@ def run_compose_post_deploy_update(
     )
     if run_destructive_restore:
         require_odoo_restore_readback_evidence(evidence)
+    if fresh_testing_generation is not None and any(
+        evidence.get(key) != "true"
+        for key in (
+            "testing_copy_runtime_isolated",
+            "testing_copy_pre_registry_sanitized",
+            "testing_copy_sanitized",
+        )
+    ):
+        raise ValueError("Fresh testing restore lacks its pre-run isolation/sanitization proof.")
     if require_company_email or readback_policy.required:
         require_odoo_module_update_readback_evidence(evidence)
     if require_company_email:
