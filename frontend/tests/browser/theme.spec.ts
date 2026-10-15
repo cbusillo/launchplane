@@ -1,4 +1,4 @@
-import { chromium, expect, freezeClock, test } from "./state";
+import { expect, launchControlledProfile, test } from "./state";
 
 const reviewPath = "/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308";
 
@@ -38,18 +38,16 @@ test("the saved theme applies before the application module can render", async (
 test("a reopened browser profile remembers both explicit choices", async ({ baseURL }, testInfo) => {
   const profile = testInfo.outputPath("browser-profile");
   for (const theme of ["light", "dark"] as const) {
-    const choosing = await chromium.launchPersistentContext(profile, { baseURL });
+    const choosing = await launchControlledProfile(profile, { baseURL });
     try {
-      await freezeClock(choosing);
       const page = await choosing.newPage();
       await page.goto(reviewPath);
       await page.getByRole("button", { name: `Use ${theme} theme`, exact: true }).click();
     } finally {
       await choosing.close();
     }
-    const returning = await chromium.launchPersistentContext(profile, { baseURL });
+    const returning = await launchControlledProfile(profile, { baseURL });
     try {
-      await freezeClock(returning);
       const page = await returning.newPage();
       await page.goto("/ui/products?fixture=products");
       await expect(page.locator("html")).toHaveAttribute("data-theme", theme);

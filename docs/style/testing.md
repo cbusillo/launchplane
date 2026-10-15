@@ -278,8 +278,8 @@ run for the same tree.
 Every browser spec imports `test` and `expect` from `tests/browser/state.ts`.
 Its context fixture installs and pauses Playwright's clock before navigation,
 including subsequent tabs, so slow host scheduling cannot expire evidence or
-fire app timers between assertions. Persistent-profile tests call its
-`freezeClock` helper on each new context. Use `setClockTime` for a fixture's
+fire app timers between assertions. Persistent-profile tests use its
+`launchControlledProfile` helper for each new context. Use `setClockTime` for a fixture's
 recorded date and `page.clock.runFor` or `fastForward` to exercise timer-driven
 behavior. Do not install a running clock or pause it within a short host-time
 window in an individual test.
@@ -295,11 +295,16 @@ screen, rather than consuming one response and assuming only one request.
 Development remounts can read a session more than once.
 
 `pnpm --dir frontend check:browser-timing` rejects sleeps, timer aliases,
-test-specific timeouts and clock installation outside the shared helper. Both
+test-specific timeouts/retries and unmanaged clock/context creation. Both
 frontend validation and browser smoke run this check. Shared Playwright
-failure deadlines remain in `playwright.config.ts`: they bound a broken test,
+failure deadlines live in `playwright-deadlines.mjs`: they bound a broken test,
 not successful synchronization. Do not add a sleep, retry or larger timeout
 to hide a flake.
+
+The server-isolation harness uses a watchdog derived from the shared server
+startup and test deadlines. Its peer wait includes the peer's cold server
+startup; it cannot assume both independent servers become ready together.
+Ordinary browser assertion, test and server deadlines are unchanged.
 
 Use Playwright's built-in repetition with zero retries to qualify the complete
 suite under representative sibling host load. Record the revision, worker

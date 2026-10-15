@@ -5,11 +5,12 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import process from "node:process";
 import { test } from "node:test";
+import { isolationDeadline } from "../../playwright-deadlines.mjs";
 
 const frontendRoot = fileURLToPath(new URL("../../", import.meta.url));
 const cli = fileURLToPath(import.meta.resolve("@playwright/test/cli"));
 
-test("overlapping smoke runs own distinct servers", { timeout: 90_000 }, async () => {
+test("overlapping smoke runs own distinct servers", { timeout: 2 * isolationDeadline }, async () => {
   const scratchRoot = resolve(frontendRoot, "../tmp/browser-isolation");
   await mkdir(scratchRoot, { recursive: true });
   const scratch = await mkdtemp(join(scratchRoot, "run-"));
@@ -24,11 +25,14 @@ test("overlapping smoke runs own distinct servers", { timeout: 90_000 }, async (
       const config = join(root, "playwright.config.ts");
       await writeFile(config, `
 import original from ${JSON.stringify(join(frontendRoot, "playwright.config.ts"))};
+import { isolationDeadline } from ${JSON.stringify(join(frontendRoot, "playwright-deadlines.mjs"))};
 export default {
   ...original,
   testDir: ${JSON.stringify(root)},
   outputDir: ${JSON.stringify(join(root, "results"))},
   workers: 1,
+  timeout: isolationDeadline,
+  expect: { ...original.expect, timeout: isolationDeadline },
   projects: [original.projects[0]],
   webServer: { ...original.webServer, cwd: ${JSON.stringify(frontendRoot)} },
 };

@@ -50,12 +50,14 @@ export function checkBrowserTiming(source, filename) {
     if (ts.isCallExpression(node)) {
       const name = memberName(node.expression);
       if (aliases.has(name) || name === "slow") report(node, "Wait on observable state or advance the controlled clock; no sleeps or per-test budgets.");
+      if (name === "toPass") report(node, "Poll observable state instead of retrying an assertion block.");
+      if (!shared && ["newContext", "launchPersistentContext"].includes(name)) report(node, "Use the shared context fixture or launchControlledProfile so new contexts keep a controlled clock.");
       if (!shared && (ts.isPropertyAccessExpression(node.expression) || ts.isElementAccessExpression(node.expression)) && memberName(node.expression.expression) === "clock" && ["install", "pauseAt", "resume"].includes(name)) {
         report(node, "The shared page fixture owns clock installation and pausing; use setClockTime/runFor.");
       }
     }
-    if (ts.isPropertyAssignment(node) && ["timeout", "actionTimeout", "navigationTimeout"].includes(memberName(node.name))) {
-      report(node, "Keep failure deadlines in playwright.config.ts; test waits must observe state.");
+    if ((ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node)) && ["timeout", "actionTimeout", "navigationTimeout", "retries", "slowMo"].includes(memberName(node.name))) {
+      report(node, "Keep failure deadlines and retry policy in shared Playwright configuration; test waits must observe state.");
     }
     ts.forEachChild(node, visit);
   }
