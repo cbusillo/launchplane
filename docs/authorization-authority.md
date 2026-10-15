@@ -203,7 +203,9 @@ through this path. The request's reason records the reviewed product facts; it
 cannot assert resource isolation or remove a usage hold. The metadata correction
 satisfies retirement's never-live prerequisite; retirement still performs its
 resource, ownership and protected-use checks. It creates no general provider,
-backup, release or promotion authority.
+backup, release or promotion authority. Never-live classification does not
+waive the Client's required production release checklist; prelaunch and held
+products still cannot start an acceptance-triggered release.
 
 Odoo preview apply uses the same source-owned Director identity boundary as
 [testing-copy isolation](#testing-copy-connection-isolation). It remains a write,
@@ -211,7 +213,11 @@ including preview destruction. It requires the caller's exact service-issued
 plan, an existing uniquely owned preview, and current disposable-lane facts.
 Stable lanes cannot be substituted for a preview. The route checks the binding
 under the durable reservation and immediately before the first provider
-effect. The frozen plan must name the qualified target ID. Completed same-key
+effect. The frozen service plan must name the discovered preview compose and cannot
+alias a recorded stable target. Real previews need no synthetic stable target-ID
+record; the driver revalidates complete provider discovery before effects.
+Safety also binds the settings and bootstrap override copied from the template
+lane, so a template change invalidates older qualification. Completed same-key
 replays and outcome reconciliation remain available after safety expires or
 lifecycle evidence changes; only a new effect needs fresh safety. Expired or changed safety, actual use,
 only-copy data, shared production resources and unknown isolation stop execution.

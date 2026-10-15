@@ -94,16 +94,6 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_preview_record(self.preview)
         self.payload = cast(dict[str, Any], _refresh_payload())
         self.payload["apply"]["dry_run_plan"]["compose_ref"] = "fixture-preview-target"
-        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-
-        self.store.write_dokploy_target_id_record(
-            DokployTargetIdRecord(
-                context=self.preview.context,
-                instance="pr-42",
-                target_id="fixture-preview-target",
-                updated_at=self.profile.updated_at,
-            )
-        )
         self.plan_id = _PLAN_ID
         self.issue_preview()
 
@@ -479,6 +469,16 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
                     execute.assert_called_once()
 
     async def test_plan_target_must_match_the_exact_qualified_target(self) -> None:
+        from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=self.preview.context,
+                instance="pr-42",
+                target_id="qualified-target",
+                updated_at=self.profile.updated_at,
+            )
+        )
         self.payload["apply"]["dry_run_plan"]["compose_ref"] = "different-target"
         self.issue_preview()
         self.safety()
@@ -545,3 +545,123 @@ class DirectorBoundedWritesTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(second.status_code, 409, second.text)
             observe.assert_called_once()
             execute.assert_called_once()
+
+    async def test_copied_template_settings_invalidate_preview_safety(self) -> None:
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        self.safety()
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=self.preview.context,
+                instance=self.profile.preview.template_instance,
+                env={"FIXTURE_OUTBOUND_ENDPOINT": "changed-connection"},
+                updated_at=self.profile.updated_at,
+                source_label="fixture",
+            )
+        )
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 409, response.text)
+        execute.assert_not_called()
+
+        from control_plane.contracts.odoo_instance_override_record import (
+            OdooInstanceOverrideRecord,
+            OdooWebsiteBootstrapPayload,
+        )
+
+        self.safety()
+        self.store.write_odoo_instance_override_record(
+            OdooInstanceOverrideRecord(
+                context=self.preview.context,
+                instance=self.profile.preview.template_instance,
+                website_bootstrap=OdooWebsiteBootstrapPayload(
+                    name="Changed preview fixture", company_email="changed@example.test"
+                ),
+                updated_at=self.profile.updated_at,
+                source_label="fixture",
+            )
+        )
+        with patch("control_plane.http_app.execute_odoo_preview_apply_result") as execute:
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 409, response.text)
+        execute.assert_not_called()
+
+    async def test_product_identity_preserves_production_history_across_context_changes(
+        self,
+    ) -> None:
+        from control_plane.contracts.deployment_record import DeploymentRecord
+        from control_plane.contracts.promotion_record import DeploymentEvidence
+        from control_plane.contracts.runtime_identity import RuntimeIdentity
+
+        for product, expected in ((self.profile.product, 403), ("unrelated-product", 202)):
+            history = DeploymentRecord(
+                record_id="old-context-production",
+                context="removed-context",
+                instance="prod",
+                source_git_ref="history",
+                deploy=DeploymentEvidence(
+                    status="pass",
+                    deploy_mode="compose",
+                    target_type="compose",
+                    target_name="old-production",
+                ),
+                runtime_identity=RuntimeIdentity(
+                    product=product,
+                    context="removed-context",
+                    instance="prod",
+                    deployment_record_id="old-context-production",
+                    artifact_id="history-artifact",
+                    source_git_ref="history",
+                ),
+            )
+            self.store.write_deployment_record(history)
+            response = await self.classify()
+            self.assertEqual(response.status_code, expected, response.text)
+
+    async def test_protected_new_plan_cannot_supersede_another_fenced_operation(self) -> None:
+        from control_plane.workflows.odoo_preview_runtime import (
+            ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
+        )
+
+        self.safety()
+
+        def uncertain(**kwargs: Any) -> Any:
+            kwargs["provider_effect_checkpoint"]("fixture-first-effect")
+            return {"status": "fail", "provider_effect_attempted": True}
+
+        with patch(
+            "control_plane.http_app.execute_odoo_preview_apply_result", side_effect=uncertain
+        ):
+            self.assertEqual((await self.preview_apply()).status_code, 409)
+        identity = configured_local_operator_identity(self.config)
+        assert identity is not None
+        route = "/v1/drivers/odoo/preview-apply"
+        original = self.store.read_idempotency_record(
+            scope=idempotency_scope(identity), route_path=route, idempotency_key=self.plan_id
+        )
+        assert original is not None
+        later = datetime.fromisoformat(
+            original.lease_expires_at.replace("Z", "+00:00")
+        ) + timedelta(seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS + 30)
+        self.plan_id = "protected-successor"
+        self.issue_preview()
+        self.safety(data="only_copy")
+        with (
+            patch(
+                "control_plane.odoo_preview_apply_execution._original_supersession_is_quiescent",
+                return_value=True,
+            ),
+            patch.object(
+                self.store, "_database_mutation_timestamp", return_value=later.isoformat()
+            ),
+        ):
+            response = await self.preview_apply()
+        self.assertEqual(response.status_code, 409, response.text)
+        retained = self.store.read_idempotency_record(
+            scope=idempotency_scope(identity),
+            route_path=route,
+            idempotency_key=original.idempotency_key,
+        )
+        assert retained is not None
+        self.assertEqual(retained.state, "reconcile_required")

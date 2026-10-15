@@ -4348,47 +4348,59 @@ class RealPostgresStorageConcurrencyTests(unittest.TestCase):
                     status="pass", deploy_mode="compose", target_name="prod", target_type="compose"
                 ),
             )
-            with store._engine.connect() as writer, ThreadPoolExecutor(max_workers=1) as workers:
-                transaction = writer.begin()
-                writer.execute(
-                    insert(LaunchplaneDeploymentRow).values(
-                        record_id=history.record_id,
-                        context=history.context,
-                        instance=history.instance,
-                        artifact_id="",
-                        source_git_ref=history.source_git_ref,
-                        deploy_started_at="",
-                        deploy_finished_at="",
-                        payload=history.model_dump(mode="json"),
-                    )
-                )
-                classify = workers.submit(
-                    store.compare_and_write_product_profile_record,
-                    expected_record=profile,
-                    replacement_record=replacement,
-                    require_never_live_history=True,
-                )
-                try:
-                    blocked = False
-                    deadline = time.monotonic() + 5
-                    while time.monotonic() < deadline:
-                        with store._engine.connect() as observer:
-                            blocked = bool(
-                                observer.scalar(
+            written = threading.Event()
+            release = threading.Event()
+
+            def pause_writer(
+                _connection: Any,
+                _cursor: Any,
+                _statement: Any,
+                _parameters: Any,
+                context: Any,
+                _many: Any,
+            ) -> None:
+                if (
+                    context.isinsert
+                    and getattr(getattr(context.compiled.statement, "table", None), "name", "")
+                    == LaunchplaneDeploymentRow.__tablename__
+                ):
+                    written.set()
+                    if not release.wait(10):
+                        raise AssertionError("History writer was not resumed")
+
+            event.listen(store._engine, "after_cursor_execute", pause_writer)
+            try:
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    writer = workers.submit(store.write_deployment_record, history)
+                    try:
+                        self.assertTrue(written.wait(5))
+                        classify = workers.submit(
+                            store.compare_and_write_product_profile_record,
+                            expected_record=profile,
+                            replacement_record=replacement,
+                            require_never_live_history=True,
+                        )
+                        deadline = time.monotonic() + 5
+                        # Observe any database wait only to control the interleaving.
+                        # The assertions below check refusal and preserved records,
+                        # not a particular locking implementation.
+                        while not classify.done() and time.monotonic() < deadline:
+                            with store._engine.connect() as observer:
+                                waiting = observer.scalar(
                                     text(
-                                        "SELECT count(*) FROM pg_locks WHERE NOT granted "
-                                        "AND relation = to_regclass(:table_name)"
-                                    ),
-                                    {"table_name": LaunchplaneDeploymentRow.__tablename__},
+                                        "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock'"
+                                    )
                                 )
-                            )
-                        if blocked:
-                            break
-                        time.sleep(0.01)
-                    self.assertTrue(blocked, "Classification must wait for concurrent history")
-                finally:
-                    transaction.commit()
-                result = classify.result(timeout=5)
+                            if waiting:
+                                break
+                            time.sleep(0.01)
+                    finally:
+                        release.set()
+                    writer.result(timeout=5)
+                    result = classify.result(timeout=5)
+            finally:
+                release.set()
+                event.remove(store._engine, "after_cursor_execute", pause_writer)
             self.assertEqual(result.status, "changed")
             self.assertEqual(store.read_product_profile_record(profile.product), profile)
             self.assertEqual(store.read_deployment_record(history.record_id), history)

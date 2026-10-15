@@ -7202,12 +7202,25 @@ def create_launchplane_fastapi_app(
                 preview = resolve_disposable_preview(
                     lane_store, current_profile, issued_plan.context, issued_plan.preview_slug
                 )
-                target_id = lane_store.read_dokploy_target_id_record(
-                    context_name=issued_plan.context, instance_name=issued_plan.preview_slug
-                )
-                if issued_plan.dry_run_plan.compose_ref != target_id.target_id:
+                compose_id = issued_plan.dry_run_plan.compose_ref
+                if not compose_id or compose_id.startswith("${created."):
                     raise DisposableLaneSafetyUnknown(
-                        "The issued plan does not act on the qualified preview target; plan again."
+                        "The existing preview target is not resolved."
+                    )
+                try:
+                    target_id = lane_store.read_dokploy_target_id_record(
+                        context_name=issued_plan.context, instance_name=issued_plan.preview_slug
+                    )
+                except FileNotFoundError:
+                    target_id = None
+                if (target_id is not None and compose_id != target_id.target_id) or any(
+                    item.target_id == compose_id
+                    and (item.context, item.instance)
+                    != (issued_plan.context, issued_plan.preview_slug)
+                    for item in lane_store.list_dokploy_target_id_records()
+                ):
+                    raise DisposableLaneSafetyUnknown(
+                        "The discovered preview target changed or aliases another lane."
                     )
                 binding = require_disposable_lane(
                     lane_store,
@@ -14245,24 +14258,8 @@ def create_launchplane_fastapi_app(
                 control_plane_product_production_use_setting.require_never_live_classification(
                     profile=profile,
                     request=production_use_request,
-                    deployments=(
-                        record
-                        for context in {
-                            profile.preview.context,
-                            *(lane.context for lane in profile.lanes),
-                        }
-                        - {""}
-                        for record in database_store.list_deployment_records(context_name=context)
-                    ),
-                    promotions=(
-                        record
-                        for context in {
-                            profile.preview.context,
-                            *(lane.context for lane in profile.lanes),
-                        }
-                        - {""}
-                        for record in database_store.list_promotion_records(context_name=context)
-                    ),
+                    deployments=database_store.list_deployment_records(),
+                    promotions=database_store.list_promotion_records(),
                     previews=database_store.list_preview_records(
                         context_name=profile.preview.context
                     ),

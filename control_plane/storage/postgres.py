@@ -36684,7 +36684,10 @@ class PostgresRecordStore(HumanSessionStore):
                     session.delete(reservation_row)
                     session.commit()
                 return ProductProfileCompareWriteResult(status="changed")
+        if require_never_live_history:
+            self._lock_product_authority_bundle_write(session)
         if require_never_live_history and self._engine.dialect.name == "postgresql":
+            session.execute(text("SET LOCAL lock_timeout = '5s'"))
             # Include concurrent history insertions, not only existing rows.
             tables = ", ".join(
                 model.__tablename__
@@ -36731,7 +36734,13 @@ class PostgresRecordStore(HumanSessionStore):
                         self._read_payload(model_type=DeploymentRecord, payload=history.payload)
                         for history in session.scalars(
                             select(LaunchplaneDeploymentRow).where(
-                                LaunchplaneDeploymentRow.context.in_(contexts)
+                                or_(
+                                    LaunchplaneDeploymentRow.context.in_(contexts),
+                                    LaunchplaneDeploymentRow.payload["runtime_identity"][
+                                        "product"
+                                    ].as_string()
+                                    == current_record.product,
+                                )
                             )
                         )
                     ),
@@ -36739,7 +36748,13 @@ class PostgresRecordStore(HumanSessionStore):
                         self._read_payload(model_type=PromotionRecord, payload=history.payload)
                         for history in session.scalars(
                             select(LaunchplanePromotionRow).where(
-                                LaunchplanePromotionRow.context.in_(contexts)
+                                or_(
+                                    LaunchplanePromotionRow.context.in_(contexts),
+                                    LaunchplanePromotionRow.payload["destination_health"][
+                                        "observed_runtime_identity"
+                                    ]["product"].as_string()
+                                    == current_record.product,
+                                )
                             )
                         )
                     ),

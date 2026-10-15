@@ -163,8 +163,21 @@ def require_never_live_classification(
         and preview.anchor_repo in {profile.repository, profile.repository.partition("/")[2]}
     }
     testing_lanes = {(lane.context, lane.instance) for lane in profile.lanes}
+    contexts = {profile.preview.context, *(lane.context for lane in profile.lanes)} - {""}
     if any(
         (record.context, record.instance) not in testing_lanes | preview_lanes
         for record in deployments
-    ) or any(True for _ in promotions):
+        if record.context in contexts
+        or (
+            record.runtime_identity is not None
+            and record.runtime_identity.product == profile.product
+        )
+    ) or any(
+        record.context in contexts
+        or (
+            record.destination_health.observed_runtime_identity is not None
+            and record.destination_health.observed_runtime_identity.product == profile.product
+        )
+        for record in promotions
+    ):
         raise ValueError("Recorded production or promotion history prevents agent classification.")

@@ -12,6 +12,7 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 
 
 class DisposableLaneSafetyUnknown(ValueError):
@@ -19,6 +20,10 @@ class DisposableLaneSafetyUnknown(ValueError):
 
 
 class DisposableLaneStore(Protocol):
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_dokploy_target_record(
@@ -69,7 +74,9 @@ def disposable_lane_binding_sha256(
     target: DokployTargetRecord | None,
     target_id: DokployTargetIdRecord | None,
     preview: PreviewRecord | None = None,
-    configuration: tuple[RuntimeEnvironmentRecord | SecretRecord | SecretBinding, ...] = (),
+    configuration: tuple[
+        RuntimeEnvironmentRecord | SecretRecord | SecretBinding | OdooInstanceOverrideRecord, ...
+    ] = (),
 ) -> str:
     # The observation itself is not part of the binding it observes. Updating
     # timestamps or retirement lifecycle state does not change lane ownership.
@@ -252,26 +259,50 @@ def resolve_disposable_preview(
 
 def disposable_lane_configuration(
     store: DisposableLaneStore, context: str, instance: str
-) -> tuple[RuntimeEnvironmentRecord | SecretRecord | SecretBinding, ...]:
+) -> tuple[
+    RuntimeEnvironmentRecord | SecretRecord | SecretBinding | OdooInstanceOverrideRecord, ...
+]:
+    # Odoo previews copy their template lane, including bootstrap overrides.
+    # Bind the actual copied inputs, not just records under the preview slug.
+    instances = {"", instance}
+    overrides: list[OdooInstanceOverrideRecord] = []
+    profiles = [
+        profile
+        for profile in store.list_product_profile_records(driver_id="odoo")
+        if profile.preview.context == context
+        and not any((lane.context, lane.instance) == (context, instance) for lane in profile.lanes)
+    ]
+    if len(profiles) == 1:
+        template = profiles[0].preview.template_instance
+        instances.add(template)
+        try:
+            overrides.append(
+                store.read_odoo_instance_override_record(
+                    context_name=context, instance_name=template
+                )
+            )
+        except FileNotFoundError:
+            pass
     # Site values and version pointers stay inside the service and only enter
     # the digest. Secret values are never read or returned.
     bindings = tuple(
         item
         for item in store.list_secret_bindings(integration="runtime_environment")
-        if item.context in ("", context) and item.instance in ("", instance)
+        if item.context in ("", context) and item.instance in instances
     )
     referenced_secrets = {item.secret_id for item in bindings}
     return (
         *(
             item
             for item in store.list_runtime_environment_records()
-            if item.context in ("", context) and item.instance in ("", instance)
+            if item.context in ("", context) and item.instance in instances
         ),
         *(
             item
             for item in store.list_secret_records(integration="runtime_environment")
-            if (item.context in ("", context) and item.instance in ("", instance))
+            if (item.context in ("", context) and item.instance in instances)
             or item.secret_id in referenced_secrets
         ),
         *bindings,
+        *overrides,
     )

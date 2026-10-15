@@ -448,6 +448,20 @@ def prepare_odoo_preview_apply_operation(
         observe_apply=observe_apply,
         pre_mutation_guard=pre_mutation_guard,
     )
+
+    def qualified_supersession(reservation: object) -> bool:
+        if pre_mutation_guard is not None:
+            pre_mutation_guard()
+        return _original_supersession_is_quiescent(
+            reservation=reservation,
+            profile=profile,
+            request=apply_request,
+            root=control_plane_root,
+            database_url=database_url,
+            check=supersession_is_quiescent,
+            store=record_store,
+        )
+
     target_supersession = ProviderTargetSupersession(
         response_status_code=409,
         response_payload=provider_operation_response_payload(
@@ -462,15 +476,7 @@ def prepare_odoo_preview_apply_operation(
             },
         ),
         minimum_expired_seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS,
-        quiescence_check=lambda reservation: _original_supersession_is_quiescent(
-            reservation=reservation,
-            profile=profile,
-            request=apply_request,
-            root=control_plane_root,
-            database_url=database_url,
-            check=supersession_is_quiescent,
-            store=record_store,
-        ),
+        quiescence_check=qualified_supersession,
     )
 
     return OdooPreviewApplyOperation(
