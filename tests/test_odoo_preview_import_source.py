@@ -204,7 +204,11 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertRaises(ValueError),
             ):
                 resolve_fishbowl_preview_source(
-                    store=self.store, profile=self.profile, preview_slug=slug, copy_from=reference
+                    store=self.store,
+                    profile=self.profile,
+                    preview_slug=slug,
+                    copy_from=reference,
+                    include_secret_value=True,
                 )
 
     def test_unclassified_or_writable_class_and_non_read_only_reason_refuse(self) -> None:
