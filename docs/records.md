@@ -59,48 +59,31 @@ Four DB-backed tables hold the authoritative ordinary-agent lifecycle boundary:
   outcome per privileged operation, including its own version-neutral current
   administrator-policy provenance.
 
-Enroll and rotation append the principal, authentication credential, custody,
-and audit records in the same transaction as a completed inner idempotency
-receipt. Rotation advances exactly one credential version. Revocation appends a
-revoked principal revision and marks the current authentication credential
-revoked without reading custody or calling a provider. The store derives the
-receipt after DB time and server-allocated revisions are known; callers cannot
-supply response content or run callbacks while locks are held.
+Enrollment, authentication/credential claim, session admission, finite-job
+execution, provider inspection, and joined ordinary-controller writes have been
+removed from storage. No enrollment or delegated execution is enabled. Historical
+tables and schema-3 policy parsing remain until their separate retirement.
 
-Enrollment recovery has been removed. Retained delivery ciphertext still
-participates in managed-secret key retirement, so the privileged-operation
-worker keeps its bounded expiry maintenance until storage deletion under #2437.
-History remains readable; no enrollment or delegated execution is enabled.
-The retired delivery controller, provider transports, token minting, custody
-orchestration, qualification executor, and readiness orchestration are removed.
-Their storage contracts and methods remain for the next retirement layer;
-native merge-train records retain their historical finite-job bindings.
+Retained delivery ciphertext still participates in managed-secret key retirement,
+so the privileged-operation worker keeps its bounded expiry maintenance. That
+maintenance preserves unclaimed-credential revocation and session/effect
+cancellation. Historical activation reads, policy maintenance and its activation
+lock remain supported. Native merge-train records retain their finite-job
+bindings and refuse to overwrite a bound controller/progress record or bypass
+an unresolved ordinary effect. These fences are not removed with the retired
+execution methods. Remaining storage-bound contracts/domain helpers and table
+retirement continue under #2437; no data migration has run.
 
 ### Provider Delivery Inspection
 
 Status: retired with ordinary-agent delegated delivery; deletion is tracked in
 cbusillo/launchplane#2437. Do not extend it.
 
-`launchplane_provider_delivery_inspections` stores private demand generations,
-bounded provider attempts, independent token custody and terminal observations.
-Its logical repository flight remains occupied until terminal history and
-release commit together; closed token custody alone does not release it.
-Database uniqueness and state constraints fence concurrent generations,
-repository custody and completion sequence. The migration creates empty
-storage, not an inspection profile, credential, expectation or activation.
-
-The payload retains normalized provider facts and immutable provenance, never a
-private key, token or raw provider response. A ready receipt binds current
-target and selected semantics; containing-policy history and producing-caller
-identity remain provenance. The latest conclusive protection observation
-governs within its original freshness window. Capability failures provide
-pacing without replacing an unexpired conclusive ready observation.
-
-Recovery uses expected state/revision and current database time, preserves
-unknown custody until its conservative expiry, and cannot let a stale finisher
-overwrite a newer result. The store retains terminal audit history and adds no
-automatic deletion. Provider inspection orchestration and token minting are
-removed; these storage records remain only until the next retirement layer.
+The inspection reservation, token-custody transition, completion, and recovery
+methods are removed. `launchplane_provider_delivery_inspections` remains as
+historical storage with its uniqueness and state constraints until the later
+table migration under #2437. No inspection profile, credential, expectation, or
+activation is created by a migration.
 
 ## Schema Migrations
 
