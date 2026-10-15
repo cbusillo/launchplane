@@ -53,6 +53,9 @@ the exceptions below. For a documentation or metadata change with no affected co
 record why behavior tests or IDE inspection do not apply; do not add tests that
 assert instruction wording or config text.
 
+For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
+and build validation, with browser smoke for UI changes as described below.
+
 The full sharded suite remains CI's required gate before merge. Wait for green
 current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
 does not replace that evidence. The trial does not change CI workflows or
@@ -61,7 +64,8 @@ required checks.
 Safety, authorization, approval-rule, destructive-helper, and shared-infrastructure
 changes are excluded from the focused-only trial and still run the full local
 suite before review. Credential handling falls under the safety and authorization
-exceptions. Broaden local validation when an affected shared contract,
+exceptions. Shared test helpers, shard tooling, and CI runner selection are
+shared infrastructure. Broaden local validation when an affected shared contract,
 storage boundary, generated surface, observed failure, or other risk requires
 it. The full local suite remains available through:
 
@@ -220,7 +224,8 @@ the run. An `always()` aggregate can retain the old workflow's concurrency slot
 while it waits for a runner, preventing the new head's CI from starting.
 
 GitHub Actions remains the source of truth for required pull-request gates.
-Local validation should be proportionate: use targeted behavior proof by
+Follow the mandatory full-local exceptions in [Local test loop](#local-test-loop).
+Otherwise, local validation should be proportionate: use targeted behavior proof by
 default, then add the full suite, PostgreSQL integration, browser, generated-
 contract, or other gate when the affected boundary or observed risk requires it.
 When PostgreSQL storage semantics require proof, the PostgreSQL integration
