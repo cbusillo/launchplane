@@ -50,7 +50,7 @@ class OrdinaryAgentRetirementTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_removed_ingress_cannot_reach_storage(self) -> None:
         with _database_app(_reader_policy()) as (store, _, app):
-            with patch.object(store, "claim_ordinary_agent_credential", side_effect=AssertionError):
+            with patch.object(store, "reserve_mutation", side_effect=AssertionError):
                 async with lifespan_client(app) as client:
                     for method, path in (
                         ("POST", "/v1/agent/ordinary-agent-enrollments"),
