@@ -241,6 +241,57 @@ class IntegratedProductRetirementTests(unittest.IsolatedAsyncioTestCase):
         }
         return cast(dict[str, Any], result)
 
+    async def test_plan_binding_waits_keep_http_service_responsive(self) -> None:
+        import asyncio
+        import threading
+        from control_plane import product_retirement
+
+        bind = product_retirement.bind_product_retirement_authority
+        for blocked_call in (1, 2):
+            with self.subTest(blocked_call=blocked_call):
+                entered = threading.Event()
+                release = threading.Event()
+                calls = 0
+
+                def wait_for_executor(**kwargs: Any) -> Any:
+                    nonlocal calls
+                    calls += 1
+                    if calls == blocked_call:
+                        entered.set()
+                        if not release.wait(5):
+                            raise ValueError("Fixture executor wait expired")
+                    return bind(**kwargs)
+
+                with patch.object(
+                    product_retirement,
+                    "bind_product_retirement_authority",
+                    side_effect=wait_for_executor,
+                ):
+                    planning = asyncio.create_task(
+                        request(
+                            self.app,
+                            "POST",
+                            "/v1/product-retirement",
+                            headers={
+                                **self.headers,
+                                "Idempotency-Key": f"responsive-plan-{blocked_call}",
+                            },
+                            payload=self.payload,
+                        )
+                    )
+                    try:
+                        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                        self.assertFalse(
+                            planning.done(), "Plan blocked the event loop until its wait ended"
+                        )
+                        health = await asyncio.wait_for(request(self.app, "GET", "/v1/health"), 2)
+                        self.assertEqual(health.status_code, 200, health.text)
+                        self.assertFalse(release.is_set())
+                    finally:
+                        release.set()
+                    response = await asyncio.wait_for(planning, 5)
+                    self.assertEqual(response.status_code, 202, response.text)
+
     async def test_retires_present_and_absent_previews_then_testing_and_excludes_sweep(
         self,
     ) -> None:

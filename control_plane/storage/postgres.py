@@ -5883,6 +5883,7 @@ class PostgresRecordStore(HumanSessionStore):
         self._provider_evidence_context = local()
         self._release_review_publication_context = local()
         self._merge_train_feedback_context = local()
+        self._preview_execution_context = local()
 
     @property
     def backend_name(self) -> str:
@@ -13649,10 +13650,25 @@ class PostgresRecordStore(HumanSessionStore):
                 text(f"select {lock_function}(hashtextextended(:lock_name, 0))"),
                 {"lock_name": f"launchplane-preview-refresh:{normalized_preview_id}"},
             )
+            held = getattr(self._preview_execution_context, "held", ())
+            self._preview_execution_context.held = (*held, (normalized_preview_id, shared, session))
             try:
                 yield
             finally:
+                self._preview_execution_context.held = held
                 session.commit()
+
+    def preview_refresh_is_excluded(self, *, preview_id: str) -> bool:
+        """Prove this thread still holds the exact exclusive PostgreSQL executor lock.
+
+        SQLite rehearsals and another thread's lock cannot establish exclusion.
+        Probe the original transaction so a lost connection cannot supply proof.
+        """
+        for name, shared, session in getattr(self._preview_execution_context, "held", ()):
+            if name == preview_id and not shared:
+                session.execute(text("SELECT 1"))
+                return True
+        return False
 
     def write_preview_generation_evidence_records(
         self,

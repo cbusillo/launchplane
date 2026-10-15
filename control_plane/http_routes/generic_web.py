@@ -1881,12 +1881,32 @@ def build_generic_web_write_route_handlers(
         if replayed_response is not None:
             return replayed_response
         verification_request.verification.context = profile.preview.context
-        try:
+
+        def complete_verification() -> AcceptedEvidenceResponse:
             result = apply_generic_web_preview_verification_result(
                 control_plane_root=dependencies.control_plane_root,
                 record_store=record_store,
                 request=verification_request,
             )
+            response = accepted_evidence_response(
+                trace_id=trace_id,
+                records=generic_web_verification_response_records(result),
+                result=result,
+            )
+            if should_store_generic_web_verification_idempotency(result):
+                dependencies.store_apply_idempotency(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
+                    idempotency_key=normalized_key,
+                    request_fingerprint_value=payload_fingerprint,
+                    trace_id=trace_id,
+                    response=response,
+                )
+            return response
+
+        try:
+            return await asyncio.shield(asyncio.to_thread(complete_verification))
         except (ValueError, click.ClickException) as error:
             raise dependencies.http_error(
                 status_code=400,
@@ -1894,22 +1914,6 @@ def build_generic_web_write_route_handlers(
                 code="invalid_request",
                 message="Request could not be completed.",
             ) from error
-        response = accepted_evidence_response(
-            trace_id=trace_id,
-            records=generic_web_verification_response_records(result),
-            result=result,
-        )
-        if should_store_generic_web_verification_idempotency(result):
-            dependencies.store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_GENERIC_WEB_PREVIEW_VERIFICATION_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
 
     return GenericWebWriteRouteHandlers(
         apply_generic_web_preview_desired_state=apply_generic_web_preview_desired_state,

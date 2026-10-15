@@ -21,6 +21,7 @@ from control_plane.workflows.generic_web_preview import (
     effective_preview_app_name_prefix,
     preview_application_name,
     resolve_generic_web_preview_slug,
+    serialize_generic_web_preview_operation,
 )
 
 LEGACY_PREVIEW_RECONCILIATION_ROUTE = "/v1/previews/legacy-generic-web/reconciliation"
@@ -74,6 +75,38 @@ def bind_legacy_preview(
     request: LegacyPreviewReconciliationRequest,
     *,
     allow_tracked: bool = False,
+) -> LegacyPreviewAuthority:
+    profile = store.read_product_profile_record(request.product)
+    preview = store.read_preview_record(request.preview_id)
+    slug = resolve_generic_web_preview_slug(
+        profile=profile,
+        preview_slug="",
+        anchor_pr_number=preview.anchor_pr_number,
+        label="Reconciliation",
+    )
+    if _execution_excluded(store, profile, slug):
+        return _bind_legacy_preview(store, request, allow_tracked=allow_tracked)
+    with serialize_generic_web_preview_operation(
+        record_store=store, profile=profile, preview_slug=slug, product_mutation=False
+    ):
+        return _bind_legacy_preview(store, request, allow_tracked=allow_tracked)
+
+
+def _execution_excluded(
+    store: PostgresRecordStore, profile: LaunchplaneProductProfileRecord, slug: str
+) -> bool:
+    return store.preview_refresh_is_excluded(
+        preview_id=f"product-retirement:{profile.product}"
+    ) or store.preview_refresh_is_excluded(
+        preview_id=f"{profile.product}:{profile.preview.context}:{slug}"
+    )
+
+
+def _bind_legacy_preview(
+    store: PostgresRecordStore,
+    request: LegacyPreviewReconciliationRequest,
+    *,
+    allow_tracked: bool,
 ) -> LegacyPreviewAuthority:
     profile = store.read_product_profile_record(request.product)
     preview = store.read_preview_record(request.preview_id)
@@ -143,6 +176,14 @@ def bind_legacy_preview(
             ):
                 raise ValueError("Historical deployment has unsupported provider evidence.")
             preview_target_ids.add(deployment.deployed_target.target_id)
+    pointers = {
+        preview.active_generation_id,
+        preview.serving_generation_id,
+        preview.latest_generation_id,
+    } - {""}
+    nonterminal = tuple(
+        g for g in generations if g.state in {"resolving", "building", "deploying", "verifying"}
+    )
     if any(
         pointer and pointer not in generation_ids
         for pointer in (
@@ -150,7 +191,14 @@ def bind_legacy_preview(
             preview.serving_generation_id,
             preview.latest_generation_id,
         )
-    ) or any(g.state in {"resolving", "building", "deploying", "verifying"} for g in generations):
+    ) or (
+        nonterminal
+        and (
+            not pointers
+            or any(g.generation_id in pointers for g in nonterminal)
+            or not _execution_excluded(store, profile, slug)
+        )
+    ):
         raise ValueError("Preview generation evidence is incomplete or still running.")
     if store.list_product_reconcile_requests(product=profile.product, state="running", limit=None):
         raise ValueError("Product reconciliation is still running.")

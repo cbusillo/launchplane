@@ -978,6 +978,123 @@ class RealPostgresLegacyPreviewReconciliationTests(
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
 
+    async def test_orphan_history_reconciles_under_real_executor_exclusion(self) -> None:
+        generation = self.seed_nonterminal_history()
+        plan = await self.plan()
+        applied = await self.apply(plan)
+        self.assertEqual(applied.status_code, 202, applied.text)
+        self.assertEqual(self.store.read_preview_record(self.preview.preview_id).state, "destroyed")
+        self.assertEqual(
+            self.store.read_preview_generation_record(generation.generation_id), generation
+        )
+
+    def test_waiting_verification_rechecks_retirement_fence(self) -> None:
+        import click
+        from control_plane.generic_web_verification_http import (
+            apply_generic_web_preview_verification_result,
+        )
+        from control_plane.workflows.generic_web_preview import (
+            serialize_generic_web_product_operation,
+        )
+
+        generation = self.seed_nonterminal_history()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with serialize_generic_web_product_operation(
+                record_store=self.store, product=self.profile.product, exclusive=True
+            ):
+                waiting = pool.submit(
+                    apply_generic_web_preview_verification_result,
+                    control_plane_root=self.root,
+                    record_store=self.store,
+                    request=self.verification_request(),
+                )
+                blocked = False
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        blocked = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                                    "AND NOT granted AND database = "
+                                    "(SELECT oid FROM pg_database WHERE datname = current_database())"
+                                )
+                            )
+                        )
+                    if blocked:
+                        break
+                    time.sleep(0.01)
+                self.assertTrue(blocked, "Verification never waited for retirement")
+                fenced = self.profile.model_copy(
+                    update={
+                        "lifecycle_state": "retiring",
+                        "preview": self.profile.preview.model_copy(update={"enabled": False}),
+                    }
+                )
+                self.store.write_product_profile_record(fenced)
+            with self.assertRaises(click.ClickException):
+                waiting.result(timeout=5)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), fenced)
+        self.assertEqual(
+            self.store.read_preview_generation_record(generation.generation_id), generation
+        )
+
+    async def test_orphan_inspection_waits_for_current_executor(self) -> None:
+        from control_plane.workflows.generic_web_preview import (
+            resolve_generic_web_preview_slug,
+            serialize_generic_web_preview_operation,
+        )
+
+        generation = self.seed_nonterminal_history()
+        slug = resolve_generic_web_preview_slug(
+            profile=self.profile,
+            preview_slug="",
+            anchor_pr_number=self.preview.anchor_pr_number,
+            label="Fixture",
+        )
+        entered = threading.Event()
+        release = threading.Event()
+
+        def executor() -> None:
+            with serialize_generic_web_preview_operation(
+                record_store=self.store, profile=self.profile, preview_slug=slug
+            ):
+                entered.set()
+                if not release.wait(10):
+                    raise ValueError("Fixture executor timed out")
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            running = pool.submit(executor)
+            self.assertTrue(await asyncio.to_thread(entered.wait, 5))
+            inspection = asyncio.create_task(self.call("inspect"))
+            try:
+                deadline = time.monotonic() + 5
+                waiting = False
+                while time.monotonic() < deadline:
+                    with self.store._engine.connect() as connection:
+                        waiting = bool(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' "
+                                    "AND NOT granted AND database = "
+                                    "(SELECT oid FROM pg_database WHERE datname = current_database())"
+                                )
+                            )
+                        )
+                    if waiting:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(waiting, "Inspection never waited for the current executor")
+                self.search.assert_not_called()
+            finally:
+                release.set()
+            await asyncio.to_thread(lambda: running.result(timeout=5))
+            response = await asyncio.wait_for(inspection, 5)
+            self.assertEqual(response.status_code, 202, response.text)
+            self.assertEqual(
+                self.store.read_preview_generation_record(generation.generation_id), generation
+            )
+
     async def test_sibling_generation_write_does_not_deadlock_reconciliation(self) -> None:
         sibling = self.preview.model_copy(update={"preview_id": "sibling", "anchor_pr_number": 7})
         self.store.write_preview_record(sibling)
