@@ -12,6 +12,11 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_replacement_resources import ROUTE
+from control_plane.workflows.dokploy_target_adoption import (
+    PROJECT_CREATE_PATH,
+    ENVIRONMENT_CREATE_PATH,
+    COMPOSE_CREATE_PATH,
+)
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import scoped_agent_transport
 from tests.support.disposable_lanes import prepare_held_rebuild
@@ -283,11 +288,11 @@ class TestingResourceCaptureRecoveryTests(unittest.TestCase):
         )
         for placement, phase, expected in (
             (("", "", ""), "", "absent"),
-            (("", "", ""), "/api/project.create", "unknown"),
-            (("project", "", ""), "/api/project.create", "absent"),
-            (("project", "", ""), "/api/environment.create", "unknown"),
-            (("project", "environment", ""), "/api/environment.create", "absent"),
-            (("project", "environment", ""), "/api/compose.create", "unknown"),
+            (("", "", ""), PROJECT_CREATE_PATH, "unknown"),
+            (("project", "", ""), PROJECT_CREATE_PATH, "absent"),
+            (("project", "", ""), ENVIRONMENT_CREATE_PATH, "unknown"),
+            (("project", "environment", ""), ENVIRONMENT_CREATE_PATH, "absent"),
+            (("project", "environment", ""), COMPOSE_CREATE_PATH, "unknown"),
         ):
             with (
                 self.subTest(placement=placement, phase=phase),
@@ -298,6 +303,55 @@ class TestingResourceCaptureRecoveryTests(unittest.TestCase):
                 assert observation is not None
                 self.assertEqual(observation.outcome, expected)
                 self.assertEqual(observation.retry_safe, expected == "absent")
+
+    def test_provider_inventory_accepts_its_relation_names_and_refuses_ambiguity(self) -> None:
+        from unittest.mock import Mock
+        from control_plane.testing_replacement_resources import (
+            TestingReplacementResourceAdapter,
+            TestingReplacementResourcesRequest,
+        )
+
+        adapter = TestingReplacementResourceAdapter(
+            Path("."),
+            Mock(),
+            "example",
+            TestingReplacementResourcesRequest(
+                context="example", operation_id="retained", reason="read actual placement"
+            ),
+            "fixture",
+        )
+        namespace = "service-namespace"
+        for relation in ("compose", "composes"):
+            project: dict[str, Any] = {
+                "name": namespace,
+                "projectId": "new-project",
+                "environments": [
+                    {"name": "provider-default", relation: []},
+                    {
+                        "name": namespace,
+                        "environmentId": "new-environment",
+                        relation: [{"name": namespace, "composeId": "new-compose"}],
+                    },
+                ],
+            }
+            with (
+                self.subTest(relation=relation),
+                patch(
+                    "control_plane.testing_replacement_resources.source.read_dokploy_config",
+                    return_value=("provider.invalid", "fixture"),
+                ),
+                patch(
+                    "control_plane.testing_replacement_resources.api.fetch_dokploy_projects",
+                    return_value=(project,),
+                ),
+            ):
+                self.assertEqual(
+                    adapter.created_placement(namespace),
+                    ("new-project", "new-environment", "new-compose"),
+                )
+                project["environments"][1]["compose" if relation == "composes" else "composes"] = []
+                with self.assertRaises(ValueError):
+                    adapter.created_placement(namespace)
 
 
 if __name__ == "__main__":

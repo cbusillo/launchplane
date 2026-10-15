@@ -10,6 +10,9 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
+    PROJECT_CREATE_PATH,
+    ENVIRONMENT_CREATE_PATH,
+    COMPOSE_CREATE_PATH,
     DokployComposeTargetCreateResult,
     DokployTargetDomainRepairResult,
     DokployTargetAdoptionResult,
@@ -392,9 +395,9 @@ def execute_dokploy_target_setup(
     ) -> dict[str, dokploy_api.JsonValue]:
         if disposable_checkpoint is not None:
             if path not in {
-                "/api/project.create",
-                "/api/environment.create",
-                "/api/compose.create",
+                PROJECT_CREATE_PATH,
+                ENVIRONMENT_CREATE_PATH,
+                COMPOSE_CREATE_PATH,
             }:
                 raise ValueError(
                     "Disposable rebuilding cannot mutate an existing provider resource."

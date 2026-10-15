@@ -10180,6 +10180,25 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             fixture.database_url = url
             fixture.setUp()
             self.addCleanup(fixture.doCleanups)
+            retained_record = fixture.store.read_dokploy_target_record(
+                context_name=fixture.context, instance_name="testing"
+            )
+            retained_record = retained_record.model_copy(
+                update={
+                    "domains": ("retained.example.invalid",),
+                    "public_hosts": ("retained-public.example.invalid",),
+                    "env": {"ODOO_DATA_VOLUME": "retained-data"},
+                    "require_test_gate": True,
+                    "policies": retained_record.policies.model_copy(
+                        update={
+                            "shopify": retained_record.policies.shopify.model_copy(
+                                update={"protected_store_keys": ("protected-store",)}
+                            ),
+                        }
+                    ),
+                }
+            )
+            fixture.store.write_dokploy_target_record(retained_record)
             policy = LaunchplaneAuthzPolicy()
             fixture.store.seed_authz_policy_if_absent(
                 LaunchplaneAuthzPolicyRecord(
@@ -10295,7 +10314,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     # Remote work completed (or is partially prepared) but the
                     # request died before the allocation receipt publication.
                     raise RuntimeError("fixture lost schedule reply")
-                if fault == "partial" and phases == ["prepare", "readback"]:
+                if (fault == "partial" and phases == ["prepare", "readback"]) or (
+                    fault == "lost-adoption" and phases == ["readback"]
+                ):
                     from control_plane.testing_replacement_resources import (
                         IncompleteTestingResources,
                     )
@@ -10359,6 +10380,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                         side_effect=schedule,
                     ),
                 ):
+                    invalid = await fixture.post(mode="apply", reviewed_plan_sha256="0" * 64)
+                    self.assertEqual(invalid.status_code, 409, invalid.text)
+                    self.assertFalse(calls)
                     if fault == "alias":
                         refused = await fixture.post(**body)
                         self.assertEqual(refused.status_code, 409, refused.text)
@@ -10420,6 +10444,21 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     fixture.store.read_product_profile_record(fixture.profile.product),
                     before_profile,
                 )
+                custody = fixture.store.read_disposable_resource_preparation(
+                    fixture.operation.operation_id
+                )
+                assert custody is not None
+                self.assertEqual(custody.retained_target_record, retained_record)
+                replacement_record = fixture.store.read_dokploy_target_record(
+                    context_name=fixture.context, instance_name="testing"
+                )
+                self.assertEqual(replacement_record.policies, retained_record.policies)
+                self.assertEqual(
+                    replacement_record.require_test_gate, retained_record.require_test_gate
+                )
+                self.assertFalse(replacement_record.domains)
+                self.assertFalse(replacement_record.public_hosts)
+                self.assertFalse(replacement_record.env)
                 self.assertEqual(
                     fixture.store.read_dokploy_target_id_record(
                         context_name=fixture.context, instance_name="prod"

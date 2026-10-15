@@ -171,6 +171,8 @@ class TestingResourceProgramTests(unittest.TestCase):
         self.assertTrue(resource_readback_passes(evidence, self.resources))
         monitor_mount["RW"] = True
         self.assertNotEqual(self.run_program("readback")[0], 0)
+        monitor_mount.update(RW=False, Source=next(iter(self.volumes.values()))["Mountpoint"])
+        self.assertNotEqual(self.run_program("readback")[0], 0)
 
     def test_partial_empty_preparation_can_be_classified_but_foreign_data_cannot(self) -> None:
         self.prepare()

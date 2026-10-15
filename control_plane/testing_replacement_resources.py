@@ -59,13 +59,21 @@ from control_plane.storage.product_authority_bundle import (
 )
 from control_plane.testing_replacement_recovery import service_testing_operation
 from control_plane.workflows.ship import utc_now_timestamp
-from control_plane.workflows.dokploy_target_adoption import adopt_dokploy_target
+from control_plane.workflows.dokploy_target_adoption import (
+    adopt_dokploy_target,
+    PROJECT_CREATE_PATH,
+    ENVIRONMENT_CREATE_PATH,
+)
 
 ROUTE = TESTING_REPLACEMENT_RESOURCES_ROUTE
 
 
 class IncompleteTestingResources(ValueError):
     """Actual terminal readback found only absent, service-named empty resources."""
+
+
+class TestingResourcePreparationRefused(ValueError):
+    """A clean refusal before a provider effect; a fresh plan can proceed."""
 
 
 class TestingReplacementResourcesRequest(BaseModel):
@@ -370,14 +378,17 @@ class TestingReplacementResourceAdapter:
                     raise ValueError("Fresh placement contains another resource.")
             if candidate.get("name") == namespace:
                 matching.append(candidate)
-            elif candidate.get("composes") not in (None, []):
+            elif any(candidate.get(key) not in (None, []) for key in ("compose", "composes")):
                 raise ValueError("Fresh project contains another compose.")
         if not matching:
             return str(project["projectId"]), "", ""
         if len(matching) != 1 or not matching[0].get("environmentId"):
             raise ValueError("Fresh environment inventory is ambiguous.")
         environment = matching[0]
-        composes = environment.get("composes")
+        wrappers = [environment[key] for key in ("compose", "composes") if key in environment]
+        if len(wrappers) != 1:
+            raise ValueError("Fresh compose inventory is incomplete or ambiguous.")
+        composes = wrappers[0]
         if not isinstance(composes, list) or len(composes) > 1:
             raise ValueError("Fresh compose inventory is incomplete or ambiguous.")
         compose_id = ""
@@ -412,10 +423,10 @@ class TestingReplacementResourceAdapter:
                 terminal = (
                     not phase
                     and not project_id
-                    or phase == "/api/project.create"
+                    or phase == PROJECT_CREATE_PATH
                     and bool(project_id)
                     and not environment_id
-                    or phase == "/api/environment.create"
+                    or phase == ENVIRONMENT_CREATE_PATH
                     and bool(environment_id)
                 )
                 return (
@@ -483,7 +494,7 @@ class TestingReplacementResourceAdapter:
                 )
         return None
 
-    def configuration_sha256(self) -> str:
+    def authority_sha256(self) -> str:
         return canonical_json_sha256(
             {
                 "profile": self.store.read_product_profile_record(self.product).model_dump(
@@ -495,6 +506,22 @@ class TestingReplacementResourceAdapter:
                         self.store, self.request.context, "testing"
                     )
                 ],
+            }
+        )
+
+    def configuration_sha256(self) -> str:
+        return canonical_json_sha256(
+            {
+                "authority": self.authority_sha256(),
+                "target": self.store.read_dokploy_target_record(
+                    context_name=self.request.context, instance_name="testing"
+                ).model_dump(mode="json"),
+                "target_id": self.store.read_dokploy_target_id_record(
+                    context_name=self.request.context, instance_name="testing"
+                ).model_dump(mode="json"),
+                "provider": self.store.read_provider_target_record(
+                    context_name=self.request.context, instance_name="testing"
+                ).model_dump(mode="json"),
             }
         )
 
@@ -517,6 +544,21 @@ class TestingReplacementResourceAdapter:
             ),
             None,
         )
+        if any(
+            key in target.env and target.env[key] != value
+            for key, value in resources.volumes.items()
+        ):
+            raise ValueError("Target volume overrides disagree with the qualified allocation.")
+        if any(
+            binding.status == "configured"
+            and binding.binding_key in resources.volumes
+            and binding.context in {"", self.request.context}
+            and binding.instance in {"", "testing"}
+            for binding in self.store.list_secret_bindings(
+                integration="runtime_environment", limit=None
+            )
+        ):
+            raise ValueError("Qualified volume names cannot be replaced by a secret binding.")
         if preparation.resources_binding_sha256:
             if preparation.resources_binding_sha256 != resources.binding_sha256 or (
                 current_runtime is None
@@ -696,7 +738,9 @@ class TestingReplacementResourceAdapter:
     ) -> ProviderMutationOutcome:
         with self.store.testing_replacement_execution_lock(self.request.operation_id) as old_check:
             if old_check is None:
-                raise ProviderMutationRejectedError(ValueError("The retained executor is active."))
+                raise ProviderMutationRejectedError(
+                    TestingResourcePreparationRefused("The retained executor is active.")
+                )
             with self.store.serialize_disposable_testing_resources():
                 try:
                     plan = resource_plan(self.store, product=self.product, request=self.request)
@@ -705,17 +749,21 @@ class TestingReplacementResourceAdapter:
                     )
                 except (ValueError, FileNotFoundError) as error:
                     raise ProviderMutationRejectedError(
-                        ValueError("The owned testing lane or retained operation changed.")
+                        TestingResourcePreparationRefused(
+                            "The owned testing lane or retained operation changed."
+                        )
                     ) from error
                 if preparation.reviewed_plan_sha256:
                     if preparation.reviewed_plan_sha256 != self.request.reviewed_plan_sha256:
                         raise ProviderMutationRejectedError(
-                            ValueError("Use the original reviewed resource plan.")
+                            TestingResourcePreparationRefused(
+                                "Use the original reviewed resource plan."
+                            )
                         )
                     plan["plan_sha256"] = preparation.reviewed_plan_sha256
                 elif plan["plan_sha256"] != self.request.reviewed_plan_sha256:
                     raise ProviderMutationRejectedError(
-                        ValueError("The reviewed resource plan changed.")
+                        TestingResourcePreparationRefused("The reviewed resource plan changed.")
                     )
                 else:
                     updated = preparation.model_copy(
@@ -727,6 +775,10 @@ class TestingReplacementResourceAdapter:
                     )
                     preparation = updated
                 expected = self.configuration_sha256()
+                expected_authority = self.authority_sha256()
+                expected_retained = self.store.read_dokploy_target_record(
+                    context_name=self.request.context, instance_name="testing"
+                )
 
             def check() -> None:
                 lease.assert_current()
@@ -745,7 +797,9 @@ class TestingReplacementResourceAdapter:
                 server_id = str(old_payload.get("serverId") or "").strip()
                 if not server_id:
                     raise ProviderMutationRejectedError(
-                        ValueError("Explicit testing placement is unavailable.")
+                        TestingResourcePreparationRefused(
+                            "Explicit testing placement is unavailable."
+                        )
                     )
 
                 def capture_check() -> None:
@@ -780,6 +834,19 @@ class TestingReplacementResourceAdapter:
                 if captured is None or not captured.replacement_target_id:
                     raise ValueError("Atomic replacement target capture is unavailable.")
                 preparation = captured
+                with self.store.serialize_disposable_testing_resources():
+                    current_target = self.store.read_dokploy_target_record(
+                        context_name=self.request.context, instance_name="testing"
+                    )
+                    if (
+                        self.authority_sha256() != expected_authority
+                        or captured.retained_target_record != expected_retained
+                        or current_target.env
+                        or current_target.domains
+                        or current_target.public_hosts
+                    ):
+                        raise ValueError("Authority changed while capturing fresh target custody.")
+                    expected = self.configuration_sha256()
             resources = OdooTestingResources(
                 product=self.product,
                 context=self.request.context,
