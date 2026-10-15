@@ -2161,6 +2161,9 @@ def execute_odoo_stable_target_replacement_apply(
             publish_host_ports=generation is None,
             mount_workflow_ssh=generation is None,
             isolated_testing=generation is not None,
+            domain_certificate_type=generation.certificate_type
+            if generation is not None
+            else "none",
         )
         current_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
         current_identity = _runtime_identity_map(current_env_map)

@@ -4,6 +4,7 @@ from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.contracts.disposable_lane import (
     DISPOSABLE_LANE_OBSERVATION_ROUTE,
     TESTING_REPLACEMENT_RESOURCES_ROUTE,
+    TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 
@@ -88,6 +89,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
+        "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_RESOURCES_ROUTE,

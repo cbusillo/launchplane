@@ -20,6 +20,9 @@ class FreshOdooTestingGeneration(BaseModel):
     namespace: str = Field(pattern=r"^lp-testing-[a-f0-9]{32}$")
     domain_host: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
     resources_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    bootstrap_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    request_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    certificate_type: Literal["none", "letsencrypt"] = "none"
     prepared_at: str
     completed_at: str = ""
 

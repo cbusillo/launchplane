@@ -233,6 +233,7 @@ def run_resource_schedule(
     resources: OdooTestingResources,
     mode: Literal["prepare", "readback"],
     checkpoint: Callable[[], None],
+    allowed_domain_hosts: tuple[str, ...] = (),
 ) -> dict[str, str]:
     target = store.read_dokploy_target_record(
         context_name=resources.context, instance_name="testing"
@@ -261,9 +262,10 @@ def run_resource_schedule(
         )
     ):
         raise ValueError("Resource preparation requires the service-created empty compose.")
-    if fetch_dokploy_compose_domains_for_target_setup(
+    actual_domains = fetch_dokploy_compose_domains_for_target_setup(
         host=host, token=token, compose_id=resources.target_id
-    ):
+    )
+    if any(str(item.get("host") or "") not in allowed_domain_hosts for item in actual_domains):
         raise ValueError("The fresh compose already has a route.")
     schedule_type, lookup_id, app_name, server_id = post_deploy._resolve_dokploy_schedule_runtime(
         host=host,
