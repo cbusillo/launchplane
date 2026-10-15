@@ -7855,6 +7855,25 @@ class PostgresRecordStore(HumanSessionStore):
             )
         self._write_row(self._idempotency_row(record))
 
+    def write_idempotency_record_once(self, record: LaunchplaneIdempotencyRecord) -> bool:
+        """Commit an evidence-only reservation once; never reclaim it after a crash."""
+        if record.state != "completed":
+            raise ValueError("Evidence reservations require a completed record.")
+        try:
+            with self._session_factory() as session:
+                session.add(self._idempotency_row(record))
+                session.commit()
+            return True
+        except IntegrityError:
+            existing = self.read_idempotency_record(
+                scope=record.scope,
+                route_path=record.route_path,
+                idempotency_key=record.idempotency_key,
+            )
+            if existing is None:
+                raise
+            return False
+
     def write_outbox_delivery_record(self, record: OutboxDeliveryRecord) -> None:
         self._write_row(self._outbox_delivery_row(record))
 

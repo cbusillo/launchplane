@@ -399,14 +399,7 @@ def discover_public_ingress_monitor_targets(
     for profile in product_profiles:
         for lane in profile.lanes:
             for check in lane.health_monitoring.checks:
-                if not check.enabled or not product_lane_monitoring_probe_effective(
-                    monitoring_intent=lane.health_monitoring.monitoring_intent,
-                    check_kind=check.kind,
-                ):
-                    continue
-                if check.kind == "public_http" and not _profile_uses_generic_web(profile):
-                    continue
-                target = _health_check_monitor_target(
+                target = effective_health_check_monitor_target(
                     profile=profile,
                     lane=lane,
                     check=check,
@@ -555,6 +548,28 @@ def _deploy_fence_monitor_target(
         provider=DEPLOY_FENCE_PROVIDER,
         provider_check=DEPLOY_FENCE_CHECK_NAME,
         deploy_fence=fence,
+    )
+
+
+def effective_health_check_monitor_target(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    check: ProductLaneHealthCheck,
+    record_store: object,
+) -> PublicIngressMonitorTarget | None:
+    if (
+        not profile.is_active
+        or not check.enabled
+        or not product_lane_monitoring_probe_effective(
+            monitoring_intent=lane.health_monitoring.monitoring_intent, check_kind=check.kind
+        )
+    ):
+        return None
+    if check.kind == "public_http" and not _profile_uses_generic_web(profile):
+        return None
+    return _health_check_monitor_target(
+        profile=profile, lane=lane, check=check, record_store=record_store
     )
 
 
@@ -3257,6 +3272,7 @@ class PublicIngressNotificationDriverSet:
         observation: PublicIngressObservationRecord,
         previous_attempts: tuple[PublicIngressNotificationAttemptRecord, ...] = (),
         notification_body: str = "",
+        drill: bool = False,
     ) -> PublicIngressNotificationDelivery:
         try:
             if destination.kind == "github_issue":
@@ -3286,6 +3302,7 @@ class PublicIngressNotificationDriverSet:
                     observation=observation,
                     discord_sender=self.discord_sender,
                     notification_body=notification_body,
+                    drill=drill,
                     secret_resolver=lambda secret_name: self._resolve_secret(secret_name, incident),
                 )
         except Exception as error:  # noqa: BLE001 - delivery failures are recorded per destination.
@@ -3832,6 +3849,7 @@ def _deliver_discord_notification(
     discord_sender: Callable[[str, dict[str, object]], object],
     secret_resolver: Callable[[str], str],
     notification_body: str = "",
+    drill: bool = False,
 ) -> PublicIngressNotificationDelivery:
     webhook_url = secret_resolver(destination.discord_webhook_secret).strip()
     if not webhook_url:
@@ -3853,20 +3871,27 @@ def _deliver_discord_notification(
         if incident.check_name.startswith("production-delivery-")
         else "Public ingress"
     )
+    payload: dict[str, object] = {
+        "embeds": [
+            {
+                "title": (
+                    f"DRILL — health alert test: {incident.product}/{incident.instance}"
+                    if drill
+                    else f"{title} {event}: {incident.product}/{incident.instance}"
+                )[:256],
+                "description": notification_body
+                or public_ingress_incident_notification_body(
+                    event=event, incident=incident, observation=observation
+                ),
+                "color": 0x1565C0 if drill else color,
+            }
+        ]
+    }
+    if drill:
+        payload["allowed_mentions"] = {"parse": []}
     discord_sender(
         webhook_url,
-        {
-            "embeds": [
-                {
-                    "title": f"{title} {event}: {incident.product}/{incident.instance}",
-                    "description": notification_body
-                    or public_ingress_incident_notification_body(
-                        event=event, incident=incident, observation=observation
-                    ),
-                    "color": color,
-                }
-            ]
-        },
+        payload,
     )
     return PublicIngressNotificationDelivery(delivery_status="delivered", action="posted_discord")
 
