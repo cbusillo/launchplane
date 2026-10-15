@@ -17,6 +17,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_testing_runtime_separation as testing_separation
 from unittest.mock import Mock, patch
 from uuid import uuid4
 
@@ -9778,3 +9779,88 @@ class RealPostgresPreviewReservationRecoveryTests(
 
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresTestingSeparationTests(testing_separation.TestingRuntimeSeparationTests):
+    def setUp(self) -> None:
+        database = _head_postgres_database()
+        self.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:separation",
+                updated_at="2026-10-15T00:00:00Z",
+                policy=policy,
+            )
+        )
+
+    async def test_staging_guard_excludes_staff_hold_and_key_policy_writers(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+        from control_plane.contracts.runtime_key_safety_policy import (
+            RuntimeKeySafetyPolicyRecord,
+            RuntimeSecretSafetyRule,
+        )
+        from control_plane.live_target_runtime import LiveTargetRuntimeApplyEnvelope
+        from control_plane.testing_runtime_separation import TestingRuntimeSeparation
+
+        assert self.database_url is not None
+        second = PostgresRecordStore(database_url=self.database_url)
+        self.addCleanup(second.close)
+        adapter = TestingRuntimeSeparation(
+            store=self.store,
+            root=Path("."),
+            request=LiveTargetRuntimeApplyEnvelope.model_validate(self.payload),
+            actor=self.actor,
+            binding=self.binding,
+            target_key=self.key,
+            trace_id="launchplane_req_fixture",
+        )
+        original_lock = second._lock_product_authority_bundle_write
+        for change in ("staff-hold", "key-policy"):
+            reached = threading.Event()
+
+            def lock(session: Any) -> None:
+                reached.set()
+                original_lock(session)
+
+            def write() -> None:
+                if change == "staff-hold":
+                    target = second.read_dokploy_target_record(
+                        context_name=self.context, instance_name="testing"
+                    )
+                    target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                        reason="Staff need this lane."
+                    )
+                    second.write_dokploy_target_record(target)
+                else:
+                    second.write_runtime_key_safety_policy_record(
+                        RuntimeKeySafetyPolicyRecord(
+                            record_id="late-policy",
+                            source="fixture",
+                            updated_at=self.production_secret.updated_at,
+                            rules=(
+                                RuntimeSecretSafetyRule(
+                                    binding_key="SYNC_DB_PASSWORD", secret_class="prod_only"
+                                ),
+                            ),
+                        )
+                    )
+
+            with (
+                self.subTest(change=change),
+                patch.object(second, "_lock_product_authority_bundle_write", side_effect=lock),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                with adapter.mutation_guard():
+                    future = pool.submit(write)
+                    self.assertTrue(reached.wait(10))
+                    with self.assertRaises(TimeoutError):
+                        future.result(timeout=0.1)
+                future.result(timeout=10)

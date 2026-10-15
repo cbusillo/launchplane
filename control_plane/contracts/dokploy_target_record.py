@@ -73,11 +73,16 @@ class DokployTargetIntegrationAllowance(BaseModel):
 
 
 class DokployTargetStaffTestingHold(BaseModel):
-    """Site staff are testing on this lane: event-driven deploys wait until it is lifted."""
+    """A deployment interlock for staff testing or resource-isolation staging."""
 
     model_config = ConfigDict(extra="forbid")
 
     reason: str
+    purpose: Literal["staff_testing", "isolation_staging"] = Field(
+        default="staff_testing",
+        exclude_if=lambda purpose: purpose == "staff_testing",
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     recorded_by: str = ""
     recorded_at: str = ""
 
