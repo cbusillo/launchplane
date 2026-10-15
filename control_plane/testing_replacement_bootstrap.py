@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
+from enum import StrEnum
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -25,7 +26,10 @@ from control_plane.disposable_lanes import (
 )
 from control_plane.dokploy import compose, source
 from control_plane.dokploy_target_setup_http import fetch_dokploy_compose_domains_for_target_setup
-from control_plane.live_target_runtime import evaluate_runtime_key_safety_for_live_target_sync
+from control_plane.live_target_runtime import (
+    LiveTargetRuntimeError,
+    evaluate_runtime_key_safety_for_live_target_sync,
+)
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
@@ -62,28 +66,29 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = TESTING_REPLACEMENT_BOOTSTRAP_ROUTE
 
-type BootstrapPrerequisiteCode = Literal[
-    "testing_credentials_unsafe",
-    "testing_credentials_unverified",
-    "testing_credential_versions_missing",
-    "testing_credentials_overlap",
-    "testing_restore_source_unconfigured",
-]
+
+class BootstrapPrerequisiteCode(StrEnum):
+    CREDENTIALS_UNSAFE = "testing_credentials_unsafe"
+    CREDENTIALS_UNVERIFIED = "testing_credentials_unverified"
+    CREDENTIAL_VERSIONS_MISSING = "testing_credential_versions_missing"
+    CREDENTIALS_OVERLAP = "testing_credentials_overlap"
+    RESTORE_SOURCE_UNCONFIGURED = "testing_restore_source_unconfigured"
+
 
 _PREREQUISITE_MESSAGES: dict[BootstrapPrerequisiteCode, str] = {
-    "testing_credentials_unsafe": (
+    BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE: (
         "Existing testing credentials need current lane-local non-production safety proof."
     ),
-    "testing_credentials_unverified": (
+    BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED: (
         "Existing testing and production managed versions could not prove credential separation."
     ),
-    "testing_credential_versions_missing": (
+    BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING: (
         "Credential comparison needs all existing local testing and production managed versions."
     ),
-    "testing_credentials_overlap": (
+    BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP: (
         "An existing local testing credential equals a production source credential."
     ),
-    "testing_restore_source_unconfigured": (
+    BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED: (
         "The supported production-copy source needs complete managed source configuration."
     ),
 }
@@ -102,10 +107,21 @@ def _bootstrap_prerequisite(code: BootstrapPrerequisiteCode) -> Iterator[None]:
     try:
         yield
     except TestingCredentialVersionsMissing:
-        raise TestingBootstrapPrerequisiteError("testing_credential_versions_missing") from None
+        raise TestingBootstrapPrerequisiteError(
+            BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING
+        ) from None
     except TestingCredentialsOverlap:
-        raise TestingBootstrapPrerequisiteError("testing_credentials_overlap") from None
-    except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
+        raise TestingBootstrapPrerequisiteError(
+            BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
+        ) from None
+    except (
+        ValueError,
+        FileNotFoundError,
+        RuntimeError,
+        OSError,
+        click.ClickException,
+        LiveTargetRuntimeError,
+    ):
         raise TestingBootstrapPrerequisiteError(code) from None
 
 
@@ -216,7 +232,7 @@ def bootstrap_plan(
             raise ValueError("Fresh testing credential delivery changed after review.")
         omitted = frozenset(generation.omitted_runtime_keys)
     bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
-    with _bootstrap_prerequisite("testing_credentials_unsafe"):
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE):
         safety = evaluate_runtime_key_safety_for_live_target_sync(
             record_store=store,
             context_name=request.context,
@@ -233,7 +249,7 @@ def bootstrap_plan(
                 or record.instance != "testing"
             ):
                 raise ValueError("Fresh testing cannot carry a shared or production credential.")
-    with _bootstrap_prerequisite("testing_credentials_unverified"):
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED):
         require_distinct_testing_credentials(store, profile, request.context)
     source_values: dict[str, str] = {}
     for scope in ("context", "instance"):
@@ -243,7 +259,7 @@ def bootstrap_plan(
             ):
                 source_values.update({key: str(value) for key, value in runtime_record.env.items()})
     source_values.update({key: str(value) for key, value in target.env.items()})
-    with _bootstrap_prerequisite("testing_restore_source_unconfigured"):
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED):
         encoded_restore_source(source_values)
     digest = canonical_json_sha256(
         {

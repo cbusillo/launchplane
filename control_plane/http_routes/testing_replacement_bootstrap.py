@@ -62,9 +62,12 @@ def register_testing_replacement_bootstrap_routes(
         adapter = TestingReplacementBootstrapAdapter(root, record_store, product, body, trace)
         try:
             if body.mode == "dry-run":
-                result = await run_in_worker_thread(
-                    lambda: bootstrap_plan(record_store, product, body).model_dump(mode="json")
-                )
+                try:
+                    result = await run_in_worker_thread(
+                        lambda: bootstrap_plan(record_store, product, body).model_dump(mode="json")
+                    )
+                except TestingBootstrapPrerequisiteError as error:
+                    refuse(409, error.code, str(error))
             elif body.mode == "readback":
                 result = await run_in_worker_thread(adapter.readback)
             else:
@@ -87,8 +90,6 @@ def register_testing_replacement_bootstrap_routes(
                     in_progress_message="Fresh testing bootstrap is running under its original key.",
                     reconcile_message="Bootstrap has an unknown outcome; inspect the retained generation with its original key.",
                 )
-        except TestingBootstrapPrerequisiteError as error:
-            refuse(409, error.code, str(error))
         except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
             refuse(
                 409,

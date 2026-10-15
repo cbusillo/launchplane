@@ -528,7 +528,7 @@ mail credentials are retired from testing delivery. Existing shared requirements
 are narrowed to their other lanes so production's effective required settings
 remain the same. Production secret records, bindings and values are not changed.
 
-Bootstrap prerequisite refusals identify whether existing credentials lack
+Bootstrap dry-run prerequisite refusals identify whether existing credentials lack
 lane-local safety proof (`testing_credentials_unsafe`), their existing managed
 versions cannot prove separation (`testing_credentials_unverified`), or the
 supported source configuration is incomplete (`testing_restore_source_unconfigured`).
@@ -539,6 +539,8 @@ credential values. Correct the named prerequisite and repeat the dry run before
 any apply; a refused dry run has prepared no generation, route or restore.
 Other failures remain `testing_bootstrap_unverified`. These classifications
 neither grant authority nor relax the source, isolation or sanitization checks.
+Apply and readback failures retain the generic original-key recovery guidance,
+including when a prerequisite changes after review or during provider effects.
 
 The new compose uses only its three qualified local volumes, no host ports and no
 SSH mounts. Its database and script runner use an internal network. The host's
