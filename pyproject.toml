@@ -22,6 +22,7 @@ dependencies = [
     "alembic>=1.19.1",
     "tinycss2>=1.5.1",
     "playwright>=1.63.0",
+    "websockets>=17.1",
 ]
 
 [project.optional-dependencies]
