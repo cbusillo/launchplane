@@ -681,6 +681,15 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertTrue(captured_runs[0]["run_destructive_restore"])
 
     def test_execute_applies_deploy_phase_overrides_during_destructive_restore(self) -> None:
+        self._restore_overrides(fresh=False)
+
+    def test_fresh_copy_applies_website_inside_the_strict_restore(self) -> None:
+        self._restore_overrides(fresh=True)
+
+    def _restore_overrides(self, *, fresh: bool) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        fresh_generation = generation() if fresh else None
         captured_runs: list[dict[str, object]] = []
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -735,16 +744,17 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                     record_store=store,
                     request=OdooPostDeployRequest(context="opw", instance="testing"),
                     run_destructive_restore=True,
+                    fresh_testing_generation=fresh_generation,
                 )
 
             self.assertEqual(result.post_deploy_status, "pass")
             self.assertEqual(result.override_status, "pass")
             self.assertTrue(result.override_payload_rendered)
-            self.assertEqual(result.workflow_intent, "restore")
-            # web.base.url plus the explicit Shopify clear for a non-production lane.
-            self.assertEqual(result.override_count, 2)
-            self.assertFalse(result.website_bootstrap_included)
-            self.assertEqual(result.override_evidence["website_bootstrap_included"], "false")
+            self.assertEqual(result.workflow_intent, "deploy" if fresh else "restore")
+            self.assertEqual(result.website_bootstrap_included, fresh)
+            self.assertEqual(
+                result.override_evidence["website_bootstrap_included"], str(fresh).lower()
+            )
             self.assertEqual(len(captured_runs), 1)
             workflow_environment = cast(
                 "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
@@ -763,7 +773,8 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
                     }
                 ],
             )
-            self.assertNotIn("website_bootstrap", decoded_payload)
+            self.assertEqual("website_bootstrap" in decoded_payload, fresh)
+            self.assertEqual(captured_runs[0]["fresh_testing_generation"], fresh_generation)
             self.assertTrue(captured_runs[0]["run_destructive_restore"])
 
     def test_execute_applies_deploy_phase_addon_overrides_during_restore_phase(self) -> None:

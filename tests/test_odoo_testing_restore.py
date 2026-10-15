@@ -10,7 +10,11 @@ from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
 from unittest.mock import Mock, patch
-from control_plane.dokploy.compose import ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND
+from control_plane.dokploy.compose import (
+    ODOO_DATABASE_DATA_DIRECTORY,
+    ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
+    _odoo_web_command,
+)
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
 from control_plane.odoo_testing_restore import (
@@ -18,6 +22,7 @@ from control_plane.odoo_testing_restore import (
     FRESH_TESTING_OMITTED_SETTINGS,
     FRESH_TESTING_RESTORE_HOST_PROGRAM,
     FRESH_TESTING_STALE_LOCK_PROGRAM,
+    TESTING_COPY_COMPLETION_PARAMETER,
     FreshOdooTestingGeneration,
     generation_binding,
     narrow_fresh_testing_requirements,
@@ -141,6 +146,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.gen = generation()
         self.database = self.gen.namespace.replace("-", "_")
         self.spec: dict[str, Any] = {
+            "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
             "generation": self.gen.model_dump(),
             "compose_project": self.gen.namespace,
             "image_reference": "registry.invalid/odoo@sha256:" + "f" * 64,
@@ -203,7 +209,13 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 },
                 "HostConfig": {"PortBindings": {}},
                 "Mounts": [
-                    {"Type": "volume", "Name": self.gen.namespace + "-" + suffix}
+                    {
+                        "Type": "volume",
+                        "Name": self.gen.namespace + "-" + suffix,
+                        "Destination": ODOO_DATABASE_DATA_DIRECTORY
+                        if service == "database"
+                        else "/volumes/" + suffix,
+                    }
                     for suffix in suffixes
                 ],
                 "NetworkSettings": {"Networks": {"testing-data": {}}},
@@ -282,8 +294,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
     def test_read_only_capture_never_copies_identity_and_web_starts_after_sanitization(
         self,
     ) -> None:
-        import hashlib
-
         status, output = self.run_program()
         self.assertEqual(status, 0, output)
         self.assertIn("testing_copy_sanitized=true", output)
@@ -308,7 +318,6 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         import shlex
 
         remote_arguments = shlex.split(remote)
-        self.assertEqual(remote_arguments[0], "sudo")
         self.assertEqual(remote_arguments[-1], self.spec["source"]["ODOO_UPSTREAM_DB_NAME"])
         self.assertIn("pg_dump", remote_arguments)
         self.assertIn("--", remote_arguments)
@@ -316,10 +325,30 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         copies = [call for call in self.calls if call[:2] == ["docker", "cp"]]
         self.assertTrue(copies)
         self.assertFalse(any("read-only-identity" in " ".join(call) for call in copies))
-        self.assertEqual(
-            self.gate_hash,
-            hashlib.sha256((self.database + "\n" + self.gate_payload).encode()).hexdigest(),
+        gate = self.root / "web-gate"
+        gate.write_text(self.gate_hash)
+        web_command = (
+            _odoo_web_command(hold_until_integration_readback=True)
+            .replace(INTEGRATION_READBACK_PASSED_PATH, str(gate))
+            .replace("$$", "$")
         )
+        subprocess.run(
+            ["bash", "-c", web_command],
+            env={
+                **os.environ,
+                "ODOO_DB_NAME": self.database,
+                "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": self.gate_payload,
+                "ODOO_WEB_COMMAND": "true",
+            },
+            timeout=2,
+            check=True,
+        )
+
+    def test_database_mount_at_another_path_refuses_before_source_capture(self) -> None:
+        self.containers["database"]["Mounts"][0]["Destination"] = "/other-database"
+        status, _output = self.run_program()
+        self.assertNotEqual(status, 0)
+        self.assertFalse(any(call[0] in {"ssh", "rsync"} for call in self.calls))
 
     def test_existing_database_and_failed_sanitization_keep_web_stopped(self) -> None:
         for fault in ("existing", "sanitization"):
@@ -403,7 +432,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 connection.execute(
                     "INSERT INTO ir_config_parameter VALUES (?, ?)",
                     (
-                        "launchplane.testing_copy.restore_complete",
+                        TESTING_COPY_COMPLETION_PARAMETER,
                         "foreign-copy" if fault == "foreign-witness" else "fixture-copy-binding",
                     ),
                 )

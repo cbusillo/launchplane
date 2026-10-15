@@ -66,12 +66,14 @@ from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.runtime_environments import SiteRuntimeEnvironment
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.workflows.odoo_prod_backup_gate import (
     BACKUP_GATE_SOURCE,
     BACKUP_VERIFICATION_SOURCE,
 )
 from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployResult,
+    _prefix_post_deploy_readback_evidence,
     execute_odoo_post_deploy,
 )
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
@@ -193,6 +195,7 @@ class _Store:
         self.deployment_records: list[DeploymentRecord] = []
         self.environment_inventories: list[EnvironmentInventory] = []
         self.release_tuples: list[object] = []
+        self.fresh_generation: FreshOdooTestingGeneration | None = None
         self.secret_bindings: tuple[SecretBinding, ...] = ()
         self.secret_records: tuple[SecretRecord, ...] = ()
         self.runtime_key_safety_policy_records: tuple[RuntimeKeySafetyPolicyRecord, ...] = ()
@@ -290,6 +293,9 @@ class _Store:
 
     def write_release_tuple_record(self, record: object) -> None:
         self.release_tuples.append(record)
+
+    def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:
+        self.fresh_generation = record
 
     def list_secret_records(
         self,
@@ -1996,7 +2002,16 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             result.image_reference,
             "ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
         )
-        self.assertEqual(render_compose.call_args.kwargs["image_reference"], result.image_reference)
+        render_compose.assert_called_with(
+            image_reference=result.image_reference,
+            hold_web_until_integration_readback=True,
+            domain_hosts=("cm-testing.shinycomputers.com",),
+            runtime_port=8069,
+            publish_host_ports=True,
+            mount_workflow_ssh=True,
+            isolated_testing=False,
+            domain_certificate_type="none",
+        )
         sync_source.assert_called_once()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
         ensure_domain.assert_called_once_with(
@@ -3108,6 +3123,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         real_post_deploy: bool = False,
         restore_schedule_upsert: Callable[[], dict[str, str]] | None = None,
         external_checkpoint: Callable[[str], None] | None = None,
+        fresh_generation: FreshOdooTestingGeneration | None = None,
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         if live:
@@ -3223,6 +3239,14 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         with (
             patch(
+                "control_plane.workflows.odoo_stable_target_replacement.read_current_testing_generation",
+                return_value=fresh_generation,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.fresh_testing_authority_sha256",
+                return_value="a" * 64,
+            ),
+            patch(
                 "control_plane.workflows.odoo_prod_backup_gate.dokploy_post_deploy.run_compose_odoo_backup_gate",
                 side_effect=capture_provider,
             ),
@@ -3329,6 +3353,66 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             )
 
         return result, post_deploy, verify, store
+
+    def test_fresh_restore_finishes_only_with_sanitized_post_deploy_readback(self) -> None:
+        from tests.test_odoo_testing_restore import generation
+
+        fresh = generation().model_copy(
+            update={
+                "product": "odoo-tenant-opw",
+                "context": "opw",
+                "target_id": "compose-opw",
+                "reconcile_requested_at": "2026-10-15T00:00:00Z",
+            }
+        )
+        markers = {
+            "testing_copy_sanitized": "true",
+            "integration_readback_ok": "true",
+            "odoo_restore_completed": "true",
+        }
+        for missing in (None, *markers):
+            with self.subTest(missing=missing):
+                readback = {key: value for key, value in markers.items() if key != missing}
+                passed = OdooPostDeployResult(
+                    context="opw",
+                    instance="testing",
+                    phase="restore",
+                    post_deploy_status="pass",
+                    override_evidence=_prefix_post_deploy_readback_evidence(readback),
+                    website_bootstrap_included=True,
+                )
+                observed: list[_Store] = []
+                if missing is not None:
+                    with self.assertRaises(OdooTargetReplacementStageError):
+                        self._apply_upstream_restore(
+                            override_record=None,
+                            post_deploy_results=(passed,),
+                            test_instance="testing",
+                            fresh_generation=fresh,
+                            mutate_before_restore=observed.append,
+                        )
+                    self.assertFalse(observed[0].environment_inventories)
+                    self.assertFalse(observed[0].release_tuples)
+                    self.assertIsNone(observed[0].fresh_generation)
+                else:
+                    result, post_deploy, _verify, store = self._apply_upstream_restore(
+                        override_record=_opw_website_override_record().model_copy(
+                            update={"instance": "testing"}
+                        ),
+                        post_deploy_results=(passed,),
+                        test_instance="testing",
+                        fresh_generation=fresh,
+                    )
+                    self.assertEqual(result.deploy_status, "pass")
+                    self.assertTrue(store.environment_inventories)
+                    self.assertTrue(store.release_tuples)
+                    self.assertIsNotNone(store.fresh_generation)
+                    assert store.fresh_generation is not None
+                    self.assertTrue(store.fresh_generation.completed_at)
+                    self.assertEqual(
+                        post_deploy.call_args.kwargs["fresh_testing_generation"], fresh
+                    )
+                    post_deploy.assert_called_once()
 
     def test_real_restore_schedule_does_not_trigger_after_authorization_revocation(self) -> None:
         from control_plane.contracts.durable_operation_authorization import (

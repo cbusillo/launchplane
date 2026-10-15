@@ -752,6 +752,20 @@ class ProductReconcileStoreTests(ProductReconcileTestCase):
 
 
 class ProductReconcileTestingTests(ProductReconcileTestCase):
+    def test_unverified_fresh_generation_holds_without_queueing(self) -> None:
+        self.github.add_run(20, DEPLOYABLE)
+        self.request()
+        with patch(
+            "control_plane.odoo_testing_restore.read_current_testing_generation",
+            side_effect=ValueError("private credential comparison detail"),
+        ):
+            outcome = self.reconcile()
+        self.assertEqual(outcome["action"], "wait")
+        self.assertTrue(outcome["held"])
+        self.assertEqual(outcome["reason"], "fresh_testing_authority_unverified")
+        self.assertFalse(self.store.list_odoo_stable_target_replacement_operation_records())
+        self.assertNotIn("private credential", json.dumps(outcome))
+
     def _running_release(self, run_id: int, commit: str) -> None:
         self.github.add_run(run_id, commit)
         verified = verify_build_artifact(

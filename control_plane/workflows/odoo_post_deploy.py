@@ -291,7 +291,7 @@ def execute_odoo_post_deploy(
     workflow_environment_overrides: dict[str, str] = {}
     required_workflow_environment_keys: tuple[str, ...] = ()
     workflow_intent: OdooPostDeployWorkflowIntent = (
-        "restore" if run_destructive_restore else "deploy"
+        "restore" if run_destructive_restore and fresh_testing_generation is None else "deploy"
     )
     override_payload: OdooPostDeployPayload | None = None
     post_deploy_readback_markers: dict[str, str] = {}

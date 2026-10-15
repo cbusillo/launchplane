@@ -437,6 +437,13 @@ Before each registry boundary, the copy runner strips source authentication and
 connections, disables cron/mail, commits and checks through separate database
 connections. Strict integration readback has no inherited allowances and also
 checks reapplied instance settings before hooks. A final readback gates web start.
+Fresh copies include the deploy-phase website settings inside that guarded restore;
+they do not run a second ordinary maintenance pass with inherited allowances.
+The shared testing connection-isolation pass also clears analytics on existing
+testing lanes; production behavior is unchanged.
+Completion consumes the post-deploy readback markers before publishing successful
+inventory. Changed resource or credential authority holds reconciliation without
+queueing another operation.
 Browser-facing responses restrict external connections through the testing route.
 Only a completed, healthy deployment marks the generation complete; subsequent
 reconciliation uses its existing data rather than restoring production again.

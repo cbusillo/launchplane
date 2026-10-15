@@ -2787,8 +2787,10 @@ def execute_odoo_stable_target_replacement_apply(
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
 
-    if post_deploy_phase == "restore" and _restore_omits_website_bootstrap(
-        normalized_override_record
+    if (
+        post_deploy_phase == "restore"
+        and generation is None
+        and _restore_omits_website_bootstrap(normalized_override_record)
     ):
         # Restore payloads leave out website bootstrap, so the restored copy
         # still carries the source's canonical URL. Apply the deploy-phase
@@ -2946,6 +2948,23 @@ def execute_odoo_stable_target_replacement_apply(
         )
     if before_records_commit is not None:
         before_records_commit()
+    completing_fresh_restore = bool(
+        generation is not None
+        and not generation.completed_at
+        and request.data_source_mode == "upstream_restore"
+    )
+    if completing_fresh_restore and any(
+        post_deploy_evidence.evidence.get(f"post_deploy_readback_{key}") != "true"
+        for key in (
+            "testing_copy_sanitized",
+            "integration_readback_ok",
+            "odoo_restore_completed",
+        )
+    ):
+        raise OdooTargetReplacementStageError(
+            "fresh_testing_restore_unverified",
+            "This generation has no completed sanitized-copy restore evidence.",
+        )
     deployment_record = build_deployment_record(
         request=ship_request,
         record_id=deployment_record_id,
@@ -2963,23 +2982,8 @@ def execute_odoo_stable_target_replacement_apply(
     record_store.write_environment_inventory(
         build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
     )
-    if (
-        generation is not None
-        and not generation.completed_at
-        and request.data_source_mode == "upstream_restore"
-    ):
-        if any(
-            post_deploy_evidence.evidence.get(key) != "true"
-            for key in (
-                "testing_copy_sanitized",
-                "integration_readback_ok",
-                "odoo_restore_completed",
-            )
-        ):
-            raise OdooTargetReplacementStageError(
-                "fresh_testing_restore_unverified",
-                "This generation has no completed sanitized-copy restore evidence.",
-            )
+    if completing_fresh_restore:
+        assert generation is not None
         writer = getattr(record_store, "write_fresh_odoo_testing_generation")
         writer(generation.model_copy(update={"completed_at": finished_at}))
     with _failure_stage("release_tuple_mint_failed"):

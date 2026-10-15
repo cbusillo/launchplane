@@ -553,13 +553,17 @@ def reconcile_testing_target(
     # The request the product's testing-deploy workflow sent before Launchplane took over.
     from control_plane.odoo_testing_restore import read_current_testing_generation
 
-    generation = read_current_testing_generation(
-        record_store,
-        product=profile.product,
-        context=lane.context,
-        instance="testing",
-        bootstrap_preparation=True,
-    )
+    try:
+        generation = read_current_testing_generation(
+            record_store,
+            product=profile.product,
+            context=lane.context,
+            instance="testing",
+            bootstrap_preparation=True,
+        )
+    except (ValueError, FileNotFoundError):
+        plan.update(action="wait", held=True, reason="fresh_testing_authority_unverified")
+        return ReconcileOutcome(plan)
     if generation is not None and not generation.reconcile_requested_at:
         plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
         return ReconcileOutcome(plan)

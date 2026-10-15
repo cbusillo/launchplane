@@ -70,6 +70,7 @@ def fresh_testing_mode_refusal(
 # registry process. The runner gets no upstream or SSH settings. Additional copy
 # connection rules run in that same transaction boundary and again after hooks.
 # A missing boundary is an unsupported artifact, never permission to run it.
+TESTING_COPY_COMPLETION_PARAMETER = "launchplane.testing_copy.restore_complete"
 TESTING_COPY_RUNNER = (
     """import base64
 import logging
@@ -136,7 +137,9 @@ runner.acquire_data_workflow_lock()
 restored = False
 try:
     dump = Path(sys.argv[1])
-    copy_marker = "launchplane.testing_copy.restore_complete"
+    copy_marker = """
+    + repr(TESTING_COPY_COMPLETION_PARAMETER)
+    + r"""
     if sys.argv[5] == "fresh":
         observer = runner._connect_with_retry("postgres")
         try:
@@ -260,7 +263,10 @@ def build_fresh_testing_restore_script(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
 ) -> str:
-    from control_plane.dokploy.compose import ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND
+    from control_plane.dokploy.compose import (
+        ODOO_DATABASE_DATA_DIRECTORY,
+        ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
+    )
     from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
     payload = workflow_environment.get(
@@ -273,6 +279,7 @@ def build_fresh_testing_restore_script(
         readback_spec=readback_spec,
     )
     spec = {
+        "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
         "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
         "runner_healthcheck_command": ODOO_SCRIPT_RUNNER_HEALTHCHECK_COMMAND,
         "expected_overrides_payload": payload,
@@ -414,6 +421,8 @@ def restore_main():
         mounts = container.get("Mounts")
         if not isinstance(mounts, list) or {item.get("Name") for item in mounts} != expected or any(item.get("Type") != "volume" for item in mounts):
             raise RuntimeError("Testing compose has unexpected writable or credential mounts")
+        if service == "database" and mounts[0].get("Destination") != spec["database_data_directory"]:
+            raise RuntimeError("Testing database storage is not mounted at its data directory")
         if service != "database":
             if configuration.get("Image") != spec["image_reference"]:
                 raise RuntimeError("Testing artifact identity changed")
