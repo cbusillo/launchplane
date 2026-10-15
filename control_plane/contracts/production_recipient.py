@@ -9,6 +9,22 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 
 
+class RecipientServiceLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+
+    cpus: float = Field(gt=0)
+    memory_bytes: int = Field(gt=0)
+    command_memory_limits: dict[Literal["--innodb-buffer-pool-size"], int] = Field(
+        default_factory=dict
+    )
+
+    @model_validator(mode="after")
+    def validate_command_limits(self) -> Self:
+        if any(value <= 0 for value in self.command_memory_limits.values()):
+            raise ValueError("Command memory limits must be positive.")
+        return self
+
+
 class ProductionRecipientRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -20,6 +36,7 @@ class ProductionRecipientRequest(BaseModel):
     ports: dict[str, int]
     application_service: str = Field(min_length=1)
     database_service: str = Field(min_length=1)
+    service_limits: dict[str, RecipientServiceLimits]
     mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
@@ -43,6 +60,8 @@ class ProductionRecipientRequest(BaseModel):
             raise ValueError("Independent explicit unprivileged ports are required.")
         if self.application_service == self.database_service:
             raise ValueError("Application and database must be separate services.")
+        if set(self.service_limits) != {self.application_service, self.database_service}:
+            raise ValueError("Explicit resource limits are required for every recipient service.")
         return self
 
 
@@ -68,6 +87,7 @@ class ProductionRecipientRecord(BaseModel):
     environment_id: str = ""
     target_id: str = ""
     app_name: str = ""
+    before_configuration_sha256: str = ""
     phase: str = "prepared"
     qualified_at: str = ""
 

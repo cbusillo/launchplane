@@ -142,6 +142,10 @@ def main():
             if mount.get("Type") == "tmpfs":
                 continue
             source = Path(mount["Source"]).resolve()
+            if mount.get("Type") == "bind" and mount.get("RW") is False and not any(source == path or path in source.parents for path in paths):
+                # A host monitor's read-only parent is not a writable alias.
+                # Exact resource paths and their children remain consumers.
+                continue
             if mount.get("Name") in spec["volumes"].values() or any(source == path or path in source.parents or source in path.parents for path in paths):
                 raise ValueError("storage already referenced")
     sockets = []

@@ -1,6 +1,5 @@
 """A production recipient is additive, private and recoverable after every failure."""
 
-from contextlib import nullcontext
 from collections.abc import Callable
 from copy import deepcopy
 import json
@@ -14,7 +13,10 @@ from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.production_recipient import ProductionRecipientRequest
+from control_plane.contracts.production_recipient import (
+    ProductionRecipientRequest,
+    RecipientServiceLimits,
+)
 from control_plane.production_recipient import (
     ROUTE,
     ProductionRecipientAdapter,
@@ -78,6 +80,7 @@ class ProductionRecipientTests(unittest.TestCase):
             }
         }
         self.effects: list[str] = []
+        self.projects: list[dict[str, Any]] = []
         self.values = {
             "DB_VOLUME": "old-database",
             "CONFIG_VOLUME": "old-config",
@@ -93,9 +96,17 @@ class ProductionRecipientTests(unittest.TestCase):
             ports={"DB_PORT": 19219, "HTTP_PORT": 19220},
             application_service="web",
             database_service="database",
+            service_limits={
+                "web": RecipientServiceLimits(cpus=1, memory_bytes=2 * 1024**3),
+                "database": RecipientServiceLimits(
+                    cpus=1,
+                    memory_bytes=2 * 1024**3,
+                    command_memory_limits={"--innodb-buffer-pool-size": 512 * 1024**2},
+                ),
+            },
             reason="Prepare a fresh state recipient while keeping production recoverable.",
         )
-        self.document = {
+        self.document: dict[str, Any] = {
             "services": {
                 "web": {
                     "image": "${DOCKER_IMAGE_REFERENCE}",
@@ -142,6 +153,14 @@ class ProductionRecipientTests(unittest.TestCase):
                 side_effect=lambda **kwargs: deepcopy(self.provider[kwargs["target_id"]]),
             ),
             patch(
+                "control_plane.production_recipient.api.fetch_dokploy_projects",
+                side_effect=lambda **kwargs: deepcopy(self.projects),
+            ),
+            patch(
+                "control_plane.production_recipient.api.list_deployments_for_target",
+                return_value=[],
+            ),
+            patch(
                 "control_plane.production_recipient.api.dokploy_request",
                 side_effect=self.provider_write,
             ),
@@ -154,14 +173,6 @@ class ProductionRecipientTests(unittest.TestCase):
                 side_effect=self.inspect_resources,
             ),
         ]
-        if not self.database_url:
-            patches.append(
-                patch.object(
-                    self.store,
-                    "serialize_disposable_testing_resources",
-                    side_effect=lambda: nullcontext(lambda: None),
-                )
-            )
         for item in patches:
             item.start()
             self.addCleanup(item.stop)
@@ -185,10 +196,19 @@ class ProductionRecipientTests(unittest.TestCase):
         path, body = kwargs["path"], kwargs["payload"]
         self.effects.append(path)
         if path == "/api/project.create":
+            self.projects.append(
+                {"name": body["name"], "projectId": "new-project", "environments": []}
+            )
             return {"project": {"projectId": "new-project"}}
         if path == "/api/environment.create":
+            self.projects[0]["environments"].append(
+                {"name": body["name"], "environmentId": "new-environment", "compose": []}
+            )
             return {"environmentId": "new-environment"}
         if path == "/api/compose.create":
+            self.projects[0]["environments"][0]["compose"].append(
+                {"name": body["name"], "composeId": "new-recipient"}
+            )
             self.provider["new-recipient"] = {
                 "composeId": "new-recipient",
                 "environmentId": body["environmentId"],
@@ -273,8 +293,12 @@ class ProductionRecipientTests(unittest.TestCase):
         ):
             self.assertEqual(self.run_operation().response_status_code, 409)
         effects = list(self.effects)
-        self.assertEqual(self.run_operation().response_status_code, 409)
-        self.assertEqual(self.run_operation("another-key").response_status_code, 409)
+        with patch(
+            "control_plane.production_recipient.api.fetch_dokploy_projects",
+            side_effect=OSError("inventory unavailable"),
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+            self.assertEqual(self.run_operation("another-key").response_status_code, 409)
         self.assertEqual(self.effects, effects)
         self.assertIsNotNone(custody(self.store, self.product, self.context))
         self.assertIn("new-recipient", self.provider)
@@ -371,3 +395,99 @@ class ProductionRecipientTests(unittest.TestCase):
                 expected=None, replacement=record.model_dump(mode="json")
             )
         self.assert_old_preserved()
+
+    def test_failure_before_first_provider_checkpoint_can_retry_original_key(self) -> None:
+        original = self.adapter.require_unchanged
+        failed = False
+
+        def refuse_once(record: Any) -> None:
+            nonlocal failed
+            original(record)
+            if not failed and record.phase == "create_project":
+                failed = True
+                raise OSError("transient pre-effect read failure")
+
+        with patch.object(self.adapter, "require_unchanged", side_effect=refuse_once):
+            with self.assertRaises(ValueError):
+                self.run_operation()
+        self.assertTrue(failed)
+        self.assertEqual(self.effects, [])
+        self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(self.effects.count("/api/compose.create"), 1)
+        self.assert_old_preserved()
+
+    def test_observed_create_is_adopted_under_original_key_without_recreation(self) -> None:
+        def lose_reply(**kwargs: Any) -> Any:
+            result = self.provider_write(**kwargs)
+            if kwargs["path"] == "/api/compose.create":
+                raise OSError("reply lost after actual creation")
+            return result
+
+        with patch(
+            "control_plane.production_recipient.api.dokploy_request", side_effect=lose_reply
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+        self.assertEqual(self.run_operation().response_status_code, 202)
+        self.assertEqual(self.effects.count("/api/compose.create"), 1)
+        self.assert_old_preserved()
+
+    def test_provider_status_observations_do_not_change_binding_authority(self) -> None:
+        original = self.provider_write
+
+        def change_status(**kwargs: Any) -> Any:
+            result = original(**kwargs)
+            self.provider["old-recipient"].update(
+                composeStatus="running", deployments=[{"status": "done"}]
+            )
+            return result
+
+        with patch(
+            "control_plane.production_recipient.api.dokploy_request", side_effect=change_status
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 202)
+        record = custody(self.store, self.product, self.context)
+        assert record is not None
+        self.adapter.verify(record)
+        self.assert_old_preserved()
+
+    def test_authority_drift_after_create_does_not_lose_provider_identity(self) -> None:
+        original = self.provider_write
+
+        def change_authority(**kwargs: Any) -> Any:
+            result = original(**kwargs)
+            if kwargs["path"] == "/api/compose.create":
+                self.store.write_product_profile_record(
+                    self.profile.model_copy(update={"updated_at": "2026-10-15T12:00:00Z"})
+                )
+            return result
+
+        with patch(
+            "control_plane.production_recipient.api.dokploy_request", side_effect=change_authority
+        ):
+            self.assertEqual(self.run_operation().response_status_code, 409)
+        record = custody(self.store, self.product, self.context)
+        assert record is not None
+        self.assertEqual(record.target_id, self.provider["new-recipient"]["composeId"])
+        self.assertFalse(record.qualified_at)
+        self.assert_old_preserved()
+
+    def test_managed_old_database_endpoint_is_refused_and_local_url_is_supported(self) -> None:
+        record = self.adapter.current()
+        values = {
+            **self.values,
+            "DB_VOLUME": record.volumes["database"],
+            "CONFIG_VOLUME": record.volumes["config"],
+            "DB_PORT": "19219",
+            "HTTP_PORT": "19220",
+            "DOCKER_IMAGE_REFERENCE": record.image_reference,
+            "DB_HOST": "old-production.internal",
+        }
+        document = deepcopy(self.document)
+        document["services"]["web"]["environment"]["DB_HOST"] = "${DB_HOST}"
+        with self.assertRaises(ValueError):
+            qualified_render(
+                record.model_copy(update={"compose_source": json.dumps(document)}), values
+            )
+        document["services"]["web"]["environment"]["DB_HOST"] = "database"
+        document["services"]["web"]["environment"]["DATABASE_URL"] = "mysql://database:3306/example"
+        qualified_render(record.model_copy(update={"compose_source": json.dumps(document)}), values)

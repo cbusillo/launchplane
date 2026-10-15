@@ -9,7 +9,7 @@ from typing import Any, cast
 import yaml
 
 from control_plane import runtime_environments
-from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.integration_allowances import canonical_sha256
 from control_plane.contracts.production_recipient import (
     ProductionRecipientPlan,
     ProductionRecipientRecord,
@@ -35,6 +35,32 @@ from control_plane.workflows.ship import utc_now_timestamp
 ROUTE = "/v1/products/{product}/production-recipient"
 
 
+def provider_binding_digest(payload: dict[str, Any]) -> str:
+    """Pin configuration and placement, excluding deployment/status observations."""
+    return canonical_sha256(
+        {
+            key: payload.get(key)
+            for key in (
+                "composeId",
+                "appName",
+                "serverId",
+                "environmentId",
+                "composeFile",
+                "sourceType",
+                "composeType",
+                "env",
+                "domains",
+                "mounts",
+                "serviceNetworks",
+                "autoDeploy",
+                "customGitUrl",
+                "customGitBranch",
+                "composePath",
+            )
+        }
+    )
+
+
 def custody(
     store: PostgresRecordStore, product: str, context: str
 ) -> ProductionRecipientRecord | None:
@@ -43,6 +69,9 @@ def custody(
 
 
 def authority_snapshot(store: PostgresRecordStore, product: str, context: str) -> dict[str, Any]:
+    from control_plane.product_config_service import resolve_product_config_profile
+
+    resolve_product_config_profile(store, product=product, context=context, instance="prod")
     profile, lane = resolve_generic_web_deploy_lane(
         record_store=store, product=product, instance="prod"
     )
@@ -158,7 +187,8 @@ def qualified_render(record: ProductionRecipientRecord, values: dict[str, str]) 
         raise ValueError("Fresh-state preparation supports one application and one database.")
     # Runtime limits are product-owned source, not a service-host override. The
     # actual converted provider definition must agree with this exact source.
-    for service in services.values():
+    for name, service in services.items():
+        required = record.request.service_limits[name]
         deploy = service.get("deploy", {})
         limits = deploy.get("resources", {}).get("limits", {})
         if (
@@ -168,23 +198,22 @@ def qualified_render(record: ProductionRecipientRecord, values: dict[str, str]) 
         ):
             raise ValueError("Each service must declare only explicit CPU and memory limits.")
         if (
-            not 0 < float(limits["cpus"]) <= 1
-            or not 0 < memory_bytes(str(limits["memory"])) <= 2 * 1024**3
+            not 0 < float(limits["cpus"]) <= required.cpus
+            or not 0 < memory_bytes(str(limits["memory"])) <= required.memory_bytes
         ):
-            raise ValueError("Each service must enforce at most one CPU and two GiB.")
-    database = services[record.request.database_service]
-    import re
-    import shlex
+            raise ValueError("Product source exceeds its reviewed service resource limits.")
+        import shlex
 
-    command = database.get("command", [])
-    arguments = shlex.split(command) if isinstance(command, str) else command
-    pools = [
-        str(argument).split("=", 1)[1]
-        for argument in arguments
-        if str(argument).startswith("--innodb-buffer-pool-size=")
-    ]
-    if len(pools) != 1 or not 0 < memory_bytes(pools[0]) <= 512 * 1024**2:
-        raise ValueError("The database must enforce its buffer-pool cap in product source.")
+        command = service.get("command", [])
+        arguments = shlex.split(command) if isinstance(command, str) else command
+        for argument_name, maximum in required.command_memory_limits.items():
+            configured = [
+                str(argument).split("=", 1)[1]
+                for argument in arguments
+                if str(argument).startswith(argument_name + "=")
+            ]
+            if len(configured) != 1 or not 0 < memory_bytes(configured[0]) <= maximum:
+                raise ValueError("Product source must enforce its reviewed command memory limit.")
     qualified = deepcopy(document)
     for service in qualified["services"].values():
         service.pop("deploy")
@@ -193,9 +222,13 @@ def qualified_render(record: ProductionRecipientRecord, values: dict[str, str]) 
             environment = dict(item.split("=", 1) for item in environment)
             service["environment"] = environment
         if isinstance(environment, dict):
+            from urllib.parse import urlsplit
+
             for key, value in tuple(environment.items()):
-                if re.search(r"(?:_HOST|_URL)$", key) and value in values.values():
-                    environment.pop(key)
+                if key.endswith("_URL") and isinstance(value, str):
+                    parsed = urlsplit(value)
+                    if parsed.hostname in {*services, "localhost", "127.0.0.1", "::1"}:
+                        environment.pop(key)
     qualify_compose(
         qualified,
         volumes=set(record.volumes.values()),
@@ -249,12 +282,12 @@ def build_recipient(
     )
     if old.get("composeId") != target_id.target_id:
         raise ValueError("The provider returned a different production recipient.")
-    plan_digest = canonical_json_sha256(
+    plan_digest = canonical_sha256(
         {
             "product": product,
             "request": intent.model_dump(mode="json"),
             "authority": snapshot,
-            "provider_sha256": canonical_json_sha256(old),
+            "provider_sha256": provider_binding_digest(old),
         }
     )
     record = ProductionRecipientRecord(
@@ -270,7 +303,7 @@ def build_recipient(
         retained_target_id=target_id,
         retained_provider=ProviderTargetRecord.model_validate(snapshot["provider"]),
         authority_snapshot=snapshot,
-        retained_provider_sha256=canonical_json_sha256(old),
+        retained_provider_sha256=provider_binding_digest(old),
         compose_source=read_product_compose(
             store,
             product,
@@ -282,7 +315,7 @@ def build_recipient(
     values = runtime_values(store, root, record)
     qualified_render(record, values)
     # The key owns execution, but is not part of the saved dry-run's digest.
-    record.plan_sha256 = canonical_json_sha256(
+    record.plan_sha256 = canonical_sha256(
         record.model_dump(exclude={"plan_sha256", "original_key"})
     )
     return record
@@ -295,7 +328,7 @@ def plan(record: ProductionRecipientRecord) -> dict[str, Any]:
         plan_sha256=record.plan_sha256,
         source_commit=record.request.source_commit,
         image_reference=record.image_reference,
-        retained_binding_sha256=canonical_json_sha256(
+        retained_binding_sha256=canonical_sha256(
             {
                 "target": record.retained_target.model_dump(mode="json"),
                 "target_id": record.retained_target_id.model_dump(mode="json"),
@@ -348,7 +381,7 @@ class ProductionRecipientAdapter:
             target_type="compose",
             target_id=record.retained_target_id.target_id,
         )
-        if canonical_json_sha256(old) != record.retained_provider_sha256:
+        if provider_binding_digest(old) != record.retained_provider_sha256:
             raise ValueError("The retained production recipient changed after review.")
 
     def save(self, record: ProductionRecipientRecord, **updates: Any) -> ProductionRecipientRecord:
@@ -429,6 +462,102 @@ class ProductionRecipientAdapter:
             raise ValueError("The actual provider render differs from reviewed source and limits.")
         qualified_render(record, values)
 
+    def unused_recipient(self, record: ProductionRecipientRecord) -> dict[str, Any]:
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        payload = api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=record.target_id
+        )
+        if (
+            payload.get("composeId") != record.target_id
+            or payload.get("environmentId") != record.environment_id
+            or str(payload.get("serverId") or "") != record.request.destination_server_id
+            or any(
+                payload.get(key)
+                for key in (
+                    "domains",
+                    "mounts",
+                    "serviceNetworks",
+                    "randomize",
+                    "isolatedDeployment",
+                )
+            )
+            or api.list_deployments_for_target(
+                host=host, token=token, target_type="compose", target_id=record.target_id
+            )
+        ):
+            raise ValueError("Retain a recipient with unqualified identity or deployment effects.")
+        return cast(dict[str, Any], payload)
+
+    def recover_placement(self, record: ProductionRecipientRecord) -> ProductionRecipientRecord:
+        """Adopt only observed IDs in this original namespace; never repeat an unknown create."""
+        if record.phase == "prepared":
+            return record
+        host, token = source.read_dokploy_config(control_plane_root=self.root)
+        matches = [
+            item
+            for item in api.fetch_dokploy_projects(host=host, token=token)
+            if item.get("name") == record.namespace
+        ]
+        if len(matches) != 1:
+            raise ValueError("Original placement is absent or ambiguous; retain its original key.")
+        project = cast(dict[str, Any], matches[0])
+        project_id = project.get("projectId")
+        if (
+            not isinstance(project_id, str)
+            or not project_id
+            or (record.project_id and record.project_id != project_id)
+        ):
+            raise ValueError("Original project identity changed.")
+        if not record.project_id:
+            if record.phase != "create_project":
+                raise ValueError("Unrequested project placement.")
+            record = self.save(record, project_id=project_id, phase="project_ready")
+        environments = project.get("environments")
+        if not isinstance(environments, list) or not all(
+            isinstance(item, dict) for item in environments
+        ):
+            raise ValueError("Original environment inventory is incomplete.")
+        candidates = [item for item in environments if item.get("name") == record.namespace]
+        if not candidates and record.phase == "project_ready":
+            return record
+        if len(candidates) != 1:
+            raise ValueError("Original environment is absent or ambiguous.")
+        environment = candidates[0]
+        environment_id = environment.get("environmentId")
+        if (
+            not isinstance(environment_id, str)
+            or not environment_id
+            or (record.environment_id and record.environment_id != environment_id)
+        ):
+            raise ValueError("Original environment identity changed.")
+        if not record.environment_id:
+            if record.phase != "create_environment":
+                raise ValueError("Unrequested environment placement.")
+            record = self.save(record, environment_id=environment_id, phase="environment_ready")
+        recipients = environment.get("compose")
+        if not isinstance(recipients, list) or not all(
+            isinstance(item, dict) for item in recipients
+        ):
+            raise ValueError("Original recipient inventory is incomplete.")
+        candidates = [item for item in recipients if item.get("name") == record.namespace]
+        if not candidates and record.phase == "environment_ready":
+            return record
+        if len(candidates) != 1:
+            raise ValueError("Original recipient is absent or ambiguous.")
+        target_id = candidates[0].get("composeId")
+        if (
+            not isinstance(target_id, str)
+            or not target_id
+            or (record.target_id and record.target_id != target_id)
+        ):
+            raise ValueError("Original recipient identity changed.")
+        if not record.target_id:
+            if record.phase != "create_recipient":
+                raise ValueError("Unrequested recipient placement.")
+            record = self.save(record, target_id=target_id, phase="recipient_ready")
+        self.unused_recipient(record)
+        return record
+
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
@@ -440,12 +569,22 @@ class ProductionRecipientAdapter:
                 record.plan_sha256 != reconciliation_key
                 or record.scope != self.scope
                 or record.original_key != self.original_key
-                or not record.target_id
             ):
                 return ProviderObservation("unknown")
-            # Never redispatch a partially persisted create or unknown update.
-            # A complete provider readback may adopt the original effect only.
-            self.verify(record)
+            self.require_unchanged(record)
+            record = self.recover_placement(record)
+            if not record.target_id or record.phase == "recipient_ready":
+                return ProviderObservation("absent", retry_safe=True)
+            try:
+                self.verify(record)
+            except ValueError:
+                unused = self.unused_recipient(record)
+                if (
+                    record.before_configuration_sha256
+                    and provider_binding_digest(unused) == record.before_configuration_sha256
+                ):
+                    return ProviderObservation("absent", retry_safe=True)
+                return ProviderObservation("unknown")
             inspect_resources(
                 self.root,
                 record,
@@ -471,10 +610,20 @@ class ProductionRecipientAdapter:
             record = self.current()
             if record.plan_sha256 != self.request.reviewed_plan_sha256:
                 raise ValueError("Review the current production recipient plan.")
-            if custody(self.store, self.product, record.context) is not None:
-                raise ValueError(
-                    "Preserve the original operation; reconcile rather than redispatch."
+            existing = custody(self.store, self.product, record.context)
+            if existing is not None:
+                reservation = self.store.read_idempotency_record(
+                    scope=self.scope,
+                    route_path=ROUTE.format(product=self.product),
+                    idempotency_key=self.original_key,
                 )
+                if (
+                    reservation is None
+                    or reservation.state != "running"
+                    or reservation.provider_effect_started_at
+                    or record.qualified_at
+                ):
+                    raise ValueError("Reconcile the original checkpoint before continuation.")
 
             def checkpoint(phase: str) -> None:
                 nonlocal started
@@ -485,10 +634,16 @@ class ProductionRecipientAdapter:
 
             self.require_unchanged(record)
             lease.assert_current()
-            self.store.write_production_recipient(
-                expected=None, replacement=record.model_dump(mode="json")
-            )
             host, token = source.read_dokploy_config(control_plane_root=self.root)
+            if existing is None:
+                if any(
+                    row.get("name") == record.namespace
+                    for row in api.fetch_dokploy_projects(host=host, token=token)
+                ):
+                    raise ValueError("A preparation namespace already exists without custody.")
+                self.store.write_production_recipient(
+                    expected=None, replacement=record.model_dump(mode="json")
+                )
             for phase, path, field, body in (
                 (
                     "create_project",
@@ -502,6 +657,13 @@ class ProductionRecipientAdapter:
                 ("create_environment", "/api/environment.create", "environmentId", {}),
                 ("create_recipient", "/api/compose.create", "composeId", {}),
             ):
+                storage_field = {
+                    "projectId": "project_id",
+                    "environmentId": "environment_id",
+                    "composeId": "target_id",
+                }[field]
+                if getattr(record, storage_field):
+                    continue
                 if field == "environmentId":
                     body = {"name": record.namespace, "projectId": record.project_id}
                 if field == "composeId":
@@ -536,27 +698,37 @@ class ProductionRecipientAdapter:
                 record = self.save(
                     record,
                     **{
-                        {
-                            "projectId": "project_id",
-                            "environmentId": "environment_id",
-                            "composeId": "target_id",
-                        }[field]: result[field]
+                        storage_field: result[field],
+                        "phase": {
+                            "projectId": "project_ready",
+                            "environmentId": "environment_ready",
+                            "composeId": "recipient_ready",
+                        }[field],
                     },
                 )
-            fresh = api.fetch_dokploy_target_payload(
-                host=host, token=token, target_type="compose", target_id=record.target_id
-            )
+            fresh = self.unused_recipient(record)
             import re
 
             app_name = fresh.get("appName")
             if (
                 not isinstance(app_name, str)
                 or not re.fullmatch(re.escape(record.namespace) + r"(?:-[a-z0-9]{6})?", app_name)
-                or fresh.get("env")
                 or fresh.get("domains")
             ):
                 raise ValueError("Fresh recipient identity is unverified.")
-            record = self.save(record, app_name=app_name)
+            if record.before_configuration_sha256:
+                if provider_binding_digest(fresh) != record.before_configuration_sha256:
+                    raise ValueError(
+                        "An uncertain recipient configuration requires readback, not another write."
+                    )
+            else:
+                if fresh.get("env"):
+                    raise ValueError("The fresh recipient has an unexpected environment.")
+                record = self.save(
+                    record,
+                    app_name=app_name,
+                    before_configuration_sha256=provider_binding_digest(fresh),
+                )
             inspect_resources(self.root, record, prepare=True, checkpoint=checkpoint)
             template = json.loads(record.compose_source)
             for volume in template["volumes"].values():

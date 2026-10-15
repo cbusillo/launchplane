@@ -17,11 +17,12 @@ from fastapi import FastAPI, HTTPException
 from httpx2 import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
+from control_plane.action_effects import action_effect
 from control_plane.contracts.production_recipient import ProductionRecipientPlan
 from control_plane.http_routes.production_recipient import register_production_recipient_routes
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.production_recipient import ROUTE, plan
-from control_plane.production_recipient_resources import RESOURCE_PROGRAM
+from control_plane.production_recipient_resources import RESOURCE_PROGRAM, resource_spec
 from control_plane.service_auth import LocalAdminIdentity, TerminalAgentIdentity
 from tests import test_odoo_testing_resources as resources_support
 from tests import test_production_recipient as recipient_support
@@ -32,15 +33,12 @@ class HostProgramTests(unittest.TestCase):
         self.fixture = resources_support.TestingResourceProgramTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
-        namespace = "lp-prod-recipient-" + "a" * 32
-        self.spec: dict[str, Any] = {
-            "namespace": namespace,
-            "project": namespace,
-            "volumes": {"database": namespace + "-db", "config": namespace + "-config"},
-            "ports": [19219, 19220],
-            "binding": "b" * 64,
-            "prepare": True,
-        }
+        recipient = recipient_support.ProductionRecipientTests()
+        recipient.setUp()
+        self.addCleanup(recipient.doCleanups)
+        record = recipient.adapter.current()
+        record = record.model_copy(update={"app_name": record.namespace})
+        self.spec: dict[str, Any] = {**resource_spec(record), "prepare": True}
 
     def run_program(self) -> tuple[int, str]:
         output = io.StringIO()
@@ -114,6 +112,19 @@ class HostProgramTests(unittest.TestCase):
             )
         )
 
+    def test_readonly_host_monitor_parent_is_distinct_from_a_resource_consumer(self) -> None:
+        self.fixture.containers["monitor"] = {
+            "Config": {"Labels": {}},
+            "HostConfig": {"PortBindings": {}},
+            "Mounts": [{"Type": "bind", "RW": False, "Source": str(self.fixture.root)}],
+        }
+        self.assertEqual(self.run_program()[0], 0)
+        name = self.spec["volumes"]["database"]
+        mounts = self.fixture.containers["monitor"]["Mounts"]
+        assert isinstance(mounts, list)
+        mounts[0]["Source"] = self.fixture.volumes[name]["Mountpoint"]
+        self.assertNotEqual(self.run_program()[0], 0)
+
 
 class HttpBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -122,13 +133,14 @@ class HttpBoundaryTests(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         self.identity: Any = LocalAdminIdentity("admin", "fixture")
         self.allowed = True
+        self.allowed_effects = {"read", "plan", "write"}
         self.requested: list[dict[str, Any]] = []
         self.mutate = AsyncMock()
         app = FastAPI()
 
         def authorize(**kwargs: Any) -> bool:
             self.requested.append(kwargs)
-            return self.allowed
+            return self.allowed and action_effect(kwargs["action"]) in self.allowed_effects
 
         dependencies = ReadRouteDependencies(
             read_identity=lambda: self.identity,
@@ -161,12 +173,12 @@ class HttpBoundaryTests(unittest.TestCase):
         return asyncio.run(send())
 
     def test_planning_is_read_authority_and_does_not_write_custody_or_provider(self) -> None:
+        self.allowed_effects = {"read", "plan"}
         body = self.fixture.body.model_copy(
             update={"mode": "dry-run", "reviewed_plan_sha256": ""}
         ).model_dump(mode="json")
         response = self.post(body)
         self.assertEqual(response.status_code, 202, response.text)
-        self.assertEqual(self.requested[-1]["action"], "product_profile.read")
         self.assertEqual(self.fixture.effects, [])
         self.assertIsNone(
             self.fixture.store.read_production_recipient(self.fixture.product, self.fixture.context)
@@ -176,7 +188,6 @@ class HttpBoundaryTests(unittest.TestCase):
         self.identity = TerminalAgentIdentity("agent", "fixture", director_agent=True)
         response = self.post(self.fixture.body.model_dump(mode="json"))
         self.assertEqual(response.status_code, 403)
-        self.assertEqual(self.requested[-1]["action"], "dokploy_target.setup")
         self.identity = LocalAdminIdentity("admin", "fixture")
         self.allowed = False
         self.assertEqual(self.post(self.fixture.body.model_dump(mode="json")).status_code, 403)

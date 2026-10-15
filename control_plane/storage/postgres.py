@@ -10465,7 +10465,7 @@ class PostgresRecordStore(HumanSessionStore):
             self._lock_product_authority_bundle_write(session)
             from control_plane.production_recipient import authority_snapshot
 
-            if (
+            if (expected is None or record.qualified_at) and (
                 authority_snapshot(self, record.product, record.context)
                 != record.authority_snapshot
             ):
@@ -10486,6 +10486,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "environment_id",
                     "target_id",
                     "app_name",
+                    "before_configuration_sha256",
                     "phase",
                     "qualified_at",
                 }

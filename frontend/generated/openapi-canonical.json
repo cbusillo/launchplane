@@ -38417,6 +38417,13 @@
             "title": "Reviewed Plan Sha256",
             "type": "string"
           },
+          "service_limits": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/RecipientServiceLimits"
+            },
+            "title": "Service Limits",
+            "type": "object"
+          },
           "source_commit": {
             "pattern": "^[a-f0-9]{40}$",
             "title": "Source Commit",
@@ -38438,6 +38445,7 @@
           "ports",
           "application_service",
           "database_service",
+          "service_limits",
           "reason"
         ],
         "title": "ProductionRecipientRequest",
@@ -40002,6 +40010,37 @@
           "recent_previews"
         ],
         "title": "RecentOperationsResponse",
+        "type": "object"
+      },
+      "RecipientServiceLimits": {
+        "additionalProperties": false,
+        "properties": {
+          "command_memory_limits": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "propertyNames": {
+              "const": "--innodb-buffer-pool-size"
+            },
+            "title": "Command Memory Limits",
+            "type": "object"
+          },
+          "cpus": {
+            "exclusiveMinimum": 0.0,
+            "title": "Cpus",
+            "type": "number"
+          },
+          "memory_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Memory Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cpus",
+          "memory_bytes"
+        ],
+        "title": "RecipientServiceLimits",
         "type": "object"
       },
       "RecordFailure": {

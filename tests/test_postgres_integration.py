@@ -10533,3 +10533,120 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         self.assertEqual(
             self.store.list_held_provider_target_reservations(), (self.preparation.original,)
         )
+
+
+class RealPostgresProductionRecipientTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests import test_production_recipient as recipients
+
+        self.fixture = recipients.ProductionRecipientTests()
+        database = _head_postgres_database()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_preparation_replay_and_uncertain_configuration_keep_old_production(self) -> None:
+        self.fixture.test_preparation_replay_readback_preserve_old_and_never_deploy_or_delete()
+
+    def test_lost_create_keeps_original_custody_and_excludes_a_new_key(self) -> None:
+        self.fixture.test_unknown_create_retains_custody_and_refuses_new_keys_without_redispatch()
+
+    def test_competing_preparation_cannot_dispatch_a_second_recipient(self) -> None:
+        from control_plane.production_recipient import ROUTE
+
+        fixture = self.fixture
+        second = PostgresRecordStore(database_url=fixture.database_url)
+        self.addCleanup(second.close)
+        other = replace(fixture.adapter, store=second, original_key="competing-key")
+        original = fixture.provider_write
+        outcomes = []
+
+        def write(**kwargs: Any) -> Any:
+            if kwargs["path"] == "/api/compose.create":
+                outcomes.append(
+                    run_durable_provider_operation(
+                        store=second,
+                        scope=fixture.adapter.scope,
+                        route_path=ROUTE.format(product=fixture.product),
+                        idempotency_key="competing-key",
+                        request_fingerprint="c" * 64,
+                        lease_owner="second-worker",
+                        response_trace_id="launchplane_req_competing",
+                        adapter=other,
+                    )
+                )
+            return original(**kwargs)
+
+        with patch("control_plane.production_recipient.api.dokploy_request", side_effect=write):
+            self.assertEqual(fixture.run_operation().response_status_code, 202)
+        self.assertEqual(len(outcomes), 1)
+        self.assertEqual(outcomes[0].response_status_code, 409)
+        self.assertEqual(fixture.effects.count("/api/compose.create"), 1)
+        fixture.assert_old_preserved()
+
+    def test_custody_snapshot_is_guarded_until_its_transaction_commits(self) -> None:
+        from control_plane.production_recipient import authority_snapshot
+
+        fixture = self.fixture
+        original = fixture.adapter.current()
+        entered, release = threading.Event(), threading.Event()
+        url = make_url(fixture.database_url)
+        second = PostgresRecordStore(
+            database_url=url.set(
+                query={**url.query, "application_name": "lp3699-competing-writer"}
+            ).render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+
+        def read_snapshot(store: Any, product: str, context: str) -> Any:
+            snapshot = authority_snapshot(store, product, context)
+            if store is fixture.store:
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError("test snapshot barrier timed out")
+            return snapshot
+
+        changed = fixture.profile.model_copy(
+            update={"updated_at": fixture.profile.updated_at + "-changed"}
+        )
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            with patch(
+                "control_plane.production_recipient.authority_snapshot", side_effect=read_snapshot
+            ):
+                first = executor.submit(
+                    fixture.store.write_production_recipient,
+                    expected=None,
+                    replacement=original.model_dump(mode="json"),
+                )
+                self.assertTrue(entered.wait(5))
+                writer = executor.submit(second.write_product_profile_record, changed)
+                try:
+                    deadline = time.monotonic() + 5
+                    waiting = 0
+                    with fixture.store._engine.connect().execution_options(
+                        isolation_level="AUTOCOMMIT"
+                    ) as connection:
+                        while time.monotonic() < deadline:
+                            waiting = int(
+                                connection.scalar(
+                                    text(
+                                        "SELECT count(*) FROM pg_stat_activity WHERE application_name = 'lp3699-competing-writer' AND wait_event_type = 'Lock'"
+                                    )
+                                )
+                                or 0
+                            )
+                            if waiting:
+                                break
+                            time.sleep(0.01)
+                    self.assertGreater(
+                        waiting, 0, "The competing writer must reach a real PostgreSQL lock wait"
+                    )
+                    self.assertFalse(writer.done())
+                finally:
+                    release.set()
+                first.result(timeout=10)
+                writer.result(timeout=10)
+        with self.assertRaises(ValueError):
+            fixture.adapter.require_unchanged(original)
+        fixture.assert_old_preserved()
