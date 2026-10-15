@@ -56,6 +56,37 @@
           "apply",
           "readback"
         ],
+        "operation_id": "prepare_fresh_testing_bootstrap",
+        "path": "/v1/products/{product}/testing-replacement-bootstrap",
+        "purpose": "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "404",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "ebeb5c9bcda9b6b59dd29774fd4282e4764c16f5edf2687c2186ce9cdbe831ae",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
         "operation_id": "prepare_testing_replacement_resources",
         "path": "/v1/products/{product}/testing-replacement-resources",
         "purpose": "Prepare fresh empty Odoo testing resources while preserving the retained target, then qualify their actual backing storage; this never restores data or starts web.",
@@ -595,8 +626,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "2d5b350e8c9339ace3a85e3bc4c12e6ddfb2a6c5"
+    "source_commit_sha": "72d17ce1cc2f6498b23234ac50b0ac1dc2551ac8"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "8ee81f82808473b56f61a3db8b2b8d883baca6854c1728007b16f630c275de17"
+  "semantic_digest_sha256": "f2a11d74dbd33da42d9f8fb1cd62d21d41085cb006058080505c4021d4f5e8a2"
 }

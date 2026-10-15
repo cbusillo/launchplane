@@ -33,6 +33,7 @@ from control_plane.dokploy.connection_isolation import (
     run_connection_isolation,
 )
 from control_plane.odoo_connection_isolation import OdooConnectionIsolationMode
+from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
@@ -247,6 +248,8 @@ def execute_odoo_post_deploy(
     before_connection_isolation_mutation: Callable[[str], None] | None = None,
     connection_isolation_operation_key: str = "",
     connection_isolation_product: str = "",
+    fresh_testing_generation: FreshOdooTestingGeneration | None = None,
+    fresh_restore_source_environment: dict[str, str] | None = None,
     artifact_id: str = "",
     release_website_settings: OdooWebsiteSettingsIntent | None = None,
     release_operation: bool = False,
@@ -304,7 +307,7 @@ def execute_odoo_post_deploy(
     workflow_environment_overrides: dict[str, str] = {}
     required_workflow_environment_keys: tuple[str, ...] = ()
     workflow_intent: OdooPostDeployWorkflowIntent = (
-        "restore" if run_destructive_restore else "deploy"
+        "restore" if run_destructive_restore and fresh_testing_generation is None else "deploy"
     )
     override_payload: OdooPostDeployPayload | None = None
     post_deploy_readback_markers: dict[str, str] = {}
@@ -471,6 +474,8 @@ def execute_odoo_post_deploy(
                 deployment_title=provider_operation_title,
                 schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
                 allow_historical_sender_contract=allow_historical_sender_contract,
+                fresh_testing_generation=fresh_testing_generation,
+                fresh_restore_source_environment=fresh_restore_source_environment,
             )
             or {}
         )

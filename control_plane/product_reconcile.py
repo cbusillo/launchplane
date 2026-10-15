@@ -551,6 +551,22 @@ def reconcile_testing_target(
         record_store=cast(VerifiedArtifactStore, record_store), verified=desired
     )
     # The request the product's testing-deploy workflow sent before Launchplane took over.
+    from control_plane.odoo_testing_restore import read_current_testing_generation
+
+    try:
+        generation = read_current_testing_generation(
+            record_store,
+            product=profile.product,
+            context=lane.context,
+            instance="testing",
+            bootstrap_preparation=True,
+        )
+    except (ValueError, FileNotFoundError, click.ClickException):
+        plan.update(action="wait", held=True, reason="fresh_testing_authority_unverified")
+        return ReconcileOutcome(plan)
+    if generation is not None and not generation.reconcile_requested_at:
+        plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
+        return ReconcileOutcome(plan)
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
         replacement=OdooStableTargetReplacementApplyRequest(
@@ -558,7 +574,9 @@ def reconcile_testing_target(
             instance=TESTING_INSTANCE,
             strategy="recreate-in-place",
             allow_empty_data=True,
-            data_source_mode="existing",
+            data_source_mode="upstream_restore"
+            if generation and not generation.completed_at
+            else "existing",
             artifact_id=manifest.artifact_id,
             source_git_ref=manifest.source_commit,
         ),
@@ -1150,6 +1168,10 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
 _UNKNOWN_TESTING_FAILURE = "The deploy failed with a code this Launchplane does not describe."
 # What each replacement-plan blocker code means, for ``plan_not_ready.<code>``.
 PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
+    "fresh_testing_bootstrap_incomplete": "The original testing bootstrap has not committed its route and queue preparation.",
+    "fresh_testing_authority_unverified": "The fresh testing generation's resource or credential authority is unverified.",
+    "fresh_testing_restore_required": "The fresh testing generation must complete its sanitized production-copy restore first.",
+    "fresh_testing_refresh_unsupported": "This initial copy is complete; use existing data for deployments until a separate refresh generation is qualified.",
     "target_record_missing": "The lane has no Dokploy target record.",
     "target_id_record_missing": "The lane has no Dokploy target-id record.",
     "target_not_compose": "The lane's Dokploy target is not a compose target.",

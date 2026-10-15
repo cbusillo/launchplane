@@ -494,3 +494,99 @@ After target adoption, an older image may read the unchanged custody identity bu
 cannot enforce the new hostname reservations. Keep the qualifying service image
 or forward-fix with compatible readers; retaining additive tables through schema
 rollback does not make old code a supported continuation.
+
+## Bootstrap a qualified fresh Odoo testing generation
+
+After resource qualification and the testing-only `upstream_restore` data policy,
+`POST /v1/products/{product}/testing-replacement-bootstrap` binds that exact
+allocation to a new independent hostname. It does not move the retained hostname
+or change production. Use the bounded repository client with its original private
+evidence directory and idempotency key:
+
+```bash
+uv run python scripts/prepare-testing-replacement-bootstrap.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product example-odoo --context example \
+  --operation-id retained-testing-operation \
+  --domain-host fresh-testing.example.invalid \
+  --reason 'Restore a sanitized testing copy on independent resources' \
+  --evidence-file /private/operator-evidence/example-testing-bootstrap.json
+```
+
+Review the plan, then use the client's `apply` mode with the same inputs,
+`--reviewed-dry-run`, the same `--evidence-file` receipt, and the original
+`--idempotency-key`. Use `readback` to verify the exact generation. The private
+receipt proves route/metadata/supersession/queue preparation; `runtime_verified`
+remains false. Actual reconciliation, health, runtime identity and incident
+readback must separately prove the restored lane is green.
+
+The service compares the existing local testing passwords with the supported
+production source's managed versions internally, without returning or retaining
+plaintext or password hashes. Missing versions or overlap refuse preparation;
+this route never creates, copies or grants a credential. Shared service-user and
+mail credentials are retired from testing delivery. Existing shared requirements
+are narrowed to their other lanes so production's effective required settings
+remain the same. Production secret records, bindings and values are not changed.
+
+The new compose uses only its three qualified local volumes, no host ports and no
+SSH mounts. Its database and script runner use an internal network. The host's
+existing restore identity performs only the supported database dump and filestore
+read; the application receives copy data, never the identity. Before source
+capture, the worker verifies actual image/container/volume/network identities,
+stops web and never overwrites an existing destination database. An existing copy
+resumes only with this exact generation's completed-restore witness. The artifact must expose
+the SQL-only pre-registry credential boundary and have declared module work.
+The runner proves module states and changed update witnesses before returning
+completion; the host does not invent module success.
+
+Before each registry boundary, the copy runner strips source authentication and
+connections, disables cron/mail, commits and checks through separate database
+connections. Strict integration readback has no inherited allowances and also
+checks reapplied instance settings before hooks. A final readback gates web start.
+Fresh copies include the deploy-phase website settings inside that guarded restore;
+they do not run a second ordinary maintenance pass with inherited allowances.
+The same native website-settings program used by ordinary testing deployments
+excludes analytics and search indexing after the guarded restore. Its failure
+keeps web stopped; final integration readback follows that program before opening
+the web gate.
+The shared testing connection-isolation pass also clears analytics on existing
+testing lanes; production behavior is unchanged.
+Completion consumes the post-deploy readback markers before publishing successful
+inventory. Changed resource or credential authority holds reconciliation without
+queueing another operation.
+Browser-facing responses restrict external connections through the testing route.
+Only a completed, healthy deployment marks the generation complete; subsequent
+reconciliation uses its existing data rather than restoring production again.
+An incomplete generation refuses an existing-data deploy. After completion,
+deployments using existing data remain supported; another production refresh
+requires a separately qualified generation and is refused at planning time.
+Plans report incomplete or unverified authority as blockers without starting work.
+
+The web service uses the provider's shared ingress bridge for HTTPS. Its data
+services use only the internal testing network; storage, database credentials and
+host ports remain independent. The restored connection settings and live keys
+are removed before the first registry process, and browser responses restrict
+external connections.
+
+An interrupted route write is adopted only from exact provider readback. An
+unobservable dispatched write remains unknown; never repeat it under a new key.
+Route custody, metadata, fence supersession and the atomic queue receipt let the
+original operation finish a partially prepared generation without creating
+another target, reassigning the retained host or queueing a second restore.
+Host dump/filestore staging is removed on success and ordinary failure. The raw
+container dump is removed before any registry hook. Failures leave retained
+resources and the stopped new copy available for exact recovery. A failed initial
+copy may drop only its own newly restored database; a resumed copy is preserved.
+The host holds an exclusive generation lock across capture and startup, uses a
+unique dump path, clears the prior web-start gate, and rechecks database absence
+under the artifact's workflow lock before an initial restore. A stale workflow
+lock is removed only after terminal schedule proof and confirmation that the
+process and its data-workflow children have exited.
+Do not retry the historical operation, fabricate a recovery journal, delete old storage,
+or point the old hostname at the replacement to clear a refusal.
+
+The generation table survives schema downgrade. Older service images cannot
+continue this route or enforce its guarantees; keep a compatible image or
+forward-fix. There is no production rollback or cleanup step in this testing-only
+procedure. Retained old targets, storage, partial-copy evidence and hostnames stay
+in custody until separately authorized disposition.

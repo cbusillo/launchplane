@@ -231,6 +231,7 @@ sys.exit(main(sys.argv[1:]))
 _FAKE_PSYCOPG2 = """\
 import json
 import os
+import re
 from pathlib import Path
 
 
@@ -263,6 +264,14 @@ class _Cursor:
         elif query == "DELETE FROM ir_config_parameter WHERE key = ANY(%s)":
             for key in params[0]:
                 config.pop(key, None)
+        elif query.startswith("DELETE FROM ir_config_parameter WHERE key LIKE"):
+            prefixes = tuple(value.rstrip("%") for value in re.findall("LIKE '([^']+)'", query))
+            for key in tuple(config):
+                if key.startswith(prefixes):
+                    config.pop(key)
+        elif query.startswith("SELECT EXISTS (SELECT 1 FROM ir_config_parameter WHERE") and "LIKE" in query:
+            prefixes = tuple(value.rstrip("%") for value in re.findall("LIKE '([^']+)'", query))
+            self.rows = [(any(key.startswith(prefixes) for key in config),)]
         elif query.startswith("INSERT INTO ir_config_parameter"):
             config[params[0]] = params[1]
         elif query.startswith("SELECT count(*) FROM ir_config_parameter WHERE (key, value)"):
