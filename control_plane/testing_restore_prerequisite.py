@@ -29,10 +29,10 @@ def incomplete_testing_restore(
         for record in record_store.list_deployment_records(
             context_name=context, instance_name=instance
         )
-        if record.post_deploy_update.attempted
-        and (
-            record.runtime_source.get("data_source_mode") == "upstream_restore"
-            or record.post_deploy_update.evidence.get("workflow_intent") == "restore"
+        if record.runtime_source.get("data_source_mode") == "upstream_restore"
+        or (
+            record.post_deploy_update.attempted
+            and record.post_deploy_update.evidence.get("workflow_intent") == "restore"
         )
     ]
     if not restores:

@@ -64,6 +64,7 @@ from control_plane.contracts.odoo_stable_target_replacement_operation import (
     safe_error_detail_keys,
 )
 from control_plane.contracts.odoo_target_replacement_failures import (
+    TESTING_RESTORE_REQUIRED_CODE,
     deploy_failure_description,
 )
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
@@ -2232,8 +2233,8 @@ def _execute_target_replacement_with_checkpoint(
             is not None
         ):
             raise OdooTargetReplacementStageError(
-                "testing_restore_required",
-                "Testing requires a completed governed restore before ordinary maintenance.",
+                TESTING_RESTORE_REQUIRED_CODE,
+                deploy_failure_description(TESTING_RESTORE_REQUIRED_CODE),
             )
         require_unchanged_production_artifact(
             record_store=record_store,

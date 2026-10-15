@@ -1,3 +1,4 @@
+from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -134,9 +135,19 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
             failed = store.read_odoo_stable_target_replacement_operation_record(
                 operation.operation_id
             )
-            self.assertEqual(failed.error_code, "testing_restore_required")
+            self.assertEqual(failed.error_code, TESTING_RESTORE_REQUIRED_CODE)
             self.assertEqual(failed.status, "fail")
             self.assertIsNone(failed.recovery_journal)
+            from control_plane.operation_status_read import operation_status_read_view
+            from control_plane.contracts.odoo_target_replacement_failures import (
+                deploy_failure_description,
+            )
+
+            view = operation_status_read_view(failed, poll_url="/fixture")
+            self.assertTrue(view["error_description"])
+            self.assertEqual(
+                view["error_description"], deploy_failure_description(failed.error_code)
+            )
 
     def test_execution_failure_survives_fence_and_automatic_cancellation(self) -> None:
         from control_plane.operation_status_read import (

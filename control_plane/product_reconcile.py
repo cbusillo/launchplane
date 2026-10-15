@@ -68,7 +68,10 @@ from control_plane.build_provenance import (
 from control_plane.contracts.record_failures import record_failure_summary
 from control_plane.contracts.promotion_record import env_key_names
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, ArtifactSourceBuild
-from control_plane.contracts.odoo_target_replacement_failures import deploy_failure_description
+from control_plane.contracts.odoo_target_replacement_failures import (
+    TESTING_RESTORE_REQUIRED_CODE,
+    deploy_failure_description,
+)
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -572,20 +575,6 @@ def reconcile_testing_target(
     if generation is not None and not generation.reconcile_requested_at:
         plan.update(action="wait", held=True, reason="fresh_testing_bootstrap_incomplete")
         return ReconcileOutcome(plan)
-    if generation is None or generation.completed_at:
-        incomplete_restore = incomplete_testing_restore(
-            cast(TestingRestoreHistoryStore, record_store),
-            context=lane.context,
-            instance=lane.instance,
-        )
-        if incomplete_restore is not None:
-            plan.update(
-                action="wait",
-                held=True,
-                reason="testing_restore_required",
-                failed_restore_deployment_record_id=incomplete_restore.record_id,
-            )
-            return ReconcileOutcome(plan)
     envelope = OdooTargetReplacementApplyEnvelope(
         product=profile.product,
         replacement=OdooStableTargetReplacementApplyRequest(
@@ -647,6 +636,20 @@ def reconcile_testing_target(
             queued_operation_status=attempt.active.status,
         )
         return ReconcileOutcome(plan)
+    if generation is None or generation.completed_at:
+        incomplete_restore = incomplete_testing_restore(
+            cast(TestingRestoreHistoryStore, record_store),
+            context=lane.context,
+            instance=lane.instance,
+        )
+        if incomplete_restore is not None:
+            plan.update(
+                action="wait",
+                held=True,
+                reason=TESTING_RESTORE_REQUIRED_CODE,
+                failed_restore_deployment_record_id=incomplete_restore.record_id,
+            )
+            return ReconcileOutcome(plan)
     if attempt.failed_attempts >= TESTING_DEPLOY_MAX_FAILED_ATTEMPTS:
         plan["held"] = False
         return ReconcileOutcome(
@@ -1177,7 +1180,6 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
         "The deploy passed, but recording its release tuple from the artifact manifest failed."
     ),
     "operation_cancelled": "The deploy was cancelled.",
-    "testing_restore_required": "Testing needs a completed governed restore before ordinary maintenance.",
     "operation_authorization_reconcile_refused": (
         "Launchplane's reconcile grant did not cover this deploy when it ran."
     ),

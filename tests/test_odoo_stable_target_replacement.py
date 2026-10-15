@@ -3362,6 +3362,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
         errors = (
             None,
+            SystemExit("fixture worker crash"),
             OdooTargetReplacementStageError("post_deploy_setup_failed", "fixture failure"),
             OdooProviderEffectUncertainError("fixture uncertain effect"),
             DurableOperationAuthorizationDeniedError(
@@ -3399,7 +3400,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     with self.assertRaises(type(error)):
                         apply()
                 record = captured[0].deployment_records[-1]
-                self.assertTrue(record.post_deploy_update.attempted)
+                self.assertEqual(
+                    record.post_deploy_update.attempted, not isinstance(error, SystemExit)
+                )
                 store = PostgresRecordStore(
                     database_url=f"sqlite+pysqlite:///{Path(directory) / 'records.sqlite'}"
                 )

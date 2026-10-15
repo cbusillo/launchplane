@@ -1,3 +1,4 @@
+from control_plane.contracts.odoo_target_replacement_failures import TESTING_RESTORE_REQUIRED_CODE
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.dokploy.api import DokployRequestFailed
 from control_plane.contracts.record_failures import record_failure_summary
@@ -841,7 +842,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.github.add_run(20, DEPLOYABLE)
         self.request()
         plan = self.reconcile()
-        self.assertEqual(plan["reason"], "testing_restore_required")
+        self.assertEqual(plan["reason"], TESTING_RESTORE_REQUIRED_CODE)
         self.assertEqual(plan["failed_restore_deployment_record_id"], restore.record_id)
         self.assertFalse(self.store.list_odoo_stable_target_replacement_operation_records())
         # A later ordinary failure does not supersede the data prerequisite.
@@ -862,7 +863,7 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.store.write_deployment_record(maintenance)
         self.github.add_run(21, DEPLOYABLE)
         self.request()
-        self.assertEqual(self.reconcile()["reason"], "testing_restore_required")
+        self.assertEqual(self.reconcile()["reason"], TESTING_RESTORE_REQUIRED_CODE)
         from control_plane.testing_restore_prerequisite import incomplete_testing_restore
 
         # A retained target's failure cannot fence an independent replacement target.
@@ -898,7 +899,22 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
             )
         )
         self.request()
-        self.assertIn("queued_operation_id", self.reconcile())
+        queued = self.reconcile()["queued_operation_id"]
+        self.store.write_deployment_record(
+            restore.model_copy(
+                update={
+                    "record_id": "interrupted-restore-after-queue",
+                    "runtime_source": {"data_source_mode": "upstream_restore"},
+                    "deploy": restore.deploy.model_copy(
+                        update={"started_at": "2026-09-29T14:00:00Z", "finished_at": ""}
+                    ),
+                    "post_deploy_update": PostDeployUpdateEvidence(),
+                }
+            )
+        )
+        self.request()
+        # The prerequisite must not hide an already-active attempt or its fence.
+        self.assertEqual(self.reconcile()["queued_operation_id"], queued)
 
     def test_unverified_fresh_generation_holds_without_queueing(self) -> None:
         for error in (ValueError, FileNotFoundError, click.ClickException):
