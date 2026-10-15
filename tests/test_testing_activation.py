@@ -835,7 +835,7 @@ class ActivationTests(unittest.TestCase):
             self.preparation.original, self.store.list_held_provider_target_reservations()
         )
 
-    def check_lost_materialization(self, *, persisted: bool) -> None:
+    def check_lost_materialization(self, *, persisted: bool, rejected: bool = False) -> None:
         original = self.provider
         attempts: list[str] = []
         production = self.store.read_dokploy_target_record(
@@ -848,9 +848,14 @@ class ActivationTests(unittest.TestCase):
                 record = self.adapter.current()
                 self.assertFalse(record.published)
                 attempts.append(kwargs["payload"]["composeId"])
-                if persisted:
-                    original(**kwargs)
-                raise OSError("Uncertain raw-source fetch reply")
+                if len(attempts) == 1:
+                    if persisted:
+                        original(**kwargs)
+                    if rejected:
+                        import click
+
+                        raise click.ClickException("Provider rejected the source-fetch request")
+                    raise OSError("Uncertain raw-source fetch reply")
             return original(**kwargs)
 
         with patch("control_plane.testing_activation.api.dokploy_request", side_effect=lost):
@@ -858,10 +863,13 @@ class ActivationTests(unittest.TestCase):
             record = self.adapter.current()
             self.assertEqual(attempts, [record.target_id])
             writes = deepcopy(self.writes)
-            self.assertEqual(self.run_activation().response_status_code, 202 if persisted else 409)
+            self.assertEqual(self.run_activation("different-key").response_status_code, 409)
             self.assertEqual(attempts, [record.target_id])
-            self.assertEqual(self.writes, writes)
-        self.assertEqual(self.adapter.current().published, persisted)
+            self.assertEqual(self.run_activation().response_status_code, 202)
+            self.assertEqual(attempts, [record.target_id] * (1 if persisted else 2))
+            if persisted:
+                self.assertEqual(self.writes, writes)
+        self.assertTrue(self.adapter.current().published)
         self.assertEqual(
             self.store.read_dokploy_target_record(context_name=self.context, instance_name="prod"),
             production,
@@ -876,8 +884,34 @@ class ActivationTests(unittest.TestCase):
     def test_lost_materialization_reply_adopts_actual_render_without_redispatch(self) -> None:
         self.check_lost_materialization(persisted=True)
 
-    def test_unknown_absent_materialization_is_never_redispatched(self) -> None:
+    def test_absent_materialization_can_resume_only_the_original_owned_unused_source(self) -> None:
         self.check_lost_materialization(persisted=False)
+
+    def test_definite_source_fetch_rejection_can_resume_the_original_key(self) -> None:
+        self.check_lost_materialization(persisted=False, rejected=True)
+
+    def test_crash_after_materialization_phase_save_can_resume_before_any_fetch(self) -> None:
+        original = self.store.write_testing_activation
+
+        def crash(**kwargs: Any) -> Any:
+            result = original(**kwargs)
+            if any(path == "/api/compose.update" for path, _ in self.writes):
+                raise OSError("Process interrupted after persisted phase, before fetch")
+            return result
+
+        with patch.object(self.store, "write_testing_activation", side_effect=crash):
+            self.assertEqual(self.run_activation().response_status_code, 409)
+        self.assertEqual(self.materialized, {})
+        self.assertFalse(any(path == "/api/compose.fetchSourceType" for path, _ in self.writes))
+        self.assertEqual(self.run_activation().response_status_code, 202)
+        self.assertEqual(
+            [
+                body["composeId"]
+                for path, body in self.writes
+                if path == "/api/compose.fetchSourceType"
+            ],
+            [self.adapter.current().target_id],
+        )
 
     def test_refused_pre_fetch_checkpoint_can_resume_without_false_dispatch(self) -> None:
         original = self.store.checkpoint_mutation_provider_effect
@@ -900,14 +934,18 @@ class ActivationTests(unittest.TestCase):
             [self.adapter.current().target_id],
         )
 
-    def test_configured_recipient_drift_refuses_materialization_and_preserves_production(
+    def check_recipient_drift_refuses_materialization(
         self,
+        *,
+        dispatched: bool,
     ) -> None:
         original = self.provider
 
         def lost_update(**kwargs: Any) -> Any:
+            if dispatched and kwargs["path"] == "/api/compose.fetchSourceType":
+                raise OSError("Uncertain source fetch without a visible file")
             value = original(**kwargs)
-            if kwargs["path"] == "/api/compose.update":
+            if not dispatched and kwargs["path"] == "/api/compose.update":
                 raise OSError("Legacy interruption after provider configuration")
             return value
 
@@ -961,6 +999,16 @@ class ActivationTests(unittest.TestCase):
             [record.target_id],
         )
         self.assertEqual(sum(path == "/api/compose.update" for path, _ in self.writes), 1)
+
+    def test_configured_recipient_drift_refuses_materialization_and_preserves_production(
+        self,
+    ) -> None:
+        self.check_recipient_drift_refuses_materialization(dispatched=False)
+
+    def test_uncertain_materialization_drift_refuses_re_fetch_and_preserves_production(
+        self,
+    ) -> None:
+        self.check_recipient_drift_refuses_materialization(dispatched=True)
 
     def test_unsafe_or_production_equal_carried_key_refuses_without_provider_writes(self) -> None:
         from control_plane.contracts.secret_record import SecretBinding, SecretRecord

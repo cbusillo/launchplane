@@ -52,10 +52,12 @@ keeps activation and hold lift refused. The new provider source and environment
 are read back before its raw source is materialized through the provider's
 source-fetch operation. This writes only the owned, unused recipient's code
 directory; it does not deploy containers or alter volumes or ports. The service
-records that dispatch before issuing it. A missing converted file permits only
-the first undispatched fetch, with exact configured source/environment, original
-placement and unused-recipient checks. An uncertain fetch is never repeated;
-the original key can adopt its actual qualified render if the file appears.
+records that dispatch before issuing it. A missing converted file permits one
+source-fetch per original-key apply, with fresh exact configured source/environment,
+original placement, unused-recipient, lease and storage/port checks. This also
+supports recovery after an interruption or rejected fetch left no file. It never
+repeats creation or configuration. A present qualified render is adopted without
+another fetch; an incompatible render is never overwritten.
 An existing incompatible render remains fenced rather than being overwritten.
 The actual converted Compose is then interpolated with those
 same managed values and checked against the reviewed source. It can use only

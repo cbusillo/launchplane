@@ -874,8 +874,8 @@ class TestingActivationAdapter:
         self, record: TestingActivationRecord, checkpoint: Callable[[str], None]
     ) -> TestingActivationRecord:
         # Dokploy converts the host file, not its configured raw-source record.
-        # Only the first undispatched fetch may write this unused recipient's
-        # code directory. Unknown fetches recover by actual render, never replay.
+        # Each original-key apply may fetch an absent file into this exact
+        # unused recipient's code directory. A present render is never rewritten.
         self.unused_recipient(record)
         try:
             self.verify_provider(record)
@@ -1136,8 +1136,6 @@ class TestingActivationAdapter:
                     try:
                         self.verify_provider(record)
                     except ValueError as error:
-                        if record.phase == "materialize_new_recipient":
-                            return ProviderObservation("unknown")
                         fresh = self.unused_recipient(record)
                         if (
                             isinstance(error, TestingActivationRefusal)
@@ -1145,6 +1143,8 @@ class TestingActivationAdapter:
                             == TestingActivationRefusalCode.RECIPIENT_SOURCE_UNMATERIALIZED
                         ):
                             return ProviderObservation("absent", retry_safe=True)
+                        if record.phase == "materialize_new_recipient":
+                            return ProviderObservation("unknown")
                         if (
                             self.recipient_configuration_sha256(fresh)
                             != record.before_configuration_sha256
@@ -1193,6 +1193,7 @@ class TestingActivationAdapter:
                 "environment_ready",
                 "recipient_ready",
                 "configure_new_recipient",
+                "materialize_new_recipient",
             }:
                 raise TestingActivationRefusal(
                     "Continue the original activation by readback, never redispatch creation."
@@ -1339,9 +1340,10 @@ class TestingActivationAdapter:
                         "Fresh recipient has unexpected identity or environment."
                     )
                 configured = False
-                if record.phase == "configure_new_recipient":
+                if record.phase in {"configure_new_recipient", "materialize_new_recipient"}:
                     if (
-                        self.recipient_configuration_sha256(fresh)
+                        record.phase == "materialize_new_recipient"
+                        or self.recipient_configuration_sha256(fresh)
                         != record.before_configuration_sha256
                     ):
                         try:
