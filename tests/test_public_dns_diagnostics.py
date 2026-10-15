@@ -50,13 +50,42 @@ class PublicDnsDiagnosticTests(unittest.TestCase):
     def test_a_second_wrong_answer_for_the_same_host_is_not_hidden(self) -> None:
         profile = _dns_profile()
         store = _Store((profile,))
-        answers = iter([_EXPECTED.addresses, ("1.1.1.1",)])
-        run_public_ingress_monitor_once(
-            record_store=store,
-            checked_at=_NOW.isoformat(),
-            notify=False,
-            http_get=lambda url, timeout: HttpObservation(200, url, 0),
-            dns_get=lambda url: next(answers),
+        store.records.append(
+            PublicIngressObservationRecord(
+                record_id="mixed-dns-evidence",
+                product=profile.product,
+                context=profile.lanes[0].context,
+                instance="prod",
+                observed_at=_NOW.isoformat(),
+                status="pass",
+                summary="Public HTTP passes",
+                targets=(
+                    PublicIngressTargetObservation(
+                        target="base_url",
+                        url="https://example.test",
+                        status="pass",
+                        summary="HTTP 200",
+                        dns=PublicDnsObservation(
+                            public_name=_EXPECTED.public_name,
+                            status="match",
+                            expected_addresses=_EXPECTED.addresses,
+                            observed_addresses=_EXPECTED.addresses,
+                        ),
+                    ),
+                    PublicIngressTargetObservation(
+                        target="health_url",
+                        url="https://example.test/healthz",
+                        status="pass",
+                        summary="HTTP 200",
+                        dns=PublicDnsObservation(
+                            public_name=_EXPECTED.public_name,
+                            status="mismatch",
+                            expected_addresses=_EXPECTED.addresses,
+                            observed_addresses=("1.1.1.1",),
+                        ),
+                    ),
+                ),
+            )
         )
         topology = build_product_environment_topology(
             record_store=store,
