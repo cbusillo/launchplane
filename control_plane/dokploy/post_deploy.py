@@ -503,6 +503,7 @@ def run_compose_post_deploy_update(
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
+    fresh_restore_source_environment: dict[str, str] | None = None,
     clear_preview_fishbowl_source: bool = False,
 ) -> dict[str, str]:
     if (
@@ -561,7 +562,9 @@ def run_compose_post_deploy_update(
     desired_env_map.update(runtime_override_target_environment)
     if run_destructive_restore:
         upstream_restore_environment = resolve_upstream_restore_workflow_environment(
-            desired_env_map=desired_env_map,
+            desired_env_map=fresh_restore_source_environment or {}
+            if fresh_testing_generation is not None
+            else desired_env_map,
         )
         resolved_workflow_environment_overrides.update(upstream_restore_environment)
         environment_class = runtime_key_safety_environment_class(target_definition.instance)
@@ -750,7 +753,7 @@ def run_compose_post_deploy_update(
             compose_project=compose_app_name,
             image_reference=desired_env_map["DOCKER_IMAGE_REFERENCE"],
             database_name=database_name,
-            source_environment=desired_env_map,
+            source_environment=fresh_restore_source_environment or {},
             readback_spec=readback_policy.encoded_spec(),
             readback_program=INTEGRATION_READBACK_PROGRAM,
             workflow_environment=resolved_workflow_environment_overrides,

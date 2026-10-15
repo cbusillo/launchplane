@@ -28,7 +28,12 @@ from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     generation_binding,
     encoded_restore_source,
+    FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+    FRESH_TESTING_OMITTED_SETTINGS,
+    narrow_fresh_testing_requirements,
+    require_distinct_testing_credentials,
 )
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderObservation,
@@ -40,6 +45,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
+    RuntimeEnvironmentWrite,
 )
 from control_plane.testing_replacement_resources import (
     TestingReplacementResourcesRequest,
@@ -72,6 +78,7 @@ class TestingReplacementBootstrapPlan(BaseModel):
     source_instance: Literal["prod"] = "prod"
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     resources_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    omitted_runtime_keys: tuple[str, ...] = ()
     retained_target_preserved: Literal[True] = True
     production_modified: Literal[False] = False
     runtime_verified: Literal[False] = False
@@ -128,6 +135,13 @@ def bootstrap_plan(
     bindings = site_delivered_secret_bindings_from_store(
         record_store=store, context_name=request.context, instance_name="testing"
     )
+    omitted = frozenset(
+        {
+            *FRESH_TESTING_OMITTED_SETTINGS,
+            *(key for key in bindings if key not in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS),
+        }
+    )
+    bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
     safety = evaluate_runtime_key_safety_for_live_target_sync(
         record_store=store,
         context_name=request.context,
@@ -144,6 +158,7 @@ def bootstrap_plan(
             or record.instance != "testing"
         ):
             raise ValueError("Fresh testing cannot carry a shared or production credential.")
+    require_distinct_testing_credentials(store, profile, request.context)
     source_values: dict[str, str] = {}
     for scope in ("context", "instance"):
         for runtime_record in store.list_runtime_environment_records(context_name=request.context):
@@ -171,6 +186,7 @@ def bootstrap_plan(
         domain_host=request.domain_host,
         plan_sha256=generation.bootstrap_plan_sha256 if generation is not None else digest,
         resources_binding_sha256=resources.binding_sha256,
+        omitted_runtime_keys=tuple(sorted(omitted)),
     )
 
 
@@ -320,7 +336,12 @@ class TestingReplacementBootstrapAdapter:
             )
             base_url = f"https://{generation.domain_host}"
             health_path = urlsplit(lane.health_url).path or "/launchplane/health"
-            updated_profile = profile.model_copy(
+            narrowed = narrow_fresh_testing_requirements(
+                profile,
+                context=self.request.context,
+                omitted_keys=frozenset(plan.omitted_runtime_keys),
+            )
+            updated_profile = narrowed.model_copy(
                 update={
                     "lanes": tuple(
                         candidate.model_copy(
@@ -344,6 +365,58 @@ class TestingReplacementBootstrapAdapter:
             updated_provider = ProviderTargetRecord.from_dokploy_records(
                 target_record=updated_target, target_id_record=target_id
             )
+            current_runtime = next(
+                iter(
+                    self.store.list_runtime_environment_records(
+                        scope="instance", context_name=self.request.context, instance_name="testing"
+                    )
+                ),
+                None,
+            )
+            runtime = RuntimeEnvironmentRecord(
+                **(
+                    {
+                        **current_runtime.model_dump(),
+                        "schema_version": 2,
+                        "env": {
+                            **{
+                                key: value
+                                for key, value in current_runtime.env.items()
+                                if key not in plan.omitted_runtime_keys
+                            },
+                            "ODOO_PROJECT_NAME": generation.namespace,
+                            "ODOO_STACK_NAME": generation.namespace,
+                            "ODOO_DB_NAME": generation.namespace.replace("-", "_"),
+                            "ODOO_DB_HOST": "database",
+                            "ODOO_DB_PORT": "5432",
+                        },
+                        "retired_provider_keys": tuple(
+                            sorted(
+                                {*current_runtime.retired_provider_keys, *plan.omitted_runtime_keys}
+                            )
+                        ),
+                        "updated_at": utc_now_timestamp(),
+                        "source_label": "service:fresh-testing-bootstrap",
+                    }
+                    if current_runtime
+                    else {
+                        "schema_version": 2,
+                        "scope": "instance",
+                        "context": self.request.context,
+                        "instance": "testing",
+                        "env": {
+                            "ODOO_PROJECT_NAME": generation.namespace,
+                            "ODOO_STACK_NAME": generation.namespace,
+                            "ODOO_DB_NAME": generation.namespace.replace("-", "_"),
+                            "ODOO_DB_HOST": "database",
+                            "ODOO_DB_PORT": "5432",
+                        },
+                        "retired_provider_keys": plan.omitted_runtime_keys,
+                        "updated_at": utc_now_timestamp(),
+                        "source_label": "service:fresh-testing-bootstrap",
+                    }
+                )
+            )
 
             def route(checkpoint: Callable[[str, str, int], None]) -> None:
                 lease.checkpoint_effect("bind_independent_testing_route")
@@ -366,6 +439,13 @@ class TestingReplacementBootstrapAdapter:
                     dokploy_targets=(updated_target,),
                     provider_target_writes=(
                         ProviderTargetWrite(record=updated_provider, expected_record=provider),
+                    ),
+                    runtime_environment_writes=(
+                        RuntimeEnvironmentWrite(
+                            record=runtime,
+                            expected_record=current_runtime,
+                            expected_absent=current_runtime is None,
+                        ),
                     ),
                 ),
                 expected_target=target,

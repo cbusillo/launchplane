@@ -10771,6 +10771,28 @@ class PostgresRecordStore(HumanSessionStore):
                     instance=expected.instance,
                 )
                 self._lock_product_authority_bundle_write(session)
+                fresh_generation = self.read_fresh_odoo_testing_generation(
+                    expected.product, expected.context
+                )
+                if (
+                    fresh_generation is not None
+                    and fresh_generation.operation_id == expected.operation_id
+                ):
+                    from control_plane.odoo_testing_restore import read_current_testing_generation
+
+                    outer = getattr(self._disposable_authority_context, "session", None)
+                    self._disposable_authority_context.session = session
+                    try:
+                        read_current_testing_generation(
+                            self,
+                            product=expected.product,
+                            context=expected.context,
+                            instance="testing",
+                        )
+                    except (ValueError, FileNotFoundError):
+                        return False
+                    finally:
+                        self._disposable_authority_context.session = outer
                 statement = (
                     select(LaunchplaneOdooStableTargetReplacementOperationRow)
                     .where(

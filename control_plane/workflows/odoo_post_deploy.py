@@ -201,6 +201,7 @@ def execute_odoo_post_deploy(
     schedule_execution_timeout_seconds: int | None = None,
     allow_historical_sender_contract: bool = False,
     fresh_testing_generation: FreshOdooTestingGeneration | None = None,
+    fresh_restore_source_environment: dict[str, str] | None = None,
 ) -> OdooPostDeployResult:
     if request.connection_isolation is not None:
         target = _resolve_compose_target_definition(
@@ -338,6 +339,7 @@ def execute_odoo_post_deploy(
                 schedule_execution_timeout_seconds=schedule_execution_timeout_seconds,
                 allow_historical_sender_contract=allow_historical_sender_contract,
                 fresh_testing_generation=fresh_testing_generation,
+                fresh_restore_source_environment=fresh_restore_source_environment,
             )
             or {}
         )

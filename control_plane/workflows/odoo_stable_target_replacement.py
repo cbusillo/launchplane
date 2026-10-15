@@ -12,7 +12,10 @@ import click
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.integration_readback import web_held_until_integration_readback
-from control_plane.odoo_testing_restore import read_current_testing_generation
+from control_plane.odoo_testing_restore import (
+    read_current_testing_generation,
+    fresh_testing_authority_sha256,
+)
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
@@ -2017,6 +2020,9 @@ def execute_odoo_stable_target_replacement_apply(
             normalized_override_record, expected_record=odoo_override_record
         )
     runtime_override_environment: dict[str, str] = {}
+    fresh_authority_snapshot = (
+        fresh_testing_authority_sha256(record_store, generation) if generation is not None else ""
+    )
     runtime_override_payload = None
     rendering_record = control_plane_odoo_instance_overrides.record_with_public_base_url(
         normalized_override_record
@@ -2078,6 +2084,15 @@ def execute_odoo_stable_target_replacement_apply(
         # The site's own environment is delivered whole, as live sync does: worker
         # credentials, global values and other sites' values never reach it.
         runtime_environment_values = dict(site_environment.values)
+        fresh_restore_source_environment = (
+            {
+                key: value
+                for key, value in runtime_environment_values.items()
+                if key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))
+            }
+            if generation is not None
+            else {}
+        )
         try:
             declared_runtime_keys = control_plane_live_target_runtime.product_lane_declared_keys(
                 record_store=record_store,
@@ -2234,6 +2249,10 @@ def execute_odoo_stable_target_replacement_apply(
                     "; ".join(message for _code, message, _keys in configuration_blockers),
                     tuple(key for _code, _message, keys in configuration_blockers for key in keys),
                 )
+        if generation is not None:
+            for key in fresh_restore_source_environment:
+                runtime_environment_values.pop(key, None)
+                application_runtime_keys.discard(key)
         provider_only_keys = _provider_only_keys(
             current_env=current_env_map,
             application_keys=application_runtime_keys,
@@ -2374,6 +2393,13 @@ def execute_odoo_stable_target_replacement_apply(
                 )
         if provider_effect_checkpoint is not None:
             provider_effect_checkpoint(TARGET_REPLACEMENT_FIRST_PROVIDER_WRITE)
+        if (
+            generation is not None
+            and fresh_testing_authority_sha256(record_store, generation) != fresh_authority_snapshot
+        ):
+            raise click.ClickException(
+                "Fresh testing authority changed while preparing its runtime values."
+            )
         check_backup_proof()
         production_write_started = True
         raw_compose_evidence = dokploy_compose.sync_dokploy_compose_raw_source(
@@ -2674,6 +2700,7 @@ def execute_odoo_stable_target_replacement_apply(
                     request.timeout_seconds if plan.data_source_mode == "upstream_restore" else None
                 ),
                 fresh_testing_generation=generation if post_deploy_phase == "restore" else None,
+                fresh_restore_source_environment=fresh_restore_source_environment,
             )
     except OdooProviderEffectUncertainError:
         runtime_source["provider_outcome"] = "uncertain"

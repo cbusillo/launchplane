@@ -2,11 +2,22 @@
 
 import base64
 import json
-from typing import Literal
+from typing import Literal, TypeVar
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductRuntimeConfigRequirement,
+    ProductSecretConfigRequirement,
+    product_config_requirement_applies_to_lane,
+)
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.odoo_connection_isolation import connection_isolation_library
+
+
+Requirement = TypeVar(
+    "Requirement", ProductRuntimeConfigRequirement, ProductSecretConfigRequirement
+)
 
 
 class FreshOdooTestingGeneration(BaseModel):
@@ -38,7 +49,7 @@ from pathlib import Path
 import subprocess
 import sys
 sys.path.insert(0, '/volumes/scripts')
-from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner
+from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner, CryptContext
 """
     + connection_isolation_library()
     + r"""
@@ -60,6 +71,19 @@ class CopyRunner(OdooDataWorkflowRunner):
         return subprocess.Popen(["true"])
 
     def prepare_credentials_before_registry(self, *args, **kwargs):
+        if not getattr(self, "_copy_credentials_compared", False):
+            self.connect_to_db()
+            context = CryptContext(schemes=["pbkdf2_sha512", "pbkdf2_sha256"])
+            candidates = [os.environ[key] for key in ("ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD") if os.environ.get(key)]
+            with self.local.db_conn.cursor() as cursor:
+                for table, column in (("res_users", "password"), ("res_users_apikeys", "key")):
+                    if column not in isolation_columns(cursor, table):
+                        continue
+                    cursor.execute('SELECT "' + column + '" FROM "' + table + '" WHERE coalesce("' + column + '", \'\') <> \'\'')
+                    for (encoded,) in cursor.fetchall():
+                        if any(context.verify(candidate, encoded) for candidate in candidates):
+                            raise RuntimeError("Testing credential matches source authentication material")
+            self._copy_credentials_compared = True
         super().prepare_credentials_before_registry(*args, **kwargs)
         self.connect_to_db()
         with self.local.db_conn.cursor() as cursor:
@@ -67,21 +91,44 @@ class CopyRunner(OdooDataWorkflowRunner):
             if refused:
                 raise RuntimeError("Testing copy connection isolation failed")
         self.local.db_conn.commit()
+        observer = self._connect_with_retry(self.local.db_name)
+        try:
+            with observer.cursor() as cursor:
+                cursor.execute("SET TRANSACTION READ ONLY")
+                if connection_isolation(cursor, apply=False):
+                    raise RuntimeError("Testing copy connection commit readback failed")
+            observer.rollback()
+        finally:
+            observer.close()
         print("testing_copy_pre_registry_sanitized=true", flush=True)
 
 
 if not callable(getattr(OdooDataWorkflowRunner, "prepare_credentials_before_registry", None)):
     raise SystemExit("Artifact lacks the pre-registry credential boundary")
 settings = LocalServerSettings()
+if settings.host != "database" or settings.db_name != sys.argv[2] or settings.platform_instance != "testing":
+    raise SystemExit("Testing copy settings no longer name the isolated database")
 runner = CopyRunner(settings, None, None)
 runner.acquire_data_workflow_lock()
+restored = False
 try:
     dump = Path(sys.argv[1])
     subprocess.run(["pg_restore", "--file=/dev/null", str(dump)], check=True,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    runner._restore_from_verified_dump(dump, do_sanitize=True)
+    # Launchplane owns the first boundary ordering. No inherited restore wrapper
+    # can load a registry before the copy's SQL-only credential/connection pass.
+    runner.overwrite_database(dump)
+    restored = True
+    runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
+    runner._prepare_restored_database(runner._resolve_filestore_owner(), do_sanitize=True)
+    runner.assert_core_schema_healthy()
+    runner.ensure_gpt_users()
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
     print("testing_copy_sanitized=true", flush=True)
+except BaseException:
+    if restored:
+        runner._drop_database_after_failed_restore()
+    raise
 finally:
     runner.release_data_workflow_lock()
 """
@@ -127,6 +174,8 @@ def build_fresh_testing_restore_script(
         "readback_program": readback_program,
         "runner": TESTING_COPY_RUNNER,
         "workflow_environment": workflow_environment,
+        "ssh_key_path": source_environment.get("DATA_WORKFLOW_SSH_KEY", ""),
+        "ssh_directory": source_environment.get("DATA_WORKFLOW_SSH_DIR", ""),
     }
     encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
     return (
@@ -212,7 +261,7 @@ def main():
             environment = dict(item.split("=", 1) for item in configuration.get("Env", []) if "=" in item)
             if environment.get("PLATFORM_INSTANCE") != "testing" or environment.get("ODOO_DB_HOST") != "database" or environment.get("ODOO_DB_NAME") != database:
                 raise RuntimeError("Testing database endpoint is not local")
-            if any(environment.get(key) for key in ("GITHUB_TOKEN", "GH_TOKEN", "SSH_AUTH_SOCK", "DATA_WORKFLOW_SSH_KEY", "DATA_WORKFLOW_SSH_DIR")):
+            if any(environment.get(key) for key in ("GITHUB_TOKEN", "GH_TOKEN", "SSH_AUTH_SOCK", "DATA_WORKFLOW_SSH_KEY", "ODOO_KEY", "ODOO_SMTP_PASSWORD")):
                 raise RuntimeError("Testing holds an execution credential")
         if service != "web":
             networks = container.get("NetworkSettings", {}).get("Networks")
@@ -235,6 +284,7 @@ def main():
     web = containers["web"][0]
     docker("stop", web)
     print("testing_copy_runtime_isolated=true", flush=True)
+    docker("exec", runner, "python3", "-c", "import sys;sys.path.insert(0,'/volumes/scripts');from run_odoo_data_workflows import OdooDataWorkflowRunner as R;assert callable(getattr(R,'prepare_credentials_before_registry',None))")
     present = docker("exec", "-i", containers["database"][0], "sh", "-c",
         'psql -X -q -t -A -v ON_ERROR_STOP=1 -v database_name="$1" -U "$POSTGRES_USER" -d postgres',
         "_", database, stdin=b"SELECT count(*) FROM pg_database WHERE datname = :'database_name';\n").decode().strip()
@@ -249,6 +299,13 @@ def main():
         raise RuntimeError("Unsupported restore source filestore")
     destination = source["ODOO_UPSTREAM_USER"] + "@" + source["ODOO_UPSTREAM_HOST"]
     ssh = ["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes"]
+    for key in ("ssh_key_path", "ssh_directory"):
+        if spec[key] and (not spec[key].startswith("/") or not re.fullmatch(r"[A-Za-z0-9_./-]+", spec[key]) or ".." in Path(spec[key]).parts):
+            raise RuntimeError("Unsupported existing host SSH location")
+    if spec["ssh_key_path"]:
+        ssh.extend(["-i", spec["ssh_key_path"]])
+    if spec["ssh_directory"]:
+        ssh.extend(["-o", "UserKnownHostsFile=" + spec["ssh_directory"].rstrip("/") + "/known_hosts"])
     # The host's existing identity is used only by these two fixed source reads.
     # No key, agent socket or SSH directory enters an application container.
     remote = shlex.join(["sudo", "-u", source["ODOO_UPSTREAM_DB_USER"], "pg_dump", "-Fc", "--", source["ODOO_UPSTREAM_DB_NAME"]])
@@ -265,14 +322,19 @@ def main():
     dump_path = "/tmp/" + namespace + "-database.dump"
     docker("cp", str(dump), runner + ":" + dump_path)
     docker("exec", "-u", "root", runner, "chmod", "644", dump_path)
+    uid = docker("exec", runner, "id", "-u").decode().strip()
+    gid = docker("exec", runner, "id", "-g").decode().strip()
+    if not uid.isdigit() or not gid.isdigit():
+        raise RuntimeError("Testing workflow identity is unavailable")
+    docker("exec", "-u", "root", runner, "chown", "-R", uid + ":" + gid, "/volumes/data", "/volumes/logs")
     workflow = spec["workflow_environment"]
-    environment = {**{key: value for key, value in workflow.items() if not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))}, "ODOO_FILESTORE_PATH": "/volumes/data/filestore", "ENV_OVERRIDE_DISABLE_CRON": "true", "ODOO_RESTORE_KEPT_INTEGRATIONS": ""}
+    environment = {**{key: value for key, value in workflow.items() if not key.startswith(("ODOO_UPSTREAM_", "DATA_WORKFLOW_SSH_"))}, "ODOO_FILESTORE_PATH": "/volumes/data/filestore", "ODOO_FILESTORE_OWNER": uid + ":" + gid, "ENV_OVERRIDE_DISABLE_CRON": "true", "ODOO_RESTORE_KEPT_INTEGRATIONS": ""}
     arguments = ["exec", "-i", "-u", "root"]
     for key, value in environment.items():
         if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
             raise RuntimeError("Invalid workflow environment key")
         arguments.extend(["-e", key + "=" + value])
-    output = docker(*arguments, runner, "python3", "-", dump_path, stdin=spec["runner"].encode()).decode()
+    output = docker(*arguments, runner, "python3", "-", dump_path, database, stdin=spec["runner"].encode()).decode()
     if "testing_copy_sanitized=true" not in output.splitlines() or "testing_copy_pre_registry_sanitized=true" not in output.splitlines():
         raise RuntimeError("Testing copy lacks sanitization proof")
     readback = docker("exec", "-i", runner, "python3", "-", database, spec["readback_spec"], stdin=spec["readback_program"].encode()).decode()
@@ -324,6 +386,14 @@ def read_current_testing_generation(
     )
     if target_id.target_id != generation.target_id:
         raise ValueError("Fresh testing generation no longer owns the target.")
+    profile = getattr(store, "read_product_profile_record")(product)
+    if (
+        not isinstance(profile, LaunchplaneProductProfileRecord)
+        or profile.driver_id != "odoo"
+        or not profile.is_active
+    ):
+        raise ValueError("Fresh testing generation no longer owns an active Odoo product.")
+    require_distinct_testing_credentials(store, profile, context)
     allocation = getattr(store, "read_disposable_resource_preparation")(generation.operation_id)
     if (
         allocation is None
@@ -332,4 +402,226 @@ def read_current_testing_generation(
         or allocation.resource_namespace != generation.namespace
     ):
         raise ValueError("Fresh testing generation lost its resource allocation.")
+    target = getattr(store, "read_dokploy_target_record")(
+        context_name=context, instance_name="testing"
+    )
+    if target.policies.staff_testing_hold is not None or target.pending_public_host_effects:
+        raise ValueError("Fresh testing generation has a use or route hold.")
+    values: dict[str, object] = {}
+    for scope in ("context", "instance"):
+        for runtime in getattr(store, "list_runtime_environment_records")(context_name=context):
+            if runtime.scope == scope and runtime.instance == (
+                "testing" if scope == "instance" else ""
+            ):
+                values.update(runtime.env)
+    values.update(target.env)
+    from control_plane.odoo_testing_resources import OdooTestingResources
+
+    resources = OdooTestingResources(
+        product=product,
+        context=context,
+        operation_id=generation.operation_id,
+        target_id=generation.target_id,
+        namespace=generation.namespace,
+    )
+    if any(values.get(key) != value for key, value in resources.volumes.items()):
+        raise ValueError("Fresh testing volume authority changed before deployment.")
+    if (
+        values.get("ODOO_PROJECT_NAME") != generation.namespace
+        or values.get("ODOO_STACK_NAME") != generation.namespace
+    ):
+        raise ValueError("Fresh testing project authority changed before deployment.")
+    for other in getattr(store, "list_dokploy_target_id_records")():
+        if other.target_id == generation.target_id and (other.context, other.instance) != (
+            context,
+            "testing",
+        ):
+            raise ValueError("Fresh testing target aliases another lane.")
     return generation
+
+
+FRESH_TESTING_LOCAL_CREDENTIAL_KEYS = frozenset(
+    {"ODOO_ADMIN_PASSWORD", "ODOO_DB_PASSWORD", "ODOO_MASTER_PASSWORD"}
+)
+FRESH_TESTING_OMITTED_SETTINGS = frozenset(
+    {
+        "ODOO_WEB_COMMAND",
+        "ODOO_KEY",
+        "ODOO_SMTP_SERVER",
+        "ODOO_SMTP_HOST",
+        "ODOO_SMTP_PORT",
+        "ODOO_SMTP_USER",
+        "ODOO_SMTP_PASSWORD",
+        "ODOO_SMTP_SSL",
+    }
+)
+
+
+def narrow_fresh_testing_requirements(
+    profile: LaunchplaneProductProfileRecord, *, context: str, omitted_keys: frozenset[str]
+) -> LaunchplaneProductProfileRecord:
+    """Keep existing models; scope shared requirements to their other stable lanes.
+
+    This changes only the testing lane's effective required keys. Production's
+    existing requirements, owner-input descriptions and secret bindings remain.
+    """
+    testing = next(
+        lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
+    )
+
+    def narrow(requirements: tuple[Requirement, ...], *, secret: bool) -> tuple[Requirement, ...]:
+        retained = []
+        generated = []
+        for requirement in requirements:
+            key = str(getattr(requirement, "binding_key" if secret else "key"))
+            if key not in omitted_keys or not product_config_requirement_applies_to_lane(
+                requirement_context=requirement.context,
+                requirement_instance=requirement.instance,
+                lane=testing,
+            ):
+                retained.append(requirement)
+                continue
+            for lane in profile.lanes:
+                if lane == testing or not product_config_requirement_applies_to_lane(
+                    requirement_context=requirement.context,
+                    requirement_instance=requirement.instance,
+                    lane=lane,
+                ):
+                    continue
+                generated.append(
+                    requirement.model_copy(
+                        update={"context": lane.context, "instance": lane.instance}
+                    )
+                )
+
+        def identity(requirement: Requirement) -> tuple[str, str, str, str]:
+            return (
+                str(getattr(requirement, "integration", "")),
+                str(getattr(requirement, "binding_key" if secret else "key")),
+                requirement.context,
+                requirement.instance,
+            )
+
+        result = {identity(requirement): requirement for requirement in retained}
+        for requirement in generated:
+            result.setdefault(identity(requirement), requirement)
+        return tuple(result.values())
+
+    expected = profile.expected_config.model_copy(
+        update={
+            "runtime_environment_keys": narrow(
+                profile.expected_config.runtime_environment_keys, secret=False
+            ),
+            "managed_secret_bindings": narrow(
+                profile.expected_config.managed_secret_bindings, secret=True
+            ),
+        }
+    )
+    result = profile.model_copy(update={"expected_config": expected})
+    return LaunchplaneProductProfileRecord.model_validate(
+        result.model_dump(mode="json")
+    ).validate_write_contract()
+
+
+def require_distinct_testing_credentials(
+    store: object, profile: LaunchplaneProductProfileRecord, context: str
+) -> None:
+    """Opaque source preflight inside the service; no value or hash is transported.
+
+    Use existing managed versions, not secret names/version IDs as value proof.
+    This reads control-plane source authority and never writes a secret, binding,
+    production target or credential. The supported copy runner separately strips
+    credentials from the restored database before registry code executes.
+    """
+    import hmac
+    from typing import cast
+    from control_plane import secrets
+
+    production = [lane for lane in profile.lanes if lane.instance == "prod"]
+    if len(production) != 1:
+        raise ValueError("A unique production source is required for credential comparison.")
+    source = production[0]
+    reader = cast(secrets.SecretReadStore, store)
+    testing_values = secrets.resolve_secret_values_for_integration_from_store(
+        record_store=reader,
+        integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=context,
+        instance_name="testing",
+        scopes=frozenset({"context_instance"}),
+    )
+    source_values = secrets.resolve_secret_values_for_integration_from_store(
+        record_store=reader,
+        integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=source.context,
+        instance_name="prod",
+        scopes=frozenset({"context", "context_instance"}),
+    )
+    if any(not testing_values.get(key) for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS) or any(
+        not source_values.get(key) for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+    ):
+        raise ValueError(
+            "Credential comparison needs the existing testing and production source versions."
+        )
+    if any(
+        hmac.compare_digest(testing_values[key].encode(), value.encode())
+        for key in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+        for value in source_values.values()
+        if value
+    ):
+        raise ValueError("Existing testing credentials overlap the supported production source.")
+
+
+def fresh_testing_authority_sha256(store: object, generation: FreshOdooTestingGeneration) -> str:
+    """Bind rendered values to recipient and supported-source version metadata."""
+    from typing import cast
+    from control_plane import secrets
+    from control_plane.disposable_lanes import DisposableLaneStore, disposable_lane_configuration
+    from control_plane.contracts.canonical_json import canonical_json_sha256
+
+    profile = getattr(store, "read_product_profile_record")(generation.product)
+    production = [lane for lane in profile.lanes if lane.instance == "prod"]
+    if len(production) != 1:
+        raise ValueError("Fresh testing source authority is unavailable.")
+    metadata = list(
+        disposable_lane_configuration(
+            cast(DisposableLaneStore, store), generation.context, "testing"
+        )
+    )
+    selected = secrets.resolve_effective_secret_bindings_from_store(
+        record_store=cast(secrets.SecretReadStore, store),
+        integration=secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=production[0].context,
+        instance_name="prod",
+        scopes=frozenset({"context", "context_instance"}),
+    )
+    for binding, record in selected.values():
+        metadata.extend((binding, record))
+    payloads = [item.model_dump(mode="json") for item in metadata]
+    secret_ids = {
+        getattr(item, "secret_id") for item in metadata if hasattr(item, "current_version_id")
+    }
+    for secret_id in secret_ids:
+        record = getattr(store, "read_secret_record")(secret_id)
+        version = getattr(store, "read_secret_version")(record.current_version_id)
+        if version.secret_id != record.secret_id:
+            raise ValueError("Fresh testing secret version provenance is inconsistent.")
+        payloads.append(version.model_dump(mode="json"))
+    override = None
+    try:
+        override = getattr(store, "read_odoo_instance_override_record")(
+            context_name=generation.context, instance_name="testing"
+        )
+    except FileNotFoundError:
+        pass
+    return canonical_json_sha256(
+        {
+            "profile": profile.model_dump(mode="json"),
+            "generation": generation.model_dump(mode="json", exclude={"completed_at"}),
+            "target": getattr(store, "read_dokploy_target_record")(
+                context_name=generation.context, instance_name="testing"
+            ).model_dump(mode="json"),
+            "target_id": generation.target_id,
+            "configuration": sorted(payloads, key=lambda item: json.dumps(item, sort_keys=True)),
+            "overrides": override.model_dump(mode="json") if override is not None else None,
+        }
+    )
