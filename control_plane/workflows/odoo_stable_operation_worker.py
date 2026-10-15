@@ -60,9 +60,12 @@ from control_plane.contracts.odoo_stable_target_replacement import (
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
+    OdooTargetReplacementExecutionFailure,
+    TESTING_EXECUTION_FAILURE_KEY,
     safe_error_detail_keys,
 )
 from control_plane.contracts.odoo_target_replacement_failures import (
+    TESTING_RESTORE_REQUIRED_CODE,
     deploy_failure_description,
 )
 from control_plane.contracts.product_reconcile import ProductReconcileRequestRecord
@@ -99,6 +102,10 @@ from control_plane.launchplane_reconcile_authorization import (
 from control_plane.testing_lane_hold import (
     read_staff_testing_hold,
     staff_testing_hold_cancellation,
+)
+from control_plane.testing_restore_prerequisite import (
+    TestingRestoreHistoryStore,
+    incomplete_testing_restore,
 )
 from control_plane.workflows.odoo_stable_bootstrap import (
     OdooStableBootstrapStore,
@@ -2219,6 +2226,20 @@ def _execute_target_replacement_with_checkpoint(
         authorization_guard.authorize_execution()
         if _reconcile_deploy_is_held(record_store=record_store, operation=operation):
             raise _StaffTestingHoldError
+        if (
+            service_testing_operation(operation)
+            and operation.request.data_source_mode == "existing"
+            and incomplete_testing_restore(
+                cast(TestingRestoreHistoryStore, record_store),
+                context=operation.context,
+                instance=operation.instance,
+            )
+            is not None
+        ):
+            raise OdooTargetReplacementStageError(
+                TESTING_RESTORE_REQUIRED_CODE,
+                deploy_failure_description(TESTING_RESTORE_REQUIRED_CODE),
+            )
         if isinstance(record_store, PostgresRecordStore):
             record_store.activate_odoo_testing_drill(operation, time.time())
         require_unchanged_production_artifact(
@@ -2322,6 +2343,28 @@ def _execute_target_replacement_with_checkpoint(
             TestingRecoveryStore, record_store
         ).read_odoo_stable_target_replacement_operation_record(operation.operation_id)
         if current.recovery_journal is not None and current.recovery_journal.effects:
+            failure = OdooTargetReplacementExecutionFailure(
+                error_code=terminal_operation.error_code,
+                error_message=terminal_operation.error_message,
+                error_detail_keys=terminal_operation.error_detail_keys,
+                deployment_record_id=terminal_operation.deployment_record_id,
+                result=terminal_operation.result,
+            )
+            journal = current.recovery_journal.model_copy(
+                update={
+                    "inspection": {
+                        **current.recovery_journal.inspection,
+                        TESTING_EXECUTION_FAILURE_KEY: failure.model_dump_json(),
+                    }
+                }
+            )
+            # Commit evidence under the live executor's lease before the fence.
+            # Existing completion storage preserves the latest running journal.
+            if not record_store.complete_odoo_stable_target_replacement_operation_record(
+                record=current.model_copy(update={"recovery_journal": journal}),
+                lease_owner=lease_owner,
+            ):
+                return False
             terminal_operation = current.model_copy(
                 update={
                     "status": "reconciliation_required",
@@ -2332,6 +2375,7 @@ def _execute_target_replacement_with_checkpoint(
                     "heartbeat_at": "",
                     "result": None,
                     "cancellation": None,
+                    "deployment_record_id": terminal_operation.deployment_record_id,
                     "error_code": "operation_reconciliation_required",
                     "error_message": "Testing provider effects require proved-safe reconciliation before retry.",
                 }
