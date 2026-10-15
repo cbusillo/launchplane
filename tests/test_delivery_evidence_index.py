@@ -21,6 +21,8 @@ from control_plane.production_delivery_monitor import (
     DELIVERY_EVIDENCE_PAGE_SIZE,
     _candidate_key,
     _write_receipt,
+    _SCOPE,
+    _ROUTE,
     monitor_production_delivery_once,
     record_production_delivery_failure,
 )
@@ -202,6 +204,59 @@ class DeliveryEvidenceIndexTests(unittest.TestCase):
                 for incident in self.store.list_public_ingress_incident_records(status="open")
             )
         )
+
+    def test_legacy_monitor_receipt_is_preserved_and_not_read_after_bootstrap(self) -> None:
+        self.setup_store("sqlite")
+        failed = self.deploy("old-failure", failed=True)
+        assert failed.failure is not None
+        key = "failures:" + self.profile.product
+        _write_receipt(
+            self.store,
+            key=key,
+            now=self.now.isoformat(),
+            payload={
+                "seen": {
+                    failed.record_id: _candidate_key(
+                        failed.failure.code + ":" + failed.deploy.finished_at
+                    )
+                }
+            },
+        )
+        original = self.store.read_idempotency_record
+        receipt = original(scope=_SCOPE, route_path=_ROUTE, idempotency_key=key)
+        self.monitor()
+
+        def read(*args: object, **kwargs: object) -> object:
+            if kwargs.get("idempotency_key") == key:
+                raise AssertionError("A steady pass must not reload legacy history")
+            return original(*args, **kwargs)  # type: ignore[arg-type]
+
+        with patch.object(self.store, "read_idempotency_record", side_effect=read):
+            self.deploy("new-failure", failed=True)
+            self.monitor()
+            self.monitor()
+        self.assertEqual(original(scope=_SCOPE, route_path=_ROUTE, idempotency_key=key), receipt)
+        self.assertEqual(len(self.incidents()), 1)
+
+    def test_invalid_initial_failure_time_does_not_hold_bootstrap_forever(self) -> None:
+        for backend in ("filesystem", "sqlite"):
+            with self.subTest(backend=backend):
+                self.setup_store(backend)
+                self.deploy("current", minutes_ago=10)
+                record = self.deploy("old-failure", failed=True)
+                self.store.write_deployment_record(
+                    record.model_copy(
+                        update={
+                            "deploy": record.deploy.model_copy(update={"finished_at": "unknown"})
+                        }
+                    )
+                )
+                self.monitor()
+                self.assertFalse(self.incidents())
+                with self.store.delivery_evidence_index() as index:
+                    self.assertFalse(
+                        index.pending(self.lane.context, self.profile.product, limit=1)
+                    )
 
     def test_acknowledging_an_old_version_cannot_hide_a_concurrent_source_update(self) -> None:
         for backend in ("filesystem", "sqlite"):

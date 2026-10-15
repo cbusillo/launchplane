@@ -1929,17 +1929,24 @@ This does not add release or authorization authority.
 The index has at most one row and one pending version per retained source.
 Acknowledged signatures are bounded by that source's fixed event/step plan, and
 DB retention deletes remove its row and release bindings, including bulk deletes.
-The per-product failure receipt stays constant size. The migration traverses old
+The new per-product checkpoint stays constant size after bootstrap. The previous
+monitor's failure receipt is read once and preserved unchanged for overlapping
+old replicas and rollback compatibility; the current monitor never appends to or
+rewrites it. Its growth ends with the last old monitor pass. The migration traverses old
 DB sources once; filesystem rehearsals do the same on first index use and mark
 pending work before atomic source replacement under the bundle lock. Existing
 processed identities are consumed during paged bootstrap and then removed from
-the checkpoint. The filesystem index lives at `.delivery-evidence.sqlite3` under
+the new checkpoint, while the original legacy receipt remains intact. The filesystem index lives at `.delivery-evidence.sqlite3` under
 the explicit state directory. Use store APIs for file-backed evidence writes;
 editing historical JSON files directly does not update its derived index.
 New or changed evidence runs ahead of initial historical backfill, so an
 upgrade backlog cannot postpone a new failure behind the old history. The
 migration uses a frozen schema and raw-JSON projection without validating
 historical rows against current runtime models or acquiring a lock per row.
+Installing capture and backfilling are one migration transaction: source-table
+writes, including idempotency writes, wait until that transaction commits. Use
+the existing drained service migration/restart path; this is a one-time upgrade
+cost, and a rollback image may still read its preserved legacy receipt.
 File-backed history is backfilled by the first monitor pass; a damaged old file
 can make monitoring unavailable but cannot block a new source write.
 Storage outcomes and the incident/outbox remain the authorities; the index owns

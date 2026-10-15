@@ -511,6 +511,7 @@ def _work_events(
     profile: LaunchplaneProductProfileRecord,
     index: DeliveryEvidenceIndex,
     work: DeliveryEvidenceWork,
+    now: str,
 ) -> list[tuple[str, str, str, str, str]]:
     if work.kind in {"deployment", "promotion"}:
         try:
@@ -524,7 +525,11 @@ def _work_events(
                 raise
             index.forget_missing(work.key, work.version)
             return []
-        index.reconcile_source(work, record.model_dump(mode="json"))
+        if (
+            not isinstance(store, PostgresRecordStore)
+            or store.database_dialect_name != "postgresql"
+        ):
+            index.reconcile_source(work, record.model_dump(mode="json"))
         if record.failure is not None or any(
             status == "fail"
             for status in (
@@ -557,7 +562,7 @@ def _work_events(
         )
         # Register even unstarted operations before reading them. A subsequent
         # worker write dirties the decision in that same source transaction.
-        index.bind(decision.record_id, _release_dependencies(profile, decision))
+        index.bind(decision.record_id, _release_dependencies(profile, decision), now=now)
         return [
             (
                 step.operation_id,
@@ -606,20 +611,25 @@ def _scan_failures(
     lane: ProductLaneProfile,
     now: str,
 ) -> None:
-    scan_key = "failures:" + profile.product
-    scan = store.read_idempotency_record(scope=_SCOPE, route_path=_ROUTE, idempotency_key=scan_key)
     with (
         store.delivery_evidence_index() as index,
         index.lane_lock(lane.context, profile.product) as acquired,
     ):
         if not acquired:
             return
-        checkpoint = index.initialize(
-            lane.context,
-            profile.product,
-            baseline=scan is None,
-            legacy_seen=dict(scan.response_payload.get("seen", {})) if scan else {},
-        )
+        checkpoint = index.checkpoint(lane.context, profile.product)
+        if checkpoint is None:
+            # Read the previous monitor's receipt once for bootstrap. Leave it
+            # unchanged so an overlapping or rolled-back reader keeps its dedup.
+            legacy = store.read_idempotency_record(
+                scope=_SCOPE, route_path=_ROUTE, idempotency_key="failures:" + profile.product
+            )
+            checkpoint = index.initialize(
+                lane.context,
+                profile.product,
+                baseline=legacy is None,
+                legacy_seen=dict(legacy.response_payload.get("seen", {})) if legacy else {},
+            )
         latest = checkpoint["latest"]
         legacy_seen = checkpoint["legacy_seen"]
         failed = False
@@ -628,7 +638,7 @@ def _scan_failures(
         ):
             try:
                 index.start(work)
-                events = _work_events(store, profile, index, work)
+                events = _work_events(store, profile, index, work, now)
                 processed = dict(work.processed)
                 for record_id, candidate, reason, trace, finished in events:
                     signature = _candidate_key(reason + ":" + finished)
@@ -637,9 +647,12 @@ def _scan_failures(
                         continue
                     initial_eligible = work.source_id == latest.get(work.kind)
                     if initial_eligible and latest.get("success"):
-                        initial_eligible = bool(
-                            finished and _time(finished) >= _time(latest["success"])
-                        )
+                        try:
+                            initial_eligible = bool(
+                                finished and _time(finished) >= _time(latest["success"])
+                            )
+                        except ValueError:
+                            initial_eligible = False
                     if not work.baseline or not checkpoint["initial"] or initial_eligible:
                         record_production_delivery_failure(
                             store,
@@ -659,7 +672,6 @@ def _scan_failures(
                 index.retry_later(work)
                 _LOGGER.exception("Could not process delivery evidence for %s", profile.product)
         index.finish_bootstrap(lane.context, profile.product)
-        _write_receipt(store, key=scan_key, now=now, payload={"indexed": True})
         _recover_delivery_failures(store, profile, lane, now, index)
         if failed:
             raise RuntimeError("Production delivery evidence remains pending")

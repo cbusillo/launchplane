@@ -133,7 +133,7 @@ def normalized_time(value: str) -> str:
         return value
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc).isoformat()
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
 def candidate_key(value: str) -> str:
@@ -202,8 +202,24 @@ def projection_insert(dialect: str, source_query: str, *, baseline: bool = False
         return f"launchplane_delivery_time_v1({value})" if postgres else value
 
     def digest(value: str) -> str:
+        # The whitespace set of the v1 candidate identity, including tabs and
+        # Unicode spaces, must agree with Python str.strip for stored identities.
+        whitespace = (
+            *range(9, 14),
+            *range(28, 33),
+            133,
+            160,
+            5760,
+            *range(8192, 8203),
+            8232,
+            8233,
+            8239,
+            8287,
+            12288,
+        )
+        characters = " || ".join(f"chr({codepoint})" for codepoint in whitespace)
         return (
-            f"left(encode(sha256(convert_to(btrim({value}), 'UTF8')), 'hex'), 24)"
+            f"left(encode(sha256(convert_to(btrim({value}, {characters}), 'UTF8')), 'hex'), 24)"
             if postgres
             else "''"
         )
@@ -244,7 +260,7 @@ def projection_insert(dialect: str, source_query: str, *, baseline: bool = False
         "finished_at": time_value(finished),
         "started_at": time_value(field("deploy", "started_at")),
         "passed": "(" + passed + ")",
-        "artifact_key": f"CASE WHEN item.kind = 'deployment' THEN {digest(field('artifact_identity', 'artifact_id'))} ELSE '' END",
+        "artifact_key": f"CASE WHEN item.kind = 'deployment' AND {field('artifact_identity', 'artifact_id')} <> '' THEN {digest(field('artifact_identity', 'artifact_id'))} ELSE '' END",
         "source_key": f"CASE WHEN item.kind = 'deployment' THEN {digest(field('source_git_ref'))} ELSE '' END",
     }
     assignments = ", ".join(

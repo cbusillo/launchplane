@@ -4423,6 +4423,61 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_delivery_projection_uses_canonical_times_and_candidate_identities(self) -> None:
+        from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+        from control_plane.storage.delivery_evidence import sources, normalized_time
+        from control_plane.production_delivery_monitor import _candidate_key
+
+        case = DeliveryEvidenceIndexTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        with _store_for_fresh_head_database() as store:
+            case.store = store
+            store.write_product_profile_record(case.profile)
+            record = case.deploy("current")
+            moment = case.now.replace(microsecond=0)
+            payload = record.model_dump(mode="json")
+            payload["source_git_ref"] = "\t source-revision\u00a0"
+            payload["artifact_identity"] = None
+            payload["deploy"]["finished_at"] = moment.replace(tzinfo=None).isoformat()
+            with store._engine.begin() as connection:
+                connection.execute(text("SET LOCAL timezone = 'America/New_York'"))
+                connection.execute(
+                    update(LaunchplaneDeploymentRow)
+                    .where(LaunchplaneDeploymentRow.record_id == record.record_id)
+                    .values(payload=payload)
+                )
+            with store.delivery_evidence_index() as index:
+                with index.engine.connect() as connection:
+                    projection = (
+                        connection.execute(
+                            select(sources).where(sources.c.source_id == record.record_id)
+                        )
+                        .mappings()
+                        .one()
+                    )
+                self.assertEqual(
+                    projection["source_key"], _candidate_key(payload["source_git_ref"])
+                )
+                self.assertFalse(projection["artifact_key"])
+                self.assertEqual(projection["finished_at"], normalized_time(moment.isoformat()))
+                self.assertFalse(
+                    index.matching_success(
+                        record.context,
+                        _candidate_key(payload["source_git_ref"]),
+                        moment.isoformat(),
+                    ),
+                    "An equally timed success cannot recover a failure",
+                )
+                self.assertTrue(
+                    index.matching_success(
+                        record.context,
+                        _candidate_key(payload["source_git_ref"]),
+                        (moment - timedelta(seconds=1)).isoformat(),
+                    )
+                )
+
     def test_delivery_capture_observes_core_writes_without_runtime_hooks(self) -> None:
         from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
         from control_plane.storage.postgres import (

@@ -167,6 +167,13 @@ class DeliveryEvidenceIndex:
             and_(sources.c.kind == "decision", sources.c.product == product),
         )
 
+    def checkpoint(self, context: str, product: str) -> dict[str, Any] | None:
+        with self.engine.connect() as connection:
+            payload = connection.scalar(
+                select(checkpoints.c.payload).where(checkpoints.c.key == context + ":" + product)
+            )
+            return dict(payload) if payload is not None else None
+
     def initialize(
         self, context: str, product: str, *, baseline: bool, legacy_seen: dict[str, str]
     ) -> dict[str, Any]:
@@ -202,6 +209,10 @@ class DeliveryEvidenceIndex:
                 )
                 or ""
             )
+            if latest["success"]:
+                # Do not freeze a corrupt successful-delivery time into a
+                # checkpoint that could never recover after source repair.
+                datetime.fromisoformat(str(latest["success"]).replace("Z", "+00:00"))
             checkpoint = {"latest": latest, "legacy_seen": legacy_seen, "initial": baseline}
             if baseline:
                 connection.execute(update(sources).where(lane).values(baseline=True))
@@ -322,7 +333,7 @@ class DeliveryEvidenceIndex:
                 .values(queued_at=datetime.now(timezone.utc).isoformat())
             )
 
-    def bind(self, decision_id: str, dependency_keys: tuple[str, ...]) -> None:
+    def bind(self, decision_id: str, dependency_keys: tuple[str, ...], *, now: str = "") -> None:
         with self.engine.begin() as connection:
             for key in sorted(dependency_keys):
                 _lock_dependency(connection, key)
@@ -349,7 +360,7 @@ class DeliveryEvidenceIndex:
                     )
                     if payload and payload.get("state") == "running":
                         expiry = normalized_time(payload.get("lease_expires_at", ""))
-                        if expiry > datetime.now(timezone.utc).isoformat():
+                        if expiry > normalized_time(now or datetime.now(timezone.utc).isoformat()):
                             next_checks.append(expiry)
                 connection.execute(
                     _insert(connection, dependencies)
