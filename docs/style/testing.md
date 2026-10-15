@@ -287,7 +287,9 @@ window in an individual test.
 Locator assertions wait for rendered app state. Use `waitForState` for a route
 handler's request count or release gate. Pass the page as its second argument
 when a development fixture intentionally delays completion: each probe advances
-the controlled clock until the requested state is observed. Observe the rendered response before
+the controlled clock until the requested state is observed. This form proves
+fixture completion; timer and freshness assertions advance a known interval
+explicitly, then await rendered state. Observe the rendered response before
 changing a fixture's mode or advancing to the next refresh; a request counter
 alone does not prove React consumed its response. Hold asynchronous fixtures
 behind an explicit release gate until the test observes the intermediate

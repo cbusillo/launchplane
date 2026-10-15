@@ -1,4 +1,5 @@
 import { waitForState, expect, test } from "./state";
+import type { Request } from "@playwright/test";
 import type { ClientReleaseRunView } from "../../src/generated/openapi.ts";
 import { RELEASE_PROGRESS_REFRESH_MS } from "../../src/OwnerReleaseReviewRoute";
 
@@ -434,7 +435,7 @@ test("Blocked release progress keeps completed steps and resumes after a hold is
   expect(writes).toEqual([]);
 });
 
-test("A stopped release stops refreshing and a newer decision discards an older read", async ({ page }) => {
+test("A stopped release stops refreshing and a newer decision cancels an older read", async ({ page }) => {
   await page.goto("/ui/owner-review?product=example-site&fixture=products");
   await expect(page.getByRole("heading", { name: "Review this release" })).toBeVisible();
   const { accepted, changesRequested } = await page.evaluate(async () => {
@@ -456,11 +457,13 @@ test("A stopped release stops refreshing and a newer decision discards an older 
   let holdRead: Promise<void> | undefined;
   let releaseHeldRead: (() => void) | undefined;
   let heldReadSettled = false;
+  let heldRequest: Request | undefined;
 
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "site-owner", github_id: 9001, role: "read_only", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", async route => {
     reads++;
     const held = holdRead;
+    if (held) heldRequest = route.request();
     if (held) await held;
     await route.fulfill({ json: current }).catch(() => undefined);
     if (held) heldReadSettled = true;
@@ -477,6 +480,10 @@ test("A stopped release stops refreshing and a newer decision discards an older 
   await page.getByRole("textbox").first().fill("Keep the old label.");
   await page.getByRole("button", { name: "Request changes" }).click();
   await expect(progress.getByRole("heading")).toHaveText("Release progress: Stopped");
+  // The app cancels the older in-flight read when the decision starts. Observe
+  // that transport state before releasing it; an unchanged heading alone can
+  // pass before an incorrect late response has reached React.
+  await waitForState(() => Boolean(heldRequest?.failure())).toBe(true);
   releaseHeldRead?.();
   holdRead = undefined;
   await waitForState(() => heldReadSettled).toBe(true);
