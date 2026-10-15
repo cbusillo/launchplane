@@ -421,6 +421,13 @@ class TestingReplacementResourceAdapter:
                     if terminal
                     else ProviderObservation("unknown")
                 )
+            if any(
+                item.target_id == compose_id for item in self.store.list_dokploy_target_id_records()
+            ) or any(
+                item.provider_id == "dokploy" and item.target_id == compose_id
+                for item in self.store.list_physical_provider_target_records()
+            ):
+                raise ValueError("Unrecorded creation is already bound to another target.")
             profile, _, _, _, _, provider = resource_context(
                 self.store, product=self.product, request=self.request
             )

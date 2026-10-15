@@ -164,13 +164,12 @@ class TestingResourceProgramTests(unittest.TestCase):
         alias.symlink_to(self.root, target_is_directory=True)
         for name, volume in self.volumes.items():
             volume["Mountpoint"] = str(alias / name / "_data")
-        self.containers["host-monitor"] = {
-            "Mounts": [{"Type": "bind", "RW": False, "Source": str(self.root)}]
-        }
+        monitor_mount: dict[str, object] = {"Type": "bind", "RW": False, "Source": str(self.root)}
+        self.containers["host-monitor"] = {"Mounts": [monitor_mount]}
         status, evidence = self.run_program("readback")
         self.assertEqual(status, 0)
         self.assertTrue(resource_readback_passes(evidence, self.resources))
-        self.containers["host-monitor"]["Mounts"][0]["RW"] = True
+        monitor_mount["RW"] = True
         self.assertNotEqual(self.run_program("readback")[0], 0)
 
     def test_partial_empty_preparation_can_be_classified_but_foreign_data_cannot(self) -> None:
