@@ -112,7 +112,7 @@ class RetirementInventoryClientTests(unittest.TestCase):
                         "rule_sha256": "b" * 64,
                         "subjects": "PRIVATE",
                     },
-                    {"principal_type": "local_operator", "subjects": "PRIVATE"},
+                    {"principal_type": "local_operators", "subjects": "PRIVATE"},
                 ],
             },
         }
@@ -127,6 +127,63 @@ class RetirementInventoryClientTests(unittest.TestCase):
         for value in ("../another", "example?apply=true", "example/testing"):
             with self.subTest(value=value), self.assertRaises(argparse.ArgumentTypeError):
                 CLIENT["identifier"](value)
+
+    def test_workflow_evidence_binds_policy_and_rejects_partial_or_changed_result(self) -> None:
+        policy: dict[str, Any] = {
+            "record_id": "policy-fixture",
+            "revision": 1,
+            "policy_sha256": "a" * 64,
+            "updated_at": "2026-01-01T00:00:00Z",
+            "schema_version": 2,
+        }
+        self.transport["request_launchplane_read"].return_value = {
+            "status": "ok",
+            "trace_id": "launchplane_req_fixture",
+            "policy": {**policy, "managed_rules": [], "unmanaged_rule_counts": {}},
+        }
+        arguments = argparse.Namespace(
+            repository="example/site",
+            workflow=["example/site/.github/workflows/build.yml"],
+            binding="job_workflow_ref",
+        )
+        for mutation in (None, "policy", "indices"):
+            evidence: dict[str, Any] = {
+                "status": "ok",
+                "trace_id": "launchplane_req_evidence",
+                "policy": dict(policy),
+                "history": {
+                    "returned_count": 1,
+                    "state": "partial",
+                    "reason_codes": ["history_truncated"],
+                },
+                "managed_sets": [],
+                "unmanaged_workflows": [
+                    {
+                        "index": 0,
+                        "state": "no_matching_rule",
+                        "rule_sha256s": [],
+                        "reason_codes": [],
+                    }
+                ],
+            }
+            if mutation == "policy":
+                evidence["policy"]["revision"] += 1
+            elif mutation == "indices":
+                evidence["unmanaged_workflows"] = []
+            self.transport["request_launchplane"].return_value = evidence
+            with self.subTest(mutation=mutation):
+                if mutation is None:
+                    result = CLIENT["inspect_policy"](self.transport, self.settings, arguments)
+                    self.assertEqual(result["workflow_evidence"]["history"]["state"], "partial")
+                    body = self.transport["request_launchplane"].call_args.kwargs["body"]
+                    for key in ("record_id", "revision", "sha256"):
+                        source = "policy_sha256" if key == "sha256" else key
+                        target = "policy_sha256" if key == "sha256" else "policy_" + key
+                        self.assertEqual(body[target], policy[source])
+                    self.assertEqual(body["workflows"][0]["binding"], arguments.binding)
+                else:
+                    with self.assertRaises(ValueError):
+                        CLIENT["inspect_policy"](self.transport, self.settings, arguments)
 
     def test_transport_failure_is_bounded_and_never_retried(self) -> None:
         transport = {

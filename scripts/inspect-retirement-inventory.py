@@ -14,6 +14,7 @@ from typing import Any
 import urllib.error
 
 from control_plane.contracts.authz_retirement_evidence import (
+    AUTHZ_RETIREMENT_MAX_CANDIDATES,
     AuthzRetirementEvidenceRequest,
     AuthzRetirementEvidenceResponse,
     AuthzWorkflowEvidenceCandidate,
@@ -93,6 +94,21 @@ def inspect_settings(
         "coverage": "caller_visible_records_only",
         "absence_proven": False,
     }
+
+
+def validate_metadata(value: object, transport: dict[str, Any]) -> None:
+    """Validate value-free metadata as identifiers, rather than free-text logs."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if transport["is_denied_key"](key):
+                raise ValueError("Unsafe metadata field.")
+            validate_metadata(item, transport)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            validate_metadata(item, transport)
+    elif isinstance(value, str) and value:
+        # Permit a leading underscore in an env key, retaining token boundaries.
+        transport["public_identifier"]("metadata/" + value)
 
 
 def inspect_policy(
@@ -190,6 +206,12 @@ def main() -> int:
     args = parser.parse_args()
     if args.mode == "settings":
         args.instance = args.instance or ""
+    elif bool(args.repository) != bool(args.workflow):
+        parser.error("Use --repository and --workflow together.")
+    elif len(args.workflow) > AUTHZ_RETIREMENT_MAX_CANDIDATES or len(args.workflow) != len(
+        set(args.workflow)
+    ):
+        parser.error(f"Use at most {AUTHZ_RETIREMENT_MAX_CANDIDATES} distinct workflow paths.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
         parser.error("Select the installed Launchplane operator helper.")
@@ -202,15 +224,19 @@ def main() -> int:
         result = (inspect_settings if args.mode == "settings" else inspect_policy)(
             transport, settings, args
         )
-        transport["assert_public_safe_shape"](result)
+        validate_metadata(result, transport)
         print(json.dumps({"status": "ok", "mode": args.mode, "result": result}))
         return 0
     except urllib.error.HTTPError as error:
         transport["emit_http_error_payload"](
             operation="retirement-inventory", request={"mode": args.mode}, exc=error
         )
-    except (KeyError, TypeError, ValueError, OSError, http.client.HTTPException):
-        print(json.dumps({"status": "unverified", "mode": args.mode}))
+    except (KeyError, TypeError, ValueError):
+        print(json.dumps({"status": "unverified", "mode": args.mode, "code": "invalid_inventory"}))
+    except (OSError, http.client.HTTPException):
+        print(
+            json.dumps({"status": "unverified", "mode": args.mode, "code": "transport_unavailable"})
+        )
     return 1
 
 
