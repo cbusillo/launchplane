@@ -1314,7 +1314,7 @@ class ActivationPortProgramTests(unittest.TestCase):
         refused_status, refused_output = self.run_program([port], [], occupied=True)
         binding_proof = "testing_resources_binding_sha256=" + resources.binding_sha256
         storage_proof = ["testing_resources_ok=true", binding_proof]
-        cases = (
+        cases: tuple[tuple[str, int, str, list[str], bool, bool], ...] = (
             ("available-inline", success_status, successful_output, storage_proof, True, True),
             ("available-fetched", success_status, successful_output, storage_proof, False, True),
             ("occupied", refused_status, refused_output, storage_proof, False, False),
