@@ -42,6 +42,7 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     execute_odoo_prod_backup_gate,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
 )
@@ -213,6 +214,24 @@ def _find_odoo_instance_override_record(
     return None
 
 
+def _write_reviewed_odoo_override(
+    store: PostgresRecordStore,
+    record: OdooInstanceOverrideRecord,
+    existing_records: tuple[OdooInstanceOverrideRecord, ...],
+) -> None:
+    expected = _find_odoo_instance_override_record(
+        existing_records=existing_records,
+        context_name=record.context,
+        instance_name=record.instance,
+    )
+    try:
+        store.write_odoo_instance_override_record(
+            record, expected_record=expected, require_absent=expected is None
+        )
+    except OdooInstanceOverrideConflictError as error:
+        raise click.ClickException("Odoo overrides changed; re-run the command.") from error
+
+
 def _build_odoo_instance_override_record_with_config_parameter(
     *,
     existing_records: tuple[OdooInstanceOverrideRecord, ...],
@@ -253,6 +272,10 @@ def _build_odoo_instance_override_record_with_config_parameter(
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
         website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
+        website_settings=target_record.website_settings if target_record is not None else None,
+        last_apply=target_record.last_apply.for_override_edit()
+        if target_record is not None
+        else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -302,6 +325,10 @@ def _build_odoo_instance_override_record_with_addon_setting(
         config_parameters=config_parameters,
         addon_settings=tuple(addon_settings[key] for key in sorted(addon_settings)),
         website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
+        website_settings=target_record.website_settings if target_record is not None else None,
+        last_apply=target_record.last_apply.for_override_edit()
+        if target_record is not None
+        else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -335,6 +362,10 @@ def _build_odoo_instance_override_record_with_website_bootstrap(
         config_parameters=target_record.config_parameters if target_record is not None else (),
         addon_settings=target_record.addon_settings if target_record is not None else (),
         website_bootstrap=website_bootstrap,
+        website_settings=target_record.website_settings if target_record is not None else None,
+        last_apply=target_record.last_apply.for_override_edit()
+        if target_record is not None
+        else OdooOverrideApplyResult(),
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -448,6 +479,7 @@ def _migrate_odoo_override_secret_transport_record(
             addon_settings=tuple(addon_settings),
             website_bootstrap=record.website_bootstrap,
             last_apply=record.last_apply,
+            website_settings=record.website_settings,
             updated_at=utc_now_timestamp(),
             source_label=source_label.strip() or "odoo-secret-transport-migration",
         )
@@ -490,6 +522,8 @@ def _build_odoo_instance_override_record_with_apply_result(
                 applied_at=applied_at.strip()
                 or (utc_now_timestamp() if normalized_status in {"pass", "fail"} else ""),
                 detail=detail,
+                website_settings=target_record.last_apply.website_settings,
+                website_settings_verified=target_record.last_apply.website_settings_verified,
             ),
             "updated_at": utc_now_timestamp(),
             "source_label": source_label.strip() or "cli",
@@ -695,7 +729,7 @@ def odoo_overrides_put_config_param(
             override_value=override_value,
             source_label=source_label,
         )
-        postgres_store.write_odoo_instance_override_record(record)
+        _write_reviewed_odoo_override(postgres_store, record, existing_records)
     finally:
         postgres_store.close()
     click.echo(
@@ -755,7 +789,7 @@ def odoo_overrides_put_addon_setting(
             override_value=override_value,
             source_label=source_label,
         )
-        postgres_store.write_odoo_instance_override_record(record)
+        _write_reviewed_odoo_override(postgres_store, record, existing_records)
     finally:
         postgres_store.close()
     click.echo(
@@ -813,7 +847,7 @@ def odoo_overrides_put_website_bootstrap(
             website_bootstrap=website_bootstrap,
             source_label=source_label,
         )
-        postgres_store.write_odoo_instance_override_record(record)
+        _write_reviewed_odoo_override(postgres_store, record, existing_records)
     finally:
         postgres_store.close()
     click.echo(
@@ -995,7 +1029,7 @@ def odoo_overrides_mark_apply(
             applied_at=applied_at,
             source_label=source_label,
         )
-        postgres_store.write_odoo_instance_override_record(record)
+        _write_reviewed_odoo_override(postgres_store, record, existing_records)
     finally:
         postgres_store.close()
     click.echo(

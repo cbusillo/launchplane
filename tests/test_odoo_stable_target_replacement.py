@@ -281,6 +281,7 @@ class _Store:
         last_apply: OdooOverrideApplyResult,
         updated_at: str,
         source_label: str,
+        preserve_website_settings: bool = False,
     ) -> OdooInstanceOverrideRecord:
         record = self.read_odoo_instance_override_record(
             context_name=context_name, instance_name=instance_name

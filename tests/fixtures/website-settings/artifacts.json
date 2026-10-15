@@ -1,0 +1,16 @@
+{
+  "startup": {
+    "repository": "cbusillo/odoo-devkit",
+    "revision": "a06d347442506cf55db5da003342852aee1c05a6",
+    "source_path": "docker/scripts/run_odoo_startup.py",
+    "artifact_path": "legacy_startup.txt",
+    "git_blob": "51ec786c805cd746c3041251c836b8744918238d"
+  },
+  "consumer": {
+    "repository": "cbusillo/odoo-devkit",
+    "revision": "66ef042e3a272ac09038550678533ce45c1e32a9",
+    "source_path": "docker/scripts/odoo_website_settings.py",
+    "artifact_path": "consumer.txt",
+    "git_blob": "ea443c6bfbed28bcb9da988c72bacc0160294827"
+  }
+}

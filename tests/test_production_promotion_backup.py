@@ -571,7 +571,10 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             deploy.assert_not_called()
             return
         with (
-            patch("control_plane.workflows.odoo_prod_promotion.require_release_approval"),
+            patch(
+                "control_plane.workflows.odoo_prod_promotion.require_release_approval",
+                return_value=None,
+            ),
             patch(
                 "control_plane.workflows.odoo_prod_promotion.execute_odoo_stable_target_replacement_apply"
             ) as replacement,

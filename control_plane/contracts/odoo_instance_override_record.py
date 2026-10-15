@@ -5,6 +5,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane.contracts.runtime_environment_record import ScalarValue
+from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsIntent
 from control_plane.contracts.odoo_import_parameters import import_parameter_runtime_key
 
 OdooOverrideApplyPhase = Literal["restore", "deploy", "promotion", "preview", "manual"]
@@ -211,6 +212,22 @@ class OdooOverrideApplyResult(BaseModel):
     status: OdooOverrideApplyStatus = "skipped"
     applied_at: str = ""
     detail: str = ""
+    website_settings_verified: bool = Field(
+        default=True,
+        exclude_if=lambda value: value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    website_settings: OdooWebsiteSettingsIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+
+    def for_override_edit(self) -> "OdooOverrideApplyResult":
+        return OdooOverrideApplyResult(
+            website_settings=self.website_settings,
+            website_settings_verified=self.website_settings_verified,
+        )
 
     @model_validator(mode="after")
     def _validate_apply_result(self) -> "OdooOverrideApplyResult":
@@ -237,6 +254,11 @@ class OdooInstanceOverrideRecord(BaseModel):
     config_parameters: tuple[OdooConfigParameterOverride, ...] = ()
     addon_settings: tuple[OdooAddonSettingOverride, ...] = ()
     website_bootstrap: OdooWebsiteBootstrapPayload | None = None
+    website_settings: OdooWebsiteSettingsIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     last_apply: OdooOverrideApplyResult = Field(default_factory=OdooOverrideApplyResult)
     updated_at: str
     source_label: str = ""
@@ -253,12 +275,8 @@ class OdooInstanceOverrideRecord(BaseModel):
             raise ValueError("Odoo instance override record requires instance")
         if not self.updated_at:
             raise ValueError("Odoo instance override record requires updated_at")
-        if (
-            not self.config_parameters
-            and not self.addon_settings
-            and self.website_bootstrap is None
-        ):
-            raise ValueError("Odoo instance override record requires at least one override")
+        # Withdrawing the last pending website intent leaves an inert record;
+        # retain it so applied/attempted readback history survives withdrawal.
         if not self.apply_on:
             raise ValueError("Odoo instance override record requires at least one apply phase")
         if len(self.apply_on) != len(set(self.apply_on)):

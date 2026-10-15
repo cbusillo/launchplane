@@ -1461,6 +1461,47 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_first_override_write_requires_the_reviewed_absence(self) -> None:
+        from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
+
+        with _store_for_fresh_head_database() as store:
+            record = _import_override_record()
+            store.write_odoo_instance_override_record(record, require_absent=True)
+            with self.assertRaises(OdooInstanceOverrideConflictError):
+                store.write_odoo_instance_override_record(
+                    record.model_copy(update={"updated_at": "concurrent replacement"}),
+                    require_absent=True,
+                )
+            self.assertEqual(
+                store.read_odoo_instance_override_record(
+                    context_name=record.context,
+                    instance_name=record.instance,
+                ),
+                record,
+            )
+
+            from control_plane.contracts.odoo_instance_override_record import (
+                OdooOverrideApplyResult,
+            )
+            from tests.test_odoo_website_settings import intent
+
+            record.last_apply = OdooOverrideApplyResult(
+                website_settings=intent(), website_settings_verified=False
+            )
+            store.write_odoo_instance_override_record(record)
+            retained = store.update_odoo_instance_override_apply_result(
+                context_name=record.context,
+                instance_name=record.instance,
+                last_apply=OdooOverrideApplyResult(),
+                updated_at=record.updated_at,
+                source_label="unrelated-driver",
+                preserve_website_settings=True,
+            )
+            self.assertEqual(
+                retained.last_apply.website_settings, record.last_apply.website_settings
+            )
+            self.assertFalse(retained.last_apply.website_settings_verified)
+
     def test_odoo_copy_connections_are_repaired_with_postgres_sql(self) -> None:
         import psycopg
         from control_plane.odoo_connection_isolation import connection_isolation_library
