@@ -3739,6 +3739,13 @@ class LaunchplaneTestingActivationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneProductionRecipientRow(Base):
+    __tablename__ = "launchplane_production_recipients"
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneProductProfileRow(Base):
     __tablename__ = "launchplane_product_profiles"
     __table_args__ = (
@@ -6006,7 +6013,7 @@ class PostgresRecordStore(HumanSessionStore):
 
     def _write_row(self, row: Base) -> None:
         with self._session_factory() as session:
-            if isinstance(
+            authority_row = isinstance(
                 row,
                 LaunchplaneProductProfileRow
                 | LaunchplaneDokployTargetRow
@@ -6021,8 +6028,11 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneDisposableLaneSafetyRow
                 | LaunchplaneDisposableReplacementPreparationRow
                 | LaunchplaneDisposableTestingResourceAllocationRow
-                | LaunchplaneFreshOdooTestingGenerationRow,
-            ):
+                | LaunchplaneFreshOdooTestingGenerationRow
+                | LaunchplaneInventoryRow
+                | LaunchplanePrivateHealthEndpointRow,
+            )
+            if authority_row:
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
                 if isinstance(row, LaunchplaneDokployTargetRow):
@@ -6036,7 +6046,8 @@ class PostgresRecordStore(HumanSessionStore):
                 row, LaunchplaneDeploymentRow | LaunchplanePromotionRow | LaunchplaneInventoryRow
             ):
                 expected = reservation_reader()
-                self._begin_serialized_write(session)
+                if not authority_row:
+                    self._begin_serialized_write(session)
                 held_row = session.scalar(
                     self._idempotency_statement(
                         scope=expected.scope,
@@ -10436,6 +10447,63 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             row = session.get(LaunchplaneTestingActivationRow, (product, context))
             return dict(row.payload) if row else None
+
+    def read_production_recipient(self, product: str, context: str) -> dict[str, Any] | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneProductionRecipientRow, (product, context))
+            return dict(row.payload) if row else None
+
+    def write_production_recipient(
+        self, *, expected: dict[str, Any] | None, replacement: dict[str, Any]
+    ) -> None:
+        """Append-only identities and compare-and-write custody, without lane publication."""
+        from control_plane.contracts.production_recipient import ProductionRecipientRecord
+
+        record = ProductionRecipientRecord.model_validate(replacement)
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            from control_plane.production_recipient import authority_snapshot
+
+            if (
+                authority_snapshot(self, record.product, record.context)
+                != record.authority_snapshot
+            ):
+                raise ValueError("Production authority changed before custody committed.")
+            row = session.get(
+                LaunchplaneProductionRecipientRow,
+                (record.product, record.context),
+                with_for_update=True,
+            )
+            previous = ProductionRecipientRecord.model_validate(row.payload) if row else None
+            if previous != (
+                ProductionRecipientRecord.model_validate(expected) if expected is not None else None
+            ):
+                raise ValueError("Production recipient custody changed.")
+            if previous is not None:
+                mutable = {
+                    "project_id",
+                    "environment_id",
+                    "target_id",
+                    "app_name",
+                    "phase",
+                    "qualified_at",
+                }
+                if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
+                    raise ValueError("Production recipient intent and old custody are immutable.")
+                for key in mutable - {"phase"}:
+                    if getattr(previous, key) and getattr(previous, key) != getattr(record, key):
+                        raise ValueError(
+                            "Production recipient identities and receipts are immutable."
+                        )
+            session.merge(
+                LaunchplaneProductionRecipientRow(
+                    product=record.product,
+                    context=record.context,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
 
     def write_testing_activation(
         self,
