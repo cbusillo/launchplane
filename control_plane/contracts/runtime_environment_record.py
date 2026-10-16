@@ -50,6 +50,8 @@ class RuntimeEnvironmentRecord(BaseModel):
                 raise ValueError("Provider key retirement requires an exact context and instance")
             if set(self.retired_provider_keys) & self.env.keys():
                 raise ValueError("A provider key cannot be both configured and retired")
+        if not self.env and not self.retired_provider_keys:
+            raise ValueError("runtime environment record requires values or retirement intent")
         return self
 
     @field_validator("updated_at", mode="after")
@@ -68,8 +70,6 @@ class RuntimeEnvironmentRecord(BaseModel):
             if not normalized_key:
                 raise ValueError("runtime environment record env keys must be non-empty")
             normalized[normalized_key] = item
-        if not normalized:
-            raise ValueError("runtime environment record requires at least one env value")
         return normalized
 
 

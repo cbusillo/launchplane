@@ -4736,6 +4736,7 @@ export type SecretBinding = {
     sharing_reason: SecretSharingReason | null;
     status: 'configured' | 'disabled';
     updated_at: string;
+    value_source: 'supplied' | 'copy' | 'provider' | null;
 };
 
 export type SecretSharingReason = {

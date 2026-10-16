@@ -361,6 +361,31 @@ def _evaluate_binding(
     rule: RuntimeSecretSafetyRule | None,
     extra_integration_key_markers: tuple[str, ...],
 ) -> tuple[RuntimeKeySafetyFinding, ...]:
+    if (
+        binding.integration == "runtime_environment"
+        and binding.declared_secret_class is not None
+        and _binding_stored_for_exact_stable_lane(
+            binding=binding,
+            target=target,
+            extra_integration_key_markers=extra_integration_key_markers,
+        )
+    ):
+        declared_findings = _evaluate_declared_secret_class(target=target, binding=binding)
+        if declared_findings:
+            return declared_findings
+        # An independently stored non-production credential is not the production
+        # credential that happens to use the same key name. Only an explicit
+        # non-production class on this exact stable lane can take precedence.
+        # Shared-safe, production and preview bindings still need the key's rule.
+        if (
+            binding.value_source == "supplied"
+            and target.environment_class == "testing"
+            and binding.declared_secret_class in {"testing", "non_prod"}
+            and not is_integration_runtime_key(
+                binding.binding_key, extra_markers=extra_integration_key_markers
+            )
+        ):
+            return ()
     if rule is not None:
         return _evaluate_binding_rule(target=target, binding=binding, rule=rule)
     if _binding_stored_for_exact_stable_lane(

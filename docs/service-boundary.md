@@ -4512,3 +4512,11 @@ ref or edits a PR. Provider errors with no confirmed result return a redacted
 finishes its worker and revocation attempt. The three updater workflow cutovers
 and real-run qualification follow this route's landing and deployment; they
 are not activated by adding the route.
+
+## Reviewed stored-setting and workflow-rule retirement
+
+See [reviewed retirement](reviewed-retirement.md) for the exact request, saved
+review, administrator apply, private rollback custody and readback contracts of
+`POST /v1/admin/runtime-settings/removal`, and the read-only
+`POST /v1/authz-policies/workflow-rule-retirement-plan`. These paths install no
+grant and perform no provider action.

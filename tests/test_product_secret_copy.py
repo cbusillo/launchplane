@@ -14,6 +14,7 @@ from httpx2 import Response
 
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_config import (
     apply_product_config_bundle,
@@ -179,6 +180,7 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             if item.instance == "testing"
         )
         self.assertEqual(binding.declared_secret_class, "shared_safe")
+        self.assertEqual(binding.value_source, "copy")
         assert binding.sharing_reason is not None
         self.assertEqual(binding.sharing_reason.kind, "read_only_source")
 
@@ -518,6 +520,40 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
             if record.name == "SITE_PASSWORD" and record.instance == "testing"
         )
         self.assertEqual(destination.scope, "context_instance")
+
+    async def test_copy_cannot_relabel_a_rule_only_production_source_as_testing(self) -> None:
+        binding = self.store.list_secret_bindings()[0]
+        self.store.write_secret_binding(binding.model_copy(update={"binding_key": "DISCORD_TOKEN"}))
+        policy = self.store.list_runtime_key_safety_policy_records()[0]
+        self.store.write_runtime_key_safety_policy_record(
+            policy.model_copy(
+                update={
+                    "rules": (
+                        RuntimeSecretSafetyRule(
+                            binding_key="DISCORD_TOKEN",
+                            secret_class="prod_only",
+                            allowed_contexts=("example-site",),
+                            allowed_instances=("prod",),
+                        ),
+                    )
+                }
+            )
+        )
+        # The legacy source has no declared class; its production restriction
+        # comes only from the policy. A caller cannot forge the new origin proof.
+        self.payload["secrets"][0].update(
+            binding_key="DISCORD_TOKEN", secret_class="testing", value_source="supplied"
+        )
+        with patch.object(
+            secrets,
+            "_decrypt_secret_value",
+            side_effect=AssertionError("refused copy must not decrypt"),
+        ):
+            response = await self.post()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"]["code"], "runtime_key_safety_failed")
+        self.assertEqual(self.store.list_secret_bindings(instance_name="testing"), ())
+        self.assertEqual(self.store.read_secret_record(self.source.secret_id), self.source)
 
     async def test_explicit_source_class_requires_authorized_source_reclassification(self) -> None:
         binding = self.store.list_secret_bindings(limit=None)[0]

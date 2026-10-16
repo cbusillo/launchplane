@@ -24,15 +24,11 @@ from control_plane.contracts.product_profile_record import (
     product_target_owner_products,
     product_config_requirement_applies_to_lane,
 )
-from control_plane.contracts.secret_record import SecretBinding
 from control_plane.product_config import ProductConfigMode, ProductConfigStore
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
-    evaluate_runtime_key_safety,
     latest_active_runtime_key_safety_policy,
-    runtime_key_safety_environment_class,
 )
-from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.runtime_environments import site_secret_scopes
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import RuntimeEnvironmentConflictError
@@ -138,60 +134,13 @@ def _runtime_key_safety_ready(
         return True
     try:
         policy_store = cast(RuntimeKeySafetyPolicyReadStore, record_store)
-        policy = latest_active_runtime_key_safety_policy(policy_store)
-        # A writer's declared class and sharing reason live on the lane's stored
-        # binding; carry them onto the stand-in binding so readiness matches the
-        # real evaluation.
-        lane_bindings = {
-            binding.binding_key: binding
-            for binding in policy_store.list_secret_bindings(
-                integration="runtime_environment",
-                context_name=lane.context,
-                instance_name=lane.instance,
-                limit=None,
-            )
-            if binding.status == "configured"
-            and binding.context == lane.context
-            and binding.instance == lane.instance
-        }
-        target = RuntimeKeySafetyTarget(
-            context=lane.context,
-            instance=lane.instance,
-            environment_class=runtime_key_safety_environment_class(lane.instance),
-        )
-        evaluation = evaluate_runtime_key_safety(
-            target=target,
-            required_binding_keys=binding_keys,
-            secret_bindings=tuple(
-                SecretBinding(
-                    binding_id=f"product-config-availability:{binding_key}",
-                    secret_id=f"product-config-availability:{binding_key}",
-                    integration="runtime_environment",
-                    binding_key=binding_key,
-                    context=lane.context,
-                    instance=lane.instance,
-                    declared_secret_class=(
-                        lane_bindings[binding_key].declared_secret_class
-                        if binding_key in lane_bindings
-                        else None
-                    ),
-                    sharing_reason=(
-                        lane_bindings[binding_key].sharing_reason
-                        if binding_key in lane_bindings
-                        else None
-                    ),
-                    created_at="1970-01-01T00:00:00Z",
-                    updated_at="1970-01-01T00:00:00Z",
-                )
-                for binding_key in binding_keys
-            ),
-            secret_rules=policy.rules,
-            integration_key_markers=policy.integration_key_markers,
-            unreasoned_shared_integration_keys="report",
-        )
+        latest_active_runtime_key_safety_policy(policy_store)
     except (AttributeError, TypeError, ValueError):
         return False
-    return evaluation.status == "pass"
+    # Availability means a real policy can evaluate the submitted values. Missing
+    # or incompatible existing bindings must not prevent first entry or correction;
+    # dry-run and apply evaluate the actual proposed bindings independently.
+    return True
 
 
 class LaneProviderEnvStore(control_plane_secrets.SecretBindingSelectionStore, Protocol):
