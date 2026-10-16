@@ -83,7 +83,7 @@ def ready_handoff_refusal(
     if handoff.status == "waiting":
         return "latest trusted engineering handoff is waiting"
     if handoff.status == "stale" or handoff.head_sha != head_sha:
-        return "Ready handoff does not name exactly the current head"
+        return "Ready handoff does not name exactly the current head; post a fresh checked gh-pr.py ready handoff"
     if not handoff_actor_allowed(policy, actor_id=handoff.actor_id, actor_role=handoff.actor_role):
         return "Ready handoff author is not allowed to enqueue"
     return ""

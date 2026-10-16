@@ -477,9 +477,11 @@ Checks on the refreshed current head must still pass before admission.
 
 The same carry applies to active stack collapses, including intermediate parents:
 the current policy binding, latest persisted progress and exact merge parents
-must prove each edge back to the handed-off head. The next planned merge can
-also carry when the executor's provider recovery proof confirms it succeeded
-before progress was saved. Blocked, retired or policy-stale plans cannot carry
+must prove each edge back to the handed-off head. The admission reader never
+promotes a planned mutation from a provider commit alone. If a merge succeeded before its mutated progress was persisted, its
+unproven new head needs a fresh checked `gh-pr.py ready` handoff; matching commit
+messages and parents alone cannot renew readiness. Standalone execution saves
+each progress checkpoint. Blocked, retired or policy-stale plans cannot carry
 readiness. Retired ordinary-agent job records are excluded. Current source
 checks and Client gates still apply. Edited-comment diagnostics name the fresh
 checked handoff needed to resume.

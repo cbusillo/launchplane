@@ -3338,6 +3338,7 @@ class GitHubMergeTrainSnapshotReader:
         if policy is None:
             return MergeTrainReadyHandoff(status="missing")
         latest: tuple[datetime, int, str, str, int, str] | None = None
+        handoffs: list[tuple[tuple[datetime, int, str, str, int, str], dict[str, object]]] = []
         try:
             # A partial discussion cannot establish the latest trusted handoff.
             for page in range(1, 101):
@@ -3370,19 +3371,13 @@ class GitHubMergeTrainSnapshotReader:
                     )
                     if not handoff_actor_allowed(policy, actor_id=actor_id, actor_role=role):
                         continue
-                    if (
-                        kind is None
-                        and edited
-                        and self._trusted_managed_comment_edit(comment, policy)
-                    ):
-                        continue
                     comment_id = _required_int(comment.get("id"), "Ready handoff requires id.")
                     timestamp = handoff_timestamp(
                         str(comment.get("updated_at") or comment.get("created_at") or "")
                     )
                     # REST attributes edits to the original author, not the
                     # editor. A fresh checked handoff is the supported renewal.
-                    handoff = (
+                    handoff: tuple[datetime, int, str, str, int, str] = (
                         timestamp,
                         comment_id,
                         "edited" if edited else kind or "unreadable",
@@ -3390,12 +3385,22 @@ class GitHubMergeTrainSnapshotReader:
                         actor_id,
                         role,
                     )
-                    if latest is None or handoff[:2] > latest[:2]:
-                        latest = handoff
+                    handoffs.append((handoff, comment))
                 if len(payload) < 100:
                     break
             else:
                 raise ValueError("Ready handoff discussion exceeds the page bound.")
+            # Only comments newer than the latest effective handoff need editor
+            # proof. Keep that proof fresh; do not spend quota on older edits.
+            for handoff, comment in sorted(handoffs, key=lambda item: item[0][:2], reverse=True):
+                if (
+                    handoff[2] == "edited"
+                    and handoff_kind(str(comment.get("body") or "")) is None
+                    and self._trusted_managed_comment_edit(comment, policy)
+                ):
+                    continue
+                latest = handoff
+                break
         except (MergeTrainGitHubError, ValueError, TypeError) as error:
             if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
                 raise
@@ -3451,7 +3456,7 @@ class GitHubMergeTrainSnapshotReader:
             records = store.list_merge_train_branch_refresh_records(
                 repository=repository_path, pull_request_number=number
             )
-            stack_edges = self._handoff_stack_edges(repository_path, number, head_sha)
+            stack_edges = self._handoff_stack_edges(repository_path, number)
         except MergeTrainGitHubError:
             raise
         except Exception as error:
@@ -3546,9 +3551,7 @@ class GitHubMergeTrainSnapshotReader:
             and editor.get("databaseId") in policy.enqueue.trusted_automation_github_user_ids
         )
 
-    def _handoff_stack_edges(
-        self, repository_path: str, number: int, head_sha: str
-    ) -> dict[str, tuple[str, str]]:
+    def _handoff_stack_edges(self, repository_path: str, number: int) -> dict[str, tuple[str, str]]:
         from control_plane.contracts.merge_train_stack_collapse import (
             MergeTrainStackCollapsePlanRecord,
         )
@@ -3608,41 +3611,17 @@ class GitHubMergeTrainSnapshotReader:
                 )
             ):
                 continue
-            current_heads = {entry.pull_request_number: entry.head_sha for entry in plan.entries}
             for mutation in plan.mutations:
-                child_head = current_heads[mutation.child_pull_request_number]
-                parent_head = current_heads[mutation.parent_pull_request_number]
-                if mutation.status == "mutated" and mutation.merge_commit_sha:
-                    merge_sha = mutation.merge_commit_sha
-                    edge = (mutation.expected_parent_head_sha, mutation.child_head_sha)
-                    current_heads[mutation.parent_pull_request_number] = merge_sha
-                    if mutation.parent_pull_request_number != number:
-                        continue
-                else:
-                    # Only the next planned effect can have succeeded without
-                    # its progress write. Reuse the executor's read-only recovery
-                    # proof, then bind it to this PR snapshot and exact parents.
-                    if mutation.parent_pull_request_number != number:
-                        break
-                    merge_sha = GitHubMergeTrainClient(
-                        transport=self.transport
-                    ).find_stack_child_merge_commit(
-                        repository=repository_path,
-                        child_head_sha=child_head,
-                        expected_parent_head_sha=parent_head,
-                        parent_head_ref=mutation.parent_head_ref,
-                        collapse_id=plan.collapse_id,
-                        child_pull_request_number=mutation.child_pull_request_number,
-                        parent_pull_request_number=mutation.parent_pull_request_number,
-                    )
-                    if not merge_sha or merge_sha != head_sha:
-                        break
-                    edge = (parent_head, child_head)
-                if merge_sha in edges and edges[merge_sha] != edge:
+                if (
+                    mutation.status != "mutated"
+                    or not mutation.merge_commit_sha
+                    or mutation.parent_pull_request_number != number
+                ):
+                    continue
+                edge = (mutation.expected_parent_head_sha, mutation.child_head_sha)
+                if mutation.merge_commit_sha in edges and edges[mutation.merge_commit_sha] != edge:
                     return {}
-                edges[merge_sha] = edge
-                if mutation.status != "mutated":
-                    break
+                edges[mutation.merge_commit_sha] = edge
         return edges
 
     def _safe_dependency_update_class(

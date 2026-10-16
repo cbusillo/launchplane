@@ -335,6 +335,19 @@ class GitHubHandoffTests(unittest.TestCase):
                 expected,
             )
 
+    def test_fresh_handoff_supersedes_older_edits_without_editor_queries(self) -> None:
+        edited = _comment(
+            "Older managed status",
+            id=2,
+            node_id="comment-node",
+            user={"id": 20, "login": "example"},
+            updated_at="2026-10-16T11:00:00Z",
+        )
+        ready = _comment(
+            id=3, user={"id": 20, "login": "example"}, created_at="2026-10-16T12:00:00Z"
+        )
+        self.assertEqual(self._read(([edited, ready],)).status, "ready")
+
     def test_complete_pagination_and_unavailable_or_malformed_evidence_fail_closed(self) -> None:
         ready_page = [_comment(id=index) for index in range(1, 101)]
         wait = _comment(
@@ -655,55 +668,143 @@ class GitHubHandoffTests(unittest.TestCase):
         self.assertEqual(set(checked), {2, 3})
         self.assertTrue(all(mutation.status == "mutated" for mutation in result.mutations))
 
-    def test_interrupted_stack_merge_requires_existing_provider_recovery_proof(self) -> None:
+    def test_uncheckpointed_provider_commit_cannot_carry_a_handoff(self) -> None:
         policy, plan, members = _stack_fixture()
-        mutation = plan.mutations[0]
-        for proven in (True, False):
-            with self.subTest(proven=proven), TemporaryDirectory() as directory:
-                store = FilesystemRecordStore(Path(directory))
-                store.write_merge_train_policy_record(policy)
-                progress = plan.model_copy(update={"status": "collapsing"})
-                store.write_merge_train_stack_collapse_plan_record(
-                    build_merge_train_stack_collapse_plan_record(
-                        plan=progress, source="test", updated_at=progress.updated_at
-                    )
+        merge_sha = "e" * 40
+        merge = {
+            "commit": {
+                "message": _stack_collapse_commit_message(
+                    collapse_id=plan.collapse_id,
+                    child_pull_request_number=2,
+                    parent_pull_request_number=1,
                 )
-                transport = RecordingMergeTrainGitHubTransport(
+            },
+            "parents": [{"sha": HEAD}, {"sha": members[1].head_sha}],
+        }
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(policy)
+            progress = plan.model_copy(update={"status": "collapsing"})
+            store.write_merge_train_stack_collapse_plan_record(
+                build_merge_train_stack_collapse_plan_record(
+                    plan=progress,
+                    source="test",
+                    updated_at=progress.updated_at,
+                )
+            )
+            # Even a provider commit matching the plan's message and parents
+            # cannot be promoted into mutated progress by an admission read.
+            reader = GitHubMergeTrainSnapshotReader(
+                transport=RecordingMergeTrainGitHubTransport(
                     responses=(
                         [_comment(user={"id": 20, "login": "example"})],
-                        {"commit": {"sha": "d" * 40}},
-                        {
-                            "commit": {
-                                "message": _stack_collapse_commit_message(
-                                    collapse_id=plan.collapse_id,
-                                    child_pull_request_number=2,
-                                    parent_pull_request_number=1,
-                                )
-                                if proven
-                                else "unrelated merge"
-                            },
-                            "parents": [{"sha": HEAD}, {"sha": members[1].head_sha}],
-                        },
-                        {
-                            "sha": "d" * 40,
-                            "parents": [{"sha": HEAD}, {"sha": mutation.child_head_sha}],
-                        },
+                        {"commit": {"sha": merge_sha}},
+                        merge,
+                        {"sha": merge_sha, "parents": merge["parents"]},
                     )
+                ),
+                repository_policy=self.policy,
+                branch_refresh_store=store,
+            )
+            handoff = reader._read_ready_handoff(
+                repository_path=REPOSITORY,
+                number=1,
+                head_sha=merge_sha,
+                base_branch="main",
+                base_sha="f" * 40,
+            )
+            self.assertEqual(handoff.status, "stale")
+            result = build_merge_train_dry_run_result(
+                policy=policy.policy,
+                snapshot=_snapshot(
+                    members[0].model_copy(update={"head_sha": merge_sha, "ready_handoff": handoff})
+                ),
+                batch_landing=True,
+            )
+            self.assertFalse(result.queue_order)
+            self.assertTrue(result.queue[0].ineligible_reasons)
+
+    def test_standalone_four_deep_execute_persists_progress_before_next_readiness(self) -> None:
+        policy, plan, members = _stack_fixture(4)
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_policy_record(policy)
+            saved = build_merge_train_stack_collapse_plan_record(
+                plan=plan,
+                source="test",
+                updated_at=plan.updated_at,
+            )
+            store.write_merge_train_stack_collapse_plan_record(saved)
+            checked: list[int] = []
+            heads = {member.number: member.head_sha for member in members}
+            edges: dict[str, tuple[str, str]] = {}
+
+            class Client(_RecordingStackCollapseBranchClient):
+                def begin_snapshot_pass(self, **_: object) -> None:
+                    pass
+
+                def merge_stack_child_into_parent(self, **kwargs: Any) -> str:
+                    result = super().merge_stack_child_into_parent(**kwargs)
+                    heads[kwargs["parent_pull_request_number"]] = result
+                    edges[result] = (kwargs["expected_parent_head_sha"], kwargs["child_head_sha"])
+                    return result
+
+                def read_pull_request_snapshot(
+                    self, *, repository: str, pull_request_number: int
+                ) -> MergeTrainPullRequestSnapshot:
+                    checked.append(pull_request_number)
+                    member = members[pull_request_number - 1]
+                    current = heads[pull_request_number]
+                    responses: tuple[object, ...] = (
+                        [
+                            _comment(
+                                f"Ready for the merge train\nHead: {member.head_sha}",
+                                user={"id": 20, "login": "example"},
+                            )
+                        ],
+                    )
+                    if current != member.head_sha:
+                        responses += (
+                            {
+                                "sha": current,
+                                "parents": [{"sha": value} for value in edges[current]],
+                            },
+                        )
+                    reader = GitHubMergeTrainSnapshotReader(
+                        transport=RecordingMergeTrainGitHubTransport(responses=responses),
+                        repository_policy=policy.policy.find_repository_policy(
+                            repository=repository, base_branch="main"
+                        ),
+                        branch_refresh_store=store,
+                    )
+                    handoff = reader._read_ready_handoff(
+                        repository_path=repository,
+                        number=pull_request_number,
+                        head_sha=current,
+                        base_branch=member.base_ref,
+                        base_sha="f" * 40,
+                    )
+                    return member.model_copy(update={"head_sha": current, "ready_handoff": handoff})
+
+            client = Client(merge_commit_shas=("e" * 40, "f" * 40, "1" * 40))
+            with patch(
+                "control_plane.merge_train_stack_collapse.GitHubMergeTrainClient",
+                return_value=client,
+            ):
+                result = execute_merge_train_stack_collapse_run_once(
+                    request=MergeTrainStackCollapseRunOnceEnvelope(
+                        repository=REPOSITORY, stack_collapse_plan_record_id=saved.record_id
+                    ),
+                    policy=policy.policy,
+                    policy_sha256=policy.policy_sha256,
+                    token="fixture",
+                    trace_id="test",
+                    recorded_at="2026-10-16T10:00:00Z",
+                    stack_collapse_store=store,
                 )
-                reader = GitHubMergeTrainSnapshotReader(
-                    transport=transport,
-                    repository_policy=self.policy,
-                    branch_refresh_store=store,
-                )
-                handoff = reader._read_ready_handoff(
-                    repository_path=REPOSITORY,
-                    number=1,
-                    head_sha="d" * 40,
-                    base_branch="main",
-                    base_sha="f" * 40,
-                )
-                self.assertEqual(handoff.status == "ready", proven)
-                self.assertTrue(all(request.method == "GET" for request in transport.requests))
+            self.assertEqual(set(checked), {2, 3, 4})
+            completed = cast(dict[str, object], result.accepted_result["stack_collapse_plan"])
+            self.assertEqual(completed["status"], "waiting_for_root_checks")
 
     def test_standalone_admit_uses_live_reader_and_stored_collapse_proof(self) -> None:
         policy, plan, members = _stack_fixture()

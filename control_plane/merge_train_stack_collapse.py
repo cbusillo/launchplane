@@ -115,6 +115,28 @@ def execute_merge_train_stack_collapse_run_once(
             ),
             read_only=False,
         )
+
+        def checkpoint_progress(progress_plan: MergeTrainStackCollapsePlan) -> None:
+            if mutation_checkpoint is not None:
+                mutation_checkpoint(
+                    "merge_stack_branches",
+                    next(
+                        (
+                            mutation.child_pull_request_number
+                            for mutation in progress_plan.mutations
+                            if mutation.status != "mutated"
+                        ),
+                        None,
+                    ),
+                )
+            stack_collapse_store.write_merge_train_stack_collapse_plan_record(
+                build_merge_train_stack_collapse_plan_record(
+                    plan=progress_plan,
+                    source=f"service:stack-collapse-progress:{trace_id}",
+                    updated_at=progress_plan.updated_at,
+                )
+            )
+
         executed_plan = execute_merge_train_stack_collapse_plan(
             plan=existing_record.plan,
             branch_client=github_client,
@@ -126,23 +148,7 @@ def execute_merge_train_stack_collapse_run_once(
                 ),
             ),
             updated_at=recorded_at,
-            checkpoint=(
-                lambda progress_plan: (
-                    mutation_checkpoint(
-                        "merge_stack_branches",
-                        next(
-                            (
-                                mutation.child_pull_request_number
-                                for mutation in progress_plan.mutations
-                                if mutation.status != "mutated"
-                            ),
-                            None,
-                        ),
-                    )
-                    if mutation_checkpoint is not None
-                    else None
-                )
-            ),
+            checkpoint=checkpoint_progress,
         )
         collapse_record = build_merge_train_stack_collapse_plan_record(
             plan=executed_plan,
