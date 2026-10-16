@@ -134,3 +134,31 @@ before a new release can use inventory. Application candidates require a valid
 immutable provider reference before reservation, persisted intent or settings
 staging. Retained old slots need no deployment tag because switch-back does not
 redeploy them.
+
+The default service deploy provider now carries a cutover factory wherever the
+caller supplies its record store and control-plane root: direct deploy,
+promotion, provider recovery, HTTP and event-driven testing reconciliation.
+Each factory reloads the profile and recompiles the exact plan before binding a
+host. Odoo's API bootstrap and both queued worker entrypoints use the same
+admission factory. A no-argument legacy provider supplies no cutover capability;
+a two-slot lane cannot fall back to an in-place deploy.
+
+Provider-host code is installed alongside the API and worker, through exactly
+one Python package entry point named `dokploy` in `launchplane.cutover_hosts`.
+The entry point is a no-argument constructor implementing `InstalledCutoverHost`
+in `control_plane/dokploy/service_cutover.py`. Its builders only bind/read;
+they supply the existing guarded transport, private preparation, recovery,
+exclusive lease, prepared-origin server, readiness/browser probes, writer
+inventory and applied Traefik file mount. Product records or HTTP input cannot
+select a Python module, executable or credential. No entry point or multiple
+entries refuse with `cutover_host_capability_unavailable` before effects.
+
+The Odoo source assembly replaces host-provided maintenance, settings, fencing
+and handoff callbacks with the native consumers around one shared
+`ContainerSlotWriters` instance. A dynamically resolved private runner follows
+recreation, and startup preflight must validate both forward and retained
+settings before candidate effects. The concrete startup capability is supplied
+by the installed host; this discovery contract does not install host code,
+provide new access, seed a lane or prove the actual package/mount/transport.
+Installation into both runtimes and qualification against the recorded lane
+remain prerequisites on #3268 before an exact Client-accepted gated release.

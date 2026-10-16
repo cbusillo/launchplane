@@ -12,6 +12,7 @@ import uuid
 
 import click
 
+from control_plane.dokploy.service_cutover import service_odoo_cutover_factory
 from control_plane.agent_operator_contract import write_agent_operator_contract
 from control_plane.github_request_timing import configure_github_request_logging
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
@@ -921,12 +922,12 @@ def service_odoo_workers_run_once(
     generated_lease_owner = (
         f"{socket.gethostname()}:{uuid.uuid4()}" if not lease_owner.strip() else lease_owner
     )
+    worker_store = _store(state_dir=state_dir, database_url=database_url)
+    worker_root = control_plane_root or _control_plane_root()
     result = run_odoo_stable_operation_worker_once(
-        record_store=cast(
-            OdooStableOperationWorkerStore,
-            _store(state_dir=state_dir, database_url=database_url),
-        ),
-        control_plane_root_path=control_plane_root or _control_plane_root(),
+        record_store=cast(OdooStableOperationWorkerStore, worker_store),
+        cutover_provider_factory=service_odoo_cutover_factory(worker_store, worker_root),
+        control_plane_root_path=worker_root,
         lease_owner=generated_lease_owner,
         lease_seconds=lease_seconds,
         heartbeat_seconds=heartbeat_seconds,
@@ -1067,12 +1068,12 @@ def service_odoo_workers_run(
     previous_sigterm = signal.signal(signal.SIGTERM, _request_stop)
     previous_sigint = signal.signal(signal.SIGINT, _request_stop)
     try:
+        worker_store = _store(state_dir=state_dir, database_url=database_url)
+        worker_root = control_plane_root or _control_plane_root()
         result = run_odoo_stable_operation_worker_loop(
-            record_store=cast(
-                OdooStableOperationWorkerStore,
-                _store(state_dir=state_dir, database_url=database_url),
-            ),
-            control_plane_root_path=control_plane_root or _control_plane_root(),
+            record_store=cast(OdooStableOperationWorkerStore, worker_store),
+            cutover_provider_factory=service_odoo_cutover_factory(worker_store, worker_root),
+            control_plane_root_path=worker_root,
             lease_owner=generated_lease_owner,
             lease_seconds=lease_seconds,
             heartbeat_seconds=heartbeat_seconds,

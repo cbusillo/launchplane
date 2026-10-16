@@ -11,6 +11,7 @@ import click
 from fastapi import FastAPI
 import uvicorn
 
+from control_plane.dokploy.service_cutover import service_odoo_cutover_factory
 from control_plane.drivers import native_routes
 from control_plane.github_request_timing import configure_github_request_logging
 from control_plane.github_app_webhook import handle_github_app_webhook_request
@@ -205,6 +206,9 @@ def create_launchplane_service_application(
         authz_policy=resolved_fastapi_policy.policy,
         authz_policy_runtime=authz_policy_runtime,
         record_store_factory=lambda: service_record_store,
+        odoo_cutover_provider_factory=service_odoo_cutover_factory(
+            service_record_store, control_plane_root_path or control_plane_root()
+        ),
         health_monitor_scheduler=HealthMonitorScheduler(service_record_store),
         testing_drill_scheduler=OdooTestingDrillScheduler(service_record_store),
         preview_lifecycle_scheduler=PreviewLifecycleScheduler(
