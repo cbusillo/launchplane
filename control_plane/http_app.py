@@ -28161,7 +28161,7 @@ def create_launchplane_fastapi_app(
                 urgent_reason=reason,
                 urgent_checklist_digest=digest,
             ),
-            adopt_invitation=lambda store, profile, digest, issue, comment, dry_run: (
+            adopt_invitation=lambda store, profile, digest, issue, comment, dry_run, reason: (
                 adopt_release_invitation(
                     store=store,
                     control_plane_root=resolved_control_plane_root,
@@ -28170,6 +28170,7 @@ def create_launchplane_fastapi_app(
                     issue_number=issue,
                     comment_id=comment,
                     dry_run=dry_run,
+                    reason=reason,
                 )
             ),
         ),

@@ -888,6 +888,20 @@ def publish_release_invitation(
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
+            if request:
+                # Keep the adoption identity and original-comment custody through
+                # every ordinary rewrite, including later reminders/completion.
+                receipts += "\n" + "\n".join(
+                    line
+                    for line in _receipt_lines(request)
+                    if line.startswith(
+                        (
+                            ADOPTED_ORIGINAL_PREFIX,
+                            "<!-- launchplane:release-adoption:",
+                            "Adoption reason: ",
+                        )
+                    )
+                )
             # The admin's reason for opening early stays on the request through
             # later silent updates; neutralize mentions in it like Client notes.
             why_now = (

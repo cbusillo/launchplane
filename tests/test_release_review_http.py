@@ -587,6 +587,7 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(result.status_code, 200, result.text)
                 self.assertEqual(adopt.call_args.kwargs["dry_run"], dry_run)
+                self.assertEqual(adopt.call_args.kwargs["reason"], "Adopt existing request.")
             publish.assert_not_called()
         self.assertEqual(
             self.store.list_release_review_decision_records(product="example-site"), ()

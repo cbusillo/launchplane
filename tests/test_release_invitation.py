@@ -99,6 +99,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             checklist_digest=self.review.checklist_digest,
             issue_number=91,
             comment_id=600,
+            reason="Preserve already sent request.",
         )
         self.assertTrue(adopt_release_invitation(**kwargs, dry_run=True))
         self.assertEqual(self.posts, [])
@@ -107,12 +108,22 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.posts), 1)
         self.assertNotIn("@site-owner", self.posts[0]["body"])
         self.assertTrue(self.publish())
+        self.assertTrue(self.publish())
+        self.assertTrue(adopt_release_invitation(**kwargs, dry_run=False))
         self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.comments[0], original)
+        self.assertIn(json.dumps(kwargs["reason"]), self.comments[1]["body"])
+        self.complete_release()
+        self.assertFalse(self.publish())
         self.assertEqual(self.comments[0], original)
 
     def test_manual_adoption_refuses_other_candidate_and_changed_checklist(self) -> None:
         self.issues.append(
-            {"number": 91, "body": release_request_issue_marker(self.profile.product)}
+            {
+                "number": 91,
+                "state": "open",
+                "body": release_request_issue_marker(self.profile.product),
+            }
         )
         self.comments.append({"id": 600, "body": "unrelated", "created_at": self.now.isoformat()})
         for digest in (self.review.checklist_digest, "0" * 64):

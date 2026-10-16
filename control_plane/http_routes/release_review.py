@@ -68,7 +68,9 @@ class ReleaseReviewRouteDependencies:
     ]
     control_plane_root: Path | None = None
     adopt_invitation: (
-        Callable[[ReleaseReviewStore, LaunchplaneProductProfileRecord, str, int, int, bool], bool]
+        Callable[
+            [ReleaseReviewStore, LaunchplaneProductProfileRecord, str, int, int, bool, str], bool
+        ]
         | None
     ) = None
 
@@ -573,6 +575,7 @@ def register_release_review_routes(
                     envelope.adopt_issue_number,
                     envelope.adopt_comment_id,
                     envelope.dry_run,
+                    envelope.reason,
                 )
                 if envelope.adopt_issue_number is not None
                 and envelope.adopt_comment_id is not None
