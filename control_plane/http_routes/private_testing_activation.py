@@ -7,6 +7,7 @@ from typing import Annotated
 import click
 from fastapi import Depends, Header, Path as PathParameter
 from control_plane.build_provenance import BuildProvenanceError
+from control_plane.github_app_identity import GitHubAppIdentityError
 
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -153,19 +154,25 @@ def register_private_testing_activation_routes(
                 in_progress_message="Private testing source is running under its original key.",
                 reconcile_message="Source outcome is uncertain; preserve the original key and inspect original readback.",
             )
-        except (ValueError, FileNotFoundError) as error:
-            raise dependencies.http_error(
-                status_code=409,
-                trace_id=trace,
-                code="private_testing_activation_unqualified",
-                message="Testing source, isolation, custody review or original operation is unqualified.",
-            ) from error
-        except (click.ClickException, OSError, BuildProvenanceError) as error:
+        except (
+            GitHubAppIdentityError,
+            click.ClickException,
+            OSError,
+            BuildProvenanceError,
+            RuntimeError,
+        ) as error:
             raise dependencies.http_error(
                 status_code=503,
                 trace_id=trace,
                 code="private_testing_activation_provider_unavailable",
                 message="Provider/source evidence is unavailable; preserve any original operation key.",
+            ) from error
+        except ValueError as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="private_testing_activation_unqualified",
+                message="Testing source, isolation, custody review or original operation is unqualified.",
             ) from error
 
     app.add_api_route(

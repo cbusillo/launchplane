@@ -116,6 +116,8 @@ relative-file planner readback is not its receipt. `runtime_inputs_match_review`
 separately describes env drift after normal image/identity delivery.
 `certificate_verified`, `host_binding_verified`, `transport_verified` and
 `deployment_performed` stay false even when configuration matches.
+The returned `trust.reviewed_ca_bundle_sha256` remains reviewed intent and
+`trust.verified` stays false; it is not a measurement of a later endpoint record.
 
 After a lost response, retain the original payload/key. An apply retry uses the
 durable runner to adopt an exact source match without repeating the update.

@@ -10,11 +10,13 @@ from control_plane.contracts.deploy_reference import (
     is_digest_pinned_image_reference,
     provider_image_reference,
 )
-from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_identity import (
+    COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
+    RuntimeIdentity,
+    runtime_identity_env,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
-
-COMPOSE_IMAGE_REFERENCE_ENV_KEYS = ("DOCKER_IMAGE_REFERENCE", "LAUNCHPLANE_IMAGE_REFERENCE")
 
 
 def dokploy_deploy_artifact_reference(

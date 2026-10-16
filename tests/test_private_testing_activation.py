@@ -18,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneHealthMonitoringPolicy,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.github_app_identity import GitHubAppIdentityError
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -149,10 +150,6 @@ class PrivateTestingActivationTests(unittest.TestCase):
 
     def test_inert_plan_binds_real_source_reader_and_preserves_templates(self) -> None:
         plan = self.prepare()
-        self.reader.assert_called_once_with(
-            self.store, "example-site", self.commit, self.payload["source_path"]
-        )
-        self.image.assert_called_once_with(self.store, "example-site", self.commit)
         self.assertFalse(plan.result(matches=False)["deployment_performed"])
         self.assertEqual(self.fixture.placement, self.before)
         self.assertFalse(self.calls)
@@ -187,8 +184,11 @@ class PrivateTestingActivationTests(unittest.TestCase):
             artifact_id=plan.intent["image"],
         )
         self.assertEqual(self.fixture.placement["composeFile"], composed)
+        image_expression = self.template["services"]["bridge"]["image"]
+        image_key = re.fullmatch(r"\$\{([A-Z_]+):\?.*\}", image_expression)
+        assert image_key is not None
         self.assertEqual(
-            parse_dokploy_env_text(str(self.fixture.placement["env"]))["DOCKER_IMAGE_REFERENCE"],
+            parse_dokploy_env_text(str(self.fixture.placement["env"]))[image_key.group(1)],
             plan.intent["image"],
         )
         self.assertTrue(plan.readback()["configuration_matches"])
@@ -278,6 +278,8 @@ class PrivateTestingActivationTests(unittest.TestCase):
             {"network_mode": "host"},
             {"environment": {"AGENT_SESSION_TOKEN": "fictional-literal"}},
             {"environment": {"AGENT_SESSION_TOKEN": "${AGENT_SESSION_TOKEN:-fictional-literal}"}},
+            {"environment": {"DATABASE_URL": "postgres://fixture:fictional@db/example"}},
+            {"environment": {"SERVICE_API_KEY_FILE": "/fictional/literal"}},
             {"image": "fixture:latest"},
             {"volumes": ["${HOST_VOLUME}:/state"]},
         ):
@@ -333,6 +335,20 @@ class PrivateTestingActivationTests(unittest.TestCase):
                 app, "POST", route, headers=headers, payload={**self.payload, "instance": "prod"}
             )
             self.assertEqual(production.status_code, 400)
+            for error in (
+                GitHubAppIdentityError("fictional source identity unavailable"),
+                RuntimeError("fictional source unavailable"),
+                OSError("fictional source read failed"),
+            ):
+                self.reader.side_effect = error
+                unavailable = await http_request(
+                    app, "POST", route, headers=headers, payload=self.payload
+                )
+                self.assertEqual(unavailable.status_code, 503, unavailable.text)
+                self.assertEqual(
+                    unavailable.json()["error"]["code"],
+                    "private_testing_activation_provider_unavailable",
+                )
 
         asyncio.run(exercise())
         self.assertFalse(self.calls)

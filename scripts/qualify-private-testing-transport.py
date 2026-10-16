@@ -232,7 +232,11 @@ def qualify(binary: Path) -> None:
                             )
                             with patch.dict(os.environ, {"SSL_CERT_FILE": bundle}):
                                 try:
-                                    fetch_private_health_url(bad_origin + "/health", 5)
+                                    fetch_private_health_url(
+                                        bad_origin + "/health",
+                                        5,
+                                        tls_ca_pem=Path(bundle).read_text(),
+                                    )
                                 except ssl.SSLError:
                                     pass
                                 else:

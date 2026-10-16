@@ -15,6 +15,7 @@ import click
 from pydantic import Field, field_validator
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.dokploy import api, source
 from control_plane.generic_web_testing_exclusion import _bind, _inventory
 from control_plane.dokploy.target_source_setup import repository_source_url
@@ -34,10 +35,10 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.runtime_platform_credentials import looks_like_credential
 from control_plane.testing_activation import read_product_compose, verified_product_image
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
-from control_plane.workflows.dokploy_deploy import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 
 ROUTE = "/v1/products/{product}/private-testing-transport/activation"
 _SOURCE_FIELDS = (
@@ -115,7 +116,7 @@ def _qualify_template(document: dict[str, Any], runtime_service: str) -> None:
         if not isinstance(environment, dict):
             raise PrivateTestingTransportRefused("Managed environment must use explicit mapping.")
         for key, value in environment.items():
-            if re.search(r"(?:TOKEN|SECRET|PASSWORD|CREDENTIAL|KEY)$", key) and not (
+            if looks_like_credential(key, str(value)) and not (
                 isinstance(value, str)
                 and re.fullmatch(r"\$\{[A-Z_][A-Z0-9_]*(?:(?::?\?[^}]*)|:-|-)?\}", value)
             ):
@@ -383,7 +384,8 @@ class PrivateTestingActivationAdapter:
             "server_url": f"wss://{authority}/agent-session/connect",
             "trust": {
                 "monitor_trust_scope": "endpoint",
-                "ca_bundle_sha256": self.request.ca_bundle_sha256,
+                "reviewed_ca_bundle_sha256": self.request.ca_bundle_sha256,
+                "verified": False,
                 "required_ip_san": str(self.request.private_ip),
                 "receiver_ca_bundle_path": self.request.receiver_ca_bundle_path,
             },
