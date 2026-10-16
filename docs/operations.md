@@ -1915,6 +1915,47 @@ policy covers provider incidents when qualifying notification delivery. The
 route must have passed its existing product-scope authorization check; ordinary
 in-progress retries and idempotency-protocol errors do not open delivery incidents.
 
+Recurring delivery evidence reads use a derived storage index, not an event-time
+watermark. Each pass reads at most `DELIVERY_EVIDENCE_PAGE_SIZE` changed sources
+and recovery queries use the indexed matching successful
+candidate, including successes between polls. Database triggers capture source
+inserts, updates and deletes in their transaction, including writes by an older
+running service or Core SQL, so late/backdated records and changes to old steps
+remain visible.
+Release dependencies include unstarted steps and failure recovery; creating or
+updating a step wakes its decision. A per-lane monitor lock excludes overlapping
+scans, and acknowledgement compares the source version so concurrent updates
+remain pending. Failed persistence leaves work pending for retry after restart.
+This does not add release or authorization authority.
+
+The index has at most one row and one pending version per retained source.
+Acknowledged signatures are bounded by that source's fixed event/step plan, and
+DB retention deletes remove its row and release bindings, including bulk deletes.
+The new per-product checkpoint stays constant size after bootstrap. The previous
+monitor's failure receipt is read once and preserved unchanged for overlapping
+old replicas and rollback compatibility; the current monitor never appends to or
+rewrites it. Its growth ends with the last old monitor pass. The migration traverses old
+DB sources once; filesystem rehearsals do the same on first index use and mark
+pending work before atomic source replacement under the bundle lock. Existing
+processed identities are consumed during paged bootstrap and then removed from
+the new checkpoint, while the original legacy receipt remains intact. The filesystem index lives at `.delivery-evidence.sqlite3` under
+the explicit state directory. Use store APIs for file-backed evidence writes;
+editing historical JSON files directly does not update its derived index.
+New or changed evidence runs ahead of initial historical backfill, so an
+upgrade backlog cannot postpone a new failure behind the old history. The fixed
+latest identities from the first-scan snapshot are also read by key, so its
+existing latest failure can alert on the first pass while old pages drain. The
+migration uses a frozen schema and raw-JSON projection without validating
+historical rows against current runtime models or acquiring a lock per row.
+Installing capture and backfilling are one migration transaction: source-table
+writes, including idempotency writes, wait until that transaction commits. Use
+the existing drained service migration/restart path; this is a one-time upgrade
+cost, and a rollback image may still read its preserved legacy receipt.
+File-backed history is backfilled by the first monitor pass; a damaged old file
+can make monitoring unavailable but cannot block a new source write.
+Storage outcomes and the incident/outbox remain the authorities; the index owns
+only discovery, ordering and deduplication bookkeeping.
+
 Merged default-branch source waiting for release is not a production failure,
 regardless of its age. Client acceptance starts a release; engineering-only
 changes may wait on testing until a later release. This wait never opens a red

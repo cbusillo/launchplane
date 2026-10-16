@@ -4,6 +4,13 @@ from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 
 from pathlib import Path
 
+from control_plane.storage.delivery_evidence import (
+    DeliveryEvidenceIndex,
+    install_triggers,
+    metadata as delivery_evidence_metadata,
+    register_source_events,
+)
+
 from uuid import uuid4
 
 from collections.abc import Callable, Iterator, Sequence
@@ -1002,6 +1009,10 @@ def _payload_from_row(row: object) -> PayloadDict:
 
 class Base(DeclarativeBase):
     pass
+
+
+for _delivery_table in delivery_evidence_metadata.sorted_tables:
+    _delivery_table.to_metadata(Base.metadata)
 
 
 class LaunchplaneServiceDeployDrainRow(Base):
@@ -5704,8 +5715,14 @@ def _engine_connect_args(
 
 ORIGINAL_MUTATION_INTENT_ROUTE = "/internal/provider-original-intent"
 
+register_source_events(Base)
+
 
 class PostgresRecordStore(HumanSessionStore):
+    @contextmanager
+    def delivery_evidence_index(self) -> Iterator[DeliveryEvidenceIndex]:
+        yield DeliveryEvidenceIndex(self._engine)
+
     def __init__(
         self,
         *,
@@ -5751,6 +5768,8 @@ class PostgresRecordStore(HumanSessionStore):
             self.verify_schema()
             return
         Base.metadata.create_all(self._engine)
+        with self._engine.begin() as connection:
+            install_triggers(connection)
 
     def list_recorded_product_scopes(self) -> tuple[str, ...]:
         """Product projections include historical records without an active profile."""
