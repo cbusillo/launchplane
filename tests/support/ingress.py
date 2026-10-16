@@ -44,6 +44,8 @@ class _FakeNpmplusIngressClient:
     ) -> NpmplusProxyHost:
         self.calls.append(f"update:{host_id}")
         updated = NpmplusProxyHost.model_validate({"id": host_id, **payload.to_api_payload()})
+        current = next(host for host in self.proxy_hosts if host.id == host_id)
+        updated.enabled = current.enabled
         self.proxy_hosts = [updated if host.id == host_id else host for host in self.proxy_hosts]
         return updated
 

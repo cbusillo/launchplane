@@ -113,6 +113,8 @@ class ReplacementBindings:
 def disposable_testing_supersession(
     operation: OdooStableTargetReplacementOperationRecord,
     bindings: ReplacementBindings,
+    *,
+    usage_store: object | None = None,
 ) -> OdooStableTargetReplacementOperationRecord:
     from control_plane.testing_replacement_recovery import service_testing_operation
 
@@ -125,6 +127,7 @@ def disposable_testing_supersession(
         product=operation.product,
         context=operation.context,
         instance=operation.instance,
+        usage_store=usage_store,
     )
     evidence = bindings.safety
     preparation = bindings.preparation

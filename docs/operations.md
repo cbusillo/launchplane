@@ -1334,6 +1334,14 @@ read with all mutation flags disabled so drift fails closed instead of changing
 the route. Context-scoped callers retain the existing provider-mutation
 contract; do not grant that broader scope merely to inspect one testing lane.
 
+For a current independent Odoo testing generation whose new domain is absent
+from the public edge, use the separate
+[testing public-edge continuation](disposable-lanes.md#continue-a-restored-generations-public-edge).
+It derives the exact route from service records and reuses a covering existing
+certificate without changing generic instance-scoped ingress authority. It
+preserves the restored copy and supplies same-key recovery; another bootstrap
+or restore is never a TLS repair.
+
 For explicitly approved maintenance of an already-authorized transitional set,
 use `Manage Launchplane Authorization` on the default branch. Select the
 intended `managed_set`, then dispatch `mode=dry_run` with the final single-line
@@ -3401,6 +3409,17 @@ alone is not proof that an existing testing copy has been repaired.
 mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   changes. `migrate-secret-transport` dry-run, `odoo-overrides list`, and
   `odoo-overrides show` stay read-only inspection paths.
+- Secret-transport migration commits each override's references, binding metadata,
+  and audit events in one transaction. Concurrent override or binding edits refuse
+  that transaction; review the fresh dry-run and rerun instead of replaying stale
+  intent. Already committed lanes remain valid if a later lane fails. A legacy
+  binding remains enabled while another override still references it, including
+  lanes excluded by `--context` or `--instance`; migrating the last consumer
+  disables it. Rerunning also repairs an old partial relabel whose destination is
+  already configured, restoring safety metadata the former relabel helper omitted
+  in the same transaction, and preserves pending website intent and apply snapshots.
+  A conflicting destination's scope, status, or safety metadata requires explicit
+  local/bootstrap repair before retry. No secret values or versions are copied.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
   persisted to the Dokploy compose target environment before the web container

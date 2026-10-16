@@ -109,10 +109,18 @@ class NpmplusProxyHostPayload(BaseModel):
         return self
 
     def to_api_payload(self) -> JsonObject:
+        if self.trust_forwarded_proto or not self.http2_support or self.meta:
+            raise ValueError(
+                "The current NPMplus API does not accept legacy protocol or metadata writes."
+            )
         payload = self.model_dump(
             mode="json",
             exclude={
                 "access_list_id": True,
+                "enabled": True,
+                "meta": True,
+                "trust_forwarded_proto": True,
+                "http2_support": True,
                 "locations": {"__all__": {"id"}},
             },
         )
@@ -165,6 +173,23 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
     @classmethod
     def _normalize_null_locations(cls, value: object) -> object:
         return () if value is None else value
+
+
+class NpmplusCertificate(BaseModel):
+    """Public certificate metadata only; provider DNS credentials are discarded."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = Field(ge=1)
+    domain_names: tuple[str, ...]
+    expires_on: str
+
+
+class NpmplusOtherHost(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    domain_names: tuple[str, ...] = Field(min_length=1)
+    enabled: bool
 
 
 @dataclass(frozen=True)
@@ -247,13 +272,54 @@ class NpmplusClient:
             proxy_hosts.append(NpmplusProxyHost.model_validate(host_payload))
         return tuple(proxy_hosts)
 
-    def get_proxy_host(self, host_id: int) -> NpmplusProxyHost:
+    def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost:
         payload = self._request(method="GET", path=f"/api/nginx/proxy-hosts/{host_id}")
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus proxy-host read returned an invalid payload.")
+        if public_only and (
+            payload.get("npmplus_nginx_online") is not True
+            or any(
+                payload.get(field) != expected
+                for field, expected in {
+                    "npmplus_mtls_certificate_id": 0,
+                    "npmplus_mtls_verify_client_optional": False,
+                    "npmplus_mtls_bypass_auth_request": False,
+                    "npmplus_auth_request_upstream": "",
+                    "npmplus_location_config": "",
+                    "npmplus_directory": "",
+                }.items()
+            )
+        ):
+            raise click.ClickException("NPMplus route is not a loaded public proxy host.")
         return NpmplusProxyHost.model_validate(payload)
 
+    def list_other_host_domains(self) -> tuple[str, ...]:
+        domains: list[str] = []
+        for kind in ("redirection-hosts", "dead-hosts"):
+            payload = self._request(method="GET", path=f"/api/nginx/{kind}")
+            if not isinstance(payload, list):
+                raise click.ClickException("NPMplus hostname claims are unavailable.")
+            for item in payload:
+                host = NpmplusOtherHost.model_validate(item)
+                if host.enabled:
+                    domains.extend(name.strip().lower() for name in host.domain_names)
+        return tuple(domains)
+
+    def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
+        payload = self._request(method="GET", path=f"/api/nginx/certificates/{certificate_id}")
+        if not isinstance(payload, dict):
+            raise click.ClickException("NPMplus certificate read returned an invalid payload.")
+        certificate = NpmplusCertificate.model_validate(payload)
+        if certificate.id != certificate_id:
+            raise click.ClickException("NPMplus certificate identity changed.")
+        return certificate
+
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
+        if not payload.enabled:
+            raise click.ClickException(
+                "The current NPMplus API cannot atomically create a disabled host; "
+                "existing hosts use the separate enable/disable lifecycle."
+            )
         response = self._request(
             method="POST",
             path="/api/nginx/proxy-hosts",

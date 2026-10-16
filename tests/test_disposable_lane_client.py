@@ -26,11 +26,13 @@ class DisposableLaneClientTests(unittest.TestCase):
         reason_code: object = None,
         runtime_facts: bool | None = False,
         qualification: str | None = None,
+        data: str = "unknown",
+        production_resources: str = "unknown",
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
         )
-        facts = {"usage": usage, "data": "unknown", "production_resources": "unknown"}
+        facts = {"usage": usage, "data": data, "production_resources": production_resources}
         inspected = {
             "trace_id": "fixture-trace",
             "result": {"mode": "inspect", "binding_sha256": "a" * 64, **facts},
@@ -94,6 +96,14 @@ class DisposableLaneClientTests(unittest.TestCase):
             ):
                 status = client["main"]()
             return status, output.getvalue(), request
+
+    def test_qualified_resource_facts_are_reported_without_private_evidence(self) -> None:
+        for data, resources in (("reproducible", "isolated"), ("only_copy", "shared")):
+            status, output, _ = self.call_client(data=data, production_resources=resources)
+            self.assertEqual(status, 0, output)
+            facts = json.loads(output)["facts"]
+            self.assertEqual((facts["data"], facts["production_resources"]), (data, resources))
+            self.assertNotIn("private-fixture", output)
 
     def test_collection_uses_inspected_binding_and_reports_only_safe_facts_and_coverage(
         self,
