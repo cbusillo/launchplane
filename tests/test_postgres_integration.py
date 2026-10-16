@@ -102,6 +102,7 @@ from tests.test_every_code_feedback_resume_storage import (
     T1 as FEEDBACK_T1,
 )
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapPrerequisiteScenario
+from tests import test_testing_public_ingress as public_ingress_tests
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
     _ReadOnlyTransport,
@@ -1760,6 +1761,41 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_notification_policy_id_cannot_be_claimed_by_two_scopes(self) -> None:
+        from control_plane.contracts.public_ingress_monitoring import (
+            NotificationPolicyScopeConflict,
+            PublicIngressNotificationPolicyRecord,
+        )
+        from tests.http_app_test_support import _public_ingress_notification_policy_record
+
+        with _store_for_fresh_head_database() as store:
+            base = _public_ingress_notification_policy_record().model_copy(
+                update={
+                    "purpose": "release_digest",
+                    "instance": "prod",
+                }
+            )
+            barrier = threading.Barrier(2)
+
+            def create(product: str) -> PublicIngressNotificationPolicyRecord | None:
+                candidate = base.model_copy(
+                    update={"product": product, "context": product + "-prod"}
+                )
+                barrier.wait(timeout=30)
+                try:
+                    store.write_public_ingress_notification_policy_record(
+                        candidate, protect_scope=True
+                    )
+                    return candidate
+                except NotificationPolicyScopeConflict:
+                    return None
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                outcomes = tuple(executor.map(create, ("first-site", "second-site")))
+            accepted = tuple(record for record in outcomes if record is not None)
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(store.list_public_ingress_notification_policy_records(), accepted)
+
     def test_delivery_index_migration_backfills_existing_production_history(self) -> None:
         from importlib import import_module
         from control_plane.storage.postgres import LaunchplaneDeploymentRow
@@ -10968,6 +11004,12 @@ class RealPostgresPreviewReservationRecoveryTests(
         return self.enterContext(_head_postgres_database())
 
 
+class RealPostgresTestingPublicIngressTests(public_ingress_tests.TestingPublicIngressTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+
+
 class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteScenario):
     def setUp(self) -> None:
         self.seed(self.enterContext(_head_postgres_database()))
@@ -12849,6 +12891,99 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
+
+
+class RealPostgresSecretReferenceTests(unittest.TestCase):
+    def test_selection_cas_rollback_and_late_completion_preservation(self) -> None:
+        from tests.test_odoo_secret_references import seed, KEY
+        from control_plane.odoo_secret_references import plan_secret_reference_reconciliation
+        from control_plane.storage.product_authority_bundle import SecretDeliveryConflictError
+        from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
+
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as store,
+        ):
+            profile, original = seed(store)
+            item = original.config_parameters[1]
+            original = original.model_copy(
+                update={
+                    "config_parameters": (
+                        original.config_parameters[0],
+                        item.model_copy(
+                            update={"value": item.value.model_copy(update={"value": True})}
+                        ),
+                    )
+                }
+            )
+            store.write_odoo_instance_override_record(original)
+            _, bundle = plan_secret_reference_reconciliation(
+                store=store, profile=profile, record=original, keys=(KEY,)
+            )
+            with patch.object(
+                store, "_after_product_authority_bundle_step", side_effect=RuntimeError("rollback")
+            ):
+                with self.assertRaises(RuntimeError):
+                    store.write_product_authority_bundle(bundle)
+            self.assertEqual(
+                store.read_odoo_instance_override_record(context_name="cm", instance_name="prod"),
+                original,
+            )
+            peer = PostgresRecordStore(database_url=url)
+            self.addCleanup(peer.close)
+            item = original.config_parameters[1]
+            peer.write_odoo_instance_override_record(
+                original.model_copy(
+                    update={
+                        "config_parameters": (
+                            original.config_parameters[0],
+                            item.model_copy(
+                                update={"value": item.value.model_copy(update={"value": 1})}
+                            ),
+                        )
+                    }
+                )
+            )
+            with self.assertRaises(OdooInstanceOverrideConflictError):
+                store.write_product_authority_bundle(bundle)
+            self.assertIs(
+                type(
+                    store.read_odoo_instance_override_record(
+                        context_name="cm", instance_name="prod"
+                    )
+                    .config_parameters[1]
+                    .value.value
+                ),
+                int,
+            )
+            peer.write_odoo_instance_override_record(original)
+            candidate = next(item for item in peer.list_secret_bindings() if item.instance)
+            peer.write_secret_binding(
+                candidate.model_copy(update={"binding_id": "concurrent-candidate"})
+            )
+            with self.assertRaises(SecretDeliveryConflictError):
+                store.write_product_authority_bundle(bundle)
+            peer.write_secret_binding(
+                candidate.model_copy(
+                    update={"binding_id": "concurrent-candidate", "status": "disabled"}
+                )
+            )
+            _, refreshed = plan_secret_reference_reconciliation(
+                store=store, profile=profile, record=original, keys=(KEY,)
+            )
+            store.write_product_authority_bundle(refreshed)
+            corrected = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="prod"
+            )
+            self.assertEqual(corrected, refreshed.odoo_instance_override_writes[0].record)
+            _write_odoo_instance_override_apply_result(
+                record_store=peer, record=original, status="pass", detail="late prior operation"
+            )
+            after = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="prod"
+            )
+            self.assertEqual(after.config_parameters, corrected.config_parameters)
+            self.assertEqual(after.last_apply.status, "pass")
 
 
 class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):

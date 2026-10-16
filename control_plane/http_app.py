@@ -3,7 +3,6 @@ from control_plane.dokploy_target_comparison import (
     require_provider_target_expectation,
 )
 from control_plane import odoo_website_settings as control_plane_odoo_website_settings
-from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
 from control_plane.odoo_connection_isolation import (
     ConnectionIsolationOutcomeUnknown,
@@ -372,15 +371,6 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
     complete_launchplane_mutation_reservation,
 )
-from control_plane.verireel_app_maintenance_http import (
-    VERIREEL_APP_MAINTENANCE_ROUTE as _VERIREEL_APP_MAINTENANCE_ROUTE,
-    VeriReelAppMaintenanceEnvelope,
-    VeriReelRouteDependencyError,
-    VeriReelProductMismatchError,
-    apply_verireel_app_maintenance_result,
-    resolve_verireel_route_authorization,
-    should_store_verireel_result_idempotency,
-)
 from control_plane.http_routes.release_review import (
     ReleaseReviewRouteDependencies,
     register_release_review_routes,
@@ -546,6 +536,7 @@ from control_plane.product_promotion_http import (
 from control_plane.http_routes.odoo_import_overrides import (
     register_import_override_reconcile_routes,
 )
+from control_plane.http_routes.odoo_secret_references import register_secret_reference_routes
 from control_plane.http_routes.odoo_runtime import (
     OdooRuntimeReadDependencies,
     register_odoo_runtime_read_routes,
@@ -765,7 +756,10 @@ from control_plane.contracts.route_binding_record import (
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
-from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressNotificationPolicyRecord,
+    NotificationPolicyScopeConflict,
+)
 from control_plane.drivers import native_routes
 from control_plane.drivers.route_paths import (
     INGRESS_ROUTE_APPLY_ROUTE as _INGRESS_ROUTE_APPLY_ROUTE,
@@ -893,6 +887,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
+from control_plane.release_digest import ReleaseDigestScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -972,6 +967,7 @@ from control_plane.http_routes.testing_replacement_resources import (
 from control_plane.http_routes.testing_replacement_bootstrap import (
     register_testing_replacement_bootstrap_routes,
 )
+from control_plane.http_routes.testing_public_ingress import register_testing_public_ingress_routes
 from control_plane.http_routes.testing_generation_retirement import (
     register_testing_generation_retirement_routes,
 )
@@ -2409,7 +2405,11 @@ class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
     @model_validator(mode="after")
     def _validate_request(self) -> "PublicIngressNotificationPolicyApplyEnvelope":
         self.reason = self.reason.strip()
-        if self.policy.product and self.policy.product != "launchplane":
+        if (
+            self.policy.purpose != "release_digest"
+            and self.policy.product
+            and self.policy.product != "launchplane"
+        ):
             raise ValueError(
                 "public ingress notification policy apply requires product 'launchplane'"
             )
@@ -2801,6 +2801,8 @@ class _PublicIngressNotificationPolicyApplyStore(Protocol):
     def write_public_ingress_notification_policy_record(
         self,
         record: PublicIngressNotificationPolicyRecord,
+        *,
+        protect_scope: bool = False,
     ) -> object: ...
 
 
@@ -3834,6 +3836,7 @@ def _public_ingress_notification_policy_summary(
         "instance": policy.instance,
         "status": policy.status,
         "reminder_interval_seconds": policy.reminder_interval_seconds,
+        "purpose": policy.purpose,
         "destination_count": len(policy.destinations),
         "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
         "created_at": policy.created_at,
@@ -4313,6 +4316,7 @@ def create_launchplane_fastapi_app(
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
+    release_digest_scheduler: ReleaseDigestScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4389,6 +4393,8 @@ def create_launchplane_fastapi_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
+            if release_digest_scheduler is not None:
+                await run_in_threadpool(release_digest_scheduler.start)
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
             if testing_drill_scheduler is not None:
@@ -4404,6 +4410,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
+            if release_digest_scheduler is not None:
+                await run_in_threadpool(release_digest_scheduler.stop)
             if preview_lifecycle_scheduler is not None:
                 await run_in_threadpool(preview_lifecycle_scheduler.stop)
             if testing_drill_scheduler is not None:
@@ -25446,106 +25454,6 @@ def create_launchplane_fastapi_app(
             )
         return response
 
-    async def apply_verireel_app_maintenance(
-        request: Request,
-        maintenance_request: VeriReelAppMaintenanceEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
-        trace_id = next_trace_id()
-        try:
-            authorization_product, authorization_context = resolve_verireel_route_authorization(
-                record_store=record_store,
-                product=maintenance_request.product,
-                context=maintenance_request.maintenance.context,
-                instance=maintenance_request.maintenance.instance,
-            )
-        except VeriReelRouteDependencyError:
-            return driver_route_dependency_not_found_response(
-                trace_id=trace_id,
-                route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
-            )
-        except VeriReelProductMismatchError as error:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="product_driver_mismatch",
-                message="Product is not configured for the requested driver route.",
-            ) from error
-        if not resolved_authz_policy_runtime.allows(
-            action=VERIREEL_APP_MAINTENANCE_ACTION,
-            identity=identity,
-            product=authorization_product,
-            context=authorization_context,
-            target=AuthorizationTarget(
-                scope="instance", instances=(maintenance_request.maintenance.instance,)
-            ),
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot execute the VeriReel app maintenance driver"
-                    " for the requested product/context."
-                ),
-            )
-        (
-            normalized_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replayed_response is not None:
-            return replayed_response
-        try:
-            records, result = apply_verireel_app_maintenance_result(
-                control_plane_root=resolved_control_plane_root,
-                request=maintenance_request,
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"No Launchplane route for {_VERIREEL_APP_MAINTENANCE_ROUTE}.",
-            ) from error
-        except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-        except Exception as error:
-            _LOGGER.exception("Unexpected Launchplane service error", extra={"trace_id": trace_id})
-            raise _launchplane_http_error(
-                status_code=500,
-                trace_id=trace_id,
-                code="internal_error",
-                message="Unexpected Launchplane service error. Use trace_id to inspect service logs.",
-            ) from error
-        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
-        if should_store_verireel_result_idempotency(result):
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
-
     async def apply_ingress_canary_route(
         request: Request,
         canary_request: IngressCanaryRouteApplyEnvelope,
@@ -25719,10 +25627,19 @@ def create_launchplane_fastapi_app(
         if replayed_response is not None:
             return replayed_response
         if policy_request.mode == "apply":
-            cast(
-                _PublicIngressNotificationPolicyApplyStore,
-                database_store,
-            ).write_public_ingress_notification_policy_record(policy_request.policy)
+            try:
+                cast(
+                    _PublicIngressNotificationPolicyApplyStore, database_store
+                ).write_public_ingress_notification_policy_record(
+                    policy_request.policy, protect_scope=True
+                )
+            except NotificationPolicyScopeConflict as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="notification_policy_scope_conflict",
+                    message=str(error),
+                ) from error
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"public_ingress_notification_policy_id": policy_request.policy.policy_id},
@@ -27082,35 +26999,6 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="inspect_generic_web_deploy_recovery_provider_evidence",
         summary="Inspect exact provider evidence for a generic web deploy reservation",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _VERIREEL_APP_MAINTENANCE_ROUTE,
-        apply_verireel_app_maintenance,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(VeriReelAppMaintenanceEnvelope)
-                    }
-                },
-            }
-        },
-        operation_id="apply_verireel_app_maintenance",
-        summary="Execute VeriReel app maintenance",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},
@@ -29776,6 +29664,15 @@ def create_launchplane_fastapi_app(
             error_response_model=LaunchplaneErrorResponse,
         ),
     )
+    from control_plane.http_routes.backup_policy_proposals import (
+        register_backup_policy_proposal_routes,
+    )
+
+    register_backup_policy_proposal_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_owner_review_browser_mutation_identity,
+    )
     register_production_backup_authority_write_routes(
         app,
         dependencies=ProductionBackupAuthorityWriteRouteDependencies(
@@ -29794,6 +29691,9 @@ def create_launchplane_fastapi_app(
     )
 
     register_import_override_reconcile_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+    register_secret_reference_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 
@@ -29875,6 +29775,13 @@ def create_launchplane_fastapi_app(
         run_provider_mutation=run_provider_mutation,
     )
     register_testing_replacement_bootstrap_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
+    register_testing_public_ingress_routes(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,

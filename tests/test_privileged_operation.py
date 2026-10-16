@@ -424,7 +424,9 @@ class PrivilegedOperationContractTests(unittest.TestCase):
 
     def test_semantic_review_covers_all_registered_descriptors_without_authority(self) -> None:
         descriptors = {
-            descriptor.descriptor_id for descriptor in list_privileged_operation_descriptors()
+            descriptor.descriptor_id
+            for descriptor in list_privileged_operation_descriptors()
+            if not descriptor.dedicated_product_review
         }
         records = (
             _record(),

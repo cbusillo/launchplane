@@ -4,7 +4,7 @@ import {
   type PrivilegedOperationListResponse,
 } from "./api";
 
-export type PrivilegedOperationDescriptorId = Exclude<ApiDescriptorId, undefined>;
+export type PrivilegedOperationDescriptorId = Exclude<ApiDescriptorId, undefined | "production-backup-policy">;
 
 const initialPlanTypes: PrivilegedOperationDescriptorId[] = [
   "managed-secret-reencryption",

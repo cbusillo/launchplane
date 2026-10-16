@@ -66,6 +66,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, ExceptionContext, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.pool import NullPool
 from sqlalchemy.types import TypeDecorator
 
@@ -575,6 +576,8 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     PublicHostAuthorityBusy,
     SecretCopySourceConflictError,
+    SecretDeliveryConflictError,
+    odoo_instance_override_records_match,
     SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
@@ -584,7 +587,6 @@ from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
-    odoo_instance_override_records_match,
 )
 from control_plane.storage.schema_invariants import (
     RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
@@ -6182,7 +6184,10 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 ):
                     raise ValueError("Provider operation no longer owns this evidence write.")
-            session.merge(row)
+            if isinstance(row, LaunchplaneOdooInstanceOverrideRow):
+                self._merge_odoo_override_row(session, row)
+            else:
+                session.merge(row)
             session.commit()
 
     @contextmanager
@@ -6219,6 +6224,13 @@ class PostgresRecordStore(HumanSessionStore):
     def _after_product_authority_bundle_step(self, step_name: str) -> None:
         return None
 
+    @staticmethod
+    def _merge_odoo_override_row(session: Any, row: LaunchplaneOdooInstanceOverrideRow) -> None:
+        merged = session.merge(row)
+        # SQLAlchemy's JSON dirty check also treats True and 1 as equal. An
+        # explicit override write must persist the caller's actual scalar types.
+        flag_modified(merged, "payload")
+
     def _after_authz_policy_write_step(self, step_name: str) -> None:
         return None
 
@@ -6227,7 +6239,10 @@ class PostgresRecordStore(HumanSessionStore):
             self._protect_testing_hold_non_use(
                 session, DokployTargetRecord.model_validate(row.payload)
             )
-        session.merge(row)
+        if isinstance(row, LaunchplaneOdooInstanceOverrideRow):
+            self._merge_odoo_override_row(session, row)
+        else:
+            session.merge(row)
         self._after_product_authority_bundle_step(step_name)
 
     def _product_profile_row(
@@ -6659,6 +6674,18 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for secret_delivery in bundle.secret_delivery_read_sets:
+                if not secret_delivery.matches(
+                    (
+                        SecretRecord.model_validate(row.payload)
+                        for row in session.scalars(select(LaunchplaneSecretRow)).all()
+                    ),
+                    (
+                        SecretBinding.model_validate(row.payload)
+                        for row in session.scalars(select(LaunchplaneSecretBindingRow)).all()
+                    ),
+                ):
+                    raise SecretDeliveryConflictError("Lane secret metadata changed before commit.")
             for expected_secret in bundle.expected_secret_records:
                 current_secret = session.scalar(
                     select(LaunchplaneSecretRow)
@@ -26537,6 +26564,107 @@ class PostgresRecordStore(HumanSessionStore):
     def write_route_binding_record(self, record: EnvironmentRouteBindingRecord) -> None:
         self._write_row(self._route_binding_row(record))
 
+    def publish_testing_public_ingress_binding(
+        self,
+        *,
+        expected: dict[str, object],
+        replacement: EnvironmentRouteBindingRecord,
+        audit: IngressRouteAuditRecord,
+    ) -> None:
+        """CAS every reviewed source with the testing-only edge authority publication."""
+        from control_plane.odoo_testing_restore import generation_binding
+
+        if (
+            replacement.instance != "testing"
+            or replacement.product != audit.product
+            or replacement.context != audit.context
+            or replacement.source.source_kind != "service"
+            or replacement.ingress.provider != audit.provider
+            or replacement.ingress.endpoint_key != audit.edge_endpoint_key
+            or replacement.ingress.endpoint_key
+            != EdgeEndpointRecord.model_validate(expected["endpoint"]).endpoint_key
+            or replacement.ingress.provider_evidence.get("audit_record") != audit.record_id
+            or replacement.tls.owner != audit.tls_owner
+            or replacement.tls.provider_evidence.get("provider_certificate_ref")
+            != audit.provider_certificate_ref
+            or audit.status != "applied"
+            or audit.testing_generation_sha256 != expected["generation"]
+            or not audit.testing_authority_sha256
+            or audit.requested_domains != tuple(d.domain_name for d in replacement.domains)
+        ):
+            raise ValueError("Testing edge publication cannot change another lane.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_route_binding_write(session, binding_key=replacement.binding_key)
+            for orm, model, identity, field in (
+                (
+                    LaunchplaneProductProfileRow,
+                    LaunchplaneProductProfileRecord,
+                    replacement.product,
+                    "profile",
+                ),
+                (
+                    LaunchplaneDokployTargetRow,
+                    DokployTargetRecord,
+                    (replacement.context, "testing"),
+                    "target",
+                ),
+                (
+                    LaunchplaneDokployTargetIdRow,
+                    DokployTargetIdRecord,
+                    (replacement.context, "testing"),
+                    "target_id",
+                ),
+                (
+                    LaunchplaneProviderTargetRow,
+                    ProviderTargetRecord,
+                    (replacement.context, "testing"),
+                    "provider",
+                ),
+                (
+                    LaunchplaneRouteBindingRow,
+                    EnvironmentRouteBindingRecord,
+                    (replacement.product, replacement.context, "testing"),
+                    "binding",
+                ),
+                (
+                    LaunchplaneEdgeEndpointRow,
+                    EdgeEndpointRecord,
+                    replacement.ingress.endpoint_key,
+                    "endpoint",
+                ),
+            ):
+                row = session.get(orm, identity, with_for_update=True)
+                if (
+                    row is None
+                    or model.model_validate(getattr(row, "payload", None)).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                    != expected[field]
+                ):
+                    raise ValueError("Testing edge authority changed before publication.")
+            generation_row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (replacement.product, replacement.context),
+                with_for_update=True,
+            )
+            if (
+                generation_row is None
+                or generation_binding(
+                    FreshOdooTestingGeneration.model_validate(generation_row.payload)
+                )
+                != expected["generation"]
+            ):
+                raise ValueError("The reviewed testing generation changed.")
+            audit_row = session.get(
+                LaunchplaneIngressRouteAuditRow, audit.record_id, with_for_update=True
+            )
+            if audit_row is None or audit_row.payload != self._payload_dict(audit):
+                raise ValueError("Testing edge audit changed before publication.")
+            session.merge(self._route_binding_row(replacement))
+            session.commit()
+
     def reconcile_route_binding_record(
         self,
         *,
@@ -27399,19 +27527,53 @@ class PostgresRecordStore(HumanSessionStore):
         return records
 
     def write_public_ingress_notification_policy_record(
-        self, record: PublicIngressNotificationPolicyRecord
+        self, record: PublicIngressNotificationPolicyRecord, *, protect_scope: bool = False
     ) -> None:
-        self._write_row(
-            LaunchplanePublicIngressNotificationPolicyRow(
-                policy_id=record.policy_id,
-                product=record.product,
-                context=record.context,
-                instance=record.instance,
-                status=record.status,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
+        from control_plane.contracts.public_ingress_monitoring import (
+            NotificationPolicyScopeConflict,
         )
+
+        row = LaunchplanePublicIngressNotificationPolicyRow(
+            policy_id=record.policy_id,
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            status=record.status,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+        if not protect_scope:
+            self._write_row(row)
+            return
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if not self.database_url.startswith("sqlite"):
+                # Lock the ID even when it does not exist yet: two creators with
+                # different scopes must not both pass the absent-row check.
+                session.execute(
+                    text("select pg_advisory_xact_lock(hashtextextended(:name, 0))"),
+                    {"name": "launchplane:notification-policy:" + record.policy_id},
+                )
+            existing = session.get(
+                LaunchplanePublicIngressNotificationPolicyRow,
+                record.policy_id,
+                with_for_update=True,
+            )
+            if existing is not None:
+                current = self._read_payload(
+                    model_type=PublicIngressNotificationPolicyRecord, payload=existing.payload
+                )
+                if (current.purpose, current.product, current.context, current.instance) != (
+                    record.purpose,
+                    record.product,
+                    record.context,
+                    record.instance,
+                ):
+                    raise NotificationPolicyScopeConflict(
+                        "Use a new policy ID for a different purpose or lane; disable the old policy in its own scope."
+                    )
+            session.merge(row)
+            session.commit()
 
     def list_public_ingress_notification_policy_records(
         self,
@@ -28686,7 +28848,7 @@ class PostgresRecordStore(HumanSessionStore):
                     for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                 ),
             )
-            session.merge(row)
+            self._merge_odoo_override_row(session, row)
             session.commit()
 
     def write_odoo_secret_transport_migration(

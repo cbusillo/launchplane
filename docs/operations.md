@@ -325,39 +325,27 @@ Admins submit exact revisioned target and policy records to
 `POST /v1/production-backup-authority/apply`. Run `mode=dry_run`, review the
 canonical `authority_digest`, then submit the same payload with `mode=apply`,
 the reviewed digest, expected-current record IDs, and an `Idempotency-Key`.
-The production lane's **Actions → Production backup authority** card accepts
-a private prepared proposal for that exact product/context/instance. It displays
-the proposed target coordinates (when supplied), whole-guest capture scope,
-snapshot retention, evidence ages and review date,
-runs the dry run, and approves only its returned digest through this same route.
-Preparation can load the file into the signed-in administrator's tab before the
-administrator reviews it. This is browser-local staging: preparation uses an
-already-authorized administrator tab, or the administrator loads the private file;
-there is no server-side proposal inbox. No terminal command or bearer token is needed from
-the person approving. Proposal loading does not submit or activate a policy.
+The production lane's **Actions → Production backup authority** card reads
+service-held pending proposals. An agent submits inert backup input through the
+existing privileged-policy proposal route; the service pins its dry run. The
+Director opens the returned product link and approves or declines with one click,
+without a file or digest comparison. The card identifies target additions or
+revisions without exposing provider coordinates. See the
+[backup proposal contract](production-backup-provider.md#review-a-proposed-backup-policy).
 
 Browser writes use the existing CSRF-checked session dependency and the unchanged
 `production_backup_authority.write` authorization model. A browser target revision
 also checks this action on every active lane using that target, including inside
 the locked write. A product-scoped caller cannot revise another product's target;
 an administrator already authorized on every affected lane retains that authority.
-The card accepts only target revisions used by the submitted policy and only a
-promotion action reported by the lane's current config-status read. Policy-only
-proposals display current target IDs, kinds and revisions; that read intentionally
-withholds provider coordinates. It retains the
-private proposal and, for an uncertain approval, the original request and
-idempotency key in that tab's session storage. A changed file invalidates review;
-an uncertain result locks replacement and permits only the original request's
-retry. A stale-authority conflict returned after the route's replay preflight
-settles that original request and permits a fresh review. Apply plans only inside
-the transaction after idempotency reservation/replay, so a concurrent original
-commit cannot become an unlocked stale-planning refusal. An authorization refusal
-occurs before replay and does not prove a lost response never committed; it keeps
-the original request locked. The card reads authority back after approval and
-keeps replacement disabled during that read. Approval does not enqueue
-a capture, restore, promotion or deployment; worker credentials and real capture
-qualification remain separate prerequisites. Existing target-only policy updates
-are bound to the current target revisions by the service digest.
+The card accepts only target revisions used by the submitted policy and a
+promotion action supported by the product's current driver. It shows target
+kinds, revisions and whether each is new, revised or retained. Private provider
+coordinates and proposal input remain server-held. The browser sends only the
+proposal identity and decision; after an interrupted response it re-reads the
+stored decision and retries only the original decision event. A settled conflict
+leaves Decline available. Approval changes no capture, restore, promotion or
+deployment, and worker credentials/capture qualification remain separate.
 
 Apply is PostgreSQL-only and commits all target supersessions, target revisions,
 policy supersession, policy revision, and idempotency evidence atomically.
@@ -1333,6 +1321,14 @@ enable, or disable before recording an unchanged audit. It repeats the provider
 read with all mutation flags disabled so drift fails closed instead of changing
 the route. Context-scoped callers retain the existing provider-mutation
 contract; do not grant that broader scope merely to inspect one testing lane.
+
+For a current independent Odoo testing generation whose new domain is absent
+from the public edge, use the separate
+[testing public-edge continuation](disposable-lanes.md#continue-a-restored-generations-public-edge).
+It derives the exact route from service records and reuses a covering existing
+certificate without changing generic instance-scoped ingress authority. It
+preserves the restored copy and supplies same-key recovery; another bootstrap
+or restore is never a TLS repair.
 
 For explicitly approved maintenance of an already-authorized transitional set,
 use `Manage Launchplane Authorization` on the default branch. Select the
@@ -4855,3 +4851,52 @@ failures do not hide other source observations. Responses, errors and logs
 contain no passwords, hashes, host/account values or raw grant rows. This read
 changes no configuration, binding, account, grants, runtime, source data or
 business data, and invokes no importer, deployment or synchronization.
+
+### Daily waiting-release digest
+
+The service's daily release-digest scheduler (UTC calendar days, rolling over at 8 PM EDT / 7 PM EST) lists source changes ahead of each
+active product's recorded production version. It does not create incidents,
+change product colors, send Client invitations, or start or approve a release.
+The list includes an immutable source comparison, a short list of changes, time
+on the default branch, testing/review blockers, and the Launchplane promotion or invitation step.
+Shared-addon, website-settings and updated-artifact changes in testing are also
+listed when the product repository itself has not moved. The digest stays quiet
+when production already contains the current source and release components.
+Unavailable or diverged evidence records a partial scheduler result rather than
+inventing a waiting release. Waiting time uses default-branch first-parent landing dates; incomplete history
+or component-only changes show age unavailable rather than guessing. Age is
+informational, never a failure signal.
+
+A signed-in admin can create a dedicated Director Discord digest policy through
+`POST /v1/public-ingress/notification-policies/apply` (`mode: dry-run`, then
+`mode: apply`) with `purpose: release_digest`. It requires an explicit product,
+production context and `instance: prod`, Discord destinations only, and no check
+filters. The existing product/context authorization check still applies; source
+delivery adds no grants. Policy IDs retain their original purpose and product/context/instance scope; changing
+that tuple returns a conflict. Create a new policy ID in the intended scope and
+disable the old policy in its original scope. A destination's disabled status is
+respected both before queuing and immediately before delivery.
+The policy's managed webhook reference must already be
+applicable to that exact context/prod lane. Missing scope is recorded as unavailable;
+the scheduler never copies secrets or invents access. Incident policies keep their
+default purpose, and digest policies never match incidents. Configuring health
+alerts alone does not opt anyone into the digest.
+The service's existing public OAuth URL supplies Launchplane links. Without that
+bootstrap URL or an enabled digest policy no digest is sent. Source delivery alone does
+not activate a destination or claim a live Discord receipt.
+
+Daily receipts use the existing idempotency store; per-product, policy,
+destination and message-part outbox keys deduplicate restarts and replicas.
+The existing outbox worker delivers the separate `release_digest` kind. It
+rechecks current policy and product scope and drops expired daily messages.
+Failures before sending and explicit rate-limit refusals retry through the existing
+outbox backoff, within the current daily slot and attempt budget. Invalid or rejected
+destinations remain recorded; a Discord timeout, 5xx response or interrupted send
+retains its provider marker and uncertain outcome, and is not blindly repeated.
+Evidence failures wait for the next daily slot. Outbox records and scheduler
+receipts are the maintenance/diagnostic path. An outbox `delivered` state means
+processing completed: only `action: sent_release_digest` proves a successful send;
+`skipped_*` actions distinguish disabled, retired, expired or changed-production
+messages that were deliberately not sent. Disable the dedicated policy (`status: disabled`)
+through the same service surface to stop future and queued sends; it leaves
+health-alert policies and historical delivery evidence intact.

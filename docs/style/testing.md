@@ -13,6 +13,9 @@ title: Testing Style
 - Do not assert workflow, action, config, or docs text. Run the embedded script
   with inputs and check what it does, or enforce a rule that holds for every
   workflow (fork isolation, pinned actions, permissions).
+- CI's `repository_pins` job runs the shared
+  [change-detector scanner](https://github.com/cbusillo/codex-skills/blob/main/skills/references/test-quality.md)
+  as warnings only. Triage its annotations on tests you add or change.
 - Verification code must not depend on working-tree state; read live state
   only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
@@ -457,6 +460,10 @@ forms:
   ordinary HTTP contracts, including GET/POST, cookies, redirects, and OpenAPI.
   These helpers enter the application's lifespan through the supported async
   HTTP client path; do not construct HTTP ASGI scopes in contract tests.
+  Their lifespan deadline only catches a startup or shutdown that never
+  finishes. Production uvicorn sets no startup deadline, and a tight one fails
+  when a loaded host stalls the test process. Do not test startup latency
+  through it.
 - `tests.support.raw_asgi.request` is reserved for duplicate, absent, or
   deliberately malformed framing headers that a supported client cannot emit.
   Streaming, body-limit, cancellation, and `http.disconnect` tests may use a
