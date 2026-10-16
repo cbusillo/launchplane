@@ -310,6 +310,12 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertEqual(self.evidence().operation_id, "")
 
     def test_down_lane_queues_without_login_history_and_keeps_resource_qualification(self) -> None:
+        self.assert_down_lane_drill_admitted("unknown")
+
+    def test_down_lane_overrides_historical_use_for_drill_repair(self) -> None:
+        self.assert_down_lane_drill_admitted("in_use")
+
+    def assert_down_lane_drill_admitted(self, usage: str) -> None:
         from tests.support.down_lanes import record_lane_health
         from control_plane.lane_usage import VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX
 
@@ -319,7 +325,7 @@ class TestingDrillTests(TestingDrillScenario):
             self.context,
             datetime.fromtimestamp(self.now, timezone.utc),
         )
-        record_safety(self.store, self.profile.product, self.context, "testing", usage="unknown")
+        record_safety(self.store, self.profile.product, self.context, "testing", usage=usage)
         self.signins.return_value = None
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "queued")
@@ -341,6 +347,13 @@ class TestingDrillTests(TestingDrillScenario):
 
     def test_new_usage_reader_failures_keep_a_bounded_skip_reason(self) -> None:
         for name in ("lane_usage_protected", "evaluate_lane_usage"):
+            record_safety(
+                self.store,
+                self.profile.product,
+                self.context,
+                "testing",
+                usage="in_use" if name == "lane_usage_protected" else "unused",
+            )
             with (
                 self.subTest(reader=name),
                 patch(

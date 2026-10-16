@@ -10824,26 +10824,27 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     getattr(fixture, scenario)()
                 finally:
                     fixture.doCleanups()
-        with _head_postgres_database() as url:
-            drill = TestingDrillTests(
-                "test_down_lane_queues_without_login_history_and_keeps_resource_qualification"
-            )
-            try:
-                drill.seed(
-                    make_url(url)
-                    .update_query_dict({"options": "-c statement_timeout=1000"})
-                    .render_as_string(hide_password=False)
-                )
-                database_errors: list[str] = []
-                event.listen(
-                    drill.store._engine,
-                    "handle_error",
-                    lambda error: database_errors.append(type(error.original_exception).__name__),
-                )
-                drill.test_down_lane_queues_without_login_history_and_keeps_resource_qualification()
-                self.assertFalse(database_errors, database_errors)
-            finally:
-                drill.doCleanups()
+        for usage in ("unknown", "in_use"):
+            with self.subTest(usage=usage), _head_postgres_database() as url:
+                drill = TestingDrillTests()
+                try:
+                    drill.seed(
+                        make_url(url)
+                        .update_query_dict({"options": "-c statement_timeout=1000"})
+                        .render_as_string(hide_password=False)
+                    )
+                    database_errors: list[str] = []
+                    event.listen(
+                        drill.store._engine,
+                        "handle_error",
+                        lambda error: database_errors.append(
+                            type(error.original_exception).__name__
+                        ),
+                    )
+                    drill.assert_down_lane_drill_admitted(usage)
+                    self.assertFalse(database_errors, database_errors)
+                finally:
+                    drill.doCleanups()
         for scenario in (
             "test_collect_produces_real_resource_facts_then_admits_down_runtime_repair",
             "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",

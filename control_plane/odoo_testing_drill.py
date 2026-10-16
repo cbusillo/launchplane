@@ -159,6 +159,7 @@ def require_drill_use_unprotected(store: PostgresRecordStore, product: str, cont
         recorded = store.read_disposable_lane_safety(product, context, "testing")
         protected = (
             recorded is not None
+            and recorded.usage == "in_use"
             and hold is None
             and lane_usage_protected(
                 store,
@@ -166,7 +167,6 @@ def require_drill_use_unprotected(store: PostgresRecordStore, product: str, cont
                 context=context,
                 instance="testing",
                 usage=recorded.usage,
-                require_unused=False,
             )
         )
     except Exception as error:
