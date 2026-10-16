@@ -11095,6 +11095,60 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
         )
         return scenario
 
+    def test_two_initial_preparations_cannot_both_activate_the_same_lane(self) -> None:
+        from control_plane.testing_replacement_resources import TestingReplacementResourcesRequest
+        from tests import test_testing_replacement_resources as resource_tests
+
+        with _head_postgres_database() as url:
+            fixture = resource_tests.TestingReplacementResourceHttpTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            successful = fixture.operation.model_copy(
+                update={
+                    "status": "pass",
+                    "phase": "completed",
+                    "error_code": "",
+                    "error_message": "",
+                    "finished_at": fixture.operation.updated_at,
+                }
+            )
+            fixture.store.write_odoo_stable_target_replacement_operation_record(successful)
+            preparations = []
+            for name in ("first", "second"):
+                intent = TestingReplacementResourcesRequest(
+                    context=fixture.context,
+                    operation_id=name,
+                    initial_generation=True,
+                    reason="independent initial preparation",
+                )
+                fixture.store.prepare_initial_testing_generation(
+                    product=fixture.profile.product, request=intent, prepared_by="fixture"
+                )
+                preparations.append(fixture.store.read_disposable_resource_preparation(name))
+            start = threading.Barrier(2)
+
+            def activate(preparation: Any) -> bool:
+                store = PostgresRecordStore(database_url=url)
+                try:
+                    start.wait(timeout=10)
+                    store.activate_initial_testing_preparation(preparation)
+                    return True
+                except ValueError:
+                    return False
+                finally:
+                    store.close()
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                activated = list(pool.map(activate, preparations))
+            self.assertCountEqual(activated, [True, False])
+            self.assertEqual(
+                fixture.store.read_odoo_stable_target_replacement_operation_record(
+                    successful.operation_id
+                ),
+                successful,
+            )
+
     def test_initial_bootstrap_queues_copy_and_keeps_successful_history(self) -> None:
         self.scenario().initial_bootstrap()
 

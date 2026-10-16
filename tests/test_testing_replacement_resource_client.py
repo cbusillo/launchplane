@@ -25,6 +25,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
         lost: bool = False,
         wrong_review: bool = False,
         verified: bool = True,
+        initial_generation: bool = False,
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(
@@ -33,13 +34,18 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
             )
         )
         draft = TestingReplacementResourcesRequest(
-            context="example", operation_id="retained", reason="private-reason"
+            context="example",
+            operation_id="" if initial_generation else "retained",
+            reason="private-reason",
+            initial_generation=initial_generation,
         )
         plan = TestingReplacementResourcesPlan(
             product="example-odoo",
             context=draft.context,
             instance="testing",
-            operation_id=draft.operation_id,
+            operation_id="service-initial-preparation"
+            if initial_generation
+            else draft.operation_id,
             plan_sha256=canonical_json_sha256({"fixture": "review"}),
             retained_target_preserved=True,
             fresh_storage_required=True,
@@ -54,7 +60,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
                 "product": plan.product,
                 "context": plan.context,
                 "instance": "testing",
-                "operation_id": draft.operation_id,
+                "operation_id": plan.operation_id,
                 "resources_verified": verified,
                 "retained_target_preserved": True,
                 "production_resources": "separation_ready",
@@ -116,6 +122,8 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
                 "--reason",
                 draft.reason,
             ]
+            if initial_generation:
+                arguments.extend(("--initial-generation", "--idempotency-key", "original-key"))
             if mode != "readback":
                 arguments.extend(("--evidence-file", str(evidence)))
             if mode == "apply":
@@ -167,3 +175,12 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(output["status"], "unverified")
         post.assert_not_called()
+
+    def test_initial_plan_apply_readback_keep_the_original_key_and_service_identity(self) -> None:
+        for mode in ("dry-run", "apply", "readback"):
+            with self.subTest(mode=mode):
+                status, output, post = self.call(mode=mode, initial_generation=True)
+                self.assertEqual(status, 0)
+                self.assertEqual(output["operation_id"], "service-initial-preparation")
+                self.assertTrue(post.call_args.kwargs["body"]["initial_generation"])
+                self.assertTrue(post.call_args.kwargs["idempotency_key"])

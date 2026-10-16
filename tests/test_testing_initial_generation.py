@@ -104,6 +104,15 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.post()).status_code, 403)
         self.assertEqual((await self.post(key="")).status_code, 409)
 
+    async def test_provider_usage_denial_is_not_reclassified_as_safety_unknown(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        self.usage.side_effect = NativeSourceAuthorizationDenied("private-provider-denial")
+        response = await self.post()
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(response.json()["error"]["code"], "authorization_denied")
+        self.assertNotIn("private-provider-denial", response.text)
+
     async def test_stranded_operation_and_original_target_drift_do_not_admit_initial_apply(
         self,
     ) -> None:

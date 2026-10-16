@@ -8,6 +8,7 @@ import click
 
 from fastapi import Depends, Header, Path as PathParameter
 
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
     accepted_evidence_response,
@@ -95,6 +96,12 @@ def register_testing_replacement_resource_routes(
                     await run_in_worker_thread(
                         lambda: require_initial_usage(root, record_store, product, body)
                     )
+            except DurableOperationAuthorizationDeniedError:
+                refuse(
+                    403,
+                    "authorization_denied",
+                    "The provider refused the Odoo testing usage read. Preserve the trace and original request.",
+                )
             except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
                 refuse(
                     409,
@@ -123,6 +130,12 @@ def register_testing_replacement_resource_routes(
                     in_progress_message="Testing resource preparation is running with the original key.",
                     reconcile_message="The original preparation has an unknown outcome; do not create another target.",
                 )
+            except DurableOperationAuthorizationDeniedError:
+                refuse(
+                    403,
+                    "authorization_denied",
+                    "The provider refused the Odoo testing usage read. Preserve the trace and original key.",
+                )
             except TestingResourcePreparationRefused:
                 refuse(
                     409,
@@ -139,6 +152,12 @@ def register_testing_replacement_resource_routes(
             adapter = TestingReplacementResourceAdapter(root, record_store, product, body, trace)
             try:
                 result = await run_in_worker_thread(adapter.readback)
+            except DurableOperationAuthorizationDeniedError:
+                refuse(
+                    403,
+                    "authorization_denied",
+                    "The provider refused the Odoo testing usage read. Preserve the trace and original key.",
+                )
             except (ValueError, FileNotFoundError, click.ClickException, RuntimeError, OSError):
                 refuse(
                     409,

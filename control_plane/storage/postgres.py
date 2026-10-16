@@ -39,6 +39,7 @@ from typing import (
 from pydantic import BaseModel, JsonValue
 
 if TYPE_CHECKING:
+    from control_plane.testing_replacement_resources import TestingReplacementResourcesRequest
     from control_plane.testing_verification import TestingVerification
 from control_plane.lane_movement import source_read_retry_ready
 from sqlalchemy import (
@@ -12455,7 +12456,7 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         *,
         product: str,
-        request: Any,
+        request: TestingReplacementResourcesRequest,
         prepared_by: str,
     ) -> None:
         from control_plane.testing_replacement_resources import (
