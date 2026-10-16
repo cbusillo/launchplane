@@ -2456,6 +2456,13 @@ export type PreviewHistoryResponse = {
     trace_id: string;
 };
 
+export type PreviewInventoryEvidence = {
+    observed_count: number | null;
+    observed_slugs: Array<string>;
+    provenance: DataProvenance;
+    status: 'empty' | 'nonempty' | 'failed' | 'stale' | 'unsupported' | 'unavailable' | 'missing';
+};
+
 export type PreviewPullRequestSummary = {
     head_sha: string;
     pr_number: number;
@@ -3603,6 +3610,7 @@ export type ProductPreviewSummary = {
     active_count: number;
     context: string;
     enabled: boolean;
+    inventory: PreviewInventoryEvidence | null;
     latest_preview_id: string;
     provenance: DataProvenance;
     records: Array<ProductPreviewReference>;
@@ -3610,6 +3618,8 @@ export type ProductPreviewSummary = {
     records_truncated: boolean;
     slug_template: string;
     trust_state: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
+    unobserved_record_slugs: Array<string>;
+    untracked_observed_slugs: Array<string>;
 };
 
 export type ProductProfileListResponse = {

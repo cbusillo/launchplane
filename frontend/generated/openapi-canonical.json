@@ -27249,6 +27249,51 @@
         "title": "PreviewHistoryResponse",
         "type": "object"
       },
+      "PreviewInventoryEvidence": {
+        "properties": {
+          "observed_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Count"
+          },
+          "observed_slugs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Observed Slugs",
+            "type": "array"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "status": {
+            "enum": [
+              "empty",
+              "nonempty",
+              "failed",
+              "stale",
+              "unsupported",
+              "unavailable",
+              "missing"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "provenance"
+        ],
+        "title": "PreviewInventoryEvidence",
+        "type": "object"
+      },
       "PreviewLifecycleCleanupEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -35222,6 +35267,16 @@
             "title": "Enabled",
             "type": "boolean"
           },
+          "inventory": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PreviewInventoryEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "latest_preview_id": {
             "default": "",
             "title": "Latest Preview Id",
@@ -35278,6 +35333,22 @@
             ],
             "title": "Trust State",
             "type": "string"
+          },
+          "unobserved_record_slugs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Unobserved Record Slugs",
+            "type": "array"
+          },
+          "untracked_observed_slugs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Untracked Observed Slugs",
+            "type": "array"
           }
         },
         "required": [

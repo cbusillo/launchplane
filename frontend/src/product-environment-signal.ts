@@ -78,7 +78,7 @@ export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | 
 
 export function expireProductEvidence(product: ProductSiteOverview, now = Date.now()): ProductSiteOverview {
   const environments = product.environments.map(environment => expireEnvironmentEvidence(environment, now));
-  return { ...product, environments,
+  return { ...product, environments, preview: expireEvidence(product.preview, now),
     trust_state: environments.some(environment => environment.trust_state === "stale") ? "stale" : product.trust_state,
   };
 }

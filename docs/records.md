@@ -2763,6 +2763,14 @@ credential, runtime grant, or stored record is changed by this code retirement.
 - One append-only record per provider inventory scan for a preview context.
 - Record the scan id, context, scanned timestamp, source, pass/fail status,
   observed preview slugs, and failure message when the scan could not complete.
+- New inventory-only scans bind product and repository as well as context. Legacy
+  context-only scans remain history; they cannot verify which product/repository
+  or provider resource type was scanned. Natural collection supplies scoped proof. Failed, unavailable, unsupported, truncated and
+  stale scans cannot establish empty inventory. A new unsuccessful scan supersedes
+  earlier success; reads never advance the scan timestamp.
+- Product Ops and the driver context use one scan interpretation and the same
+  30-minute deadline. Observed provider counts are separate from recorded preview
+  identities, with unmatched slugs disclosed only under existing preview-read access.
 - A zero-preview scan is valid evidence and should be distinguished from missing
   inventory. Read models and readiness checks should use the latest scan to
   decide whether an empty preview inventory is verified or unknown.

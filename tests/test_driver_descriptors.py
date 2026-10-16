@@ -1161,10 +1161,8 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         preview_inventory_provenance = view.drivers[0].preview_inventory_provenance
         self.assertIsNotNone(preview_inventory_provenance)
         assert preview_inventory_provenance is not None
-        self.assertEqual(
-            preview_inventory_provenance.detail,
-            "Preview identity record exists, but no generation evidence is recorded.",
-        )
+        self.assertEqual(preview_inventory_provenance.freshness_status, "unsupported")
+        self.assertEqual(preview_inventory_provenance.source_record_id, "")
 
     def test_driver_context_view_materializes_odoo_profile_inheritance(self) -> None:
         view = build_driver_context_view(

@@ -3,7 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-PreviewInventoryScanStatus = Literal["pass", "fail"]
+PreviewInventoryScanStatus = Literal["pass", "fail", "unsupported", "unavailable"]
 
 
 class PreviewInventoryScanRecord(BaseModel):
@@ -14,6 +14,9 @@ class PreviewInventoryScanRecord(BaseModel):
     context: str
     scanned_at: str
     source: str
+    product: str = ""
+    repository: str = ""
+    truncated: bool = False
     status: PreviewInventoryScanStatus
     preview_count: int = Field(ge=0)
     preview_slugs: tuple[str, ...] = ()
