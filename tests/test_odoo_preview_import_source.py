@@ -1,4 +1,5 @@
 import base64
+import click
 import json
 import os
 from pathlib import Path
@@ -27,6 +28,11 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.odoo_instance_overrides import (
     ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY,
     config_parameter_secret_env_key,
+    build_post_deploy_environment,
+)
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooInstanceOverrideRecord,
+    OdooOverrideValue,
 )
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.odoo_preview_apply_http import (
@@ -210,6 +216,42 @@ class FishbowlPreviewSourceTests(unittest.IsolatedAsyncioTestCase):
                     copy_from=reference,
                     include_secret_value=True,
                 )
+
+    def test_qualified_preview_source_cannot_waive_another_payload_or_lane(self) -> None:
+        source = self.resolve(include_secret_value=True)
+        record = OdooInstanceOverrideRecord(
+            context=source.context,
+            instance=source.instance,
+            config_parameters=source.parameters,
+            updated_at=self.profile.updated_at,
+        )
+        self.assertTrue(
+            build_post_deploy_environment(
+                record, preview_import_source=source
+            ).payload.config_parameters
+        )
+        password = source.parameters[-1]
+        for changed in (
+            record.model_copy(update={"instance": "prod"}),
+            record.model_copy(update={"instance": "pr-43"}),
+            record.model_copy(update={"context": "another-product"}),
+            record.model_copy(
+                update={
+                    "config_parameters": (
+                        *source.parameters[:-1],
+                        password.model_copy(
+                            update={
+                                "value": OdooOverrideValue(
+                                    source="secret_binding", secret_binding_id="wrong"
+                                )
+                            }
+                        ),
+                    )
+                }
+            ),
+        ):
+            with self.subTest(instance=changed.instance), self.assertRaises(click.ClickException):
+                build_post_deploy_environment(changed, preview_import_source=source)
 
     def test_unclassified_or_writable_class_and_non_read_only_reason_refuse(self) -> None:
         assert self.binding.sharing_reason is not None

@@ -265,6 +265,8 @@ from control_plane.production_backup_authority import (
 )
 from control_plane.storage.product_authority_bundle import (
     SecretCopySourceConflictError,
+    SecretDeliveryConflictError,
+    odoo_instance_override_records_match,
     SecretRecordConflictError,
     require_bundle_context_owner,
     ProductAuthorityBundle,
@@ -275,7 +277,6 @@ from control_plane.storage.product_authority_bundle import (
     RuntimeEnvironmentDelete,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
-    odoo_instance_override_records_match,
 )
 from control_plane.contracts.product_owner import (
     ProductOwnerPolicyConflictError,
@@ -578,6 +579,12 @@ class FilesystemRecordStore:
                     raise RuntimeEnvironmentConflictError(
                         "Runtime selectors changed before commit."
                     )
+            for secret_delivery in bundle.secret_delivery_read_sets:
+                if not secret_delivery.matches(
+                    self._list_models_locked(SecretRecord, "launchplane_secrets"),
+                    self._list_models_locked(SecretBinding, "launchplane_secret_bindings"),
+                ):
+                    raise SecretDeliveryConflictError("Lane secret metadata changed before commit.")
             for expected_secret in bundle.expected_secret_records:
                 current_secret = self._read_model_locked(
                     SecretRecord, "launchplane_secrets", expected_secret.secret_id
