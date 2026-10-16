@@ -3,6 +3,7 @@
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -224,6 +225,10 @@ def plan_secret_reference_reconciliation(
     changed = any(item.action == "reconcile_reference" for item in entries)
     replacement = record.model_copy(
         update={
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+            if changed
+            else record.updated_at,
+            "source_label": "odoo-secret-reference-reconcile" if changed else record.source_label,
             "config_parameters": tuple(
                 item.model_copy(
                     update={
@@ -235,11 +240,11 @@ def plan_secret_reference_reconciliation(
                 if item.key in selected
                 else item
                 for item in record.config_parameters
-            )
+            ),
         }
     )
-    # Deliberately preserve timestamps, source labels, pending intent and apply receipts:
-    # this corrects pointers only and does not apply settings to an Odoo database.
+    # Stamp the metadata edit, preserving pending intent and every apply receipt:
+    # correcting pointers does not apply settings to an Odoo database.
     digest_input = {
         "profile": profile.model_dump(mode="json"),
         "override": record.model_dump(mode="json"),

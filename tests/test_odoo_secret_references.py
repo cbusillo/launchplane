@@ -154,9 +154,11 @@ class SecretReferenceStorageTests(unittest.TestCase):
                     after.config_parameters[0].value.secret_binding_id, "lane-password"
                 )
                 self.assertEqual(
-                    after.model_dump(exclude={"config_parameters"}),
-                    before.model_dump(exclude={"config_parameters"}),
+                    after.model_dump(exclude={"config_parameters", "updated_at", "source_label"}),
+                    before.model_dump(exclude={"config_parameters", "updated_at", "source_label"}),
                 )
+                self.assertNotEqual(after.updated_at, before.updated_at)
+                self.assertNotEqual(after.source_label, before.source_label)
                 self.assertEqual(after.config_parameters[1:], before.config_parameters[1:])
                 self.assertEqual(store.list_secret_records(), secrets)
                 self.assertEqual(store.list_secret_bindings(), bindings)
@@ -299,6 +301,17 @@ class SecretReferenceStorageTests(unittest.TestCase):
                                 .value.value
                             ),
                             int,
+                        )
+                        store.write_odoo_instance_override_record(before, expected_record=current)
+                        self.assertIs(
+                            type(
+                                store.read_odoo_instance_override_record(
+                                    context_name="cm", instance_name="prod"
+                                )
+                                .config_parameters[1]
+                                .value.value
+                            ),
+                            bool,
                         )
 
     def test_unsafe_selection_refuses_and_context_precedence_is_supported(self) -> None:

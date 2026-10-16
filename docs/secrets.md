@@ -174,11 +174,13 @@ Use the service route
    `product_environment.read`, dry-run requires `product_config.plan`, and apply
    requires `product_config.apply` for that product/lane. Terminal-agent
    credentials remain read/plan only. This adds no authorization grant.
-3. Apply changes only those reference pointers to the bindings already selected
+3. Apply changes those reference pointers to the bindings already selected
    by lane delivery. Its independent record readback must match. GET again to
    confirm `already_agrees`. No managed secret, binding, classification, sharing
    metadata, runtime environment, provider or Odoo database is changed. Full
-   override intent and apply receipts are preserved.
+   override intent and apply receipts are preserved. `updated_at` and
+   `source_label` record the metadata edit's time and service path; keep its
+   authenticated request/trace receipt with the reviewed production operation.
 
 The review covers the product profile, full override snapshot, lane secret
 metadata (including versions and disabled candidates) and retirement metadata.
