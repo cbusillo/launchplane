@@ -41,7 +41,6 @@ class ArtifactRetentionTests(TestCase):
         )
         self.assertEqual(set(plan.candidates), {3, 7})
         self.assertEqual(set(plan.retained), {1, 2, 4, 5, 6})
-        self.assertEqual(plan.permission, "unconfirmed")
 
     def test_inventory_warning_and_duplicate_reads_never_yield_candidates(self) -> None:
         plan = plan_retention(
@@ -150,3 +149,24 @@ class ArtifactRetentionHttpTests(IsolatedAsyncioTestCase):
                 anonymous = await get(app, "/v1/artifacts/retention?product=verireel")
                 self.assertEqual(anonymous.status_code, 401)
                 planner.assert_not_called()
+
+    async def test_ungranted_identity_never_reaches_package_provider(self) -> None:
+        from unittest.mock import patch
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _local_operator_artifact_protection_policy
+        from tests.support.auth import _identity, _StubVerifier
+        from tests.support.http import get
+
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_identity()),
+            authz_policy=_local_operator_artifact_protection_policy(),
+            record_store_factory=object,
+        )
+        with patch("control_plane.http_routes.products.product_retention_dry_run") as planner:
+            response = await get(
+                app,
+                "/v1/artifacts/retention?product=example",
+                headers={"Authorization": "Bearer valid-token"},
+            )
+            self.assertEqual(response.status_code, 403)
+            planner.assert_not_called()

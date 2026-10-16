@@ -1,6 +1,7 @@
 from copy import deepcopy
 from collections.abc import Callable
 import json
+import base64
 from pathlib import Path
 import subprocess
 from typing import Any
@@ -11,6 +12,7 @@ from control_plane.artifact_scan import (
     ArtifactScanResult,
     RegistryReadCredentials,
     SCAN_RESULT_TTL_SECONDS,
+    SCAN_UNAVAILABLE_TTL_SECONDS,
     GHCR_ARTIFACT_READ_INTEGRATION,
     _RESULTS,
     artifact_scan_from_report,
@@ -68,7 +70,9 @@ class ArtifactScanTests(TestCase):
             self.assertEqual(argv[argv.index("--image-src") + 1], "remote")
             self.assertNotIn("TRIVY_TOKEN", kwargs["env"])
             self.assertNotIn("GITHUB_TOKEN", kwargs["env"])
-            self.assertEqual(Path(kwargs["cwd"]), Path(argv[argv.index("--config") + 1]).parent)
+            self.assertTrue(
+                Path(argv[argv.index("--config") + 1]).is_relative_to(Path(kwargs["cwd"]))
+            )
             Path(argv[argv.index("--output") + 1]).write_text(json.dumps(report()))
             return subprocess.CompletedProcess(argv, 0)
 
@@ -127,6 +131,54 @@ class ArtifactScanTests(TestCase):
                     )
                 )
                 resolve.reset_mock()
-                scan_product_artifact("registry.example/site@sha256:" + "a" * 64)
-                resolve.assert_not_called()
-                self.assertIsNone(scanner.call_args.kwargs["credentials"])
+                for host in (
+                    "registry.example",
+                    "ghcr.io.attacker.example",
+                    "other.example/ghcr.io",
+                ):
+                    scan_product_artifact(host + "/site@sha256:" + "a" * 64)
+                    resolve.assert_not_called()
+                    self.assertIsNone(scanner.call_args.kwargs["credentials"])
+
+    def test_credential_reaches_only_an_isolated_host_scoped_auth_file(self) -> None:
+        credentials = RegistryReadCredentials("fixture-user", "fixture-password")
+        config_paths: list[Path] = []
+
+        def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            self.assertNotIn("TRIVY_USERNAME", kwargs["env"])
+            self.assertNotIn("TRIVY_PASSWORD", kwargs["env"])
+            self.assertNotIn(credentials.password, argv)
+            config_path = Path(kwargs["env"]["DOCKER_CONFIG"]) / "config.json"
+            config_paths.append(config_path)
+            auths = json.loads(config_path.read_text())["auths"]
+            self.assertEqual(list(auths), [IMAGE.split("/", 1)[0]])
+            self.assertEqual(
+                base64.b64decode(next(iter(auths.values()))["auth"]).decode(),
+                f"{credentials.username}:{credentials.password}",
+            )
+            self.assertEqual(config_path.stat().st_mode & 0o777, 0o600)
+            Path(argv[argv.index("--output") + 1]).write_text(json.dumps(report()))
+            return subprocess.CompletedProcess(argv, 0)
+
+        with patch("control_plane.artifact_scan.subprocess.run", side_effect=run):
+            self.assertEqual(scan_artifact(IMAGE, credentials=credentials).status, "pass")
+        self.assertTrue(config_paths)
+        self.assertFalse(config_paths[0].exists())
+
+    def test_transient_failure_cache_expires_before_a_success_cache(self) -> None:
+        unavailable = ArtifactScanResult(
+            image_reference=IMAGE, status="unavailable", reason="fixture", scanned_at=NOW
+        )
+        with patch(
+            "control_plane.artifact_scan._scan_artifact", return_value=unavailable
+        ) as scanner:
+            with patch("control_plane.artifact_scan.monotonic", return_value=0):
+                scan_artifact(IMAGE)
+                scan_artifact(IMAGE)
+                self.assertEqual(scanner.call_count, 1)
+            with patch(
+                "control_plane.artifact_scan.monotonic",
+                return_value=SCAN_UNAVAILABLE_TTL_SECONDS + 1,
+            ):
+                scan_artifact(IMAGE)
+                self.assertEqual(scanner.call_count, 2)

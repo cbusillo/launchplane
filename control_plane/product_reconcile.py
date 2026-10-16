@@ -778,6 +778,13 @@ def _deploy_generic_web_testing(
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
+        existing = record_store.read_idempotency_record(
+            scope=reconcile_reservation_scope(profile.product),
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key=idempotency_key,
+        )
+        if existing is None and not _scan_deploy_artifact(profile, plan, desired):
+            return ReconcileOutcome(plan)
         provider = (
             default_generic_web_deploy_provider(
                 record_store=record_store, control_plane_root=control_plane_root
@@ -914,13 +921,6 @@ def _deploy_generic_web_testing(
                             plan, error=f"{held_outcome.error} Testing recovery refused: {refusal}."
                         )
                     return held_outcome
-            existing = record_store.read_idempotency_record(
-                scope=reconcile_reservation_scope(profile.product),
-                route_path=GENERIC_WEB_DEPLOY_ROUTE,
-                idempotency_key=idempotency_key,
-            )
-            if existing is None and not _scan_deploy_artifact(profile, plan, desired):
-                return ReconcileOutcome(plan)
             result = run_durable_provider_operation(
                 store=cast(DurableProviderOperationStore, record_store),
                 scope=reconcile_reservation_scope(profile.product),
@@ -1576,9 +1576,6 @@ def reconcile_preview_target(
         if unresolved:
             plan.update(held=True, reason="held_preview_recovery_required")
         return ReconcileOutcome(plan)
-    if plan["action"] == "apply" and isinstance(decision.verified, VerifiedBuildArtifact):
-        if not _scan_deploy_artifact(profile, plan, decision.verified):
-            return ReconcileOutcome(plan)
     odoo = product_profile_uses_odoo_driver(profile)
     if not odoo and not reconciles_as_generic_web(profile):
         plan.update(held=True, reason="no_reconcile_preview_for_driver")
@@ -1983,6 +1980,12 @@ def _run_preview_operation(
             else:
                 if observed.status != "reconcile_required" or not allow_retry:
                     return finish_result(observed, stored_plan)
+        retained_intent = reservation is not None and bool(
+            cast(PostgresRecordStore, record_store).read_original_mutation_intent(reservation)
+        )
+        if operation == "refresh" and verified is not None and not retained_intent:
+            if not _scan_deploy_artifact(profile, plan, verified):
+                return ReconcileOutcome(plan)
         inputs = preview_hooks.build_inputs(
             control_plane_root=control_plane_root,
             record_store=record_store,

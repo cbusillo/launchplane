@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from collections import OrderedDict
 from dataclasses import dataclass, field
 import hashlib
+import base64
 import json
 import os
 from pathlib import Path
@@ -13,14 +14,17 @@ from tempfile import TemporaryDirectory, gettempdir
 from threading import Lock
 from time import monotonic
 from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
 _IMAGE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 _MAX_REPORT_BYTES = 32 * 1024 * 1024
 SCAN_RESULT_TTL_SECONDS = 30 * 60
+SCAN_UNAVAILABLE_TTL_SECONDS = 60
 GHCR_ARTIFACT_READ_INTEGRATION = "ghcr_artifact_read"
 _SCAN_LOCK = Lock()
+_RESULTS_LOCK = Lock()
 
 
 @dataclass(frozen=True)
@@ -49,6 +53,7 @@ def scan_product_artifact(image_reference: str) -> ArtifactScanResult:
 
     credentials = None
     try:
+        registry = urlsplit("https://" + image_reference.split("@", 1)[0])
         values = (
             {
                 key: secrets.resolve_context_secret_value(
@@ -58,7 +63,7 @@ def scan_product_artifact(image_reference: str) -> ArtifactScanResult:
                 )
                 for key in ("username", "password")
             }
-            if image_reference.startswith("ghcr.io/")
+            if _IMAGE.fullmatch(image_reference) and registry.netloc == "ghcr.io"
             else {}
         )
         if values.get("username") and values.get("password"):
@@ -76,19 +81,42 @@ def scan_artifact(
         repr((credentials.username, credentials.password)).encode() if credentials else b"anonymous"
     ).hexdigest()
     key = image_reference, credential_key
-    with _SCAN_LOCK:
-        cached = _RESULTS.get(key)
-        if cached is not None and monotonic() - cached[0] < (
-            60 if cached[1].status == "unavailable" else SCAN_RESULT_TTL_SECONDS
-        ):
-            _RESULTS.move_to_end(key)
-            return cached[1]
+
+    def cached_result() -> ArtifactScanResult | None:
+        with _RESULTS_LOCK:
+            cached = _RESULTS.get(key)
+            if cached is not None and monotonic() - cached[0] < (
+                SCAN_UNAVAILABLE_TTL_SECONDS
+                if cached[1].status == "unavailable"
+                else SCAN_RESULT_TTL_SECONDS
+            ):
+                _RESULTS.move_to_end(key)
+                return cached[1]
+        return None
+
+    cached = cached_result()
+    if cached is not None:
+        return cached
+    if not _SCAN_LOCK.acquire(timeout=5):
+        return ArtifactScanResult(
+            image_reference=image_reference,
+            status="unavailable",
+            reason="scanner_busy",
+            scanned_at=datetime.now(UTC).isoformat(),
+        )
+    try:
+        cached = cached_result()
+        if cached is not None:
+            return cached
         result = _scan_artifact(image_reference, credentials=credentials)
-        _RESULTS[key] = monotonic(), result
-        _RESULTS.move_to_end(key)
-        while len(_RESULTS) > 128:
-            _RESULTS.popitem(last=False)
+        with _RESULTS_LOCK:
+            _RESULTS[key] = monotonic(), result
+            _RESULTS.move_to_end(key)
+            while len(_RESULTS) > 128:
+                _RESULTS.popitem(last=False)
         return result
+    finally:
+        _SCAN_LOCK.release()
 
 
 def _scan_artifact(
@@ -129,9 +157,15 @@ def _scan_artifact(
                 "XDG_CACHE_HOME": directory,
             }
             if credentials is not None:
-                environment.update(
-                    TRIVY_USERNAME=credentials.username, TRIVY_PASSWORD=credentials.password
-                )
+                # Registry credentials must not become Trivy's global DB-download
+                # credentials. Docker's auth map scopes this entry to GHCR only.
+                auth = base64.b64encode(
+                    f"{credentials.username}:{credentials.password}".encode()
+                ).decode()
+                with os.fdopen(
+                    os.open(root / "config.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
+                ) as auth_file:
+                    json.dump({"auths": {"ghcr.io": {"auth": auth}}}, auth_file)
             completed = subprocess.run(
                 [
                     "trivy",

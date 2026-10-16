@@ -2313,10 +2313,15 @@ class ProductReconcileGenericWebTestingTests(ProductReconcileTestCase):
             DokployTargetRecord(context="cm", instance="testing", updated_at="2026-10-02T00:00:00Z")
         )
         failed = self.failed_deploy()
+        scan_effect = self.artifact_scanner.side_effect
+        self.artifact_scanner.side_effect = AssertionError(
+            "A retained deploy must replay without a scan"
+        )
         self.request()
         repeated = self.run_once()
         self.assertEqual(repeated.last_plan["deploy_operation_status"], "replayed")
         self.assertEqual(len(self.deploys.runtime_identities), 1)
+        self.artifact_scanner.side_effect = scan_effect
 
         target = self.store.read_dokploy_target_record(context_name="cm", instance_name="testing")
         self.store.write_dokploy_target_record(
@@ -5389,7 +5394,8 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                     )
                     self.request(target, 5 if target == "preview" else None)
                     plan = self.reconcile()
-                    self.assertEqual(plan["reason"], "artifact_scan_refused")
+                    self.assertTrue(plan["held"])
+                    self.assertEqual(plan["action"], "wait")
                     self.assertEqual(
                         self.artifact_scanner.call_args.args,
                         (f"{IMAGE_REPOSITORY}@{_digest(commit)}",),
@@ -5422,7 +5428,7 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
         self.github.add_run(20, PR_HEAD, event="pull_request")
         self.request("preview", 5)
         plan = self.reconcile()
-        self.assertEqual(plan["artifact_scan"], {"status": "disabled"})
+        self.assertEqual(cast(dict[str, object], plan["artifact_scan"])["status"], "disabled")
         self.assertTrue(self.provider.applied)
         self.artifact_scanner.assert_not_called()
 

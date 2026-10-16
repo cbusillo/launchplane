@@ -40,9 +40,12 @@ For private GHCR images, the service supports an exact context-scoped managed
 secret integration `ghcr_artifact_read` in its own `launchplane` context, with
 `username` and `password` bindings. The password must be a separately approved
 pull-only credential; no key is created, copied or granted by this change. The
-service reads these bindings only for `ghcr.io`, supplies them only in Trivy's
-child environment, and never falls back to a product token or host login. It
-never sends them to a different registry. The Director creates/pastes any new
+service reads these bindings only for the parsed `ghcr.io` host and writes a
+GHCR-only auth entry in a mode-0600 file inside the private temporary Docker
+config directory. It never supplies global Trivy username/password settings,
+and removes the file when scanning ends. Other registry and advisory mirror
+hosts receive no such entry. It never falls back to a product token or host
+login. The Director creates/pastes any new
 credential through the existing managed-secret UI; the agent verifies only
 redacted reads. Absent credentials allow public reads; an enabled private scan
 without usable credentials remains unavailable and holds the deploy.
@@ -53,9 +56,11 @@ cache reuses pass/fail evidence for 30 minutes and unavailable evidence for one
 minute, keyed by immutable digest and a one-way credential fingerprint. A
 credential rotation or process restart forces fresh qualification. Trivy checks
 its advisory DB freshness on uncached scans. No cached result is promotion
-acceptance. Testing gates run after existing-attempt detection; previously
-admitted operations keep their observation/replay path. Generic-web previews
-retain their failed-build memo before scanning.
+acceptance. Testing gates run after existing-attempt detection and before the
+generic-web execution lock. Previously admitted testing and Odoo preview
+operations keep their observation/replay path. Generic-web previews retain
+their failed-build memo before scanning. Cache hits do not wait for another
+image's scan; a busy scanner returns unavailable after a bounded wait.
 
 ## Retention dry run
 
