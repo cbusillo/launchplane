@@ -971,6 +971,7 @@ from control_plane.http_routes.testing_replacement_resources import (
 from control_plane.http_routes.testing_replacement_bootstrap import (
     register_testing_replacement_bootstrap_routes,
 )
+from control_plane.http_routes.testing_public_ingress import register_testing_public_ingress_routes
 from control_plane.http_routes.testing_generation_retirement import (
     register_testing_generation_retirement_routes,
 )
@@ -29808,6 +29809,13 @@ def create_launchplane_fastapi_app(
         run_provider_mutation=run_provider_mutation,
     )
     register_testing_replacement_bootstrap_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
+    register_testing_public_ingress_routes(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,

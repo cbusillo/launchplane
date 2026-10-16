@@ -1334,6 +1334,14 @@ read with all mutation flags disabled so drift fails closed instead of changing
 the route. Context-scoped callers retain the existing provider-mutation
 contract; do not grant that broader scope merely to inspect one testing lane.
 
+For a current independent Odoo testing generation whose new domain is absent
+from the public edge, use the separate
+[testing public-edge continuation](disposable-lanes.md#continue-a-restored-generations-public-edge).
+It derives the exact route from service records and reuses a covering existing
+certificate without changing generic instance-scoped ingress authority. It
+preserves the restored copy and supplies same-key recovery; another bootstrap
+or restore is never a TLS repair.
+
 For explicitly approved maintenance of an already-authorized transitional set,
 use `Manage Launchplane Authorization` on the default branch. Select the
 intended `managed_set`, then dispatch `mode=dry_run` with the final single-line

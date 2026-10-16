@@ -167,6 +167,16 @@ class NpmplusProxyHost(NpmplusProxyHostPayload):
         return () if value is None else value
 
 
+class NpmplusCertificate(BaseModel):
+    """Public certificate metadata only; provider DNS credentials are discarded."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: int = Field(ge=1)
+    domain_names: tuple[str, ...]
+    expires_on: str
+
+
 @dataclass(frozen=True)
 class NpmplusCredentials:
     base_url: str
@@ -252,6 +262,15 @@ class NpmplusClient:
         if not isinstance(payload, dict):
             raise click.ClickException("NPMplus proxy-host read returned an invalid payload.")
         return NpmplusProxyHost.model_validate(payload)
+
+    def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
+        payload = self._request(method="GET", path=f"/api/nginx/certificates/{certificate_id}")
+        if not isinstance(payload, dict):
+            raise click.ClickException("NPMplus certificate read returned an invalid payload.")
+        certificate = NpmplusCertificate.model_validate(payload)
+        if certificate.id != certificate_id:
+            raise click.ClickException("NPMplus certificate identity changed.")
+        return certificate
 
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
         response = self._request(

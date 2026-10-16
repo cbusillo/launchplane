@@ -37,6 +37,12 @@ class _Opener:
         self.requests: list[tuple[str, str, object | None]] = []
         self.token_payload: object = {"expires": "2026-06-01T01:17:27.592Z"}
         self.proxy_hosts_payload: object = [_proxy_host_payload(id=78)]
+        self.certificate_payload = {
+            "id": 47,
+            "domain_names": ["*.example.test"],
+            "expires_on": "2027-01-01 00:00:00",
+            "meta": {"dns_provider_credentials": "fixture-secret"},
+        }
 
     def open(self, request: Request, timeout: int | float) -> _Response:
         body_bytes = cast(bytes | None, request.data)
@@ -55,6 +61,8 @@ class _Opener:
             return _Response(_proxy_host_payload(id=78, enabled=True, npmplus_noindex=True))
         if method == "GET" and path == "/api/nginx/proxy-hosts":
             return _Response(self.proxy_hosts_payload)
+        if method == "GET" and path == f"/api/nginx/certificates/{self.certificate_payload['id']}":
+            return _Response(self.certificate_payload)
         if method == "PUT" and path == "/api/nginx/proxy-hosts/78":
             assert isinstance(payload, dict)
             return _Response({"id": 78, **payload})
@@ -239,6 +247,17 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
 
 class NpmplusClientTests(unittest.TestCase):
+    def test_certificate_reader_retains_only_public_metadata(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        certificate = client.get_certificate(cast(int, opener.certificate_payload["id"]))
+        self.assertEqual(
+            certificate.domain_names,
+            tuple(cast(list[str], opener.certificate_payload["domain_names"])),
+        )
+        self.assertNotIn("meta", certificate.model_dump())
+        self.assertNotIn("fixture-secret", certificate.model_dump_json())
+
     def test_create_proxy_host_authenticates_and_posts_payload(self) -> None:
         opener = _Opener()
         client = NpmplusClient(credentials=_credentials(), opener=opener)

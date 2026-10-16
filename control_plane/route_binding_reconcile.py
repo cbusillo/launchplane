@@ -179,6 +179,94 @@ def plan_route_binding_reconcile(
             current_record_sha256=current_record_sha256,
         )
 
+    candidate = build_route_binding_candidate(
+        record_store=record_store,
+        request=request,
+        current_record=current_record,
+        current_record_sha256=current_record_sha256,
+    )
+    if candidate.record is None:
+        return candidate
+    record = candidate.record
+    candidate_record_sha256 = route_binding_record_sha256(record)
+    if current_record is None:
+        return RouteBindingReconcilePlan(
+            status="ready",
+            operation="create",
+            candidate_record_sha256=candidate_record_sha256,
+            record=record,
+        )
+    external_handoff = _is_relinquished_external_operator_binding(current_record)
+    if current_record.source.source_kind not in {"backfill", "service"} and not external_handoff:
+        return _conflict_plan(
+            code="route_binding_ownership_conflict",
+            detail=("Reconcile cannot replace a route-binding record set by an admin."),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+            candidate_record_sha256=candidate_record_sha256,
+        )
+    if external_handoff:
+        return RouteBindingReconcilePlan(
+            status="ready",
+            operation="refresh",
+            findings=(
+                RouteBindingReconcileFinding(
+                    code="external_route_authority_handoff",
+                    detail=(
+                        "Managed reconcile will replace explicitly relinquished external "
+                        "route authority with service-owned provider evidence."
+                    ),
+                ),
+            ),
+            current_record_sha256=current_record_sha256,
+            candidate_record_sha256=candidate_record_sha256,
+            current_record=current_record,
+            record=record,
+        )
+    if _route_binding_authority_projection(current_record) != (
+        _route_binding_authority_projection(record)
+    ):
+        return _conflict_plan(
+            code="route_binding_authority_conflict",
+            detail=(
+                "Current source records describe different route authority. Reconcile will not "
+                "silently change provider target, domains, ingress, TLS ownership, or status."
+            ),
+            current_record=current_record,
+            current_record_sha256=current_record_sha256,
+            candidate_record_sha256=candidate_record_sha256,
+        )
+    if _route_binding_evidence_projection(current_record) != (
+        _route_binding_evidence_projection(record)
+    ) or _route_binding_refresh_due(
+        current_record=current_record,
+        evaluated_at=request.evaluated_at,
+    ):
+        return RouteBindingReconcilePlan(
+            status="ready",
+            operation="refresh",
+            current_record_sha256=current_record_sha256,
+            candidate_record_sha256=candidate_record_sha256,
+            current_record=current_record,
+            record=record,
+        )
+    return RouteBindingReconcilePlan(
+        status="unchanged",
+        current_record_sha256=current_record_sha256,
+        candidate_record_sha256=current_record_sha256,
+        current_record=current_record,
+        record=current_record,
+    )
+
+
+def build_route_binding_candidate(
+    *,
+    record_store: RouteBindingReconcileStore,
+    request: RouteBindingReconcileRequest,
+    current_record: EnvironmentRouteBindingRecord | None = None,
+    current_record_sha256: str = "",
+) -> RouteBindingReconcilePlan:
+    """Build desired authority from stored sources; this grants no replacement permission."""
     findings: list[RouteBindingReconcileFinding] = []
     provider_target = _read_provider_target(
         record_store=record_store, request=request, findings=findings
@@ -346,74 +434,13 @@ def plan_route_binding_reconcile(
         ),
         updated_at=request.evaluated_at,
     )
-    candidate_record_sha256 = route_binding_record_sha256(record)
-    if current_record is None:
-        return RouteBindingReconcilePlan(
-            status="ready",
-            operation="create",
-            candidate_record_sha256=candidate_record_sha256,
-            record=record,
-        )
-    external_handoff = _is_relinquished_external_operator_binding(current_record)
-    if current_record.source.source_kind not in {"backfill", "service"} and not external_handoff:
-        return _conflict_plan(
-            code="route_binding_ownership_conflict",
-            detail=("Reconcile cannot replace a route-binding record set by an admin."),
-            current_record=current_record,
-            current_record_sha256=current_record_sha256,
-            candidate_record_sha256=candidate_record_sha256,
-        )
-    if external_handoff:
-        return RouteBindingReconcilePlan(
-            status="ready",
-            operation="refresh",
-            findings=(
-                RouteBindingReconcileFinding(
-                    code="external_route_authority_handoff",
-                    detail=(
-                        "Managed reconcile will replace explicitly relinquished external "
-                        "route authority with service-owned provider evidence."
-                    ),
-                ),
-            ),
-            current_record_sha256=current_record_sha256,
-            candidate_record_sha256=candidate_record_sha256,
-            current_record=current_record,
-            record=record,
-        )
-    if _route_binding_authority_projection(current_record) != (
-        _route_binding_authority_projection(record)
-    ):
-        return _conflict_plan(
-            code="route_binding_authority_conflict",
-            detail=(
-                "Current source records describe different route authority. Reconcile will not "
-                "silently change provider target, domains, ingress, TLS ownership, or status."
-            ),
-            current_record=current_record,
-            current_record_sha256=current_record_sha256,
-            candidate_record_sha256=candidate_record_sha256,
-        )
-    if _route_binding_evidence_projection(current_record) != (
-        _route_binding_evidence_projection(record)
-    ) or _route_binding_refresh_due(
-        current_record=current_record,
-        evaluated_at=request.evaluated_at,
-    ):
-        return RouteBindingReconcilePlan(
-            status="ready",
-            operation="refresh",
-            current_record_sha256=current_record_sha256,
-            candidate_record_sha256=candidate_record_sha256,
-            current_record=current_record,
-            record=record,
-        )
     return RouteBindingReconcilePlan(
-        status="unchanged",
-        current_record_sha256=current_record_sha256,
-        candidate_record_sha256=current_record_sha256,
+        status="ready",
+        operation="create",
+        record=record,
         current_record=current_record,
-        record=current_record,
+        current_record_sha256=current_record_sha256,
+        candidate_record_sha256=route_binding_record_sha256(record),
     )
 
 

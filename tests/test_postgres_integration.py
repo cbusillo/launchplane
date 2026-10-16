@@ -101,6 +101,7 @@ from tests.test_every_code_feedback_resume_storage import (
     T1 as FEEDBACK_T1,
 )
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapPrerequisiteScenario
+from tests import test_testing_public_ingress as public_ingress_tests
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
     _ReadOnlyTransport,
@@ -10904,6 +10905,12 @@ class RealPostgresPreviewReservationRecoveryTests(
 
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresTestingPublicIngressTests(public_ingress_tests.TestingPublicIngressTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
 
 
 class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteScenario):

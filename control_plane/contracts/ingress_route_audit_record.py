@@ -45,6 +45,7 @@ class IngressRouteAuditRecord(BaseModel):
     edge_endpoint_key: str = ""
     tls_owner: IngressRouteTlsOwner = "unknown"
     provider_certificate_ref: str = ""
+    provider_route_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
     expected_host_id: int | None = Field(default=None, ge=1)
     provider_host_id: int | None = Field(default=None, ge=1)
     operations: tuple[IngressRouteAuditOperation, ...]
