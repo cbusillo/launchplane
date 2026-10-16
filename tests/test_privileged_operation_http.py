@@ -2492,6 +2492,108 @@ class PrivilegedOperationHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after_record, before_record)
         self.assertEqual(after_events, before_events)
 
+    @patch.dict(
+        os.environ,
+        {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"x" * 32).decode()},
+    )
+    async def test_pending_plan_cancellation_records_human_and_permanently_blocks_approval(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                planned = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json={
+                        "source_event_id": "cancellation-plan",
+                        "request": {"reason": "Inspect canonical root migration"},
+                    },
+                )
+                self.assertEqual(planned.status_code, 200, planned.text)
+                operation_id = planned.json()["record"]["operation_id"]
+                path = f"/v1/privileged-operations/plans/{operation_id}"
+                blank = await client.post(
+                    f"{path}/cancel", json={"source_event_id": "blank", "reason": "   "}
+                )
+                self.assertEqual(blank.status_code, 422, blank.text)
+                self.assertEqual(
+                    store.read_privileged_operation_record(operation_id).status, "planned"
+                )
+                payload = {"source_event_id": "cancel-plan", "reason": "  Superseded plan  "}
+                cancelled = await client.post(f"{path}/cancel", json=payload)
+                self.assertEqual(cancelled.status_code, 200, cancelled.text)
+                replay = await client.post(f"{path}/cancel", json=payload)
+                self.assertEqual(replay.json()["write_status"], "replayed")
+                detail = await client.get(path)
+                record = detail.json()["record"]
+                self.assertEqual(record["status"], "cancelled")
+                self.assertEqual(record["terminal_reason"], payload["reason"].strip())
+                self.assertTrue(record["terminal_at"])
+                self.assertIsNone(record["approval"])
+                event = next(e for e in detail.json()["events"] if e["action"] == "cancelled")
+                self.assertEqual(event["actor"]["github_id"], _human().github_id)
+                self.assertEqual(event["actor"]["login"], _human().login)
+                self.assertEqual(event["reason"], record["terminal_reason"])
+                review = await client.get(f"{path}/review")
+                self.assertFalse(review.json()["review"]["can_approve"])
+                approved = await client.post(
+                    f"{path}/approve",
+                    json={"source_event_id": "late-approval", "reason": "Too late"},
+                )
+                self.assertEqual(approved.status_code, 409, approved.text)
+                self.assertEqual(
+                    store.read_privileged_operation_record(operation_id).status, "cancelled"
+                )
+
+    @patch.dict(
+        os.environ,
+        {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": base64.urlsafe_b64encode(b"x" * 32).decode()},
+    )
+    async def test_nonhuman_callers_cannot_cancel_or_approve_pending_plan(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            app = self._app(store=store, policy=_policy())
+            async with lifespan_client(app) as client:
+                planned = await client.post(
+                    "/v1/privileged-operations/plans",
+                    json={
+                        "source_event_id": "protected-plan",
+                        "request": {"reason": "Inspect canonical root migration"},
+                    },
+                )
+            operation_id = planned.json()["record"]["operation_id"]
+            before = store.read_privileged_operation_record(operation_id)
+            for identity in (
+                _agent(),
+                _SETUP_IDENTITY,
+                LocalAdminIdentity(subject="local-admin", token_label="local-admin"),
+            ):
+                denied_app = self._app(
+                    store=store, policy=_policy(), mutation_human_reader=Mock(return_value=identity)
+                )
+                async with lifespan_client(denied_app) as client:
+                    for action in ("cancel", "approve"):
+                        with self.subTest(identity=type(identity).__name__, action=action):
+                            denied = await client.post(
+                                f"/v1/privileged-operations/plans/{operation_id}/{action}",
+                                json={
+                                    "source_event_id": f"agent-{action}",
+                                    "reason": "Try human action",
+                                },
+                            )
+                            self.assertEqual(denied.status_code, 403, denied.text)
+                self.assertEqual(store.read_privileged_operation_record(operation_id), before)
+            self.assertEqual(
+                [
+                    event.action
+                    for event in store.list_privileged_operation_event_records(
+                        operation_id=operation_id
+                    )
+                ],
+                ["planned"],
+            )
+
     async def test_human_approval_and_revocation_are_replay_safe(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory,

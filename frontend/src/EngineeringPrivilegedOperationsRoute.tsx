@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import {
   LaunchplaneApiError,
   approvePrivilegedOperation,
+  cancelPrivilegedOperation,
   listProductProfiles,
   prepareAuthorizationCandidate,
   readPrivilegedOperationPlans,
@@ -13,6 +14,7 @@ import {
   type AuthorizationCandidateId,
   type PrivilegedOperationListResponse,
   type PrivilegedOperationSemanticReview,
+  type PrivilegedOperationHumanResponse,
   type AuthorizationCandidateIntent,
 } from "./api";
 import type { DevFixtureMode } from "./dev-fixture-loader";
@@ -35,13 +37,15 @@ import {
   type PrivilegedOperationDescriptorId,
 } from "./privileged-operation-selection";
 
-export function EngineeringPrivilegedOperationsRoute({ fixtureMode }: { fixtureMode: DevFixtureMode }) {
-  return <DefaultPrivilegedOperationsRoute fixtureMode={fixtureMode} />;
+export function EngineeringPrivilegedOperationsRoute({ admin, fixtureMode }: { admin: boolean; fixtureMode: DevFixtureMode }) {
+  return <DefaultPrivilegedOperationsRoute admin={admin} fixtureMode={fixtureMode} />;
 }
 
 function DefaultPrivilegedOperationsRoute({
+  admin,
   fixtureMode,
 }: {
+  admin: boolean;
   fixtureMode: DevFixtureMode;
 }) {
   const query = new URLSearchParams(window.location.search);
@@ -179,7 +183,7 @@ function DefaultPrivilegedOperationsRoute({
                 refresh={resource.refresh}
               />
             ) : null}
-            <PrivilegedOperationPlanList data={data.plans} refresh={resource.refresh} />
+            <PrivilegedOperationPlanList admin={admin} data={data.plans} refresh={resource.refresh} />
           </>
         )}
       </EngineeringResourceGate>
@@ -560,9 +564,11 @@ function AuthorizationCandidateCard({
 }
 
 function PrivilegedOperationPlanList({
+  admin,
   data,
   refresh,
 }: {
+  admin: boolean;
   data: PrivilegedOperationListResponse;
   refresh: () => void;
 }) {
@@ -582,6 +588,7 @@ function PrivilegedOperationPlanList({
     >
       {data.reviews.map((review) => (
         <PrivilegedOperationPlanCard
+          admin={admin}
           key={review.operation_id}
           review={review}
           refresh={refresh}
@@ -593,27 +600,46 @@ function PrivilegedOperationPlanList({
 
 
 function PrivilegedOperationPlanCard({
+  admin,
   review,
   refresh,
 }: {
+  admin: boolean;
   review: PrivilegedOperationSemanticReview;
   refresh: () => void;
 }) {
   const [mutationMessage, setMutationMessage] = useState("");
   const [detailMessage, setDetailMessage] = useState("");
   const [rawDetail, setRawDetail] = useState("");
+  const [cancelReason, setCancelReason] = useState("");
+  const [pendingMutation, setPendingMutation] = useState(false);
+  const mutationInFlight = useRef(false);
+  const cancelEventId = useRef<string | null>(null);
+  const [cancellation, setCancellation] = useState<PrivilegedOperationHumanResponse | null>(null);
   const isAgentPolicyProposal = review.requested_by_kind === "local_operator";
+  const needsDetail = isAgentPolicyProposal || review.lifecycle.status === "cancelled";
   const proposalLoader = useCallback(async (signal: AbortSignal) => {
-    if (!isAgentPolicyProposal) return null;
+    if (!needsDetail) return null;
     return readPrivilegedOperationRawDetail(review.operation_id, signal);
-  }, [review.operation_id, isAgentPolicyProposal]);
-  const proposalResource = useEngineeringResource(proposalLoader, `proposal:${review.operation_id}:${isAgentPolicyProposal}`);
+  }, [review.operation_id, needsDetail]);
+  const proposalResource = useEngineeringResource(proposalLoader, `proposal:${review.operation_id}:${review.lifecycle.status}:${needsDetail}`);
   const proposal = proposalResource.state.data;
   const proposalMatches = proposalResource.state.phase === "ready"
     && !proposalResource.state.stale
     && proposal?.record.operation_id === review.operation_id;
+  const cancellationResult = cancellation ?? (proposalMatches && proposal?.record.status === "cancelled" ? proposal : null);
+  const cancelled = cancellationResult?.record.status === "cancelled" || review.lifecycle.status === "cancelled";
+  const canCancel = admin && !cancelled && review.lifecycle.status === "planned"
+    && review.descriptor_id !== "ordinary-agent-delivery-activation"
+    && !review.lifecycle.approval_recorded && !review.lifecycle.execution_recorded;
+  const updateMessage = !cancellation && cancellationResult
+    ? "Plan cancelled. It can no longer be approved or executed."
+    : mutationMessage;
 
   async function mutate(action: "approve" | "revoke") {
+    if (mutationInFlight.current || cancelled || cancelEventId.current !== null) return;
+    mutationInFlight.current = true;
+    setPendingMutation(true);
     const reason =
       action === "approve"
         ? `Approved ${review.title} after reviewing the server-computed evidence.`
@@ -637,6 +663,49 @@ function PrivilegedOperationPlanCard({
           ? error.message
           : "The operation could not be updated.",
       );
+    } finally {
+      mutationInFlight.current = false;
+      setPendingMutation(false);
+    }
+  }
+
+  async function cancelPlan() {
+    const reason = cancelReason.trim();
+    if (!reason || !canCancel || mutationInFlight.current) return;
+    mutationInFlight.current = true;
+    setPendingMutation(true);
+    setMutationMessage("");
+    cancelEventId.current ??= `ui:cancel:${crypto.randomUUID()}`;
+    let recorded = false;
+    try {
+      const result = await cancelPrivilegedOperation(review.operation_id, reason, cancelEventId.current);
+      if (result.record.operation_id !== review.operation_id || result.record.status !== "cancelled") {
+        throw new Error("Cancellation response did not confirm this plan.");
+      }
+      recorded = true;
+      setCancellation(result);
+      setRawDetail("");
+      const detail = await readPrivilegedOperationRawDetail(review.operation_id);
+      if (detail.record.operation_id !== review.operation_id || detail.record.status !== "cancelled") {
+        throw new Error("Cancellation readback did not confirm this plan.");
+      }
+      setCancellation(detail);
+      setRawDetail(JSON.stringify(detail, null, 2));
+      setMutationMessage("Plan cancelled. It can no longer be approved or executed.");
+    } catch (error) {
+      if (!recorded && error instanceof LaunchplaneApiError
+        && [400, 403, 409, 410, 422].includes(error.statusCode)) {
+        cancelEventId.current = null;
+      }
+      setMutationMessage(recorded
+        ? "Cancellation recorded, but the refreshed result could not be read. Refresh plans to check it."
+        : error instanceof LaunchplaneApiError
+          ? error.message
+          : "Cancellation could not be confirmed. Refresh plans before trying again.");
+    } finally {
+      refresh();
+      mutationInFlight.current = false;
+      setPendingMutation(false);
     }
   }
 
@@ -678,9 +747,9 @@ function PrivilegedOperationPlanCard({
           </p>
         </div>
         <span
-          className={`privileged-operation-status ${review.lifecycle.status}`}
+          className={`privileged-operation-status ${cancelled ? "cancelled" : review.lifecycle.status}`}
         >
-          {review.lifecycle.status}
+          {cancelled ? "cancelled" : review.lifecycle.status}
         </span>
       </header>
 
@@ -712,7 +781,7 @@ function PrivilegedOperationPlanCard({
         <div>
           <dt>Review validity</dt>
           <dd>
-            {review.lifecycle.status === "expired"
+            {cancelled ? "This review has ended and cannot be reused." : review.lifecycle.status === "expired"
               ? "Expired historical review."
               : review.lifecycle.status === "planned" || review.lifecycle.status === "approved"
                 ? "No time limit. Policy and pre-state checks still apply; withdrawal or execution ends validity."
@@ -795,19 +864,45 @@ function PrivilegedOperationPlanCard({
         </section>
       ) : null}
 
-      {review.can_approve || review.can_revoke ? (
+      {!cancelled && (review.can_approve || review.can_revoke) ? (
         <div className="privileged-operation-actions">
           {review.can_approve ? (
-            <button type="button" disabled={isAgentPolicyProposal && !proposalMatches} onClick={() => void mutate("approve")}>
+            <button type="button" disabled={pendingMutation || cancelEventId.current !== null || (isAgentPolicyProposal && !proposalMatches)} onClick={() => void mutate("approve")}>
               Approve plan
             </button>
           ) : null}
           {review.can_revoke ? (
-            <button type="button" onClick={() => void mutate("revoke")}>
+            <button type="button" disabled={pendingMutation} onClick={() => void mutate("revoke")}>
               Revoke approval
             </button>
           ) : null}
         </div>
+      ) : null}
+
+      {canCancel ? (
+        <form className="privileged-operation-cancel" onSubmit={event => {
+          event.preventDefault();
+          void cancelPlan();
+        }}>
+          <label>
+            Reason for cancellation
+            <textarea required maxLength={4000} value={cancelReason} disabled={pendingMutation || cancelEventId.current !== null}
+              onChange={event => setCancelReason(event.target.value)} />
+          </label>
+          <p>Reject this pending plan permanently. It cannot be approved or executed afterwards.</p>
+          <button type="submit" disabled={pendingMutation || !cancelReason.trim()}>
+            {pendingMutation ? "Updating plan…" : "Reject / Cancel plan"}
+          </button>
+        </form>
+      ) : null}
+
+      {cancellationResult ? (
+        <section aria-label="Cancellation result" className="privileged-operation-terminal-reason">
+          <p>{cancellationResult.record.terminal_reason}</p>
+          {cancellationResult.events.filter(event => event.action === "cancelled").map(event => event.actor.identity_type === "github_human" ? (
+            <p key={event.event_id}>Cancelled by {event.actor.login} (GitHub ID {event.actor.github_id}) · {formatTime(event.occurred_at)}</p>
+          ) : null)}
+        </section>
       ) : null}
 
       {review.evidence.raw_detail_available ? (
@@ -828,13 +923,13 @@ function PrivilegedOperationPlanCard({
         </details>
       ) : null}
 
-      {mutationMessage ? (
-        <p className="privileged-operation-terminal-reason">
-          {mutationMessage}
+      {updateMessage ? (
+        <p className="privileged-operation-terminal-reason" role="status" aria-label="Operation update">
+          {updateMessage}
         </p>
       ) : null}
 
-      {review.lifecycle.terminal_reason_available ? (
+      {review.lifecycle.terminal_reason_available && !cancellationResult ? (
         <p className="privileged-operation-terminal-reason">
           Terminal reason is available in the authorized detail response.
         </p>

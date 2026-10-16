@@ -16,6 +16,7 @@ import type {
   ApplyProductProductionUseData,
   ApplyProductOwnerData,
   ApproveHumanPrivilegedOperationData,
+  CancelHumanPrivilegedOperationData,
   DispatchProductPromotionWorkflowData,
   DryRunProductPromotionData,
   EnqueueOdooProdPromotionData,
@@ -77,6 +78,8 @@ export const BROWSER_WRITE_ROUTES = {
     "/v1/product-review/feedback/retry" satisfies RetryProductReviewFeedbackData["url"],
   privilegedOperationApprove:
     "/v1/privileged-operations/plans/{operation_id}/approve" satisfies ApproveHumanPrivilegedOperationData["url"],
+  privilegedOperationCancel:
+    "/v1/privileged-operations/plans/{operation_id}/cancel" satisfies CancelHumanPrivilegedOperationData["url"],
   privilegedOperationRevoke:
     "/v1/privileged-operations/plans/{operation_id}/revoke" satisfies RevokeHumanPrivilegedOperationData["url"],
   authorizationCandidatePrepare:
