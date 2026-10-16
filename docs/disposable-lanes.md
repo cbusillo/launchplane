@@ -809,6 +809,16 @@ change the origin certificate policy, or dismiss an incident to resolve TLS.
 Retain private review/receipts outside the checkout for same-key recovery.
 The retained edge host and its certificate are not changed or removed.
 
+Existing provider certificate renewal remains its maintenance path. A changed
+certificate ID or route is drift requiring the supported ingress maintenance
+path and fresh review; this create-only continuation never updates, disables
+or deletes a host. No global proxy restart or verification setting changes.
+After edge publication the operational parent still proves strict public
+HTTPS, exact runtime identity and monitor-driven incident resolution through
+the existing service checks. `public_health_verified` remains false in these
+configuration receipts; source tests or private HTTP success cannot clear the
+real incident.
+
 ### Complete verification after public TLS repair
 
 A completed copy and post-deploy pass can precede a public TLS failure. Until
@@ -868,16 +878,6 @@ review the changed evidence before planning further. Incidents resolve through
 normal monitor checks after truthful inventory publication; this endpoint never
 dismisses or edits an incident. Keep operational acceptance open until that
 monitor observation is recorded.
-
-Existing provider certificate renewal remains its maintenance path. A changed
-certificate ID or route is drift requiring the supported ingress maintenance
-path and fresh review; this create-only continuation never updates, disables
-or deletes a host. No global proxy restart or verification setting changes.
-After edge publication the operational parent still proves strict public
-HTTPS, exact runtime identity and monitor-driven incident resolution through
-the existing service checks. `public_health_verified` remains false in these
-configuration receipts; source tests or private HTTP success cannot clear the
-real incident.
 
 ### Retire an incomplete legacy generation into custody
 
