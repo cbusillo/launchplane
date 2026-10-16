@@ -12888,6 +12888,20 @@ class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
 
 
 class RealPostgresNeverServedTests(unittest.TestCase):
+    def test_usage_revocation_preserves_independent_protection_on_postgres(self) -> None:
+        from tests.test_testing_never_served import NeverServedHttpTests
+
+        for protection in NeverServedHttpTests.revocation_protections:
+            with self.subTest(protection=protection), _head_postgres_database() as url:
+                fixture = NeverServedHttpTests(
+                    "test_usage_revocation_preserves_independent_copy_and_resource_protection"
+                )
+                fixture.database_url = url
+                fixture.revocation_protections = (protection,)
+                result = unittest.TestResult()
+                fixture.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_lifetime_non_use_and_revocation_on_postgres(self) -> None:
         from tests.test_testing_never_served import NeverServedTestingTests
 

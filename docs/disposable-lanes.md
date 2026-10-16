@@ -1064,8 +1064,10 @@ binds to the generation rather than a growing list of failed checks. Failed chec
 against an earlier route do not count toward coverage. The predicate is rechecked
 under the shared authority lock before publication and again when
 consumed, including through the supersession snapshot adapter. Dispatch/hold
-revocation removes an already-published never-served
-observation; a delayed collector cannot republish it. Data custody, physical
+revocation removes an already-published never-served usage witness; a delayed
+collector cannot republish it. An observation with needed-copy, shared-resource
+or separation-staging protection retains those facts, binding and expiry with
+usage set to UNKNOWN, so revocation cannot erase independent protection. Data custody, physical
 isolation, backup gates and retained-operation fences remain independent.
 
 Use the existing evidence-only `scripts/collect-disposable-lane.py collect`

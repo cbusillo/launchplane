@@ -450,6 +450,89 @@ class NeverServedTestingTests(unittest.TestCase):
 
 
 class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
+    database_url = ""
+    revocation_protections: tuple[dict[str, str], ...] = (
+        {"data": "only_copy", "production_resources": "unknown"},
+        {"data": "unknown", "production_resources": "shared"},
+        {"data": "unknown", "production_resources": "separation_ready"},
+    )
+
+    async def test_usage_revocation_preserves_independent_copy_and_resource_protection(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+        from tests.support.http import request
+
+        for changes in self.revocation_protections:
+            with self.subTest(protection=changes):
+                fixture = NeverServedTestingTests()
+                fixture.database_url = self.database_url
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                app = fixture.fixture.fixture.app
+                previous = fixture.store.read_disposable_lane_safety(
+                    fixture.product, fixture.context, "testing"
+                )
+                assert previous is not None
+                fixture.store.write_disposable_lane_safety(previous.model_copy(update=changes))
+                body = {
+                    "product": fixture.product,
+                    "context": fixture.context,
+                    "instance": "testing",
+                }
+
+                async def collect() -> dict[str, object]:
+                    inspected = await request(
+                        app,
+                        "POST",
+                        "/v1/disposable-lanes/observations",
+                        headers={"Authorization": "Bearer local-operator-token"},
+                        payload=body,
+                    )
+                    response = await request(
+                        app,
+                        "POST",
+                        "/v1/disposable-lanes/observations",
+                        headers={"Authorization": "Bearer local-operator-token"},
+                        payload={
+                            **body,
+                            "mode": "collect",
+                            "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
+                        },
+                    )
+                    self.assertEqual(response.status_code, 202, response.text)
+                    return dict(response.json()["result"])
+
+                with patch(
+                    "control_plane.http_app.read_odoo_testing_usage",
+                    return_value=OdooTestingUsage(
+                        reason_code="serving_container_absent",
+                        never_served_candidate=True,
+                    ),
+                ):
+                    first = await collect()
+                with patch(
+                    "control_plane.http_app.read_odoo_testing_usage",
+                    return_value=OdooTestingUsage(
+                        "in_use",
+                        True,
+                        True,
+                        "complete",
+                    ),
+                ):
+                    positive = await collect()
+                self.assertEqual(first["usage"], "unused")
+                self.assertEqual(first["data"], changes["data"])
+                self.assertEqual(first["production_resources"], changes["production_resources"])
+                self.assertEqual(positive["data"], first["data"])
+                self.assertEqual(positive["production_resources"], first["production_resources"])
+                self.assertEqual(positive["usage"], "in_use")
+                self.assertEqual(fixture.read().usage, "unknown")
+                fixture.store.clear_disposable_lane_safety(
+                    fixture.product, fixture.context, "testing"
+                )
+                self.assertEqual(fixture.read().usage, "unknown")
+
     async def test_unavailable_runtime_uses_only_complete_service_records(self) -> None:
         from unittest.mock import patch
         from tests.support.http import request

@@ -10689,7 +10689,18 @@ class PostgresRecordStore(HumanSessionStore):
             if (not product or evidence.product == product) and str(
                 evidence.payload.get("usage_evidence", "")
             ).startswith(NON_USE_EVIDENCE_PREFIX):
-                session.delete(evidence)
+                if evidence.payload.get("data") == "only_copy" or evidence.payload.get(
+                    "production_resources"
+                ) in {"shared", "separation_ready"}:
+                    # Revoke this usage witness, not independent protections on
+                    # the same row. Neither their binding nor expiry is renewed.
+                    evidence.payload = {
+                        **evidence.payload,
+                        "usage": "unknown",
+                        "usage_evidence": "",
+                    }
+                else:
+                    session.delete(evidence)
 
     def invalidate_testing_non_use(self, product: str, context: str) -> None:
         with self._session_factory() as session:
