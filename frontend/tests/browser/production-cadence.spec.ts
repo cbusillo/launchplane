@@ -1,5 +1,5 @@
-import { expect, setClockTime, test, waitForState } from "./state";
-import { READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
+import { expect, setClockTime, test } from "./state";
+import { DEADLINE_RETRY_INTERVAL_MS, READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 for (const view of ["index", "workspace", "environment"] as const) {
   test(`open ${view} follows production evidence deadlines for over thirty minutes`, { tag: "@responsive" }, async ({ page }, testInfo) => {
@@ -23,13 +23,15 @@ for (const view of ["index", "workspace", "environment"] as const) {
     });
     // The service updates at its evidence deadline, independently of when the
     // browser opened. The first response has only a small fresh window left.
-    const cadence = READ_REFRESH_INTERVAL_MS;
+    // Independent fixture input: production observations have a one-minute
+    // lifetime, and this monitor publishes ten seconds after the slot starts.
+    const cadence = 60_000;
+    const publicationDelay = 2 * DEADLINE_RETRY_INTERVAL_MS;
     const origin = Date.now();
     let serviceTime = origin + cadence * 0.9;
     let stoppedAt: number | undefined;
     let unavailable = false;
     let reads = 0;
-    let lastName = "";
     const mutations: string[] = [];
     await setClockTime(page, serviceTime);
     page.on("request", request => {
@@ -37,7 +39,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
     });
     const response = <T,>(source: T): T => {
       const copy = structuredClone(source);
-      const observed = origin + Math.floor(((stoppedAt ?? serviceTime) - origin) / cadence) * cadence;
+      const observed = origin + Math.floor(((stoppedAt ?? serviceTime) - origin - publicationDelay) / cadence) * cadence;
       const fresh = (value: unknown) => {
         if (!value || typeof value !== "object") return;
         const record = value as Record<string, unknown>;
@@ -63,11 +65,11 @@ for (const view of ["index", "workspace", "environment"] as const) {
     });
     await page.route(target, async route => {
       reads++;
+      const name = `Cadence observation ${reads}`;
       if (unavailable) return route.fulfill({ status: 503, json: { error: { code: "read_unavailable", message: "Cadence fixture unavailable" } } });
       serviceTime = await page.evaluate(() => Date.now());
-      lastName = `Cadence observation ${reads}`;
-      const product = { ...response(fixture.product), display_name: lastName };
-      const detail = { ...response(fixture.detail), display_name: lastName };
+      const product = { ...response(fixture.product), display_name: name };
+      const detail = { ...response(fixture.detail), display_name: name };
       return route.fulfill({ json: { status: "ok", products: [product], product, environment: detail } });
     });
     await page.route(`${detailUrl}/public-ingress/incidents`, route => route.fulfill({ json: { status: "ok", incident_list: fixture.incidents } }));
@@ -77,12 +79,21 @@ for (const view of ["index", "workspace", "environment"] as const) {
     const attribute = view === "index" ? "data-operational" : "data-tone";
     const healthy = view === "environment" ? "pass" : "verified";
     await expect(signal).toHaveAttribute(attribute, healthy);
-    for (let minute = 0; minute <= 30; minute++) {
+    // Observe the boundary before publication rather than jumping over it.
+    const beforeDeadline = reads;
+    await page.clock.runFor(cadence * 0.1 + 1);
+    await expect(page.getByText(`Cadence observation ${beforeDeadline + 1}`, { exact: true }).last()).toBeVisible();
+    await expect(signal).toHaveAttribute(attribute, "warning");
+    for (let retry = 0; retry < publicationDelay / DEADLINE_RETRY_INTERVAL_MS; retry++) {
       const before = reads;
-      const advance = minute === 0 ? cadence * 0.2 : cadence;
-      await page.clock.runFor(advance);
-      await waitForState(() => reads).toBeGreaterThan(before);
-      await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
+      await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS);
+      await expect(page.getByText(`Cadence observation ${before + 1}`, { exact: true }).last()).toBeVisible();
+    }
+    await expect(signal).toHaveAttribute(attribute, healthy);
+    for (let minute = 0; minute < 31; minute++) {
+      const before = reads;
+      await page.clock.runFor(cadence);
+      await expect(page.getByText(`Cadence observation ${before + 1}`, { exact: true }).last()).toBeVisible();
       await expect(signal).toHaveAttribute(attribute, healthy);
     }
     await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-${view}-${testInfo.project.name}.png`, fullPage: true });
@@ -90,9 +101,15 @@ for (const view of ["index", "workspace", "environment"] as const) {
     stoppedAt = serviceTime;
     await page.clock.runFor(cadence);
     await expect(signal).toHaveAttribute(attribute, "warning");
-    await expect(signal).toContainText("Stale");
+    // Repeated successful reads cannot renew the stopped observation, and the
+    // short follow-up ends after one cadence rather than spinning forever.
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
+    await expect(signal).toHaveAttribute(attribute, "warning");
+    const stoppedReads = reads;
+    await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS * 2);
+    expect(reads).toBe(stoppedReads);
     unavailable = true;
-    await page.clock.runFor(cadence);
+    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
     await expect(page.getByText("Cadence fixture unavailable", { exact: false }).first()).toBeVisible();
     await expect(signal).toHaveAttribute(attribute, "warning");
     expect(mutations).toEqual([]);
