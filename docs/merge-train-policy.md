@@ -142,7 +142,10 @@ and the same authenticated provider transport. Compare response-header quota-use
 counters as well as per-pass attempts/304s; other users of a shared installation
 can increase its counter during the measurement. The HTTP fixture in
 `tests/test_merge_train_read_cost.py` exercises the controller with fifteen unqueued
-PRs. An isolated read proof does not establish a whole night's installation-wide
+PRs. A cold pass now includes discussion evidence for each unlabelled PR, plus
+commit classification for dependency updates; its cost scales with that evidence.
+Immediately repeated unchanged passes revalidate those bodies without charging
+primary quota. An isolated read proof does not establish a whole night's installation-wide
 budget; correlate deployed pass tallies with hourly counter peaks after landing.
 
 ## Preparing An Ordinary-Agent Target
