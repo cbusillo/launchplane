@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from control_plane.workflows.generic_web_deploy_provider import GenericWebDeployProvider
+
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -73,6 +75,7 @@ def execute_generic_web_rollback(
     record_store: GenericWebRollbackApplyStore,
     request: GenericWebRollbackPlanRequest,
     post_deploy_executor: GenericWebPostDeployExecutor | None = None,
+    deploy_provider: GenericWebDeployProvider | None = None,
 ) -> GenericWebRollbackApplyResult:
     plan = build_generic_web_rollback_plan(record_store=record_store, request=request)
     record_store.write_generic_web_rollback_plan_record(plan)
@@ -100,6 +103,7 @@ def execute_generic_web_rollback(
             no_cache=planned_deploy.no_cache,
         ),
         post_deploy_executor=post_deploy_executor,
+        deploy_provider=deploy_provider,
         # The plan took this artifact from Launchplane's own deployment record.
         recorded_artifact=True,
         rollback=True,

@@ -17,6 +17,7 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
+from control_plane.odoo_diagnostic_identity import DIAGNOSTIC_IDENTITY_UNAVAILABLE
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -216,9 +217,7 @@ def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str
         domain_host=url.hostname,
     ):
         raise ValueError("Diagnostic origin mismatch")
-    credentials = connection.credentials
-    if not credentials["ODOO_DB_NAME"] or not credentials["ODOO_ADMIN_PASSWORD"]:
-        raise ValueError("Missing diagnostic credentials")
+    authentication = reads.diagnostic_authentication(connection)
     opener = build_opener(reads._NoRedirects(), HTTPCookieProcessor(CookieJar()))
 
     def health() -> None:
@@ -230,26 +229,15 @@ def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str
         )
 
     health()
-    authenticated = reads._rpc(
-        opener,
-        origin,
-        "/web/session/authenticate",
-        {
-            "db": credentials["ODOO_DB_NAME"],
-            "login": credentials["ODOO_ADMIN_LOGIN"] or "admin",
-            "password": credentials["ODOO_ADMIN_PASSWORD"],
-        },
+    authenticated = reads.authenticate_diagnostic(
+        connection,
+        lambda: reads._rpc(opener, origin, "/web/session/authenticate", authentication),
     )
-    if (
-        not isinstance(authenticated, dict)
-        or type(authenticated.get("uid")) is not int
-        or authenticated["uid"] <= 0
-    ):
-        raise ValueError("Diagnostic authentication unavailable")
     keys = [
         prefix + "." + name for prefix in SOURCE_PREFIXES.values() for name in (*FIELDS, "password")
     ]
     try:
+        reads.require_diagnostic_user(connection, authenticated)
         raw = reads._rpc(
             opener,
             origin,
@@ -262,7 +250,10 @@ def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str
             },
         )
     finally:
-        reads._rpc(opener, origin, "/web/session/destroy", {}, expect_result=False)
+        reads.destroy_diagnostic_session(
+            connection,
+            lambda: reads._rpc(opener, origin, "/web/session/destroy", {}, expect_result=False),
+        )
     health()
     if not isinstance(raw, list) or len(raw) > len(keys):
         raise ValueError("Invalid diagnostic rows")
@@ -374,6 +365,7 @@ def diagnose_imports(
             selection=selection,
             control_plane_root=control_plane_root,
             database_url=database_url,
+            diagnostics=True,
         )
         applied = read_applied_parameters(connection)
         results: list[SourceDiagnostic] = []
@@ -464,6 +456,10 @@ def diagnose_imports(
             return unknown_result()
         reads.assert_selection_current(store, selection)
         return ImportDiagnosticResult(runtime="verified", sources=tuple(results))
+    except reads.OdooRuntimeReadError as error:
+        if error.code == DIAGNOSTIC_IDENTITY_UNAVAILABLE:
+            raise
+        return unknown_result()
     except Exception:
         # No provider/RPC/driver/decryption exception text or chained context is
         # returned. This fixed response contains no caller/server-controlled text.

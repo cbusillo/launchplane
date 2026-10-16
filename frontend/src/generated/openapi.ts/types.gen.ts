@@ -463,6 +463,7 @@ export type DeploymentRecordOutput = {
     deployed_target: DeployedTargetReference | null;
     destination_health: HealthcheckEvidence;
     failure: RecordFailure | null;
+    generic_web_cutover?: GenericWebCutoverRecord | null;
     instance: string;
     integration_key_readback: IntegrationKeyReadbackEvidence | null;
     no_cache: boolean;
@@ -739,6 +740,43 @@ export type GenericWebApplicationSchedule = {
     enabled: boolean;
     name: string;
     timeout_seconds: number;
+};
+
+export type GenericWebCutoverLane = {
+    host: string;
+    route_id: string;
+    runtime_settings_sha256: string;
+    slots: [
+        WebSlotCoordinates,
+        WebSlotCoordinates
+    ];
+    writers: Array<string>;
+};
+
+export type GenericWebCutoverPlan = {
+    candidate: ArtifactIdentityManifest;
+    compatibility: ReleaseDatabaseCompatibility;
+    lane: GenericWebCutoverLane;
+    new: WebSlot;
+    old: WebSlot;
+    production: ArtifactIdentityManifest;
+    release_id: string;
+};
+
+export type GenericWebCutoverRecord = {
+    began_at: string;
+    ended_at: string | null;
+    error: string;
+    old_connections_drained: boolean;
+    plan: GenericWebCutoverPlan;
+    previous_slot_retained: true;
+    readiness: WebSlotReadiness | null;
+    record_id: string;
+    records_committed: boolean;
+    rollback_started_at: string | null;
+    route: WebRouteObservation | null;
+    step: 'preparing' | 'ready' | 'switching' | 'resuming' | 'draining' | 'complete' | 'rolling_back' | 'rolled_back' | 'blocked';
+    updated_at: string;
 };
 
 export type GenericWebLaneDeclaration = {
@@ -3393,6 +3431,7 @@ export type ProductLaneHealthMonitoringPolicy = {
 export type ProductLaneProfile = {
     base_url: string;
     context: string;
+    generic_web_cutover?: GenericWebCutoverLane | null;
     generic_web_extensions?: GenericWebLaneExtensions;
     health_monitoring: ProductLaneHealthMonitoringPolicy;
     health_url: string;
@@ -4964,6 +5003,51 @@ export type UrgentReleaseReviewEnvelope = {
     checklist_digest: string;
     product: string;
     reason: string;
+};
+
+export type WebRouteObservation = {
+    applied: true;
+    authoritative_router_count: 1;
+    evidence_id: string;
+    host: string;
+    public_health: HealthcheckEvidence;
+    route_id: string;
+    slot_id: string;
+    target_url: string;
+};
+
+export type WebSlot = {
+    deploy_reference: string;
+    image: string;
+    private_url: string;
+    runtime_identity: RuntimeIdentity;
+    slot_id: string;
+    target_id: string;
+    target_type: 'application' | 'compose';
+};
+
+export type WebSlotCoordinates = {
+    private_url: string;
+    slot_id: string;
+    target_id: string;
+    target_type: 'application' | 'compose';
+};
+
+export type WebSlotReadiness = {
+    assets: true;
+    background_workers_fenced: boolean;
+    evidence_id: string;
+    first_request_ms: number;
+    host: string;
+    image: string;
+    observed_at: string;
+    render: true;
+    retained_previous_assets: true;
+    runtime_identity: RuntimeIdentity;
+    runtime_settings_sha256: string;
+    slot_id: string;
+    warmed: true;
+    warmed_request_ms: number;
 };
 
 export type WorkGraphIssueInboxResponse = {

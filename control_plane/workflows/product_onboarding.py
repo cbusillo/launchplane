@@ -118,6 +118,16 @@ def build_product_profile_record(
             ProductLaneProfile(
                 instance=lane.instance,
                 context=lane.context,
+                generic_web_cutover=next(
+                    (
+                        old.generic_web_cutover
+                        for old in existing_profile.lanes
+                        if old.instance == lane.instance and old.context == lane.context
+                    ),
+                    None,
+                )
+                if existing_profile
+                else None,
                 base_url=lane.base_url,
                 health_url=_lane_health_url(manifest=manifest, lane=lane),
                 odoo_stable_bootstrap=lane.odoo_stable_bootstrap,

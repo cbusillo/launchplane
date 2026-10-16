@@ -10797,6 +10797,8 @@ class PostgresRecordStore(HumanSessionStore):
                     "before_configuration_sha256",
                     "phase",
                     "qualified_at",
+                    "upstream_proof",
+                    "recovery_proof",
                 }
                 if not superseding and previous.model_dump(exclude=mutable) != record.model_dump(
                     exclude=mutable

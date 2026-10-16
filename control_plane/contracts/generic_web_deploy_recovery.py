@@ -25,6 +25,7 @@ GenericWebDeployRecoveryProviderOutcome = Literal[
 ]
 GenericWebDeployProviderEvidenceClassification = Literal[
     "deployment_present",
+    "cutover_checkpoint_recoverable",
     "deployment_correlated_legacy",
     "deployment_absent_before_effect",
     "deployment_absent_after_effect",

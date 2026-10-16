@@ -13,8 +13,11 @@ import urllib.error
 from control_plane.contracts.production_recipient import (
     ProductionRecipientRequest,
     ProductionRecipientPlan,
+    RecipientRecoveryRequest,
+    RecipientRecoveryPlan,
 )
 from control_plane.production_recipient import ROUTE
+from control_plane.production_recipient_recovery import RECOVERY_ROUTE
 
 
 def save(path: Path, payload: object) -> None:
@@ -46,6 +49,11 @@ def main() -> int:
     parser.add_argument("--config")
     parser.add_argument("--env-config")
     parser.add_argument("--url")
+    parser.add_argument(
+        "--recovery",
+        action="store_true",
+        help="Qualify isolated cold-data recovery of the exact preparation.",
+    )
     args = parser.parse_args()
     submitted = False
     try:
@@ -62,18 +70,20 @@ def main() -> int:
         transport["validate_service_url"](settings["service_url"])
         if not settings["token"]:
             raise ValueError("The existing caller credential is unavailable.")
-        draft = ProductionRecipientRequest.model_validate(json.loads(args.request_file.read_text()))
+        request_type = RecipientRecoveryRequest if args.recovery else ProductionRecipientRequest
+        result_type = RecipientRecoveryPlan if args.recovery else ProductionRecipientPlan
+        draft = request_type.model_validate(json.loads(args.request_file.read_text()))
         if draft.mode != "dry-run" or draft.reviewed_plan_sha256:
             raise ValueError("The request file must be the original planning request.")
         body = draft.model_dump(mode="json")
-        path = ROUTE.format(product=args.product)
+        path = (RECOVERY_ROUTE if args.recovery else ROUTE).format(product=args.product)
         if args.mode == "apply":
             if not args.idempotency_key.strip() or not args.reviewed_dry_run:
                 raise ValueError("Apply requires saved review and the original stable key.")
             evidence = json.loads(args.evidence_file.read_text())
             if evidence["request"] != body or evidence["path"] != path:
                 raise ValueError("The review belongs to another preparation.")
-            body["reviewed_plan_sha256"] = ProductionRecipientPlan.model_validate(
+            body["reviewed_plan_sha256"] = result_type.model_validate(
                 evidence["result"]
             ).plan_sha256
         if args.mode == "receipt" and not args.idempotency_key.strip():
@@ -96,7 +106,7 @@ def main() -> int:
         )
         if response["status"] != "accepted":
             raise ValueError("Preparation was not accepted.")
-        result = ProductionRecipientPlan.model_validate(response["result"]).model_dump(mode="json")
+        result = result_type.model_validate(response["result"]).model_dump(mode="json")
         output = (
             args.evidence_file
             if args.mode == "dry-run"
