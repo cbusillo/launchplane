@@ -45,11 +45,12 @@ Treat this file as the launch checklist for each engineering session in
 - Follow [DIRECTION.md](DIRECTION.md) for delivery authority and retired designs.
   After required checks pass and review findings are accounted for, use the
   `launchplane` skill to drive the train if the task explicitly authorizes it.
-  Otherwise comment `Ready for the merge train` on the PR and hand it off to
-  the direction or Supervisor session. That comment is a handoff, not automatic
-  enqueueing; the authorized session applies the configured enqueue label and
-  routes the PR through the train. An executing agent does not merge by hand
-  or operate the train without explicit authority for that task.
+  Otherwise use the checked `gh-pr.py ready` handoff on the current PR head.
+  The train admits trusted, proven current-head handoffs between candidates;
+  see [train admission](docs/merge-train-policy.md#ready-handoffs). Until that
+  source is deployed, the Supervisor's interim watcher supplies enqueue labels.
+  An executing agent does not merge by hand or operate the train without
+  explicit authority for that task.
 - Use [event-driven deploys](docs/event-driven-deploys.md) and
   [artifact provenance](docs/artifact-provenance.md) for the product build handoff,
   and [Client review](docs/owner-acceptance.md) and

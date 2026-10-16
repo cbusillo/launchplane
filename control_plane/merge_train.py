@@ -7,6 +7,7 @@ from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
+from control_plane.merge_train_handoff import MergeTrainReadyHandoff, ready_handoff_refusal
 
 
 MergeTrainCheckStatus = Literal["pass", "fail", "pending", "unknown"]
@@ -118,6 +119,10 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     label_actors: tuple[MergeTrainLabelActor, ...] = Field(
         default=(), exclude_if=lambda value: not value
     )
+    ready_handoff: MergeTrainReadyHandoff | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    changed_paths: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     actor_id: PositiveInt | None = None
     actor_role: str = "unknown"
     head_sha: str
@@ -200,6 +205,7 @@ class MergeTrainQueueEntry(BaseModel):
     branch_update_required: bool
     eligible: bool
     ineligible_reasons: tuple[str, ...] = ()
+    deferred_reasons: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
 
 
 class MergeTrainDryRunResult(BaseModel):
@@ -402,15 +408,43 @@ def build_merge_train_dry_run_result(
         if batch_size is not None and existing_candidate_size is not None:
             batch_size = max(batch_size, existing_candidate_size)
         batch_entries: list[MergeTrainQueueEntry] = []
+        paths_by_number = {pr.number: pr.changed_paths for pr in base_pull_requests}
+        group_areas = new_candidate and not any(
+            entry.owner_review_required for entry in eligible_entries
+        )
+        batch_areas: frozenset[str] = frozenset()
+        deferred_reason = ""
         for entry in eligible_entries:
             if batch_size is not None and len(batch_entries) == batch_size:
+                deferred_reason = "waiting for the next candidate: maximum batch size reached"
                 break
             if entry.requires_individual_landing:
                 if not batch_entries:
                     batch_entries.append(entry)
+                deferred_reason = "waiting for the next candidate: individual landing boundary"
+                break
+            areas = frozenset(
+                path.split("/", 1)[0] if "/" in path else "."
+                for path in paths_by_number[entry.number]
+            )
+            if group_areas and batch_entries and batch_areas and areas and not batch_areas & areas:
+                deferred_reason = "waiting for the next candidate: different changed-file area"
                 break
             batch_entries.append(entry)
+            batch_areas |= areas
         eligible_entries = tuple(batch_entries)
+        if new_candidate:
+            admitted_numbers = {entry.number for entry in eligible_entries}
+            queue = tuple(
+                entry.model_copy(
+                    update={
+                        "deferred_reasons": (deferred_reason,),
+                    }
+                )
+                if entry.eligible and entry.number not in admitted_numbers
+                else entry
+                for entry in queue
+            )
     selected_pr = next(iter(eligible_entries), None)
     intended_next_action, next_action_detail = _next_action_for_selected_pr(
         repository_policy,
@@ -768,6 +802,10 @@ def _build_queue_entry(
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
     )
     label_refusal = _enqueue_label_refusal(repository_policy, pull_request)
+    handoff_refusal = ready_handoff_refusal(
+        repository_policy, pull_request.ready_handoff, pull_request.head_sha
+    )
+    has_ready_handoff = not handoff_refusal
     if (
         skip_blocked
         and pull_request.state == "open"
@@ -794,8 +832,21 @@ def _build_queue_entry(
             else DEPENDENCY_HEAD_CHECKS_FAILED
         )
     if repository_policy.enqueue.label_required and label_refusal:
-        if not is_dependency_update:
+        if has_ready_handoff:
+            # A handoff admits only a proven source head. The combined candidate
+            # and landing still pass their own independent checks.
+            if pull_request.required_checks_status != "pass":
+                ineligible_reasons.append(
+                    f"current-head required checks are {pull_request.required_checks_status}"
+                )
+            if pull_request.mergeable != "mergeable":
+                ineligible_reasons.append(f"current-head mergeability is {pull_request.mergeable}")
+            if pull_request.client_test_notes_error:
+                ineligible_reasons.append(pull_request.client_test_notes_error)
+        elif not is_dependency_update:
             ineligible_reasons.append(label_refusal)
+            if pull_request.ready_handoff is not None:
+                ineligible_reasons.append(handoff_refusal)
         elif pull_request.dependency_update_class != "patch_or_minor":
             ineligible_reasons.append("dependency update needs agent review")
     if (
@@ -803,6 +854,7 @@ def _build_queue_entry(
         and actor_role not in repository_policy.enqueue.allowed_actor_roles
         and not (
             actor_role == "unknown"
+            and not has_ready_handoff
             and repository_policy.enqueue.label_required
             and repository_policy.enqueue_label not in pull_request.labels
             and pull_request.dependency_update_class != "patch_or_minor"

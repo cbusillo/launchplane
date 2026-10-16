@@ -84,6 +84,14 @@ from control_plane.merge_train_codeowners import (
 )
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
+from control_plane.merge_train_handoff import (
+    MergeTrainReadyHandoff,
+    handoff_actor_allowed,
+    handoff_head,
+    handoff_kind,
+    handoff_timestamp,
+    ready_handoff_refusal,
+)
 from control_plane.source_control_change import change_fingerprint
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
@@ -2921,6 +2929,7 @@ class GitHubMergeTrainSnapshotReader:
         self._actor_roles: dict[tuple[str, str], str] = {}
         self._author_roles: dict[tuple[str, str], str] = {}
         self._dependency_classes: dict[tuple[str, int, str, str], DependencyUpdateClass] = {}
+        self._ready_handoffs: dict[int, MergeTrainReadyHandoff] = {}
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -2928,6 +2937,7 @@ class GitHubMergeTrainSnapshotReader:
         self._actor_roles.clear()
         self._author_roles.clear()
         self._dependency_classes.clear()
+        self._ready_handoffs.clear()
         repository_path = _repository_path(repository)
         normalized_base_branch = _required_value(
             base_branch, "GitHub pull request base branch is required."
@@ -3045,14 +3055,11 @@ class GitHubMergeTrainSnapshotReader:
             or str(head.get("ref") or "").startswith("launchplane/train/")
         ):
             return True
-        if (
-            user.get("id") not in policy.enqueue.dependency_update_github_user_ids
-            or user.get("type") != "Bot"
-        ):
-            return False
         base = _json_object(pull_request.get("base"), "GitHub pull request base")
-        return (
-            self._safe_dependency_update_class(
+        if (
+            user.get("id") in policy.enqueue.dependency_update_github_user_ids
+            and user.get("type") == "Bot"
+            and self._safe_dependency_update_class(
                 repository_path=_repository_path(policy.repository),
                 pull_request_number=_required_int(
                     pull_request.get("number"), "GitHub pull request requires number."
@@ -3063,7 +3070,15 @@ class GitHubMergeTrainSnapshotReader:
                 base_sha=str(base.get("sha") or ""),
             )
             == "patch_or_minor"
+        ):
+            return True
+        number = _required_int(pull_request.get("number"), "PR requires number.")
+        head_sha = _required_text(head.get("sha"), "PR requires head SHA.")
+        handoff = self._read_ready_handoff(
+            repository_path=_repository_path(policy.repository), number=number, head_sha=head_sha
         )
+        self._ready_handoffs[number] = handoff
+        return not ready_handoff_refusal(policy, handoff, head_sha)
 
     def read_pull_request_snapshot(
         self, *, repository: str, pull_request_number: int
@@ -3071,6 +3086,7 @@ class GitHubMergeTrainSnapshotReader:
         self._actor_roles.clear()
         self._author_roles.clear()
         self._dependency_classes.clear()
+        self._ready_handoffs.clear()
         repository_path = _repository_path(repository)
         snapshot = self._pull_request_snapshot(
             repository_path=repository_path,
@@ -3241,7 +3257,20 @@ class GitHubMergeTrainSnapshotReader:
         ):
             review_intent = ClientTestNotes(False)
         owner_review_required = review_intent.review_required
+        ready_handoff = self._ready_handoffs.get(pull_request_number)
+        policy = self._repository_policy
+        if (
+            enrich
+            and policy is not None
+            and policy.enqueue.label_required
+            and policy.enqueue_label not in labels
+            and ready_handoff is None
+        ):
+            ready_handoff = self._read_ready_handoff(
+                repository_path=repository_path, number=pull_request_number, head_sha=head_sha
+            )
         return MergeTrainPullRequestSnapshot(
+            ready_handoff=ready_handoff,
             owner_review_required=owner_review_required,
             client_test_notes_error=review_intent.error,
             number=pull_request_number,
@@ -3282,6 +3311,72 @@ class GitHubMergeTrainSnapshotReader:
             else "unknown",
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
+        )
+
+    def _read_ready_handoff(
+        self, *, repository_path: str, number: int, head_sha: str
+    ) -> MergeTrainReadyHandoff:
+        policy = self._repository_policy
+        if policy is None:
+            return MergeTrainReadyHandoff(status="missing")
+        latest: tuple[datetime, int, str, str, int, str] | None = None
+        try:
+            # A partial discussion cannot establish the latest trusted handoff.
+            for page in range(1, 101):
+                payload = self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/issues/{number}/comments?per_page=100&page={page}",
+                )
+                if not isinstance(payload, list):
+                    raise ValueError("Ready handoff comments must be a list.")
+                for item in payload:
+                    comment = _json_object(item, "Ready handoff comment")
+                    body = str(comment.get("body") or "")
+                    kind = handoff_kind(body)
+                    if kind is None:
+                        continue
+                    actor = _json_object(comment.get("user"), "Ready handoff author")
+                    actor_id = _required_int(actor.get("id"), "Ready handoff author requires id.")
+                    if _on_behalf_via_app(event=comment, actor=actor):
+                        continue
+                    role = (
+                        "trusted_automation"
+                        if actor_id in policy.enqueue.trusted_automation_github_user_ids
+                        else self._actor_role_for_user(
+                            repository_path=repository_path,
+                            username=_required_text(
+                                actor.get("login"), "Handoff author requires login."
+                            ),
+                        )
+                    )
+                    if not handoff_actor_allowed(policy, actor_id=actor_id, actor_role=role):
+                        continue
+                    comment_id = _required_int(comment.get("id"), "Ready handoff requires id.")
+                    timestamp = handoff_timestamp(
+                        str(comment.get("updated_at") or comment.get("created_at") or "")
+                    )
+                    handoff = (timestamp, comment_id, kind, handoff_head(body), actor_id, role)
+                    if latest is None or handoff[:2] > latest[:2]:
+                        latest = handoff
+                if len(payload) < 100:
+                    break
+            else:
+                raise ValueError("Ready handoff discussion exceeds the page bound.")
+        except (MergeTrainGitHubError, ValueError, TypeError):
+            return MergeTrainReadyHandoff(status="unreadable")
+        if latest is None:
+            return MergeTrainReadyHandoff(status="missing")
+        _, comment_id, latest_kind, declared_head, actor_id, role = latest
+        return MergeTrainReadyHandoff(
+            status="waiting"
+            if latest_kind == "waiting"
+            else "ready"
+            if declared_head == head_sha
+            else "stale",
+            head_sha=declared_head,
+            actor_id=actor_id,
+            actor_role=role,
+            comment_id=comment_id,
         )
 
     def _safe_dependency_update_class(

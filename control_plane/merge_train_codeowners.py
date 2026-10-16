@@ -36,13 +36,13 @@ def individual_landing_snapshots(
     if not base_sha:
         raise MergeTrainGitHubError("Code-owner batch routing requires the current base SHA.")
     patterns = _read_patterns(transport, repository_path, base_sha)
-    if not patterns:
-        return pull_requests
     result = []
     for pr in pull_requests:
-        if pr.state != "open" or pr.is_draft:
+        handoff_ready = pr.ready_handoff is not None and pr.ready_handoff.status == "ready"
+        if pr.state != "open" or pr.is_draft or (not patterns and not handoff_ready):
             result.append(pr)
             continue
+        paths: tuple[str, ...] = ()
         try:
             paths = _changed_paths(transport, repository_path, pr.number)
             confirmation = transport.request(
@@ -61,7 +61,12 @@ def individual_landing_snapshots(
             # Incomplete evidence can never justify transferring this PR's
             # approval to a batch. Other PRs may still proceed.
             individual = True
-        result.append(pr.model_copy(update={"requires_individual_landing": individual}))
+            paths = ()
+        result.append(
+            pr.model_copy(
+                update={"requires_individual_landing": individual, "changed_paths": paths}
+            )
+        )
     return tuple(result)
 
 
