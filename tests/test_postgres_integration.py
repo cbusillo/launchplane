@@ -12765,6 +12765,8 @@ class RealPostgresNeverServedTests(unittest.TestCase):
             self.assertEqual(fixture.read().usage, "unknown")
             # The reverse order must refuse the stale negative, too.
             self.assertFalse(fixture.store.publish_collected_disposable_lane_safety(evidence))
+
+
 class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTransportTests):
     def make_store(self) -> PostgresRecordStore:
         return self.enterContext(_store_for_fresh_head_database())
