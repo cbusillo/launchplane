@@ -45471,6 +45471,108 @@
         "title": "RuntimeSecretSafetyTargetScope",
         "type": "object"
       },
+      "RuntimeSettingRemovalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "default": "",
+            "maxLength": 256,
+            "title": "Instance",
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 256,
+            "minItems": 1,
+            "title": "Keys",
+            "type": "array"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "review_id": {
+            "default": "",
+            "maxLength": 128,
+            "title": "Review Id",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[0-9a-f]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "context",
+              "instance"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "scope",
+          "keys",
+          "reason"
+        ],
+        "title": "RuntimeSettingRemovalRequest",
+        "type": "object"
+      },
+      "RuntimeSettingRemovalResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "additionalProperties": true,
+            "title": "Result",
+            "type": "object"
+          },
+          "status": {
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "RuntimeSettingRemovalResponse",
+        "type": "object"
+      },
       "RuntimeSettings": {
         "additionalProperties": false,
         "description": "One plain runtime-environment record's settings.\n\n``values`` omits any setting that looks like a credential; its key is listed in\n``withheld_keys`` instead, because a credential stored as a plain setting belongs\nin a managed secret.",
@@ -50211,6 +50313,92 @@
         "title": "WorkGraphSnapshotResponse",
         "type": "object"
       },
+      "WorkflowRuleRetirementRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "inspect",
+            "enum": [
+              "inspect",
+              "plan"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "policy_record_id": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Policy Record Id",
+            "type": "string"
+          },
+          "policy_revision": {
+            "minimum": 1.0,
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "policy_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Policy Sha256",
+            "type": "string"
+          },
+          "selection": {
+            "items": {
+              "$ref": "#/components/schemas/WorkflowRuleSelection"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Selection",
+            "type": "array"
+          }
+        },
+        "required": [
+          "policy_record_id",
+          "policy_revision",
+          "policy_sha256",
+          "selection"
+        ],
+        "title": "WorkflowRuleRetirementRequest",
+        "type": "object"
+      },
+      "WorkflowRuleSelection": {
+        "additionalProperties": false,
+        "properties": {
+          "managed_rule_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Rule Id"
+          },
+          "managed_set_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Managed Set Id"
+          },
+          "rule_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Rule Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rule_sha256"
+        ],
+        "title": "WorkflowRuleSelection",
+        "type": "object"
+      },
       "WriterObservation": {
         "additionalProperties": false,
         "properties": {
@@ -51295,6 +51483,106 @@
           }
         },
         "summary": "Dry Run Promotion Recovery"
+      }
+    },
+    "/v1/admin/runtime-settings/removal": {
+      "post": {
+        "operationId": "runtime_setting_removal",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RuntimeSettingRemovalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RuntimeSettingRemovalResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Review, remove and read back exact stored plain-setting keys"
       }
     },
     "/v1/agent/context": {
@@ -54890,6 +55178,108 @@
           }
         },
         "summary": "Revoke one-time solo-administration confirmation evidence"
+      }
+    },
+    "/v1/authz-policies/workflow-rule-retirement-plan": {
+      "post": {
+        "operationId": "read_workflow_rule_retirement_plan",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkflowRuleRetirementRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Read Workflow Rule Retirement Plan",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Inspect exact workflow rule scopes and plan selected removal without applying"
       }
     },
     "/v1/contexts/{context}/driver-view": {

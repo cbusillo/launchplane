@@ -12207,3 +12207,38 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
+
+
+class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
+    def test_removal_atomicity_replay_and_drift_on_postgres(self) -> None:
+        from tests.test_reviewed_runtime_setting_removal import RuntimeRemovalTests
+
+        for name in (
+            "test_exact_deletion_survivors_archive_readback_and_lost_reply_replay",
+            "test_last_key_removes_record_and_keeps_delete_event_and_preimage",
+            "test_transaction_failure_keeps_values_and_no_success_receipt",
+            "test_drift_type_changes_and_key_or_reason_changes_refuse",
+        ):
+            with self.subTest(scenario=name), _head_postgres_database() as url:
+                fixture = RuntimeRemovalTests(name)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, name)()
+                finally:
+                    fixture.doCleanups()
+
+    def test_concurrent_same_key_removal_commits_once(self) -> None:
+        from tests.test_reviewed_runtime_setting_removal import (
+            RuntimeRemovalTests,
+            RuntimeRemovalPostgresScenarios,
+        )
+
+        with _head_postgres_database() as url:
+            fixture = RuntimeRemovalTests()
+            fixture.database_url = url
+            try:
+                fixture.setUp()
+                RuntimeRemovalPostgresScenarios.simultaneous_keys(fixture.store)
+            finally:
+                fixture.doCleanups()
