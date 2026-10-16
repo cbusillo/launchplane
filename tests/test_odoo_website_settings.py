@@ -132,6 +132,21 @@ class WebsiteSettingsTests(unittest.TestCase):
                     )
                     with self.assertRaises(ValueError):
                         plan_website_settings(store, bad)
+            store.write_dokploy_target_record(
+                target.model_copy(update={"public_hosts": tuple(reversed(target.public_hosts))})
+            )
+            with self.assertRaises(ValueError):
+                prepare_website_settings(
+                    store,
+                    value.model_copy(
+                        update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
+                    ),
+                )
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(
+                    context_name=target.context, instance_name=target.instance
+                )
+            store.write_dokploy_target_record(target)
             result = prepare_website_settings(
                 store,
                 value.model_copy(
@@ -144,16 +159,6 @@ class WebsiteSettingsTests(unittest.TestCase):
                 store.read_dokploy_target_record(context_name=target.context, instance_name="prod"),
                 target,
             )
-            store.write_dokploy_target_record(
-                target.model_copy(update={"public_hosts": tuple(reversed(target.public_hosts))})
-            )
-            with self.assertRaises(ValueError):
-                prepare_website_settings(
-                    store,
-                    value.model_copy(
-                        update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
-                    ),
-                )
 
     def test_no_public_hosts_preserves_the_profile_origin(self) -> None:
         with TemporaryDirectory() as directory:
