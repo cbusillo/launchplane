@@ -1,0 +1,18 @@
+{
+  "source_revision": "6c5146da396c97e4eac0e7657de014b7683f2b1a",
+  "wire_payload": {
+    "context": "example",
+    "instance": "testing",
+    "operation_id": "fixture-operation",
+    "mode": "dry-run",
+    "reason": "fixture",
+    "reviewed_plan_sha256": ""
+  },
+  "request_payload": {
+    "context": "example",
+    "instance": "testing",
+    "operation_id": "fixture-operation",
+    "reason": "fixture"
+  },
+  "request_sha256": "bee9f5ee9486f94a437ba4764877d8a6b6ce731e399d08851185900ef668a9c5"
+}

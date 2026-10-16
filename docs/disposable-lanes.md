@@ -1483,3 +1483,87 @@ down that connection and retains original-key uncertainty. Alert delivery writes
 only delivery fields for its original failure, and cannot overwrite worker
 storage/disposal evidence. A hold or positive use report arriving while a completed
 cleanup result is in flight preserves that result but skips the new activation.
+
+## Initial fresh Odoo testing generation
+
+An existing Odoo testing lane with no current fresh generation and no active or
+stranded lane operation uses the same resource and bootstrap producers with
+`initial_generation: true`. This is a separate preparation identity, not a
+replacement operation or a historical supersession. Completed operations,
+journals, old storage, target, hostname and credentials stay intact. It never
+qualifies the current database as a fresh copy.
+
+Start with the resource client, omitting `--operation-id`:
+
+```bash
+uv run python scripts/prepare-testing-replacement-resources.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <testing-context> --initial-generation \
+  --source-mode <ssh-or-container-export> \
+  --reason '<reason>' --idempotency-key <resource-key> \
+  --evidence-file <private-resource-review>
+```
+
+The service derives the preparation ID from the exact product, context,
+authenticated principal and original stable key; the receipt returns it as
+`operation_id`. Preserve that ID and key. Repeating the same dry run returns the
+same preparation while its recorded snapshot is unchanged; a changed intent or
+configuration requires a new key and new review. A refused, unactivated plan
+reserves neither an executor nor its original hostnames. Planning writes only
+its own custody/allocation evidence and reserves no executor. Before review it
+checks the existing bootstrap restore policy, distinct managed credentials and
+selected production source, then current original-lane usage through the existing
+read-only login/session probe or authoritative downtime rule. Missing evidence stays unknown. Holds,
+known use, production aliases and an existing generation or active operation
+refuse. Original copy custody is preserved by construction, not declared safe.
+
+Review the receipt, then repeat with `apply --reviewed-dry-run` and exactly the
+same arguments/key/evidence file. Separately run `readback` with the same key.
+Only reviewed apply establishes the initial preparation's durable lane fence;
+competing synchronous and durable operations cannot start until its exact
+bootstrap queue transaction commits. Unknown or partial effects retain that
+fence and all resources. Recover through the original key and actual provider
+readback; do not create a replacement key to escape an uncertain effect.
+If apply refuses before any dispatch, its lane checks now precede activation.
+For an interrupted no-effect attempt that already took the fence, run the same
+resource client with `release --reviewed-dry-run`, the original resource key,
+intent and private review file. The service excludes its executor, independently
+reads that its named provider placement is absent, and atomically verifies no
+dispatch checkpoint, captured target, resource receipt or generation exists.
+It atomically records terminal release for both the lane fence and original
+provider reservation, without deleting custody or rewriting the original request.
+Repeated release is idempotent; that released intent can never apply. The client
+reports `released` explicitly if the original apply is replayed after release.
+The lane can continue normally, or a new initial intent can be reviewed with a
+new key. Any partial placement, recorded dispatch or unknown provider read keeps
+the original fence; use original-key reconciliation, never release to bypass it.
+
+Configuration drift before adoption refuses the reviewed plan. Each bounded
+provider effect and final publication rechecks current identity, holds, use and
+aliases. Independent resource readback is the same as stranded recovery.
+
+Next use `scripts/prepare-testing-replacement-bootstrap.py` with
+`--initial-generation --operation-id <returned-preparation-id>`, the same product
+and context, a new unbound hostname, and the same reviewed `--source-mode` (`ssh` or
+`container-export`) for the recorded same-product production source. Run its
+`dry-run --evidence-file <private-bootstrap-review>`, review, then
+`apply --reviewed-dry-run --idempotency-key <bootstrap-key>` and separate
+`readback`. Keep the complete original bootstrap intent and key for recovery.
+The existing testing-only upstream-restore policy and distinct managed testing
+credentials are prerequisites; this path creates no credential or grant.
+
+Bootstrap uses the existing isolated renderer and sanitized production-copy
+worker: live keys and outbound integrations are removed before any copied Odoo
+registry, module or web code runs. It commits only a generation and queue
+receipt, never copy completion. Its atomic queue releases the preparation fence
+without modifying any historical operation. Genuine copy completion, physical
+isolation, runtime identity, integration and usage checks remain required before
+walkthrough provisioning. Read back that completion through the supported lane
+and walkthrough paths after the worker finishes. A ready source PR does not
+establish those runtime facts.
+
+Keep the service image that understands initial preparation fences active while
+one is open; forward-fix an interrupted preparation. An older image cannot
+interpret its exclusion contract. Never roll back storage or erase custody to
+clear a fence. The stranded-operation procedure above retains its original
+admission and supersession meaning.
