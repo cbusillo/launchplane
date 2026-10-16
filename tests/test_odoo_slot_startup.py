@@ -407,8 +407,9 @@ class SlotStartupTests(unittest.TestCase):
                 self.recover()
 
     def test_missing_corrupt_or_changed_authority_and_guard_refuse_recovery(self) -> None:
-        with self.assertRaisesRegex(ValueError, "previously admitted"):
+        with self.assertRaises(ValueError):
             self.recover()
+        self.assertFalse(self.effects)
         self.interrupt()
         path = next(self.authority_directory.glob("*.json"))
         original = path.read_text()
