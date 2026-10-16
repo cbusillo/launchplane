@@ -1,7 +1,7 @@
 """Index delivery-monitor sources and release-step dependencies.
 
 Revision ID: d3e7a1b5c9f2
-Revises: bc081b48f008
+Revises: cd192c59f009
 """
 
 from alembic import op
@@ -19,7 +19,7 @@ from control_plane.storage.migrations.delivery_evidence_v1 import (
 )
 
 revision = "d3e7a1b5c9f2"
-down_revision = "bc081b48f008"
+down_revision = "cd192c59f009"
 branch_labels = None
 depends_on = None
 
