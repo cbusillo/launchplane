@@ -423,6 +423,7 @@ or data migrations. Backup, restore and release gates retain their own rules.
 
 Once site staff test on a testing lane, a merge must not deploy mid-session.
 An admin holds the lane, and lifts the hold when staff are done.
+When inviting staff or a Client to test, the inviting admin sets the lane's staff-testing hold as part of the invitation and lifts it when their testing finishes.
 
 - The hold is `policies.staff_testing_hold` on the testing lane's tracked
   target record: a reason, who recorded it and when. It is set and lifted only

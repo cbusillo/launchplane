@@ -36,8 +36,8 @@ the drill also preserves those references in its private admission receipt.
 These observations describe Launchplane's monitor vantage. A network, DNS or
 TLS fault in that vantage can look like a lane outage even if a person can reach
 it elsewhere. A staff-testing hold remains authoritative regardless of monitor
-results. Network-only qualification is the explicit policy choice recorded on
-the owning issue before this rule is used on a live lane.
+results. [Director decision Q380](https://github.com/cbusillo/launchplane/issues/3812#issuecomment-6217513435)
+accepts this bounded monitor-vantage rule for an unheld non-production lane.
 
 The common disposable guard covers runtime repair/deploy, preview operations,
 replacement target setup, held-operation supersession and rehearsal admission.
