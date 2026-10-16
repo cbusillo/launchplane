@@ -78,13 +78,13 @@ def inspect_resources(
         raise ValueError("Recipient storage and ports were not qualified on their actual host.")
 
 
-RESOURCE_PROGRAM = r"""
+RESOURCE_LIBRARY = r"""
 import base64, hashlib, json, re, socket, subprocess, sys
 from pathlib import Path
 
 def docker(*args):
-    result = subprocess.run(["docker", *args], capture_output=True, text=True)
-    if result.returncode:
+    result = subprocess.run(["docker", *args], capture_output=True, text=True, timeout=60)
+    if result.returncode or len(result.stdout)>1024*1024:
         raise RuntimeError("resource operation failed")
     return result.stdout
 
@@ -133,7 +133,7 @@ def main():
         if not path.is_absolute() or path.is_symlink():
             raise ValueError("invalid backing")
         path = path.resolve(strict=True)
-        if path.name != "_data" or path.parent.name != name or not path.is_dir() or any(path.iterdir()):
+        if path.name != "_data" or path.parent.name != name or not path.is_dir() or (not spec.get("recover", False) and any(path.iterdir())):
             raise ValueError("nonempty allocation")
         identity = (path.stat().st_dev, path.stat().st_ino)
         if identity in identities:
@@ -177,10 +177,16 @@ def main():
     binding = {key:value for key,value in spec.items() if key != "prepare"}
     print("production_recipient_resources_sha256=" + hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
     print("production_recipient_resources_ok=true")
+    return paths
+"""
 
+RESOURCE_PROGRAM = (
+    RESOURCE_LIBRARY
+    + r"""
 try:
     main()
 except Exception:
     print("production_recipient_resources_ok=false")
     sys.exit(1)
 """
+)

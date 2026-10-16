@@ -19,6 +19,11 @@ from control_plane.contracts.production_recipient import (
 from control_plane.dokploy import api, compose, source
 from control_plane.generic_web_deploy_http import resolve_generic_web_deploy_lane
 from control_plane.production_recipient_resources import inspect_resources
+from control_plane.production_recipient_upstreams import (
+    require_delivered_upstreams,
+    upstream_connections,
+    upstream_binding,
+)
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -164,6 +169,7 @@ def runtime_values(
     ):
         raise ValueError("Use existing, nonsecret, unretired production resource settings.")
     values = dict(environment.values)
+    require_delivered_upstreams(store, record)
     for role, key in record.request.volume_keys.items():
         values[key] = record.volumes[role]
     for key, value in record.request.ports.items():
@@ -193,6 +199,18 @@ def _qualified_render(record: ProductionRecipientRecord, values: dict[str, str])
     services = document.get("services", {})
     if set(services) != {record.request.application_service, record.request.database_service}:
         raise ValueError("Fresh-state preparation supports one application and one database.")
+    import re
+
+    if (
+        re.fullmatch(
+            r"[A-Za-z0-9./:_-]+@sha256:[a-f0-9]{64}",
+            str(services[record.request.database_service].get("image", "")),
+        )
+        is None
+    ):
+        raise ValueError(
+            "The database verifier requires an immutable database image in product source."
+        )
     # Runtime limits are product-owned source, not a service-host override. The
     # actual converted provider definition must agree with this exact source.
     for name, service in services.items():
@@ -261,6 +279,14 @@ def _qualified_render(record: ProductionRecipientRecord, values: dict[str, str])
             if len(configured) != 1 or not 0 < memory_bytes(configured[0]) <= maximum:
                 raise ValueError("Product source must enforce its reviewed command memory limit.")
     qualified = deepcopy(document)
+    upstream_connections(record, document, values)
+    for upstream in record.request.upstreams:
+        environment = qualified["services"][upstream.service].get("environment", {})
+        if isinstance(environment, list):
+            environment = dict(item.split("=", 1) for item in environment)
+            qualified["services"][upstream.service]["environment"] = environment
+        for key in upstream.keys.values():
+            environment.pop(key, None)
     for service in qualified["services"].values():
         service.pop("deploy")
         environment = service.get("environment", {})
@@ -414,6 +440,8 @@ def plan(record: ProductionRecipientRecord) -> dict[str, Any]:
         ),
         qualified=bool(record.qualified_at),
         qualified_at=record.qualified_at,
+        upstream_qualified=bool(record.upstream_proof),
+        recovery_qualified=bool(record.recovery_proof),
     ).model_dump(mode="json")
 
 
@@ -834,6 +862,43 @@ class ProductionRecipientAdapter:
                     before_configuration_sha256=provider_binding_digest(fresh),
                 )
             inspect_resources(self.root, record, prepare=not configured, checkpoint=checkpoint)
+            if record.request.upstreams:
+                from control_plane.production_recipient_host import (
+                    run_recipient_program,
+                    upstream_program,
+                )
+
+                values = runtime_values(self.store, self.root, record)
+                rendered = qualified_render(record, values)
+                binding = upstream_binding(record)
+                evidence = run_recipient_program(
+                    self.root,
+                    record,
+                    {
+                        "connections": upstream_connections(record, rendered, values),
+                        "image": rendered["services"][record.request.database_service]["image"],
+                        "binding": binding,
+                        "project": record.app_name,
+                    },
+                    upstream_program(),
+                    checkpoint,
+                    scrub_guard=lambda: lease.checkpoint_effect("scrub_upstream_probe"),
+                )
+                if (
+                    evidence.get("recipient_upstreams_ok") != "true"
+                    or evidence.get("recipient_upstreams_binding") != binding
+                ):
+                    raise ValueError("The actual destination upstream grants are not read-only.")
+                if not record.upstream_proof:
+                    record = self.save(
+                        record,
+                        upstream_proof={
+                            "binding": binding,
+                            "observed_at": utc_now_timestamp(),
+                            "grants": "read_only",
+                            "origin": "recipient_default_network",
+                        },
+                    )
             template = json.loads(record.compose_source)
             for volume in template["volumes"].values():
                 volume["external"] = True
