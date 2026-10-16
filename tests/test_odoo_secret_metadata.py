@@ -159,6 +159,12 @@ class OdooSecretMetadataTests(unittest.TestCase):
                 self.assertEqual(repaired.sharing_reason, source.sharing_reason)
                 self.assertEqual(repaired.value_source, source.value_source)
                 self.assertEqual(store.read_secret_record(secret.secret_id), secret)
+                audit = next(
+                    event
+                    for event in store.list_secret_audit_events(secret_id=secret.secret_id)
+                    if event.metadata.get("action") == "relabel_metadata_repair"
+                )
+                self.assertEqual(audit.metadata["binding_id"], destination.binding_id)
                 self.assertEqual(
                     store.read_odoo_instance_override_record(
                         context_name=record.context, instance_name=record.instance
@@ -298,7 +304,7 @@ class OdooSecretMetadataTests(unittest.TestCase):
                 self.assertEqual(store.list_secret_bindings(limit=None), before)
 
     def test_cli_dry_run_and_apply_acknowledgement(self) -> None:
-        store, _, destination, _, _ = self.fixture()
+        store, source, destination, _, _ = self.fixture()
         assert isinstance(store, PostgresRecordStore)
         command = [
             "odoo-overrides",
@@ -311,7 +317,7 @@ class OdooSecretMetadataTests(unittest.TestCase):
             "testing",
             "--repair-metadata-from-relabel-history",
             "--repair-binding-id",
-            destination.binding_id,
+            f" {destination.binding_id} ",
         ]
         runner = CliRunner()
         dry = runner.invoke(main, command)
@@ -330,3 +336,33 @@ class OdooSecretMetadataTests(unittest.TestCase):
         applied = runner.invoke(main, [*command, "--apply", "--allow-direct-db-mutation"])
         self.assertEqual(applied.exit_code, 0, applied.output)
         self.assertIn("metadata_repaired", applied.output)
+        repaired = next(
+            item
+            for item in store.list_secret_bindings(limit=None)
+            if item.binding_id == destination.binding_id
+        )
+        self.assertEqual(repaired.value_source, source.value_source)
+        self.assertEqual(repaired.declared_secret_class, source.declared_secret_class)
+        self.assertEqual(repaired.sharing_reason, source.sharing_reason)
+
+    def test_cli_selector_refuses_missing_lane_and_blank_binding_id(self) -> None:
+        store, _, destination, _, _ = self.fixture()
+        assert isinstance(store, PostgresRecordStore)
+        command = [
+            "odoo-overrides",
+            "migrate-secret-transport",
+            "--database-url",
+            store.database_url,
+            "--context",
+            "missing",
+            "--instance",
+            "testing",
+            "--repair-metadata-from-relabel-history",
+            "--repair-binding-id",
+        ]
+        missing = CliRunner().invoke(main, [*command, destination.binding_id])
+        self.assertNotEqual(missing.exit_code, 0)
+        self.assertIn("no override record", missing.output)
+        blank = CliRunner().invoke(main, [*command, " "])
+        self.assertNotEqual(blank.exit_code, 0)
+        self.assertIn("must not be blank", blank.output)

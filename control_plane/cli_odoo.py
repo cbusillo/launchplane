@@ -810,6 +810,9 @@ def odoo_overrides_migrate_secret_transport(
 ) -> None:
     normalized_context = context_name.strip().lower()
     normalized_instance = instance_name.strip().lower()
+    normalized_binding_ids = frozenset(item.strip() for item in repair_binding_ids)
+    if "" in normalized_binding_ids:
+        raise click.ClickException("--repair-binding-id must not be blank.")
     if repair_metadata and not (normalized_context and normalized_instance):
         raise click.ClickException("Metadata recovery requires exact --context and --instance.")
     if repair_binding_ids and not repair_metadata:
@@ -832,6 +835,8 @@ def odoo_overrides_migrate_secret_transport(
             if (not normalized_context or record.context == normalized_context)
             and (not normalized_instance or record.instance == normalized_instance)
         ]
+        if normalized_binding_ids and not selected_records:
+            raise click.ClickException("Metadata recovery found no override record for this lane.")
         migrations: list[dict[str, object]] = []
         changed_records = 0
         for record in selected_records:
@@ -841,7 +846,7 @@ def odoo_overrides_migrate_secret_transport(
                 apply_changes=apply_changes,
                 source_label=source_label,
                 repair_metadata=repair_metadata,
-                repair_binding_ids=frozenset(repair_binding_ids),
+                repair_binding_ids=normalized_binding_ids,
             )
             changed = any(change["action"] != "unchanged" for change in changes)
             if apply_changes and changed:
