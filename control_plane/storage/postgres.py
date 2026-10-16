@@ -10483,6 +10483,47 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def publish_collected_disposable_lane_safety(self, record: DisposableLaneSafety) -> bool:
+        """A delayed collector cannot erase a newer protective observation."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneDisposableLaneSafetyRow,
+                (record.product, record.context, record.instance),
+                with_for_update=True,
+            )
+            if row is not None:
+                previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
+                if previous.usage == "in_use" and record.usage == "unknown":
+                    return False
+                if previous.observed_at > record.observed_at or (
+                    previous.observed_at == record.observed_at
+                    and previous.usage == "in_use"
+                    and record.usage != "in_use"
+                ):
+                    return False
+            session.merge(
+                LaunchplaneDisposableLaneSafetyRow(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+            return True
+
+    def disposable_lane_observation_time(self) -> datetime:
+        """Use the database clock shared by API replicas for collection ordering."""
+        if self.database_dialect_name != "postgresql":
+            return datetime.now(timezone.utc)
+        with self._session_factory() as session:
+            value = session.scalar(select(func.clock_timestamp()))
+        if not isinstance(value, datetime) or value.utcoffset() is None:
+            raise ValueError("The observation clock is unavailable.")
+        return value.astimezone(timezone.utc)
+
     def clear_disposable_lane_safety(self, product: str, context: str, instance: str) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -18028,10 +18069,13 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         context_name: str = "",
         limit: int | None = None,
+        exclude_source: str = "",
     ) -> tuple[PreviewInventoryScanRecord, ...]:
         filters: list[object] = []
         if context_name:
             filters.append(LaunchplanePreviewInventoryScanRow.context == context_name)
+        if exclude_source:
+            filters.append(LaunchplanePreviewInventoryScanRow.source != exclude_source)
         return self._list_models(
             model_type=PreviewInventoryScanRecord,
             orm_model=LaunchplanePreviewInventoryScanRow,

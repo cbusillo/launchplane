@@ -23,6 +23,8 @@ from control_plane.preview_lifecycle_cleanup_routes import (
     build_preview_lifecycle_sweep,
     require_preview_lifecycle_sweep_store,
 )
+from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_STALE_AFTER
+from control_plane.preview_inventory_collection import collect_preview_inventory
 from control_plane.provider_operations import _ReservationHeartbeat
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -72,7 +74,16 @@ def sweep_summary(result: dict[str, object]) -> dict[str, JsonValue]:
     }
 
 
-class PreviewLifecycleScheduler:
+class _PreviewScheduler:
+    scope = _SCOPE
+    route = _ROUTE
+    fingerprint = SWEEP_RECEIPT_FINGERPRINT
+    interval = SWEEP_INTERVAL_SECONDS
+    offset = SWEEP_SLOT_OFFSET_SECONDS
+
+    def slot(self) -> int:
+        return int((self.clock() - self.offset) // self.interval)
+
     def __init__(
         self,
         store: PostgresRecordStore,
@@ -91,7 +102,9 @@ class PreviewLifecycleScheduler:
 
     def start(self) -> None:
         self._stop.clear()
-        self._thread = Thread(target=self._loop, name="preview-lifecycle-sweep", daemon=True)
+        self._thread = Thread(
+            target=self._loop, name=self.route.removeprefix("service:"), daemon=True
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -105,12 +118,12 @@ class PreviewLifecycleScheduler:
             try:
                 self.run_once()
             except Exception:  # noqa: BLE001 - keep the next slot alive.
-                _LOGGER.exception("Preview lifecycle sweep schedule pass failed")
+                _LOGGER.exception("Preview scheduler %s pass failed", self.route)
             self._stop.wait(SWEEP_POLL_SECONDS)
 
     def _read(self, key: str) -> LaunchplaneIdempotencyRecord | None:
         return self.store.read_idempotency_record(
-            scope=_SCOPE, route_path=_ROUTE, idempotency_key=key
+            scope=self.scope, route_path=self.route, idempotency_key=key
         )
 
     def _write_completion(self, key: str, payload: dict[str, JsonValue]) -> None:
@@ -118,14 +131,14 @@ class PreviewLifecycleScheduler:
         self.store.write_idempotency_record(
             LaunchplaneIdempotencyRecord(
                 record_id=build_launchplane_mutation_reservation_id(
-                    scope=_SCOPE, route_path=_ROUTE, idempotency_key=key
+                    scope=self.scope, route_path=self.route, idempotency_key=key
                 ),
-                scope=_SCOPE,
-                route_path=_ROUTE,
+                scope=self.scope,
+                route_path=self.route,
                 idempotency_key=key,
-                request_fingerprint=SWEEP_RECEIPT_FINGERPRINT,
+                request_fingerprint=self.fingerprint,
                 response_status_code=200,
-                response_trace_id=f"preview-lifecycle-sweep:{key}",
+                response_trace_id=f"{self.route}:{key}",
                 recorded_at=_timestamp(now),
                 response_payload={"completed_at": _timestamp(now), **payload},
             )
@@ -134,10 +147,10 @@ class PreviewLifecycleScheduler:
     @contextmanager
     def _lease(self) -> Iterator[_ReservationHeartbeat | None]:
         claim = self.store.reserve_mutation(
-            scope=_SCOPE,
-            route_path=_ROUTE,
+            scope=self.scope,
+            route_path=self.route,
             idempotency_key="active",
-            request_fingerprint=SWEEP_RECEIPT_FINGERPRINT,
+            request_fingerprint=self.fingerprint,
             lease_owner=self._owner,
             lease_seconds=SWEEP_LEASE_SECONDS,
         )
@@ -158,7 +171,7 @@ class PreviewLifecycleScheduler:
             self.store.release_mutation_reservation(reservation=reservation)
 
     def run_once(self) -> bool:
-        key = str(sweep_slot(self.clock()))
+        key = str(self.slot())
         if self._read(key) is not None:
             return False
         with self._lease() as heartbeat:
@@ -173,12 +186,12 @@ class PreviewLifecycleScheduler:
             except Exception as error:
                 # A failed slot waits for the next one, like the daily workflow did;
                 # retrying every poll would repeat provider and GitHub reads all day.
-                _LOGGER.exception("Preview lifecycle sweep slot %s failed", key)
+                _LOGGER.exception("Preview scheduler %s slot %s failed", self.route, key)
                 summary = {"status": "error", "apply": False, "error": type(error).__name__}
             heartbeat.assert_current()
             self._write_completion(key, summary)
         log = _LOGGER.warning if summary["status"] in {"fail", "error"} else _LOGGER.info
-        log("Preview lifecycle sweep slot %s completed: %s", key, summary["status"])
+        log("Preview scheduler %s slot %s completed: %s", self.route, key, summary["status"])
         return True
 
     def _run_sweep(self) -> dict[str, object]:
@@ -190,3 +203,48 @@ class PreviewLifecycleScheduler:
             request=PreviewLifecycleSweepEnvelope(apply=False),
             should_stop=self._stop.is_set,
         )
+
+
+class PreviewInventoryScheduler(_PreviewScheduler):
+    scope = "launchplane:preview-inventory-scheduler:v1"
+    route = "service:preview-inventory-scheduler"
+    fingerprint = "preview-inventory-scheduler-v1"
+    # Three opportunities to collect before the shared evidence deadline.
+    interval = int(PREVIEW_INVENTORY_STALE_AFTER.total_seconds() / 3)
+    offset = 0
+
+    def _run_sweep(self) -> dict[str, object]:
+        return collect_preview_inventory(
+            control_plane_root=self.control_plane_root,
+            record_store=self.store,
+            should_stop=self._stop.is_set,
+        )
+
+
+class PreviewLifecycleScheduler(_PreviewScheduler):
+    def __init__(
+        self,
+        store: PostgresRecordStore,
+        *,
+        control_plane_root: Path,
+        clock: Callable[[], float] = time.time,
+        run_sweep: Callable[[], dict[str, object]] | None = None,
+    ) -> None:
+        super().__init__(
+            store, control_plane_root=control_plane_root, clock=clock, run_sweep=run_sweep
+        )
+        self.inventory_scheduler = PreviewInventoryScheduler(
+            store,
+            control_plane_root=control_plane_root,
+            clock=clock,
+        )
+
+    def start(self) -> None:
+        self.inventory_scheduler.start()
+        super().start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self.inventory_scheduler._stop.set()
+        self.inventory_scheduler.stop()
+        super().stop()

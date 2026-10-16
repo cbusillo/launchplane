@@ -248,6 +248,197 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.sync(), 409)
             driver.assert_not_called()
 
+    async def test_odoo_collection_reads_complete_usage_without_qualifying_data_or_isolation(
+        self,
+    ) -> None:
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
+        initial = self.store.read_product_profile_record("example-site")
+        for used in (False, True, None):
+            self.store.clear_disposable_lane_safety("example-site", self.context, "testing")
+            with patch(
+                "control_plane.http_app.read_odoo_testing_usage",
+                return_value=OdooTestingUsage(
+                    "unknown" if used is None else "in_use" if used else "unused",
+                    used,
+                    None if used is None else False,
+                ),
+            ) as reader:
+                inspected = await self.observe()
+                response = await self.observe(
+                    mode="collect",
+                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                reader.assert_called_once()
+            evidence = self.store.read_disposable_lane_safety(
+                "example-site", self.context, "testing"
+            )
+            assert evidence is not None
+            self.assertEqual(
+                evidence.usage, "unknown" if used is None else "in_use" if used else "unused"
+            )
+            self.assertEqual((evidence.data, evidence.production_resources), ("unknown", "unknown"))
+            self.assertEqual(self.store.read_product_profile_record("example-site"), initial)
+            self.assertEqual(response.json()["result"]["odoo_usage"]["recent_signins"], used)
+
+    async def test_delayed_unused_collection_cannot_erase_newer_protective_evidence(self) -> None:
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
+        inspected = await self.observe()
+
+        def newer_usage(**kwargs: object) -> OdooTestingUsage:
+            record_safety(self.store, "example-site", self.context, "testing", usage="in_use")
+            return OdooTestingUsage("unused", False, False)
+
+        with patch("control_plane.http_app.read_odoo_testing_usage", side_effect=newer_usage):
+            response = await self.observe(
+                mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        evidence = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert evidence is not None
+        self.assertEqual(evidence.usage, "in_use")
+
+    async def test_service_collection_runs_real_reader_against_provider_fixture(self) -> None:
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        inspected = await self.observe()
+        module = "control_plane.odoo_testing_usage."
+        with (
+            patch(
+                module + "source.read_dokploy_config",
+                return_value=("https://provider.invalid", "private-token"),
+            ),
+            patch(
+                module + "api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": target.target_name,
+                    "appName": "fixture-project",
+                    "serverId": "fixture-server",
+                },
+            ),
+            patch(
+                module + "_read_remote",
+                side_effect=lambda **kw: kw["receive"](
+                    {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
+                ),
+            ) as transport,
+        ):
+            response = await self.observe(
+                mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        transport.assert_called_once()
+        self.assertEqual(response.json()["result"]["usage"], "unused")
+        self.assertNotIn("private-token", response.text)
+
+    async def test_unknown_reads_and_assertions_cannot_clear_use_after_binding_change(self) -> None:
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
+        record_safety(self.store, "example-site", self.context, "testing", usage="in_use")
+        before = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        target.env["FIXTURE_SETTING"] = "changed"
+        self.store.write_dokploy_target_record(target)
+        inspected = await self.observe()
+        for mode in ("collect", "record"):
+            with patch(
+                "control_plane.http_app.read_odoo_testing_usage", return_value=OdooTestingUsage()
+            ):
+                response = await self.observe(
+                    mode=mode, expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+                )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(
+                self.store.read_disposable_lane_safety("example-site", self.context, "testing"),
+                before,
+            )
+
+    async def test_expired_collection_and_aliased_targets_cannot_publish_unused(self) -> None:
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
+        inspected = await self.observe()
+        started = datetime.now(timezone.utc)
+        with patch.object(self.store, "disposable_lane_observation_time") as clock:
+            clock.return_value = started
+
+            def expired(**kwargs: object) -> OdooTestingUsage:
+                clock.return_value = started + timedelta(seconds=2)
+                return OdooTestingUsage("unused", False, False)
+
+            with patch("control_plane.http_app.read_odoo_testing_usage", side_effect=expired):
+                response = await self.observe(
+                    mode="collect",
+                    lifetime_seconds=1,
+                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        )
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(target_id.model_copy(update={"instance": "prod"}))
+        with patch("control_plane.http_app.read_odoo_testing_usage") as reader:
+            response = await self.observe(
+                mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+            )
+            reader.assert_not_called()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(response.json()["result"]["usage"], "unknown")
+
+    async def test_odoo_usage_drift_and_provider_denial_cannot_publish_unused(self) -> None:
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
+        inspected = await self.observe()
+
+        def change_hold(**kwargs: object) -> OdooTestingUsage:
+            from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+
+            target = self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            )
+            target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                reason="Staff started testing",
+                recorded_at=target.updated_at,
+                recorded_by="fixture",
+            )
+            self.store.write_dokploy_target_record(target)
+            return OdooTestingUsage("unused", False, False)
+
+        for effect, expected in (
+            (NativeSourceAuthorizationDenied("private-provider-error"), 403),
+            (change_hold, 409),
+        ):
+            with patch("control_plane.http_app.read_odoo_testing_usage", side_effect=effect):
+                response = await self.observe(
+                    mode="collect",
+                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                )
+            self.assertEqual(response.status_code, expected, response.text)
+            self.assertNotIn("private-provider-error", response.text)
+            self.assertIsNone(
+                self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+            )
+
     async def test_collector_never_infers_unused_reproducible_or_isolated_from_absence(
         self,
     ) -> None:

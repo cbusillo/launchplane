@@ -4185,6 +4185,34 @@ Launchplane drivers: product repos send PR/image intent, Launchplane derives the
 live preview URL from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that
 returned URL with generation status and cleanup outcome.
 
+Launchplane also collects preview inventory independently of lifecycle planning.
+The service's existing lease/slot runner collects once per ten-minute UTC slot
+(one third of inventory's 30-minute freshness window), across replicas and
+restarts. Both schedulers are signaled before shutdown joins either thread.
+Each active preview-enabled profile produces a product/repository-bound
+scan: generic web uses complete application inventory; Odoo uses complete compose
+inventory. Provider reads produce append-only scan evidence only. Product reads examine at most
+100 recent scans per context; no matching scoped evidence in that window is
+unknown, never empty. No desired-state
+discovery, lifecycle plan, cleanup apply, deployment or record destruction runs in
+this job. Explicit lifecycle planning excludes these scans in storage before
+limiting its result, so background history cannot crowd out its own evidence.
+Unsupported drivers and read/collection failures remain explicit scans;
+a failure is retried in the next slot rather than every poll. Shutdown stops between
+products; an interrupted slot remains eligible after restart.
+
+To check operation after deployment, compare successive scan IDs and original
+`scanned_at` values through Product Ops and the driver context. The product summary
+reports the observed count separately from recorded identities and their mismatches.
+Successful empty scans say no previews observed; disabled previews are not
+applicable. Missing or unsuccessful scans cannot establish absence. Do not edit
+records to renew freshness. Service logs and the separate
+`launchplane:preview-inventory-scheduler:v1` slot receipts retain collection outcomes.
+Rollback is the normal previous-service-image rollback: scans retain the strict v1 payload shape with versioned scope metadata in the
+existing source field, the prior daily job remains supported, and evidence naturally
+expires if collection stops. No grants, workflow settings or credentials are added
+or removed by this source change; #3514 still owns its settings-retirement proof.
+
 Launchplane now owns the preview lifecycle planning boundary. The service runs
 the daily sweep itself: one replica holds the sweep lease, each daily slot
 (rolling over at 05:17 UTC) runs once across restarts and replicas, and the
@@ -4195,7 +4223,7 @@ Stopping the service ends a running sweep between products without a
 receipt, so that slot runs again after restart.
 The service derives the participating products from product profiles where
 `preview.enabled=true`, refreshes provider inventory, discovers desired preview
-anchors from GitHub PR label state, writes lifecycle plans, and records cleanup
+anchors from open GitHub pull requests, including drafts, writes lifecycle plans, and records cleanup
 results, which Product Ops shows per product. Destructive provider cleanup
 still requires an explicit `apply=true` request to
 `POST /v1/previews/lifecycle-sweep` from a separately authorized caller; the

@@ -338,6 +338,120 @@ class AlembicFixtureConfigTests(unittest.TestCase):
                 self.assertEqual(restored_url, database_url)
 
 
+class RealPostgresOdooUsageTests(unittest.TestCase):
+    def test_observation_time_comes_from_the_shared_database_clock(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            with store._engine.connect() as connection:
+                before = connection.scalar(text("SELECT clock_timestamp()"))
+                observed = store.disposable_lane_observation_time()
+                after = connection.scalar(text("SELECT clock_timestamp()"))
+            self.assertLessEqual(before, observed)
+            self.assertLessEqual(observed, after)
+
+    def test_concurrent_collectors_preserve_newer_in_use_evidence(self) -> None:
+        from control_plane.contracts.disposable_lane import DisposableLaneSafety
+
+        with _store_for_fresh_head_database() as store:
+            now = datetime.now(timezone.utc)
+            old = DisposableLaneSafety(
+                product="fixture",
+                context="fixture",
+                instance="testing",
+                observed_by="fixture",
+                observer_kind="director_agent",
+                binding_sha256="a" * 64,
+                usage="unused",
+                usage_evidence="fixture:usage",
+                observed_at=now - timedelta(seconds=2),
+                expires_at=now + timedelta(seconds=300),
+            )
+            newer = old.model_copy(
+                update={"usage": "in_use", "observed_at": now - timedelta(seconds=1)}
+            )
+            barrier = threading.Barrier(2)
+
+            def publish(record: DisposableLaneSafety) -> bool:
+                barrier.wait(timeout=5)
+                return store.publish_collected_disposable_lane_safety(record)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                attempts = [pool.submit(publish, record) for record in (old, newer)]
+                for attempt in attempts:
+                    attempt.result(timeout=10)
+            self.assertEqual(
+                store.read_disposable_lane_safety("fixture", "fixture", "testing"), newer
+            )
+
+    def test_login_window_and_read_only_probe_leave_application_data_unchanged(self) -> None:
+        import psycopg
+        from types import ModuleType, SimpleNamespace
+        from unittest.mock import MagicMock
+        from control_plane.odoo_testing_usage import ODOO_TESTING_USAGE_CONTAINER_PROGRAM
+        from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
+        from tests.test_odoo_testing_usage import supported_odoo_argv
+
+        with _isolated_postgres_database() as url, TemporaryDirectory() as directory:
+            conninfo = (
+                make_url(url).set(drivername="postgresql").render_as_string(hide_password=False)
+            )
+            database = make_url(url).database
+            root = Path(directory)
+            (root / "sessions").mkdir()
+            with psycopg.connect(conninfo) as owner:
+                owner.execute(
+                    "CREATE TABLE res_users_log (create_uid integer, create_date timestamp)"
+                )
+                owner.execute(
+                    "INSERT INTO res_users_log VALUES (2, (now() AT TIME ZONE 'UTC') - interval '2 days')"
+                )
+                owner.commit()
+                driver = ModuleType("psycopg2")
+
+                def connect(**kwargs: Any) -> Any:
+                    connection = psycopg.connect(conninfo, options=kwargs["options"])
+                    # Exercise PostgreSQL's actual enforcement, not a copied
+                    # assertion about connection-option or SQL wording.
+                    with self.assertRaises(psycopg.errors.ReadOnlySqlTransaction):
+                        connection.execute("INSERT INTO res_users_log VALUES (99, now())")
+                    connection.rollback()
+                    return connection
+
+                driver.connect = connect  # type: ignore[attr-defined]
+                config = MagicMock()
+                config.read.return_value = [ODOO_WEB_CONFIG_PATH]
+                config.__getitem__.return_value = {
+                    "db_name": database,
+                    "db_host": "database",
+                    "data_dir": directory,
+                    "db_user": "fixture",
+                    "db_password": "fixture",
+                }
+                process = SimpleNamespace(
+                    read_bytes=lambda: b"\0".join(supported_odoo_argv(str(database))) + b"\0"
+                )
+                env = {
+                    "PLATFORM_INSTANCE": "testing",
+                    "ODOO_DB_NAME": database,
+                    "ODOO_DB_USER": "fixture",
+                    "ODOO_DB_PASSWORD": "fixture",
+                }
+                namespace: dict[str, Any] = {"__name__": "fixture"}
+                with (
+                    patch.dict("sys.modules", {"psycopg2": driver}),
+                    patch.dict(os.environ, env, clear=True),
+                    patch("configparser.ConfigParser", return_value=config),
+                    patch.object(Path, "glob", return_value=[process]),
+                ):
+                    exec(ODOO_TESTING_USAGE_CONTAINER_PROGRAM, namespace)
+                    self.assertFalse(namespace["probe"]()["recent_signins"])
+                    owner.execute("INSERT INTO res_users_log VALUES (2, now() AT TIME ZONE 'UTC')")
+                    owner.commit()
+                    self.assertTrue(namespace["probe"]()["recent_signins"])
+                self.assertEqual(
+                    owner.execute("SELECT count(*) FROM res_users_log").fetchone(), (2,)
+                )
+
+
 def _create_postgres_database(root_database_url: str, *, template: str = "") -> str:
     database_name = f"launchplane_test_{uuid4().hex}"
     template_clause = f' TEMPLATE "{template}"' if template else ""

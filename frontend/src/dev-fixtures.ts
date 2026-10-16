@@ -2234,6 +2234,9 @@ const atlasProduct: ProductSiteOverview = {
     records_status: "unsupported",
     records: [],
     records_truncated: false,
+    inventory: null,
+    unobserved_record_slugs: [],
+    untracked_observed_slugs: [],
     trust_state: "recorded",
     provenance: provenance(
       "recorded",
@@ -2269,6 +2272,9 @@ const missingEvidenceProduct: ProductSiteOverview = {
     records_status: "unsupported",
     records: [],
     records_truncated: false,
+    inventory: null,
+    unobserved_record_slugs: [],
+    untracked_observed_slugs: [],
     trust_state: "unsupported",
     provenance: provenance(
       "unsupported",

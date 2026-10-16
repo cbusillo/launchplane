@@ -91,7 +91,7 @@ export function AppShell({
   const staleDescription = inventoryStale ? `Stale data${inventoryReceivedAt === null ? "" :
     `; data from ${new Date(inventoryReceivedAt.wallTime).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}` : "";
   const products = (productsResource.data ?? []).map(product => expireProductEvidence(product));
-  useEvidenceExpiry(products.flatMap(product => product.environments));
+  useEvidenceExpiry(products.flatMap(product => product.environments), products.map(product => product.preview.provenance.stale_after));
   const selectedProductKey = routeProductKey(route);
   const productArea = route.kind === "product-index" || Boolean(selectedProductKey);
   const routeLabel =
