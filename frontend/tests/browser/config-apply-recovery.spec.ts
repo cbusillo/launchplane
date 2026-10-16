@@ -43,7 +43,7 @@ for (const form of ["runtime-settings", "managed-secrets"] as const) {
     const field = page.locator(".product-config-field").filter({ hasText:
       form === "runtime-settings" ? "PUBLIC_ORIGIN" : "SMTP_PASSWORD" });
     await field.getByRole("checkbox").check();
-    const valueInput = field.locator("input:not([type=checkbox])");
+    const valueInput = field.getByRole("textbox");
     await valueInput.fill(form === "runtime-settings"
       ? "https://example.invalid" : "inert-secret");
     await page.getByLabel("Change reason").fill("First review");
