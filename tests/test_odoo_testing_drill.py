@@ -750,7 +750,7 @@ class TestingDrillTests(TestingDrillScenario):
             self.store.list_pending_odoo_testing_drill_alerts(self.profile.product, self.context)
         )
 
-    def test_late_success_refreshes_lane_evidence_and_keeps_deadline_alert(self) -> None:
+    def test_late_success_refreshes_original_evidence_and_keeps_deadline_alert(self) -> None:
         self.scheduler.run_once()
         self.activate()
         self.now += DRILL_TIMEOUT_SECONDS + 1
@@ -783,8 +783,13 @@ class TestingDrillTests(TestingDrillScenario):
             )
         )
         self.scheduler.run_once()
-        self.assertEqual(self.evidence().status, "pass")
-        self.assertTrue(self.evidence().alert_delivered)
+        # A new daily slot may now be queued; inspect this attempt's receipt.
+        completed = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+        )
+        assert completed is not None
+        self.assertEqual(completed.response_payload["status"], "pass")
+        self.assertTrue(completed.response_payload["alert_delivered"])
 
     def test_partial_discord_delivery_does_not_resend_successful_destination(self) -> None:
         destinations = tuple(
