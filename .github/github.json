@@ -10,7 +10,7 @@
       "ci-gate",
       "security-gate"
     ],
-    "mergePath": "launchplane.mergeTrain",
+    "mergePath": "Launchplane merge train",
     "watchSkill": "babysit-pr"
   },
   "docs": {
@@ -65,6 +65,7 @@
     "publicReadiness": "docs/public-readiness.md",
     "roleWords": "docs/role-words.md",
     "artifactProvenance": "docs/artifact-provenance.md",
+    "artifactSecurity": "docs/artifact-security.md",
     "eventDrivenDeploys": "docs/event-driven-deploys.md",
     "releaseReview": "docs/release-review.md",
     "productionBackupProvider": "docs/production-backup-provider.md",
@@ -76,11 +77,13 @@
     "policies": [
       "docs/policies/coding-standards.md"
     ],
-    "odooWebsiteSettings": "docs/odoo-website-settings.md"
+    "odooWebsiteSettings": "docs/odoo-website-settings.md",
+    "launchplaneMergeTrain": "https://github.com/cbusillo/codex-skills/blob/main/skills/launchplane/references/merge-train.md"
   },
   "qualityGate": {
     "test": {
       "local": "uv run --extra dev python -m unittest {modules}",
+      "localSafety": "uv run --extra dev python -m unittest {safety_modules}",
       "ci": "uv run --extra dev launchplane ci unittest-shard local",
       "serviceRestartRehearsal": "LP_REHEARSAL_OPERATOR_HELPER=<installed-launchplane-skill>/scripts/launchplane-write-action.py uv run --extra dev python scripts/qualify-lane-service-restart.py",
       "postgresIntegration": "LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launchplane ci postgres-integration",
@@ -274,24 +277,6 @@
       "enabled": true,
       "helper": "launchplane/scripts/launchplane-write-action.py",
       "requiresPrivateConfig": true
-    },
-    "mergeTrain": {
-      "enabled": true,
-      "controller": true,
-      "readyLabel": "ready-to-merge",
-      "baseBranch": "main",
-      "githubActionsRunner": {
-        "repo": "cbusillo/launchplane",
-        "workflow": "merge-train-runner.yml",
-        "ref": "main",
-        "runnerMode": "controller",
-        "mutateDefault": false,
-        "revisionEvidenceFields": {
-          "runnerWorkflow": "workflow_run.head_sha",
-          "candidate": "result.candidate.candidate_sha",
-          "landing": "result.landing_plan.entries[].merge_commit_sha"
-        }
-      }
     }
   },
   "githubSettings": {

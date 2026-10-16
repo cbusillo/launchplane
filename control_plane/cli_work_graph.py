@@ -161,7 +161,12 @@ def merge_train_run_once(
         if not token:
             raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
         transport = UrllibMergeTrainGitHubTransport(token=token, api_base_url=github_api_base_url)
-        snapshot_reader = GitHubMergeTrainSnapshotReader(transport=transport)
+        snapshot_reader = GitHubMergeTrainSnapshotReader(
+            transport=transport,
+            repository_policy=policy.find_repository_policy(
+                repository=repository, base_branch=base_branch
+            ),
+        )
         snapshot = snapshot_reader.read_merge_train_snapshot(
             repository=repository, base_branch=base_branch
         )

@@ -36,13 +36,13 @@ def individual_landing_snapshots(
     if not base_sha:
         raise MergeTrainGitHubError("Code-owner batch routing requires the current base SHA.")
     patterns = _read_patterns(transport, repository_path, base_sha)
-    if not patterns:
-        return pull_requests
     result = []
     for pr in pull_requests:
-        if pr.state != "open" or pr.is_draft:
+        handoff_ready = pr.ready_handoff is not None and pr.ready_handoff.status == "ready"
+        if pr.state != "open" or pr.is_draft or (not patterns and not handoff_ready):
             result.append(pr)
             continue
+        paths: tuple[str, ...] = ()
         try:
             paths = _changed_paths(transport, repository_path, pr.number)
             confirmation = transport.request(
@@ -58,10 +58,22 @@ def individual_landing_snapshots(
                 )
             individual = _paths_require_individual_landing(paths, patterns)
         except _IncompleteCodeOwnerEvidence:
-            # Incomplete evidence can never justify transferring this PR's
-            # approval to a batch. Other PRs may still proceed.
-            individual = True
-        result.append(pr.model_copy(update={"requires_individual_landing": individual}))
+            # With ownership rules, incomplete evidence cannot transfer this
+            # PR's approval to a batch. Without them it withholds grouping only.
+            individual = bool(patterns)
+            paths = ()
+        except MergeTrainGitHubError as error:
+            if patterns or error.rate_limited:
+                raise
+            # Without ownership assignments, files supply grouping hints only.
+            # Unavailable hints cannot deny unrelated ready work.
+            individual = False
+            paths = ()
+        result.append(
+            pr.model_copy(
+                update={"requires_individual_landing": individual, "changed_paths": paths}
+            )
+        )
     return tuple(result)
 
 

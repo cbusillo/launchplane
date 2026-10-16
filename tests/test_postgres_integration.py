@@ -102,6 +102,7 @@ from tests.test_every_code_feedback_resume_storage import (
     T1 as FEEDBACK_T1,
 )
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapPrerequisiteScenario
+from tests import test_testing_public_ingress as public_ingress_tests
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
     _ReadOnlyTransport,
@@ -1760,6 +1761,41 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_notification_policy_id_cannot_be_claimed_by_two_scopes(self) -> None:
+        from control_plane.contracts.public_ingress_monitoring import (
+            NotificationPolicyScopeConflict,
+            PublicIngressNotificationPolicyRecord,
+        )
+        from tests.http_app_test_support import _public_ingress_notification_policy_record
+
+        with _store_for_fresh_head_database() as store:
+            base = _public_ingress_notification_policy_record().model_copy(
+                update={
+                    "purpose": "release_digest",
+                    "instance": "prod",
+                }
+            )
+            barrier = threading.Barrier(2)
+
+            def create(product: str) -> PublicIngressNotificationPolicyRecord | None:
+                candidate = base.model_copy(
+                    update={"product": product, "context": product + "-prod"}
+                )
+                barrier.wait(timeout=30)
+                try:
+                    store.write_public_ingress_notification_policy_record(
+                        candidate, protect_scope=True
+                    )
+                    return candidate
+                except NotificationPolicyScopeConflict:
+                    return None
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                outcomes = tuple(executor.map(create, ("first-site", "second-site")))
+            accepted = tuple(record for record in outcomes if record is not None)
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(store.list_public_ingress_notification_policy_records(), accepted)
+
     def test_delivery_index_migration_backfills_existing_production_history(self) -> None:
         from importlib import import_module
         from control_plane.storage.postgres import LaunchplaneDeploymentRow
@@ -10807,6 +10843,60 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
 
+    def test_down_lane_usage_and_locked_successor_on_postgres(self) -> None:
+        from tests.test_down_lane_collection import DownLaneCollectionTests
+        from tests.test_lane_usage import LaneUsageTests
+        from tests.test_odoo_testing_drill import TestingDrillTests
+
+        for scenario in (
+            "test_locked_successor_adapter_consumes_the_service_downtime_rule",
+            "test_current_staff_hold_always_blocks_down_lane",
+            "test_private_serving_or_unresolved_endpoint_protects_a_publicly_down_lane",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                fixture = LaneUsageTests(scenario)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, scenario)()
+                finally:
+                    fixture.doCleanups()
+        for usage in ("unknown", "in_use"):
+            with self.subTest(usage=usage), _head_postgres_database() as url:
+                drill = TestingDrillTests()
+                try:
+                    drill.seed(
+                        make_url(url)
+                        .update_query_dict({"options": "-c statement_timeout=1000"})
+                        .render_as_string(hide_password=False)
+                    )
+                    database_errors: list[str] = []
+                    event.listen(
+                        drill.store._engine,
+                        "handle_error",
+                        lambda error: database_errors.append(
+                            type(error.original_exception).__name__
+                        ),
+                    )
+                    drill.assert_down_lane_drill_admitted(usage)
+                    self.assertFalse(database_errors, database_errors)
+                finally:
+                    drill.doCleanups()
+        for scenario in (
+            "test_collect_produces_real_resource_facts_then_admits_down_runtime_repair",
+            "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",
+            "test_needed_copy_and_failed_physical_inspection_still_refuse",
+            "test_resource_denial_and_binding_drift_do_not_publish",
+            "test_recorded_shared_resources_survive_passing_inspection",
+            "test_positive_usage_reads_are_distinct_but_retained_history_stays_stable",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                collected = DownLaneCollectionTests(scenario)
+                collected.database_url = url
+                result = unittest.TestResult()
+                collected.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 
@@ -10912,6 +11002,12 @@ class RealPostgresPreviewReservationRecoveryTests(
 
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresTestingPublicIngressTests(public_ingress_tests.TestingPublicIngressTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
 
 
 class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteScenario):
@@ -12797,6 +12893,99 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
             )
 
 
+class RealPostgresSecretReferenceTests(unittest.TestCase):
+    def test_selection_cas_rollback_and_late_completion_preservation(self) -> None:
+        from tests.test_odoo_secret_references import seed, KEY
+        from control_plane.odoo_secret_references import plan_secret_reference_reconciliation
+        from control_plane.storage.product_authority_bundle import SecretDeliveryConflictError
+        from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
+
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as store,
+        ):
+            profile, original = seed(store)
+            item = original.config_parameters[1]
+            original = original.model_copy(
+                update={
+                    "config_parameters": (
+                        original.config_parameters[0],
+                        item.model_copy(
+                            update={"value": item.value.model_copy(update={"value": True})}
+                        ),
+                    )
+                }
+            )
+            store.write_odoo_instance_override_record(original)
+            _, bundle = plan_secret_reference_reconciliation(
+                store=store, profile=profile, record=original, keys=(KEY,)
+            )
+            with patch.object(
+                store, "_after_product_authority_bundle_step", side_effect=RuntimeError("rollback")
+            ):
+                with self.assertRaises(RuntimeError):
+                    store.write_product_authority_bundle(bundle)
+            self.assertEqual(
+                store.read_odoo_instance_override_record(context_name="cm", instance_name="prod"),
+                original,
+            )
+            peer = PostgresRecordStore(database_url=url)
+            self.addCleanup(peer.close)
+            item = original.config_parameters[1]
+            peer.write_odoo_instance_override_record(
+                original.model_copy(
+                    update={
+                        "config_parameters": (
+                            original.config_parameters[0],
+                            item.model_copy(
+                                update={"value": item.value.model_copy(update={"value": 1})}
+                            ),
+                        )
+                    }
+                )
+            )
+            with self.assertRaises(OdooInstanceOverrideConflictError):
+                store.write_product_authority_bundle(bundle)
+            self.assertIs(
+                type(
+                    store.read_odoo_instance_override_record(
+                        context_name="cm", instance_name="prod"
+                    )
+                    .config_parameters[1]
+                    .value.value
+                ),
+                int,
+            )
+            peer.write_odoo_instance_override_record(original)
+            candidate = next(item for item in peer.list_secret_bindings() if item.instance)
+            peer.write_secret_binding(
+                candidate.model_copy(update={"binding_id": "concurrent-candidate"})
+            )
+            with self.assertRaises(SecretDeliveryConflictError):
+                store.write_product_authority_bundle(bundle)
+            peer.write_secret_binding(
+                candidate.model_copy(
+                    update={"binding_id": "concurrent-candidate", "status": "disabled"}
+                )
+            )
+            _, refreshed = plan_secret_reference_reconciliation(
+                store=store, profile=profile, record=original, keys=(KEY,)
+            )
+            store.write_product_authority_bundle(refreshed)
+            corrected = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="prod"
+            )
+            self.assertEqual(corrected, refreshed.odoo_instance_override_writes[0].record)
+            _write_odoo_instance_override_apply_result(
+                record_store=peer, record=original, status="pass", detail="late prior operation"
+            )
+            after = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="prod"
+            )
+            self.assertEqual(after.config_parameters, corrected.config_parameters)
+            self.assertEqual(after.last_apply.status, "pass")
+
+
 class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
     def test_removal_atomicity_replay_and_drift_on_postgres(self) -> None:
         from tests.test_reviewed_runtime_setting_removal import RuntimeRemovalTests
@@ -12834,6 +13023,20 @@ class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
 
 
 class RealPostgresNeverServedTests(unittest.TestCase):
+    def test_usage_revocation_preserves_independent_protection_on_postgres(self) -> None:
+        from tests.test_testing_never_served import NeverServedHttpTests
+
+        for protection in NeverServedHttpTests.revocation_protections:
+            with self.subTest(protection=protection), _head_postgres_database() as url:
+                fixture = NeverServedHttpTests(
+                    "test_usage_revocation_preserves_independent_copy_and_resource_protection"
+                )
+                fixture.database_url = url
+                fixture.revocation_protections = (protection,)
+                result = unittest.TestResult()
+                fixture.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_lifetime_non_use_and_revocation_on_postgres(self) -> None:
         from tests.test_testing_never_served import NeverServedTestingTests
 

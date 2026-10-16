@@ -78,8 +78,8 @@ def main() -> int:
         facts = {key: result[key] for key in ("usage", "data", "production_resources")}
         for key, allowed in (
             ("usage", {"unknown", "in_use", "unused"}),
-            ("data", {"unknown"}),
-            ("production_resources", {"unknown", "shared"}),
+            ("data", {"unknown", "reproducible", "only_copy"}),
+            ("production_resources", {"unknown", "shared", "isolated", "separation_ready"}),
         ):
             if facts[key] not in allowed:
                 raise ValueError("Invalid fact response.")
@@ -101,6 +101,11 @@ def main() -> int:
             raise ValueError("Odoo usage and diagnostic disagree.")
         if any(value is not None and type(value) is not bool for value in usage_facts.values()):
             raise ValueError("Invalid Odoo usage evidence.")
+        historical_usage_retained = result.get("historical_usage_retained", False)
+        if type(historical_usage_retained) is not bool or (
+            historical_usage_retained and facts["usage"] != "in_use"
+        ):
+            raise ValueError("Invalid retained usage evidence.")
         if facts["usage"] == "unused" and any(
             value is not (None if reason_code == "never_served" else False)
             for value in usage_facts.values()
@@ -123,6 +128,7 @@ def main() -> int:
                 {
                     "mode": args.mode,
                     "facts": facts,
+                    "historical_usage_retained": historical_usage_retained,
                     "odoo_usage": {**usage_facts, "reason_code": reason_code},
                     "never_served_qualification": qualification,
                     "source_coverage": coverage,

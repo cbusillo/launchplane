@@ -116,7 +116,11 @@ def execute_merge_train_run_once(
         api_base_url=request.github_api_base_url,
     )
     snapshot = GitHubMergeTrainSnapshotReader(
-        transport=transport, branch_refresh_store=review_store
+        transport=transport,
+        branch_refresh_store=review_store,
+        repository_policy=policy.find_repository_policy(
+            repository=request.repository, base_branch=request.base_branch
+        ),
     ).read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,

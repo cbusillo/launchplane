@@ -104,6 +104,24 @@ def run_outbox_worker_once(
                 )
             ),
         )
+    elif record.kind == "release_digest":
+        from control_plane.release_digest import deliver_release_digest
+        from control_plane.storage.postgres import PostgresRecordStore
+
+        if not isinstance(record_store, PostgresRecordStore):
+            raise TypeError("Release digest requires the service record store")
+        result = deliver_release_digest(
+            store=record_store,
+            record=record,
+            drivers=notification_drivers or PublicIngressNotificationDriverSet(),
+            mark_provider_started=lambda key, provider: _mark_provider_started(
+                record_store=record_store,
+                record=record,
+                lease_owner=lease_owner,
+                provider_operation_key=key,
+                provider_id=provider,
+            ),
+        )
     elif record.kind == "operator_authorization_recovery_alert":
         result = record.model_copy(
             update={
