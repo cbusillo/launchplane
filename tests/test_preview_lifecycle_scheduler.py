@@ -102,6 +102,65 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
             ],
         )
 
+    def test_inventory_collects_before_expiry_and_excludes_other_replicas_and_restarts(
+        self,
+    ) -> None:
+        from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_STALE_AFTER
+
+        scheduler = self.make_scheduler()
+        inventory = scheduler.inventory_scheduler
+        inventory.run_sweep = self.sweep
+        self.assertTrue(inventory.run_once())
+        self.assertFalse(inventory.run_once())
+        replica = self.make_scheduler().inventory_scheduler
+        replica.run_sweep = self.sweep
+        self.assertFalse(replica.run_once())
+        self.now += PREVIEW_INVENTORY_STALE_AFTER.total_seconds() / 2
+        self.assertTrue(replica.run_once())
+        self.assertEqual(self.sweep.call_count, 2)
+        # Inventory collection did not consume the independent daily lifecycle slot.
+        self.assertTrue(scheduler.run_once())
+
+    def test_inventory_failure_is_recorded_and_recovers_before_expiry(self) -> None:
+        from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_STALE_AFTER
+
+        inventory = self.make_scheduler().inventory_scheduler
+        inventory.run_sweep = self.sweep
+        self.sweep.side_effect = RuntimeError("provider unavailable")
+        with self.assertLogs(preview_lifecycle_scheduler._LOGGER, level="ERROR"):
+            self.assertTrue(inventory.run_once())
+        record = self.store.read_idempotency_record(
+            scope=inventory.scope, route_path=inventory.route, idempotency_key=str(inventory.slot())
+        )
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record.response_payload["status"], "error")
+        self.assertFalse(inventory.run_once())
+        self.sweep.side_effect = None
+        self.now += PREVIEW_INVENTORY_STALE_AFTER.total_seconds() / 2
+        self.assertTrue(inventory.run_once())
+
+    def test_inventory_lease_blocks_replica_and_expired_holder_is_recovered(self) -> None:
+        inventory = self.make_scheduler().inventory_scheduler
+        inventory.run_sweep = self.sweep
+        with patch.object(
+            self.store,
+            "_database_mutation_timestamp",
+            side_effect=lambda _session: datetime.fromtimestamp(self.now, timezone.utc).isoformat(),
+        ):
+            claim = self.store.reserve_mutation(
+                scope=inventory.scope,
+                route_path=inventory.route,
+                idempotency_key="active",
+                request_fingerprint=inventory.fingerprint,
+                lease_owner="fixture",
+                lease_seconds=SWEEP_LEASE_SECONDS,
+            )
+            self.assertEqual(claim.status, "acquired")
+            self.assertFalse(inventory.run_once())
+            self.now += SWEEP_LEASE_SECONDS + 1
+            self.assertTrue(inventory.run_once())
+
     def test_scheduled_sweep_never_applies(self) -> None:
         scheduler = PreviewLifecycleScheduler(
             self.store, control_plane_root=Path(self.directory.name), clock=lambda: self.now
@@ -184,6 +243,20 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
             self.now += SWEEP_LEASE_SECONDS + 1
             self.assertTrue(self.make_scheduler().run_once())
         self.sweep.assert_called_once()
+
+    def test_shutdown_signals_both_jobs_before_joining_either(self) -> None:
+        scheduler = self.make_scheduler()
+        inventory_thread = Mock()
+        scheduler.inventory_scheduler._thread = inventory_thread
+        inventory_thread.join.side_effect = lambda: self.assertTrue(scheduler._stop.is_set())
+        lifecycle_thread = Mock()
+        scheduler._thread = lifecycle_thread
+        lifecycle_thread.join.side_effect = lambda: self.assertTrue(
+            scheduler.inventory_scheduler._stop.is_set()
+        )
+        scheduler.stop()
+        inventory_thread.join.assert_called_once()
+        lifecycle_thread.join.assert_called_once()
 
 
 if __name__ == "__main__":

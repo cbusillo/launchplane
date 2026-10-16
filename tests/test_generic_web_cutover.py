@@ -1049,11 +1049,9 @@ class WebCutoverRecordsCommitTests(unittest.TestCase):
                     store = FilesystemRecordStore(Path(folder))
                     result = run(reverse=reverse, record_id=result_id)
                     self.assertEqual(result.deploy.status, "pass")
-                    self.assertTrue(
-                        store.read_deployment_record(
-                            "release"
-                        ).generic_web_cutover.records_committed
-                    )
+                    committed = store.read_deployment_record("release").generic_web_cutover
+                    assert committed is not None
+                    self.assertTrue(committed.records_committed)
                     self.assertEqual(
                         store.read_environment_inventory(
                             context_name=lane.context, instance_name=lane.instance

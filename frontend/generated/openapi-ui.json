@@ -12977,6 +12977,11 @@
             "title": "Record Id",
             "type": "string"
           },
+          "records_committed": {
+            "default": false,
+            "title": "Records Committed",
+            "type": "boolean"
+          },
           "rollback_started_at": {
             "anyOf": [
               {
@@ -13030,6 +13035,7 @@
           "previous_slot_retained",
           "readiness",
           "record_id",
+          "records_committed",
           "rollback_started_at",
           "route",
           "step",
@@ -23701,6 +23707,53 @@
         "title": "PreviewHistoryResponse",
         "type": "object"
       },
+      "PreviewInventoryEvidence": {
+        "properties": {
+          "observed_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed Count"
+          },
+          "observed_slugs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Observed Slugs",
+            "type": "array"
+          },
+          "provenance": {
+            "$ref": "#/components/schemas/DataProvenance"
+          },
+          "status": {
+            "enum": [
+              "empty",
+              "nonempty",
+              "failed",
+              "stale",
+              "unsupported",
+              "unavailable",
+              "missing"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "observed_count",
+          "observed_slugs",
+          "provenance",
+          "status"
+        ],
+        "title": "PreviewInventoryEvidence",
+        "type": "object"
+      },
       "PreviewPullRequestSummary": {
         "additionalProperties": false,
         "properties": {
@@ -30758,6 +30811,16 @@
             "title": "Enabled",
             "type": "boolean"
           },
+          "inventory": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PreviewInventoryEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "latest_preview_id": {
             "default": "",
             "title": "Latest Preview Id",
@@ -30814,19 +30877,38 @@
             ],
             "title": "Trust State",
             "type": "string"
+          },
+          "unobserved_record_slugs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Unobserved Record Slugs",
+            "type": "array"
+          },
+          "untracked_observed_slugs": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Untracked Observed Slugs",
+            "type": "array"
           }
         },
         "required": [
           "active_count",
           "context",
           "enabled",
+          "inventory",
           "latest_preview_id",
           "provenance",
           "records",
           "records_status",
           "records_truncated",
           "slug_template",
-          "trust_state"
+          "trust_state",
+          "unobserved_record_slugs",
+          "untracked_observed_slugs"
         ],
         "title": "ProductPreviewSummary",
         "type": "object"

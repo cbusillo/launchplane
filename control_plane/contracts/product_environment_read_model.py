@@ -86,6 +86,12 @@ from control_plane.production_backup_authority import (
 )
 
 
+from control_plane.preview_inventory_evidence import (
+    PreviewInventoryEvidence,
+    read_preview_inventory_evidence,
+)
+
+
 ActionAllowed = Callable[[str, str, str, tuple[str, ...]], bool]
 ProductSecretBindingTrustState = FreshnessStatus | Literal["disabled"]
 ProductConfigItemStatus = Literal[
@@ -463,6 +469,9 @@ class ProductPreviewSummary(BaseModel):
     context: str = ""
     slug_template: str = ""
     active_count: int = Field(default=0, ge=0)
+    inventory: PreviewInventoryEvidence | None = None
+    unobserved_record_slugs: tuple[str, ...] = ()
+    untracked_observed_slugs: tuple[str, ...] = ()
     latest_preview_id: str = ""
     records_status: Literal["available", "authorization_denied", "unsupported"] = "unsupported"
     records: tuple[ProductPreviewReference, ...] = ()
@@ -2262,26 +2271,29 @@ def _build_preview_summary(
     summaries = tuple(filtered_summaries)
     latest_summary = next(iter(summaries), None)
     latest_preview_id = ""
-    provenance = DataProvenance(
-        source_kind="record",
-        freshness_status="missing",
-        detail="Launchplane has not recorded previews for this product profile.",
+    inventory = read_preview_inventory_evidence(
+        record_store=record_store,
+        context=profile.preview.context,
+        product=profile.product,
+        repository=profile.repository,
     )
+    provenance = inventory.provenance
     if latest_summary is not None:
-        if isinstance(latest_summary, LaunchplanePreviewSummary):
-            preview = latest_summary.preview
-            provenance = latest_summary.provenance
-        else:
-            preview = latest_summary
-            provenance = DataProvenance(
-                source_kind="record",
-                source_record_id=preview.preview_id,
-                recorded_at=preview.updated_at,
-                refreshed_at=preview.updated_at,
-                freshness_status="recorded",
-                detail="Launchplane preview identity record.",
-            )
+        preview = (
+            latest_summary.preview
+            if isinstance(latest_summary, LaunchplanePreviewSummary)
+            else latest_summary
+        )
         latest_preview_id = preview.preview_id
+    tracked_slugs = {
+        profile.preview.slug_template.format(number=preview.anchor_pr_number)
+        for summary in summaries
+        for preview in (
+            summary.preview if isinstance(summary, LaunchplanePreviewSummary) else summary,
+        )
+    }
+    observed_slugs = set(inventory.observed_slugs)
+    comparable = inventory.status in {"empty", "nonempty"}
     # Match the existing preview/history read grant exactly; product-read access
     # alone does not authorize these additional individual identities.
     records_allowed = action_allowed("preview.read", "launchplane", profile.preview.context, ())
@@ -2314,6 +2326,15 @@ def _build_preview_summary(
         context=profile.preview.context,
         slug_template=profile.preview.slug_template,
         active_count=len(summaries),
+        inventory=inventory
+        if records_allowed
+        else inventory.model_copy(update={"observed_slugs": ()}),
+        unobserved_record_slugs=tuple(sorted(tracked_slugs - observed_slugs))
+        if comparable and records_allowed
+        else (),
+        untracked_observed_slugs=tuple(sorted(observed_slugs - tracked_slugs))
+        if comparable and records_allowed
+        else (),
         latest_preview_id=latest_preview_id,
         records_status=records_status,
         records=records,

@@ -34,13 +34,13 @@ from control_plane.contracts.production_backup_authority import (
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
-from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.drivers.route_paths import INGRESS_ROUTE_APPLY_ROUTE
 from control_plane.lane_runtime_verification import read_lane_runtime_verification
+from control_plane.preview_inventory_evidence import read_preview_inventory_evidence
 from control_plane.production_backup_authority import (
     require_production_backup_authority_store,
     resolve_production_backup_authority,
@@ -98,12 +98,6 @@ class _ListBackupGateRecords(Protocol):
 
 class _ReadOdooInstanceOverrideRecord(Protocol):
     def __call__(self, *, context_name: str, instance_name: str) -> OdooInstanceOverrideRecord: ...
-
-
-class _ListPreviewInventoryScanRecords(Protocol):
-    def __call__(
-        self, *, context_name: str = "", limit: int | None = None
-    ) -> tuple[PreviewInventoryScanRecord, ...]: ...
 
 
 class _ListPreviewSummaries(Protocol):
@@ -197,15 +191,6 @@ def _read_odoo_instance_override_record_method(
     return cast(
         _ReadOdooInstanceOverrideRecord | None,
         _callable_store_method(record_store, "read_odoo_instance_override_record"),
-    )
-
-
-def _list_preview_inventory_scan_records_method(
-    record_store: object,
-) -> _ListPreviewInventoryScanRecords | None:
-    return cast(
-        _ListPreviewInventoryScanRecords | None,
-        _callable_store_method(record_store, "list_preview_inventory_scan_records"),
     )
 
 
@@ -1179,44 +1164,6 @@ def _preview_provenance(summary: LaunchplanePreviewSummary) -> DataProvenance:
     )
 
 
-def _preview_inventory_provenance(
-    *,
-    record_store: object,
-    context_name: str,
-    preview_summaries: tuple[LaunchplanePreviewSummary, ...],
-) -> DataProvenance:
-    list_scans = _list_preview_inventory_scan_records_method(record_store)
-    if list_scans is not None:
-        scans = list_scans(context_name=context_name, limit=1)
-        latest_scan = next(iter(scans), None)
-        if latest_scan is not None:
-            status, stale_after = _freshness_status(
-                recorded_at=latest_scan.scanned_at,
-                stale_after=PREVIEW_STALE_AFTER,
-                verified=latest_scan.status == "pass",
-            )
-            return DataProvenance(
-                source_kind="record",
-                source_record_id=latest_scan.scan_id,
-                recorded_at=latest_scan.scanned_at,
-                refreshed_at=latest_scan.scanned_at,
-                freshness_status=status,
-                stale_after=stale_after,
-                detail=(
-                    "Latest Launchplane preview inventory scan; "
-                    f"{latest_scan.preview_count} preview(s) observed."
-                ),
-            )
-    latest_preview = next(iter(preview_summaries), None)
-    if latest_preview is not None:
-        return latest_preview.provenance
-    return DataProvenance(
-        source_kind="record",
-        freshness_status="missing",
-        detail="Launchplane has not recorded a preview inventory scan for this context.",
-    )
-
-
 def _read_lane_summary(
     *, record_store: object, context_name: str, instance_name: str
 ) -> LaunchplaneLaneSummary | None:
@@ -1484,11 +1431,12 @@ def build_driver_context_view(
                 )
             preview_inventory_provenance = None
             if _driver_exposes_preview_inventory(matched_descriptor):
-                preview_inventory_provenance = _preview_inventory_provenance(
+                preview_inventory_provenance = read_preview_inventory_evidence(
                     record_store=record_store,
-                    context_name=context_name,
-                    preview_summaries=preview_summaries,
-                )
+                    context=context_name,
+                    product=owners[0].product,
+                    repository=owners[0].repository,
+                ).provenance
             drivers.append(
                 DriverView(
                     driver_id=matched_descriptor.driver_id,

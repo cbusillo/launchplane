@@ -88,9 +88,9 @@ def _render_odoo_web_traefik_labels(
     return "\n".join(lines) + "\n"
 
 
-_ODOO_WEB_START_COMMAND = (
-    "${ODOO_WEB_COMMAND:-python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf}"
-)
+ODOO_WEB_CONFIG_PATH = "/tmp/platform.odoo.conf"
+ODOO_WEB_START_COMMAND = f"python3 /volumes/scripts/run_odoo_startup.py -c {ODOO_WEB_CONFIG_PATH}"
+_ODOO_WEB_START_COMMAND = "${ODOO_WEB_COMMAND:-" + ODOO_WEB_START_COMMAND + "}"
 
 
 def _odoo_web_command(*, hold_until_integration_readback: bool) -> str:

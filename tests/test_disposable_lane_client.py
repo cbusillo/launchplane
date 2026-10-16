@@ -22,11 +22,12 @@ class DisposableLaneClientTests(unittest.TestCase):
         truncated: bool = False,
         provider_mutation: bool = False,
         binding_sha256: str = "a" * 64,
+        usage: str = "unknown",
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
         )
-        facts = {"usage": "unknown", "data": "unknown", "production_resources": "unknown"}
+        facts = {"usage": usage, "data": "unknown", "production_resources": "unknown"}
         inspected = {
             "trace_id": "fixture-trace",
             "result": {"mode": "inspect", "binding_sha256": "a" * 64, **facts},
@@ -36,6 +37,7 @@ class DisposableLaneClientTests(unittest.TestCase):
             "source_coverage": disposable_collection_coverage(),
             "binding_sha256": binding_sha256,
             "provider_mutation": provider_mutation,
+            "odoo_usage": {"recent_signins": False, "authenticated_sessions": False},
             **facts,
         }
         collected = {
@@ -103,6 +105,11 @@ class DisposableLaneClientTests(unittest.TestCase):
                 self.assertEqual(status, 1)
                 self.assertEqual(json.loads(output)["status"], "unverified")
                 self.assertNotIn("private-fixture", output)
+
+    def test_service_collected_non_use_is_reported_by_the_bounded_client(self) -> None:
+        status, output, _ = self.call_client(usage="unused")
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(output)["facts"]["usage"], "unused")
 
     def test_truncated_or_mismatched_receipt_stays_unverified(self) -> None:
         for truncated, mutation, digest in (
