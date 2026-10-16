@@ -152,6 +152,7 @@ def bootstrap_request_sha256(request: TestingReplacementResourcesRequest) -> str
 
 
 class TestingReplacementBootstrapRequest(TestingReplacementResourcesRequest):
+    mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     operation_id: str = Field(min_length=1)
     domain_host: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
     certificate_type: Literal["none", "letsencrypt"] = "none"

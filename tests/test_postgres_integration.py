@@ -11081,10 +11081,10 @@ class RealPostgresTestingVerificationHttpTests(
 
 class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
     def scenario(self) -> Any:
-        from tests.test_testing_initial_generation import InitialTestingBootstrapScenarioTests
+        from tests.test_testing_initial_generation import InitialTestingBootstrapScenario
         from control_plane.odoo_testing_usage import OdooTestingUsage
 
-        scenario = InitialTestingBootstrapScenarioTests()
+        scenario = InitialTestingBootstrapScenario()
         scenario.seed(self.enterContext(_head_postgres_database()), initial_generation=True)
         self.addCleanup(scenario.doCleanups)
         scenario.enterContext(
@@ -11094,6 +11094,144 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
             )
         )
         return scenario
+
+    def test_clean_refusal_never_fences_and_no_effect_drift_can_release(self) -> None:
+        from tests import test_testing_replacement_resources as resource_tests
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+        from control_plane.testing_replacement_resources import TestingReplacementResourceAdapter
+
+        for failure in ("use", "drift", "unknown-placement", "dispatched"):
+            with self.subTest(failure=failure), _head_postgres_database() as url:
+                fixture = resource_tests.TestingReplacementResourceHttpTests()
+                fixture.database_url = url
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                successful = fixture.operation.model_copy(
+                    update={
+                        "status": "pass",
+                        "phase": "completed",
+                        "error_code": "",
+                        "error_message": "",
+                        "finished_at": fixture.operation.updated_at,
+                    }
+                )
+                fixture.store.write_odoo_stable_target_replacement_operation_record(successful)
+
+                policy = LaunchplaneAuthzPolicy()
+                fixture.store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id=build_authz_policy_record_id(
+                            revision=1, policy_sha256=authz_policy_sha256(policy)
+                        ),
+                        revision=1,
+                        status="active",
+                        source="test:initial-release",
+                        updated_at=successful.updated_at,
+                        policy=policy,
+                    )
+                )
+
+                async def scenario() -> None:
+                    async def post(**changes: object) -> Any:
+                        return await fixture.post(
+                            initial_generation=True, operation_id="", **changes
+                        )
+
+                    with patch(
+                        "control_plane.testing_initial_generation.read_odoo_testing_usage",
+                        return_value=OdooTestingUsage("unused", False, False, "complete"),
+                    ) as usage:
+                        planned = await post()
+                        self.assertEqual(planned.status_code, 202, planned.text)
+                        result = planned.json()["result"]
+
+                        def pre_effect(adapter: Any, namespace: str) -> tuple[str, str, str]:
+                            target = fixture.store.read_dokploy_target_record(
+                                context_name=fixture.context, instance_name="testing"
+                            )
+                            fixture.store.write_dokploy_target_record(
+                                target.model_copy(update={"env": {"SETTING": "changed"}})
+                            )
+                            if failure == "dispatched":
+                                raise ValueError("placement has unknown work")
+                            raise OSError("fixture failure before dispatch")
+
+                        if failure == "use":
+                            usage.return_value = OdooTestingUsage("in_use", True, True, "complete")
+                        with patch.object(
+                            TestingReplacementResourceAdapter, "created_placement", new=pre_effect
+                        ):
+                            refused = await post(
+                                mode="apply", reviewed_plan_sha256=result["plan_sha256"]
+                            )
+                        self.assertEqual(refused.status_code, 409, refused.text)
+                        allocation = fixture.store.read_disposable_resource_preparation(
+                            result["operation_id"]
+                        )
+                        assert allocation is not None
+                        self.assertEqual(
+                            bool(allocation.initial_apply_started_at), failure != "use"
+                        )
+                        if failure == "use":
+                            with fixture.store.odoo_synchronous_lane_reservation(
+                                product=fixture.profile.product,
+                                context=fixture.context,
+                                instance="testing",
+                            ) as owner:
+                                self.assertIsNone(owner)
+                            return
+                        if failure == "dispatched":
+                            # A durable checkpoint is uncertain dispatch even with no captured target.
+                            # Resolve the exact fixture principal through the actual stored receipt.
+                            with fixture.store._session_factory() as session:
+                                from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+                                row = session.scalar(
+                                    select(LaunchplaneIdempotencyRow).where(
+                                        LaunchplaneIdempotencyRow.idempotency_key
+                                        == "resource-fixture"
+                                    )
+                                )
+                                assert row is not None
+                                row.payload = {
+                                    **row.payload,
+                                    "provider_effect_started_at": successful.updated_at,
+                                    "provider_effect_phase": "create",
+                                }
+                                session.commit()
+                        with patch.object(
+                            TestingReplacementResourceAdapter,
+                            "created_placement",
+                            return_value=("partial-project", "", "")
+                            if failure == "unknown-placement"
+                            else ("", "", ""),
+                        ):
+                            released = await post(
+                                mode="release", reviewed_plan_sha256=result["plan_sha256"]
+                            )
+                            if failure in {"unknown-placement", "dispatched"}:
+                                self.assertEqual(released.status_code, 409, released.text)
+                                return
+                            self.assertEqual(released.status_code, 202, released.text)
+                            replay = await post(
+                                mode="release", reviewed_plan_sha256=result["plan_sha256"]
+                            )
+                            self.assertEqual(replay.json()["result"], released.json()["result"])
+                        self.assertEqual((await post()).status_code, 409)
+                        with fixture.store.odoo_synchronous_lane_reservation(
+                            product=fixture.profile.product,
+                            context=fixture.context,
+                            instance="testing",
+                        ) as owner:
+                            self.assertIsNone(owner)
+                        self.assertEqual(
+                            fixture.store.read_odoo_stable_target_replacement_operation_record(
+                                successful.operation_id
+                            ),
+                            successful,
+                        )
+
+                asyncio.run(scenario())
 
     def test_two_initial_preparations_cannot_both_activate_the_same_lane(self) -> None:
         from control_plane.testing_replacement_resources import TestingReplacementResourcesRequest
@@ -11148,6 +11286,42 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
                 ),
                 successful,
             )
+
+    def test_durable_and_synchronous_admission_resume_only_after_queue(self) -> None:
+        from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
+
+        scenario = self.scenario()
+        pending = scenario.legacy_operation.model_copy(
+            update={
+                "operation_id": "first-genuine-initial-copy",
+                "idempotency_key": "initial-copy-executor",
+                "status": "pending",
+                "phase": "created",
+                "finished_at": "",
+            }
+        )
+        with self.assertRaises(OdooStableLaneOperationConflictError):
+            scenario.store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                pending
+            )
+        scenario.initial_bootstrap()
+        with scenario.store.odoo_synchronous_lane_reservation(
+            product=scenario.profile.product, context=scenario.fixture.context, instance="testing"
+        ) as owner:
+            self.assertIsNone(owner)
+        actual, created = (
+            scenario.store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                pending
+            )
+        )
+        self.assertTrue(created)
+        self.assertEqual(actual, pending)
+        self.assertEqual(
+            scenario.store.read_odoo_stable_target_replacement_operation_record(
+                scenario.legacy_operation.operation_id
+            ),
+            scenario.legacy_operation,
+        )
 
     def test_initial_bootstrap_queues_copy_and_keeps_successful_history(self) -> None:
         self.scenario().initial_bootstrap()

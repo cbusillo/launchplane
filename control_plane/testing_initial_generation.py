@@ -35,6 +35,10 @@ def initial_resource_context(
     preparation: DisposableTestingResourcePreparation,
     allow_bootstrap_resume: bool,
 ) -> None:
+    if preparation.initial_released_at:
+        raise ValueError(
+            "This initial intent was released; retain its history and review a new key."
+        )
     if not preparation.initial_request_sha256 or (
         preparation.product,
         preparation.context,

@@ -1,5 +1,3 @@
-from pathlib import Path
-from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -163,21 +161,6 @@ class InitialTestingBootstrapScenario(FreshTestingBootstrapScenario):
         self.store.request_fresh_testing_reconcile(generation)
         self.assertEqual(self.store.read_product_reconcile_request(queued.target_key), queued)
         self.assertEqual(self.route_writes, 1)
-
-
-class InitialTestingBootstrapScenarioTests(InitialTestingBootstrapScenario):
-    def setUp(self) -> None:
-        directory = self.enterContext(TemporaryDirectory())
-        self.seed(f"sqlite+pysqlite:///{Path(directory) / 'state.db'}", initial_generation=True)
-        self.enterContext(
-            patch(
-                "control_plane.testing_initial_generation.read_odoo_testing_usage",
-                return_value=OdooTestingUsage("unused", False, False, "complete"),
-            )
-        )
-
-    def initial_bootstrap_queues_real_copy_without_superseding_success(self) -> None:
-        self.initial_bootstrap()
 
     def apply_fence_blocks_another_executor_and_preserves_original_key(self) -> None:
         with self.store.odoo_synchronous_lane_reservation(

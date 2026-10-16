@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.testing_replacement_resources import (
     resource_wire_payload,
+    TestingInitialPreparationRelease,
     TestingReplacementResourcesPlan,
     TestingReplacementResourcesRequest,
 )
@@ -55,7 +56,11 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
             applied=False,
         )
         binding = canonical_json_sha256({"fixture": "allocation"})
-        if mode == "readback":
+        if mode == "release":
+            result = TestingInitialPreparationRelease(
+                product=plan.product, context=plan.context, operation_id=plan.operation_id
+            ).model_dump(mode="json")
+        elif mode == "readback":
             result = {
                 "product": plan.product,
                 "context": plan.context,
@@ -95,7 +100,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
             helper = Path(directory) / "launchplane-write-action.py"
             helper.touch()
             evidence = Path(directory) / "review.json"
-            if mode == "apply":
+            if mode in {"apply", "release"}:
                 evidence.write_text(
                     json.dumps(
                         {
@@ -126,7 +131,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
                 arguments.extend(("--initial-generation", "--idempotency-key", "original-key"))
             if mode != "readback":
                 arguments.extend(("--evidence-file", str(evidence)))
-            if mode == "apply":
+            if mode in {"apply", "release"}:
                 arguments.extend(("--reviewed-dry-run", "--idempotency-key", "original-key"))
             output = io.StringIO()
             with (
@@ -177,7 +182,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
         post.assert_not_called()
 
     def test_initial_plan_apply_readback_keep_the_original_key_and_service_identity(self) -> None:
-        for mode in ("dry-run", "apply", "readback"):
+        for mode in ("dry-run", "apply", "readback", "release"):
             with self.subTest(mode=mode):
                 status, output, post = self.call(mode=mode, initial_generation=True)
                 self.assertEqual(status, 0)

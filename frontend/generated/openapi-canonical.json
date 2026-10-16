@@ -50646,7 +50646,8 @@
             "enum": [
               "dry-run",
               "apply",
-              "readback"
+              "readback",
+              "release"
             ],
             "title": "Mode",
             "type": "string"

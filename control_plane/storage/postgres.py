@@ -9882,21 +9882,24 @@ class PostgresRecordStore(HumanSessionStore):
                 select(
                     LaunchplaneDisposableReplacementPreparationRow,
                     LaunchplaneDisposableTestingResourceAllocationRow,
-                ).join(
+                )
+                .join(
                     LaunchplaneDisposableTestingResourceAllocationRow,
                     LaunchplaneDisposableReplacementPreparationRow.operation_id
                     == LaunchplaneDisposableTestingResourceAllocationRow.operation_id,
                 )
+                .where(
+                    LaunchplaneDisposableReplacementPreparationRow.payload["product"].as_string()
+                    == product,
+                    LaunchplaneDisposableReplacementPreparationRow.payload["context"].as_string()
+                    == context,
+                )
             ):
-                if (custody.payload.get("product"), custody.payload.get("context")) != (
-                    product,
-                    context,
-                ):
-                    continue
                 if (
                     custody.operation_id != exclude_initial_preparation
                     and allocation.payload.get("initial_apply_started_at")
                     and not allocation.payload.get("initial_reconcile_requested_at")
+                    and not allocation.payload.get("initial_released_at")
                 ):
                     return OdooStableLaneOperationOwner(
                         operation_kind="initial_testing_generation",
@@ -12422,9 +12425,12 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         shared_session: Any = None,
     ) -> None:
-        with (
-            nullcontext(shared_session) if shared_session is not None else self._session_factory()
-        ) as session:
+        held = (
+            shared_session
+            if shared_session is not None
+            else getattr(self._disposable_authority_context, "session", None)
+        )
+        with nullcontext(held) if held is not None else self._session_factory() as session:
             owner = self._active_odoo_stable_lane_operation_owner(
                 session,
                 product=preparation.product,
@@ -12571,25 +12577,97 @@ class PostgresRecordStore(HumanSessionStore):
                 self._disposable_authority_context.session = old
 
     def activate_initial_testing_preparation(
-        self, expected: DisposableTestingResourcePreparation
+        self,
+        expected: DisposableTestingResourcePreparation,
+        *,
+        before_activation: Callable[[], None] | None = None,
+        validate: Callable[[], object] | None = None,
     ) -> None:
         with self._session_factory() as session:
             self._lock_odoo_stable_lane(
                 session, product=expected.product, context=expected.context, instance="testing"
             )
-            self._lock_product_authority_bundle_write(session)
             self.require_initial_testing_lane_available(expected, shared_session=session)
+            # Read provider usage under lane exclusion, before acquiring global authority.
+            if before_activation is not None:
+                before_activation()
+            self._lock_product_authority_bundle_write(session)
+            outer = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                if validate is not None:
+                    validate()
+                row = session.get(
+                    LaunchplaneDisposableTestingResourceAllocationRow,
+                    expected.operation_id,
+                    with_for_update=True,
+                )
+                if (
+                    row is None
+                    or not row.payload.get("initial_request_sha256")
+                    or row.payload.get("initial_released_at")
+                ):
+                    raise ValueError("Initial testing preparation is unavailable.")
+                if not row.payload.get("initial_apply_started_at"):
+                    row.payload = {
+                        **row.payload,
+                        "initial_apply_started_at": self._database_mutation_timestamp(session),
+                    }
+                    session.commit()
+            finally:
+                self._disposable_authority_context.session = outer
+
+    def release_initial_testing_preparation(
+        self,
+        expected: DisposableTestingResourcePreparation,
+        *,
+        reservation_scope: str,
+        idempotency_key: str,
+        reviewed_plan_sha256: str,
+    ) -> None:
+        from control_plane.testing_replacement_resources import ROUTE
+
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=expected.product, context=expected.context, instance="testing"
+            )
+            self._lock_product_authority_bundle_write(session)
             row = session.get(
                 LaunchplaneDisposableTestingResourceAllocationRow,
                 expected.operation_id,
                 with_for_update=True,
             )
-            if row is None or not row.payload.get("initial_request_sha256"):
-                raise ValueError("Initial testing preparation is unavailable.")
-            if not row.payload.get("initial_apply_started_at"):
+            receipt = session.scalar(
+                self._idempotency_statement(
+                    scope=reservation_scope,
+                    route_path=ROUTE.format(product=expected.product),
+                    idempotency_key=idempotency_key,
+                    for_update=True,
+                )
+            )
+            generation = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow, (expected.product, expected.context)
+            )
+            if (
+                row is None
+                or not row.payload.get("initial_request_sha256")
+                or row.payload.get("replacement_target_id")
+                or row.payload.get("resources_binding_sha256")
+                or row.payload.get("initial_reconcile_requested_at")
+                or generation is not None
+                or row.payload.get("reviewed_plan_sha256") != reviewed_plan_sha256
+                or receipt is not None
+                and receipt.payload.get("provider_effect_started_at")
+            ):
+                raise ValueError(
+                    "An effect may have started; preserve its original fence and resources."
+                )
+            # The caller holds the exact executor lock and independently found no
+            # named provider placement. Preserve all custody and reservation history.
+            if not row.payload.get("initial_released_at"):
                 row.payload = {
                     **row.payload,
-                    "initial_apply_started_at": self._database_mutation_timestamp(session),
+                    "initial_released_at": self._database_mutation_timestamp(session),
                 }
                 session.commit()
 

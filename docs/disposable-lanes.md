@@ -1520,6 +1520,18 @@ competing synchronous and durable operations cannot start until its exact
 bootstrap queue transaction commits. Unknown or partial effects retain that
 fence and all resources. Recover through the original key and actual provider
 readback; do not create a replacement key to escape an uncertain effect.
+If apply refuses before any dispatch, its lane checks now precede activation.
+For an interrupted no-effect attempt that already took the fence, run the same
+resource client with `release --reviewed-dry-run`, the original resource key,
+intent and private review file. The service excludes its executor, independently
+reads that its named provider placement is absent, and atomically verifies no
+dispatch checkpoint, captured target, resource receipt or generation exists.
+It records a terminal release without deleting custody or rewriting the original
+request. Repeated release is idempotent; that released intent can never apply.
+The lane can continue normally, or a new initial intent can be reviewed with a
+new key. Any partial placement, recorded dispatch or unknown provider read keeps
+the original fence; use original-key reconciliation, never release to bypass it.
+
 Configuration drift before adoption refuses the reviewed plan. Each bounded
 provider effect and final publication rechecks current identity, holds, use and
 aliases. Independent resource readback is the same as stranded recovery.

@@ -108,6 +108,33 @@ def register_testing_replacement_resource_routes(
                     "testing_resources_refused",
                     "Initial testing custody or current use could not be verified.",
                 )
+        if body.mode == "release":
+            if not body.initial_generation or not body.reviewed_plan_sha256:
+                refuse(
+                    400,
+                    "review_required",
+                    "Release requires the original reviewed initial preparation and key.",
+                )
+            adapter = TestingReplacementResourceAdapter(root, record_store, product, body, trace)
+            try:
+                result = await run_in_worker_thread(
+                    lambda: adapter.release(idempotency_scope(identity), idempotency_key)
+                )
+            except DurableOperationAuthorizationDeniedError:
+                refuse(
+                    403,
+                    "authorization_denied",
+                    "The provider refused initial preparation release readback. Preserve the trace and original key.",
+                )
+            except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
+                refuse(
+                    409,
+                    "testing_resources_unverified",
+                    "Initial release could not prove absent effects and placement; retain the fence.",
+                )
+            return accepted_evidence_response(
+                trace_id=trace, records={"operation": body.operation_id}, result=result
+            )
         if body.mode == "apply":
             if not idempotency_key.strip() or not body.reviewed_plan_sha256:
                 refuse(

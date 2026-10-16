@@ -45,6 +45,7 @@ from control_plane.odoo_testing_resources import (
     resource_readback_passes,
     TESTING_RESOURCES_INCOMPLETE_MARKER,
 )
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -83,7 +84,7 @@ class TestingReplacementResourcesRequest(BaseModel):
     instance: Literal["testing"] = "testing"
     operation_id: str = ""
     initial_generation: bool = False
-    mode: Literal["dry-run", "apply", "readback"] = "dry-run"
+    mode: Literal["dry-run", "apply", "readback", "release"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
@@ -124,6 +125,17 @@ class TestingReplacementResourcesReadback(BaseModel):
     production_resources: Literal["separation_ready"]
     restore_started: Literal[False]
     schedule_id: str = Field(min_length=1)
+
+
+class TestingInitialPreparationRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    product: str
+    context: str
+    instance: Literal["testing"] = "testing"
+    operation_id: str
+    released: Literal[True] = True
+    provider_effects_started: Literal[False] = False
+    retained_target_preserved: Literal[True] = True
 
 
 def resource_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
@@ -792,6 +804,38 @@ class TestingReplacementResourceAdapter:
             ),
         )
 
+    def release(self, reservation_scope: str, idempotency_key: str) -> dict[str, object]:
+        if not self.request.initial_generation or not self.request.reviewed_plan_sha256:
+            raise ValueError("Release requires the original reviewed initial preparation.")
+        with self.store.testing_replacement_execution_lock(self.request.operation_id) as check:
+            if check is None:
+                raise ValueError("Initial preparation executor is still active.")
+            preparation = self.store.read_disposable_resource_preparation(self.request.operation_id)
+            if (
+                preparation is None
+                or preparation.replacement_target_id
+                or preparation.initial_request_sha256
+                != canonical_json_sha256(resource_request_payload(self.request))
+            ):
+                raise ValueError(
+                    "Retain any dispatched or captured resources and the original intent."
+                )
+            # An empty journal alone does not establish provider absence.
+            if any(self.created_placement(preparation.resource_namespace)):
+                raise ValueError("Named provider placement exists or is incomplete.")
+            check()
+            self.store.release_initial_testing_preparation(
+                preparation,
+                reservation_scope=reservation_scope,
+                idempotency_key=idempotency_key,
+                reviewed_plan_sha256=self.request.reviewed_plan_sha256,
+            )
+        return TestingInitialPreparationRelease(
+            product=self.product,
+            context=self.request.context,
+            operation_id=self.request.operation_id,
+        ).model_dump(mode="json")
+
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
@@ -840,7 +884,22 @@ class TestingReplacementResourceAdapter:
                 )
 
             if self.request.initial_generation:
-                self.store.activate_initial_testing_preparation(preparation)
+                try:
+                    self.store.activate_initial_testing_preparation(
+                        preparation,
+                        before_activation=self.require_initial_usage,
+                        validate=lambda: resource_context(
+                            self.store, product=self.product, request=self.request
+                        ),
+                    )
+                except DurableOperationAuthorizationDeniedError as error:
+                    raise ProviderMutationRejectedError(error) from error
+                except (ValueError, FileNotFoundError) as error:
+                    raise ProviderMutationRejectedError(
+                        TestingResourcePreparationRefused(
+                            "Initial preparation refused before any effect; re-read its lane."
+                        )
+                    ) from error
                 activated = self.store.read_disposable_resource_preparation(
                     self.request.operation_id
                 )
