@@ -56,6 +56,40 @@
           "apply",
           "readback"
         ],
+        "operation_id": "activate_private_testing_transport_source",
+        "path": "/v1/products/{product}/private-testing-transport/activation",
+        "purpose": "Install or remove exact reviewed private testing Compose source using immutable product provenance and original-operation recovery; deployment and live TLS proof remain separate.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_plan_sha256",
+          "host_review",
+          "custody_review",
+          "trust_review"
+        ],
+        "schema_fingerprint_sha256": "47f44b2de14827c949b24278aab35d5a8e521d46e0527d256d71d19c735727eb",
+        "supported_surfaces": [
+          "service_api",
+          "local_cli"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
         "operation_id": "prepare_testing_public_ingress",
         "path": "/v1/products/{product}/testing-public-ingress",
         "purpose": "Publish the current independent Odoo testing hostname at its recorded edge using an existing covering certificate; preserve its restored copy and retained routes.",
@@ -744,8 +778,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "40a3371c1660b7d3cde67c84a05ed4f46008e126"
+    "source_commit_sha": "25076e0e1a45fb60be2a593928017ec78bae8cd9"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "1542afdfd02d09e8405a1f9617244cf325feabefac0dfb7b7b83271385a1b9b5"
+  "semantic_digest_sha256": "a7bea1cb5ac802c5ce633e50099fdcb9fb5e6ac7fe762fb1b522a82b10913c58"
 }
