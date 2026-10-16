@@ -21502,6 +21502,26 @@
             "title": "Deployment Record Id",
             "type": "string"
           },
+          "disposal_attention": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Disposal Attention",
+            "type": "integer"
+          },
+          "disposal_pending": {
+            "default": 0,
+            "minimum": 0,
+            "title": "Disposal Pending",
+            "type": "integer"
+          },
+          "disposal_pending_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Disposal Pending Bindings",
+            "type": "array"
+          },
           "observed_at": {
             "title": "Observed At",
             "type": "string"
@@ -21526,6 +21546,17 @@
             "title": "Step",
             "type": "string"
           },
+          "storage_status": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "pass",
+              "insufficient",
+              "unconfigured"
+            ],
+            "title": "Storage Status",
+            "type": "string"
+          },
           "trace": {
             "default": "",
             "title": "Trace",
@@ -21535,13 +21566,60 @@
         "required": [
           "alert_delivered",
           "deployment_record_id",
+          "disposal_attention",
+          "disposal_pending",
+          "disposal_pending_bindings",
           "observed_at",
           "operation_id",
           "status",
           "step",
+          "storage_status",
           "trace"
         ],
         "title": "OdooTestingDrillEvidence",
+        "type": "object"
+      },
+      "OdooTestingDrillStorageBudget": {
+        "additionalProperties": false,
+        "description": "Admin-supplied working headroom, never an inferred source-size guarantee.",
+        "properties": {
+          "database_bytes": {
+            "exclusiveMinimum": 0,
+            "title": "Database Bytes",
+            "type": "integer"
+          },
+          "filestore_bytes": {
+            "exclusiveMinimum": 0,
+            "title": "Filestore Bytes",
+            "type": "integer"
+          },
+          "reserve_bytes": {
+            "exclusiveMinimum": 0,
+            "title": "Reserve Bytes",
+            "type": "integer"
+          },
+          "retained_copy_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Copy Bindings",
+            "type": "array"
+          },
+          "staging_bytes": {
+            "exclusiveMinimum": 0,
+            "title": "Staging Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "database_bytes",
+          "filestore_bytes",
+          "reserve_bytes",
+          "retained_copy_bindings",
+          "staging_bytes"
+        ],
+        "title": "OdooTestingDrillStorageBudget",
         "type": "object"
       },
       "OdooWebsiteBootstrapPayload": {
@@ -29594,6 +29672,17 @@
             "default": false,
             "title": "Odoo Testing Drill Enabled",
             "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
+          "odoo_testing_drill_storage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooTestingDrillStorageBudget"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "x-launchplane-optional-response": true
           }
         },

@@ -2133,11 +2133,23 @@ export type OdooSlotReadiness = {
 export type OdooTestingDrillEvidence = {
     alert_delivered: boolean;
     deployment_record_id: string;
+    disposal_attention: number;
+    disposal_pending: number;
+    disposal_pending_bindings: Array<string>;
     observed_at: string;
     operation_id: string;
     status: 'queued' | 'pass' | 'fail' | 'skipped';
     step: string;
+    storage_status: 'unknown' | 'pass' | 'insufficient' | 'unconfigured';
     trace: string;
+};
+
+export type OdooTestingDrillStorageBudget = {
+    database_bytes: number;
+    filestore_bytes: number;
+    reserve_bytes: number;
+    retained_copy_bindings: Array<string>;
+    staging_bytes: number;
 };
 
 export type OdooWebsiteBootstrapPayload = {
@@ -3494,6 +3506,7 @@ export type ProductLaneProfile = {
     odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy;
     odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy;
     odoo_testing_drill_enabled?: boolean;
+    odoo_testing_drill_storage?: OdooTestingDrillStorageBudget | null;
 };
 
 export type ProductManagedSecretConfigStatusItem = {

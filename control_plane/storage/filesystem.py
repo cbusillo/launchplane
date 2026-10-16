@@ -275,6 +275,7 @@ from control_plane.storage.product_authority_bundle import (
     RuntimeEnvironmentDelete,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
+    odoo_instance_override_records_match,
 )
 from control_plane.contracts.product_owner import (
     ProductOwnerPolicyConflictError,
@@ -646,7 +647,7 @@ class FilesystemRecordStore:
             current = self._read_model_locked(
                 OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
             )
-            if current != write.expected_record:
+            if not odoo_instance_override_records_match(current, write.expected_record):
                 raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             self._stage_product_authority_bundle_write(
                 stage_dir=stage_dir,
@@ -7159,7 +7160,7 @@ class FilesystemRecordStore:
                     )
                 except FileNotFoundError:
                     current = None
-                if current != expected_record:
+                if not odoo_instance_override_records_match(current, expected_record):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             if required_context_owner is not None or required_product_config_target is not None:
                 require_bundle_context_owner(
