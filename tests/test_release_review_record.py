@@ -78,11 +78,7 @@ class FakeReleaseIssues:
             return snapshot
         assert body is not None
         with self._lock:
-            issue = {
-                "number": 99 + len(self.issues),
-                "body": body["body"],
-                "performed_via_github_app": {"id": 77},
-            }
+            issue = {"number": 99 + len(self.issues), "body": body["body"]}
             self.issues.append(issue)
         if self.lose_response:
             self.lose_response = False
@@ -114,9 +110,6 @@ def concurrent_publication(
         patch(
             "control_plane.release_review_record.resolve_launchplane_github_token",
             return_value="test-token",
-        ),
-        patch(
-            "control_plane.release_review_record.resolve_delivery_github_app_id", return_value=77
         ),
         patch.object(stores[1], "release_review_publication_lock", contender_lock),
         ThreadPoolExecutor(max_workers=2) as workers,
@@ -168,11 +161,6 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         )
         token.start()
         self.addCleanup(token.stop)
-        app = patch(
-            "control_plane.release_review_record.resolve_delivery_github_app_id", return_value=77
-        )
-        app.start()
-        self.addCleanup(app.stop)
 
     def test_concurrent_publishers_return_one_stored_issue(self) -> None:
         urls, github = concurrent_publication(
@@ -336,13 +324,7 @@ class ReleaseReviewRecordTests(unittest.TestCase):
     def test_recovers_successful_issue_write_without_a_duplicate(self) -> None:
         with patch(
             "control_plane.release_review_record.github_api_request",
-            return_value=[
-                {
-                    "number": 99,
-                    "body": release_decision_issue_body(self.decision),
-                    "performed_via_github_app": {"id": 77},
-                }
-            ],
+            return_value=[{"number": 99, "body": release_decision_issue_body(self.decision)}],
         ) as api:
             url = publish_release_decision(
                 store=self.store,
@@ -364,9 +346,7 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         )
         with patch(
             "control_plane.release_review_record.github_api_request",
-            return_value=[
-                {"number": 99, "body": older_body, "performed_via_github_app": {"id": 77}}
-            ],
+            return_value=[{"number": 99, "body": older_body}],
         ) as api:
             url = publish_release_decision(
                 store=self.store,
@@ -403,38 +383,11 @@ class ReleaseReviewRecordTests(unittest.TestCase):
         self.assertEqual(url, "https://github.com/example/site/issues/101")
         self.assertTrue(any(call.kwargs.get("method") == "POST" for call in api.call_args_list))
 
-    def test_foreign_copied_decision_marker_cannot_supply_the_release_record(self) -> None:
-        issue = {
-            "number": 88,
-            "body": release_decision_issue_body(self.decision),
-            "performed_via_github_app": {"id": 99},
-        }
-        with patch(
-            "control_plane.release_review_record.github_api_request",
-            side_effect=[[issue], {"number": 101}, None],
-        ) as api:
-            url = publish_release_decision(
-                store=self.store,
-                control_plane_root=self.root,
-                profile=profile(),
-                decision=self.decision,
-            )
-        self.assertTrue(url.endswith("/101"))
-        self.assertTrue(any(call.kwargs.get("method") == "POST" for call in api.call_args_list))
-
     def test_incomplete_lookup_or_create_never_claims_a_release_record(self) -> None:
         cases: tuple[list[object], ...] = (
             [{}],
             [[], {}],
-            [
-                [
-                    {
-                        "number": "bad",
-                        "body": release_decision_issue_body(self.decision),
-                        "performed_via_github_app": {"id": 77},
-                    }
-                ]
-            ],
+            [[{"number": "bad", "body": release_decision_issue_body(self.decision)}]],
         )
         for responses in cases:
             with (

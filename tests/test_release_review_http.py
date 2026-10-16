@@ -148,10 +148,6 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                 return_value="test-token",
             ),
             patch(
-                "control_plane.release_review_record.resolve_delivery_github_app_id",
-                return_value=77,
-            ),
-            patch(
                 "control_plane.release_review_record.github_api_request", side_effect=github.request
             ),
             patch.object(
@@ -194,10 +190,6 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
             patch(
                 "control_plane.release_review_record.resolve_launchplane_github_token",
                 return_value="test-token",
-            ),
-            patch(
-                "control_plane.release_review_record.resolve_delivery_github_app_id",
-                return_value=77,
             ),
             patch(
                 "control_plane.release_review_record.github_api_request", side_effect=github.request

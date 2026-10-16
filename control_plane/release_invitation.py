@@ -181,6 +181,16 @@ def _announced_changes(
 REPLACED_MARKER = "<!-- launchplane:release-invitation-replaced -->"
 COMPLETED_PREFIX = "<!-- launchplane:release-invitation-completed:"
 WHY_NOW = "**Why now:** "
+ADOPTED_ORIGINAL_PREFIX = "<!-- launchplane:release-adopted-original:"
+
+
+def _adopted_originals(comments: list[dict[str, object]]) -> set[int]:
+    return {
+        int(match[1])
+        for comment in comments
+        for line in _receipt_lines(comment)
+        if (match := re.fullmatch(re.escape(ADOPTED_ORIGINAL_PREFIX) + r"([1-9][0-9]*) -->", line))
+    }
 
 
 def _replace_older_invitations(
@@ -195,9 +205,14 @@ def _replace_older_invitations(
     current_id = current.get("id")
     if not isinstance(current_id, int) or current_id < 1:
         raise ValueError("Release invitation comment identity is unavailable.")
+    preserved = _adopted_originals(comments)
     for comment in comments:
         lines = _receipt_lines(comment)
-        if comment.get("id") == current_id or REPLACED_MARKER in lines:
+        if (
+            comment.get("id") in preserved
+            or comment.get("id") == current_id
+            or REPLACED_MARKER in lines
+        ):
             continue
         if not any(
             re.fullmatch(r"<!-- launchplane:release-(?:invitation|reminder):[0-9a-f]{64} -->", line)
@@ -367,7 +382,7 @@ def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord
 
 
 def _pages(
-    path: str, token: str, *, app_id: int, marker: str = "", issues_only: bool = False
+    path: str, token: str, *, app_id: int | None = None, marker: str = "", issues_only: bool = False
 ) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     separator = "&" if "?" in path else "?"
@@ -383,7 +398,7 @@ def _pages(
         ]
         matching = []
         for item in marked:
-            if github_app_authored(
+            if app_id is None or github_app_authored(
                 item,
                 app_id,
                 lookup_app=lambda slug: github_api_request(
@@ -476,7 +491,6 @@ def _settle_completed_invitation(
             issues = _pages(
                 f"{path}?state=all&sort=updated&direction=desc",
                 token,
-                app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
                 marker=release_request_issue_marker(profile.product),
                 issues_only=True,
             )
@@ -489,11 +503,9 @@ def _settle_completed_invitation(
             number = issues[0].get("number")
             if not isinstance(number, int) or number < 1:
                 raise ValueError("Release invitation issue number is unavailable.")
-            comments = _pages(
-                f"{path}/{number}/comments",
-                token,
-                app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
-            )
+            comments = _pages(f"{path}/{number}/comments", token)
+            preserved = _adopted_originals(comments)
+            comments = [comment for comment in comments if comment.get("id") not in preserved]
             marker = release_invitation_marker(profile.product, production)
             completion = (
                 COMPLETED_PREFIX + hashlib.sha256(decision.record_id.encode()).hexdigest() + " -->"
@@ -738,7 +750,6 @@ def publish_release_invitation(
             issues = _pages(
                 f"{path}?state=all&sort=updated&direction=desc",
                 token,
-                app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
                 marker=issue_marker,
                 issues_only=True,
             )
@@ -764,11 +775,7 @@ def publish_release_invitation(
             # or reminders for a later candidate under the same saved decision.
             comments = [
                 comment
-                for comment in _pages(
-                    comments_path,
-                    token,
-                    app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
-                )
+                for comment in _pages(comments_path, token)
                 if REPLACED_MARKER not in _receipt_lines(comment)
                 and not any(line.startswith(COMPLETED_PREFIX) for line in _receipt_lines(comment))
             ]
@@ -946,6 +953,7 @@ def adopt_release_invitation(
     issue_number: int,
     comment_id: int,
     dry_run: bool,
+    reason: str = "",
 ) -> bool:
     """Attest an admin-selected existing request with no mention or original edit."""
     with store.release_review_publication_lock(record_id=f"invitation:{profile.product}"):
@@ -989,6 +997,7 @@ def adopt_release_invitation(
                 not isinstance(issue, dict)
                 or "pull_request" in issue
                 or issue.get("number") != issue_number
+                or issue.get("state") != "open"
                 or not isinstance(original, dict)
                 or original.get("id") != comment_id
                 or original.get("issue_url") != f"https://api.github.com{path}/{issue_number}"
@@ -1004,6 +1013,15 @@ def adopt_release_invitation(
             ):
                 return False
             comments_path = f"{path}/{issue_number}/comments"
+            destinations = _pages(
+                f"{path}?state=all&sort=updated&direction=desc",
+                token,
+                app_id=app_id,
+                marker=issue_marker,
+                issues_only=True,
+            )
+            if any(destination.get("number") != issue_number for destination in destinations):
+                return False
             existing = _pages(comments_path, token, app_id=app_id, marker=adoption_marker)
             if existing:
                 return len(existing) == 1
@@ -1025,12 +1043,15 @@ def adopt_release_invitation(
                     issue_marker,
                     candidate_marker,
                     request_marker,
+                    ADOPTED_ORIGINAL_PREFIX + str(comment_id) + " -->",
                     *(
                         f"<!-- launchplane:release-client-change:{key} -->"
                         for key in sorted(changes)
                     ),
                     "",
                     "Existing release request adopted; no new Client action or decision.",
+                    "Adoption reason: "
+                    + json.dumps(reason).replace("<", "\\u003c").replace("@", "@\u200b"),
                     f"https://github.com/{profile.repository}/issues/{issue_number}#issuecomment-{comment_id}",
                 )
             )
@@ -1040,7 +1061,13 @@ def adopt_release_invitation(
             return bool(
                 isinstance(result, dict)
                 and isinstance(result.get("id"), int)
-                and github_app_authored(result, app_id)
+                and github_app_authored(
+                    result,
+                    app_id,
+                    lookup_app=lambda slug: github_api_request(
+                        path=f"/apps/{quote(slug)}", token=token
+                    ),
+                )
             )
     return False
 

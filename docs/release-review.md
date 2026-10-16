@@ -185,24 +185,28 @@ from the candidate's artifact, commit and shared-input identity. The worker
 serializes publication across replicas using the existing release-publication
 lock and checks for that receipt before posting. A retry after a lost response
 adopts the existing comment; edits to checklist notes do not notify again.
-Only provider-attested records from the configured Delivery App count as
-destinations or receipts. That includes request, candidate, reminder,
-announced-change, replacement and completed-review markers. Markers inside
-fenced examples are data. Release-decision issue recovery checks the same App
-provenance; a copied marker cannot acknowledge another author's issue.
+Receipt-only adoption is the migration prerequisite for the receipt-trust
+hardening tracked in #3085. The ordinary publisher still accepts its existing
+legacy markers; enforcing App-only discovery before adopting already-sent
+manual or former-App requests could create another invitation. Deploy this
+preparation first, inventory/adopt the existing requests, then deliver the
+separate trust-enforcement source. Marker text alone is not an acceptance.
 
 For an already-sent manual request or a request from a former App, a signed-in
 admin uses `POST /v1/release-review/urgent-openings` with the current
 `product`, `checklist_digest`, `reason`, `adopt_issue_number`,
 `adopt_comment_id` and `dry_run: true`. After reviewing that result, the same
 request with `dry_run: false` posts only an App receipt to the selected issue.
-The original comment must belong to that issue and contain the current exact
+The original comment must belong to that open issue and contain the current exact
 candidate marker, with no replacement/completion or intervening Client decision.
 The existing admin permission and browser CSRF checks apply. No Client decision,
 mention, original edit or new invitation is created. Retries discover the same
 adoption marker; the ordinary publisher can then update its own receipt silently.
 An App attestation on a manual destination supplies trust without trusting its
-human author or borrowing another App's credential.
+human author or borrowing another App's credential. Adoption refuses when another
+App-attested destination already exists. The adoption receipt begins a new
+three-day reminder clock; it does not send a reminder on adoption. The original
+manual comment is retained unchanged, including after release completion.
 The invitation greets the Client, shows the Client test notes for changes they
 reviewed or were asked to review on preview, and asks them to open the release
 page, check the testing site, and press Accept or Request changes. It explains
@@ -290,15 +294,12 @@ reminder. Markers are delivery
 receipts only and never supply release acceptance. Preserve them during edits;
 deleting a receipt permits another notification.
 
-For a candidate already requested manually, append its candidate marker on its
-own line, without indentation or trailing spaces, to the existing request comment
-and the issue marker to that issue's body before the
-new publisher starts. Leave its wording and mention unchanged during marker
-adoption; later candidates follow the in-place update behavior above. Read the exact
-candidate from the supported release-review endpoint and pass its `ReleaseVersion`
-to the marker command below; do not infer it from a shortened commit or from the newest
-testing build after it has changed. This imports delivery evidence without sending
-another request or submitting a decision.
+Legacy marker-only requests need the receipt-only admin adoption above before
+App-only discovery is enabled. The following read-only command can identify the
+exact markers for an existing candidate; it does not perform adoption. Read the
+candidate from the supported release-review endpoint rather than inferring it
+from a shortened commit or a newer testing build. Preserve the original manual
+request and use the reviewed service operation to add its App attestation.
 
 Save the endpoint's exact `checklist.candidate` object as a private JSON file
 and use the supported read-only marker command:

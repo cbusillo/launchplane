@@ -3,6 +3,7 @@ from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 import io
 import json
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -71,25 +72,6 @@ from tests.test_release_review import decision, github_read, profile, seed
 
 
 class ReleaseInvitationTests(unittest.TestCase):
-    def test_foreign_copied_request_and_reminder_do_not_redirect_or_suppress(self) -> None:
-        self.publish()
-        original = self.comments[0]["body"]
-        request_marker = original.splitlines()[0]
-        foreign = {
-            "id": 900,
-            "body": original
-            + "\n"
-            + request_marker.replace("release-request:", "release-reminder:"),
-            "created_at": self.now.isoformat(),
-            "performed_via_github_app": {"id": 88},
-        }
-        self.comments.append(foreign.copy())
-        self.now += timedelta(days=3)
-        self.publish()
-        self.assertEqual(self.comments[1], foreign)
-        self.assertEqual(len(self.comments), 3)
-        self.assertIn("@site-owner", self.comments[-1]["body"])
-
     def test_manual_request_adoption_is_receipt_only_and_preserves_original(self) -> None:
         assert self.review.checklist is not None
         candidate_marker = release_invitation_marker(
@@ -167,6 +149,42 @@ class ReleaseInvitationTests(unittest.TestCase):
                 store=self.store, control_plane_root=self.root, backoff=backoff
             )
         self.assertFalse(backoff.diagnostics)
+
+    def test_adoption_cannot_create_a_second_trusted_destination(self) -> None:
+        self.publish()
+        assert self.review.checklist is not None
+        self.issues.append(
+            {
+                "number": 92,
+                "state": "open",
+                "performed_via_github_app": {"id": 88},
+                "body": release_request_issue_marker(self.profile.product),
+            }
+        )
+        self.comments.append(
+            {
+                "id": 600,
+                "created_at": self.now.isoformat(),
+                "performed_via_github_app": {"id": 88},
+                "issue_url": "https://api.github.com/repos/example/site/issues/92",
+                "body": release_invitation_marker(
+                    self.profile.product, self.review.checklist.candidate
+                ),
+            }
+        )
+        posts = len(self.posts)
+        self.assertFalse(
+            adopt_release_invitation(
+                store=cast(ReleaseReviewStore, self.store),
+                control_plane_root=self.root,
+                profile=self.profile,
+                checklist_digest=self.review.checklist_digest,
+                issue_number=92,
+                comment_id=600,
+                dry_run=False,
+            )
+        )
+        self.assertEqual(len(self.posts), posts)
 
     def setUp(self) -> None:
         directory = TemporaryDirectory()
@@ -1122,8 +1140,10 @@ class ReleaseInvitationTests(unittest.TestCase):
                 comment for comment in self.comments if path.endswith(f"/{comment['id']}")
             )
             return {"issue_url": "https://api.github.com/repos/example/site/issues/91", **result}
-        if path.endswith("/issues/91"):
-            return self.issues[0].copy()
+        if re.fullmatch(r"/repos/example/site/issues/[0-9]+", path):
+            return next(
+                issue.copy() for issue in self.issues if path.endswith(f"/{issue['number']}")
+            )
         # Existing fixtures model records emitted by this fake Delivery App.
         return [
             {"performed_via_github_app": {"id": 77}, **item}
