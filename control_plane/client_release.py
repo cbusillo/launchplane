@@ -984,6 +984,71 @@ def _run_generic_web_promotion(
             resolved_deploy_target=target,
         )
 
+    from control_plane.production_recipient import custody
+    from control_plane.production_recipient_cutover import RecipientCutoverAdapter
+
+    recipient = custody(store, profile.product, lane.context)
+    if (
+        recipient is not None
+        and recipient.activation
+        and recipient.phase != "retired"
+        and (
+            recipient.phase != "published"
+            or decision.checklist.candidate.source_commit == recipient.request.source_commit
+        )
+    ):
+        if (
+            decision.checklist.candidate.artifact_id,
+            decision.checklist.candidate.source_commit,
+        ) != (recipient.image_reference, recipient.request.source_commit):
+            raise ClientReleaseNotReady("recipient_release_candidate_changed")
+
+        def validate_recipient_release() -> None:
+            if (
+                decision.decision != "accepted"
+                or decision.actor_github_id != profile.owner.github_id
+            ):
+                raise click.ClickException(
+                    "Recipient cutover requires the Client's accepted release."
+                )
+            validate_checkpoint()
+            covered = _covering_decision(
+                store, profile.product, decision_record_id=decision.record_id
+            )
+            if covered is None:
+                raise click.ClickException("The release is no longer accepted.")
+
+        if recipient.phase != "published" and not recipient.execution:
+            _require_current_release(store, control_plane_root, profile, decision)
+
+        recipient_adapter = RecipientCutoverAdapter(
+            control_plane_root,
+            store,
+            recipient,
+            f"client-release-{decision.record_id}",
+            backup_record_id,
+            validate_recipient_release,
+        )
+        recipient_result = run_durable_provider_operation(
+            store=store,
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=_step_key(decision, step),
+            request_fingerprint=hashlib.sha256(request.model_dump_json().encode()).hexdigest(),
+            lease_owner=f"client-release-{decision.record_id}-{datetime.now(UTC).isoformat()}",
+            response_trace_id=f"client-release-{decision.record_id}",
+            adapter=recipient_adapter,
+        )
+        expected_id = client_release_step_operation_id(
+            profile=profile, decision=decision, step=step
+        )
+        return (
+            expected_id
+            if recipient_result.record is not None
+            and recipient_result.record.record_id == expected_id
+            else ""
+        )
+
     adapter = GenericWebProdPromotionProviderMutationAdapter(
         control_plane_root=control_plane_root,
         record_store=store,
@@ -1331,6 +1396,12 @@ def _queue_rollback(
     ):
         raise ClientReleaseNotReady("release_changed")
     target_artifact_id = checklist.production.artifact_id
+    if profile.driver_id == "generic-web":
+        recipient_operation = _queue_recipient_inverse(
+            store, control_plane_root, profile, decision, step, context, authorized_at
+        )
+        if recipient_operation is not None:
+            return recipient_operation
     deployment = (
         _generic_web_drill_target(store, profile, decision)
         if profile.driver_id == "generic-web"
@@ -1421,6 +1492,27 @@ def _generic_web_drill_target(
     profile: LaunchplaneProductProfileRecord,
     decision: ReleaseReviewDecisionRecord,
 ) -> DeploymentRecord:
+    from control_plane.production_recipient import custody
+
+    recipient = custody(store, profile.product, _prod_context(profile))
+    if (
+        recipient is not None
+        and recipient.publication
+        and recipient.execution.get("release_trace") == f"client-release-{decision.record_id}"
+    ):
+        before = recipient.publication["before"]["inventory"]
+        if before is not None and (
+            before["source_git_ref"] == decision.checklist.production.source_commit
+        ):
+            retained = store.read_deployment_record(before["deployment_record_id"])
+            if (
+                retained.artifact_identity is not None
+                and retained.artifact_identity.artifact_id
+                == decision.checklist.production.artifact_id
+                and deployment_record_passed(retained)
+            ):
+                return retained
+        raise ClientReleaseNotReady("rollback_target_missing")
     for deployment in store.list_deployment_records(
         context_name=_prod_context(profile), instance_name="prod"
     ):
@@ -1460,6 +1552,12 @@ def _queue_rejection_rollback(
         raise ClientReleaseNotReady("release_record_missing") from error
     if production.artifact_id != decision.checklist.candidate.artifact_id:
         raise ClientReleaseNotReady("release_changed")
+    if profile.driver_id == "generic-web":
+        recipient_operation = _queue_recipient_inverse(
+            store, control_plane_root, profile, decision, step, context, authorized_at
+        )
+        if recipient_operation is not None:
+            return recipient_operation
     deployment = rejection_rollback_target(store, profile)
     if deployment is None or deployment.artifact_identity is None:
         raise ClientReleaseNotReady("rollback_target_missing")
@@ -1530,3 +1628,56 @@ def _queue_rejection_rollback(
         operation
     )
     return persisted.operation_id if persisted.operation_id == operation.operation_id else ""
+
+
+def _queue_recipient_inverse(
+    store: PostgresRecordStore,
+    root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    decision: ReleaseReviewDecisionRecord,
+    step: ClientReleaseStep,
+    context: str,
+    authorized_at: str,
+) -> str | None:
+    from control_plane.production_recipient import custody
+    from control_plane.production_recipient_inverse import run_recipient_inverse
+
+    record = custody(store, profile.product, context)
+    if (
+        record is None
+        or not record.publication
+        or record.execution.get("release_trace") != f"client-release-{decision.record_id}"
+        or record.phase not in {"published", "reverting", "inverse_published", "rolled_back"}
+    ):
+        return None
+    before = record.publication["before"]["inventory"]
+    if (
+        before is None
+        or before["source_git_ref"] != decision.checklist.production.source_commit
+        or (before.get("runtime_identity") or {}).get("artifact_id")
+        != decision.checklist.production.artifact_id
+    ):
+        raise ClientReleaseNotReady("recipient_inverse_target_changed")
+    grant = client_release_grant(
+        decision=decision,
+        action="generic_web_rollback.execute",
+        context=context,
+        authorized_at=authorized_at,
+    )
+
+    def validate() -> None:
+        if not client_release_grant_allows(store, grant):
+            raise click.ClickException("The Client release no longer authorizes this inverse.")
+
+    actual = run_recipient_inverse(
+        root=root,
+        store=store,
+        record=record,
+        scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        route_path=GENERIC_WEB_ROLLBACK_ROUTE,
+        key=_step_key(decision, step),
+        trace=f"client-release-{decision.record_id}",
+        validate_release=validate,
+    )
+    expected = client_release_step_operation_id(profile=profile, decision=decision, step=step)
+    return expected if actual == expected else ""
