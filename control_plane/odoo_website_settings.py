@@ -15,6 +15,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.public_hosts import resolve_public_base_url
 from control_plane.odoo_post_deploy_http import resolve_odoo_post_deploy_product_route
 from control_plane.storage.product_authority_bundle import LaneProductConfigWriteRequirements
 
@@ -118,11 +119,21 @@ def _validate_candidate(
     production: ProductLaneProfile | None,
 ) -> None:
     assert request.website_settings is not None
-    if production is None or request.website_settings.settings.public_origin.rstrip(
-        "/"
-    ) != production.base_url.rstrip("/"):
+    if production is None:
+        raise ValueError("Website settings require the product's production lane.")
+    try:
+        target = store.read_dokploy_target_record(
+            context_name=production.context, instance_name=production.instance
+        )
+        public_hosts = target.public_hosts
+    except FileNotFoundError:
+        public_hosts = ()
+    public_origin = resolve_public_base_url(
+        instance=production.instance, public_hosts=public_hosts
+    ) or production.base_url.rstrip("/")
+    if request.website_settings.settings.public_origin.rstrip("/") != public_origin:
         raise ValueError(
-            "Website settings origin must match the product's recorded production URL."
+            "Website settings origin must match the product's resolved production URL."
         )
     testing = next((lane for lane in profile.lanes if lane.instance == "testing"), None)
     if testing is None:
