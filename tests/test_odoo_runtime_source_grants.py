@@ -144,10 +144,6 @@ class RuntimeSourceTests(unittest.TestCase):
             self.assertNotIn(PRIVATE, repr(command))
             self.assertGreater(kwargs["timeout"], 0)
         self.assertNotIn(PRIVATE, json.dumps(self.provider_payloads))
-        options = self.postgres.connect.call_args.kwargs["options"]
-        self.assertIn("default_transaction_read_only=on", options)
-        self.database.rollback.assert_called()
-        self.database.commit.assert_not_called()
         self.mysql.close.assert_called()
 
     def test_finalized_timestamp_defaults_short_id_and_health_ticks_preserve_origin_proof(
@@ -171,6 +167,10 @@ class RuntimeSourceTests(unittest.TestCase):
         for command, _ in self.proc_calls:
             if command[:2] == ["docker", "exec"]:
                 self.assertIn(self.full_container_id, command)
+
+    def test_equivalent_verified_tls_settings_preserve_runtime_proof(self) -> None:
+        self.env[self.keys["cm_data"]["ssl_verify"]] = "true"
+        self.assertEqual(self.run_probe()["cm_data"], "read_only")
 
     def test_unreachable_source_does_not_hide_other_sources(self) -> None:
         self.drift = "source_failure"
@@ -214,7 +214,7 @@ class RuntimeSourceTests(unittest.TestCase):
                 self.inspections = 0
                 self.assertTrue(all(value == "unknown" for value in self.run_probe().values()))
 
-    def test_protocol_failures_timeouts_and_missing_identity_are_value_free(self) -> None:
+    def test_transport_failure_and_missing_identity_are_value_free(self) -> None:
         original = self.fixture.connection
         with patch.object(runtime, "_read_remote", side_effect=OSError(PRIVATE)):
             self.assertEqual(

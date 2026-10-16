@@ -54,6 +54,11 @@ def parameters():
     finally:
         connection.close()
 
+def matches(field,left,right):
+    if field=='ssl_verify':
+        return left.lower() in {'true','1'} and right.lower() in {'true','1'}
+    return bool(left) and hmac.compare_digest(left.encode(),right.encode())
+
 def run():
     if (os.environ.get('PLATFORM_INSTANCE')!='testing'
         or json.loads(os.environ[__IDENTITY_KEY__])!=spec['identity']):
@@ -65,9 +70,7 @@ def run():
         prefix=prefixes[name]
         settings={field:before.get(prefix+'.'+field,'') for field in (*fields,'password')}
         expected={field:os.environ.get(__ENV_KEYS__[name][field],'') for field in settings}
-        if not all(settings[field] and hmac.compare_digest(settings[field].encode(),expected[field].encode()) for field in settings):
-            continue
-        if settings['ssl_verify'].lower() not in {'true','1'}:
+        if not all(matches(field,settings[field],expected[field]) for field in settings):
             continue
         try:
             child=subprocess.run(
@@ -101,7 +104,7 @@ prefix=sys.argv[2]
 result={name:'unknown' for name in spec['sources']}
 
 def inspect():
-    raw=subprocess.run(['docker','inspect',spec['container']], capture_output=True, check=True, timeout=5)
+    raw=subprocess.run(['docker','inspect','--type','container',spec['container']], capture_output=True, check=True, timeout=5)
     values=json.loads(raw.stdout)
     if len(values)!=1:
         raise ValueError()

@@ -466,6 +466,22 @@ class DiagnosticTests(unittest.TestCase):
                     )
                 )
                 self.mocks[1].side_effect = None
+                self.mocks[1].return_value = self.environment
+
+    def test_binding_drift_during_runtime_read_discards_all_evidence(self) -> None:
+        def drift(connection: object, sources: tuple[str, ...], **kwargs: object) -> dict[str, str]:
+            self.fixture.bindings.clear()
+            return {name: "read_only" for name in sources}
+
+        self.runtime_mock.side_effect = drift
+        result = self.run_diagnostic()
+        self.assertEqual(result.runtime, "unknown")
+        self.assertTrue(
+            all(
+                source.managed_connection_grants == source.applied_connection_grants == "unknown"
+                for source in result.sources
+            )
+        )
 
     def test_duplicate_binding_missing_version_and_missing_parameter(self) -> None:
         self.fixture.bindings.append(
