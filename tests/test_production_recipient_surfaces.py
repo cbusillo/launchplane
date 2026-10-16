@@ -18,7 +18,12 @@ from httpx2 import ASGITransport, AsyncClient
 from pydantic import BaseModel
 
 from control_plane.action_effects import action_effect
-from control_plane.contracts.production_recipient import ProductionRecipientPlan
+from control_plane.contracts.production_recipient import (
+    ProductionRecipientPlan,
+    RecipientRecoveryRequest,
+    RecipientRecoveryPlan,
+)
+from control_plane.production_recipient_recovery import RECOVERY_ROUTE
 from control_plane.http_routes.production_recipient import register_production_recipient_routes
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.production_recipient import ROUTE, plan
@@ -186,12 +191,12 @@ class HttpBoundaryTests(unittest.TestCase):
         )
         self.app = app
 
-    def post(self, body: dict[str, Any]) -> Any:
+    def post(self, body: dict[str, Any], route: str = ROUTE) -> Any:
         async def send() -> Any:
             async with AsyncClient(
                 transport=ASGITransport(app=self.app), base_url="https://fixture.invalid"
             ) as client:
-                return await client.post(ROUTE.format(product=self.fixture.product), json=body)
+                return await client.post(route.format(product=self.fixture.product), json=body)
 
         return asyncio.run(send())
 
@@ -256,8 +261,101 @@ class HttpBoundaryTests(unittest.TestCase):
                 self.assertEqual(self.post(body).status_code, 409)
         self.assertFalse(self.fixture.effects)
 
+    def test_recovery_plan_is_read_only_and_denied_apply_never_dispatches(self) -> None:
+        self.fixture.run_operation()
+        record = self.fixture.adapter.current()
+        body = RecipientRecoveryRequest(
+            context=self.fixture.context,
+            preparation_plan_sha256=record.plan_sha256,
+            reason="Review scoped isolated recovery",
+        )
+        self.allowed_effects = {"read", "plan"}
+        with patch(
+            "control_plane.http_routes.production_recipient.idempotency_scope",
+            return_value=self.fixture.adapter.scope,
+        ):
+            response = self.post(body.model_dump(mode="json"), RECOVERY_ROUTE)
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertFalse(response.json()["result"]["recovered"])
+        self.identity = TerminalAgentIdentity("agent", "fixture", director_agent=True)
+        self.allowed_effects = {"read", "plan", "write"}
+        response = self.post(
+            body.model_copy(update={"mode": "apply"}).model_dump(mode="json"), RECOVERY_ROUTE
+        )
+        self.assertEqual(response.status_code, 403)
+        self.mutate.assert_not_awaited()
+        injected = {**body.model_dump(mode="json"), "capture_sha256": "a" * 64, "recovered": True}
+        self.assertEqual(self.post(injected, RECOVERY_ROUTE).status_code, 422)
+
 
 class TerminalClientTests(unittest.TestCase):
+    def test_recovery_consumer_binds_saved_request_and_uses_existing_caller(self) -> None:
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/prepare-production-recipient.py")
+        )
+        draft = RecipientRecoveryRequest(
+            context="fixture", preparation_plan_sha256="a" * 64, reason="Recover exact scoped data"
+        )
+        result = RecipientRecoveryPlan(
+            product="fixture",
+            context=draft.context,
+            preparation_plan_sha256=draft.preparation_plan_sha256,
+            plan_sha256="b" * 64,
+        )
+        post = Mock(
+            return_value={
+                "status": "accepted",
+                "trace_id": "launchplane_req_fixture",
+                "result": result.model_dump(mode="json"),
+            }
+        )
+        transport = {
+            "resolve_settings": lambda args: {
+                "service_url": "https://fixture.invalid",
+                "token": "opaque-fixture-token",
+            },
+            "validate_service_url": lambda url: None,
+            "request_launchplane": post,
+            "public_trace_id": lambda trace: trace,
+        }
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            helper = root / "launchplane-write-action.py"
+            helper.touch()
+            request, evidence = root / "request.json", root / "evidence.json"
+            request.write_text(draft.model_dump_json())
+            for mode in ("dry-run", "apply"):
+                args = [
+                    "client",
+                    mode,
+                    "--recovery",
+                    "--operator-helper",
+                    str(helper),
+                    "--product",
+                    "fixture",
+                    "--request-file",
+                    str(request),
+                    "--evidence-file",
+                    str(evidence),
+                ]
+                if mode == "apply":
+                    args.extend(["--reviewed-dry-run", "--idempotency-key", "original-recovery"])
+                output = io.StringIO()
+                with (
+                    patch("runpy.run_path", return_value=transport),
+                    patch("sys.argv", args),
+                    redirect_stdout(output),
+                ):
+                    self.assertEqual(client["main"](), 0, output.getvalue())
+                self.assertNotIn("opaque-fixture-token", output.getvalue())
+                self.assertEqual(
+                    post.call_args.kwargs["path"], RECOVERY_ROUTE.format(product="fixture")
+                )
+            self.assertEqual(
+                post.call_args.kwargs["body"]["reviewed_plan_sha256"], result.plan_sha256
+            )
+            self.assertEqual(evidence.stat().st_mode & 0o077, 0)
+
     def test_saved_review_is_private_bound_and_original_key_replay_is_readable(self) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/prepare-production-recipient.py")

@@ -149,19 +149,35 @@ class TraefikFileRoute:
 
     def publish(self, backend: str, *, expected: tuple[str, ...]) -> str:
         observed = self.observed_target()
-        if observed == backend:
-            return observed
-        if observed not in expected:
+        if observed != backend and observed not in expected:
             raise ValueError("route authority changed; refusing a stale traffic switch")
         # A watched file belongs to this route alone. Never replace a shared
         # dynamic configuration and silently retire its other routers/services.
         owned = yaml.safe_load(self.target.route_file.read_text())
         intended = json.loads(json.dumps(route_payload(self.target, backend)))
-        previous = json.loads(json.dumps(route_payload(self.target, observed)))
-        if owned not in (previous, intended):
+        admitted = [
+            json.loads(json.dumps(route_payload(self.target, target)))
+            for target in {observed, backend, *expected}
+        ]
+        if owned not in admitted:
             raise ValueError("route file is not the exact single-route owned configuration")
+        if owned == intended and observed == backend:
+            return observed
         if owned == intended:
-            return self._wait_applied(backend, expected)
+            try:
+                return self._wait_applied(backend, expected)
+            except TimeoutError:
+                # A watched-directory notification can be lost across provider
+                # restart or filesystem event coalescing. A later recovery may
+                # re-publish this exact owned intent, never a foreign/stale route.
+                observed = self.observed_target()
+                if observed == backend:
+                    return observed
+                if (
+                    observed not in expected
+                    or yaml.safe_load(self.target.route_file.read_text()) != intended
+                ):
+                    raise ValueError("route authority changed during publication recovery")
         payload = json.dumps(intended, sort_keys=True)
         temporary: str | None = None
         try:

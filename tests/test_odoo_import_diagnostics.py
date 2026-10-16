@@ -11,10 +11,15 @@ from unittest.mock import MagicMock, patch
 
 from fastapi import FastAPI, HTTPException
 import pymysql
+from pydantic import SecretStr
 from pymysql.constants import CLIENT, CR
 
 from control_plane import odoo_import_diagnostics as diagnostic
 from control_plane import odoo_runtime_reads as reads
+from control_plane.odoo_diagnostic_identity import (
+    OdooDiagnosticIdentity,
+    DIAGNOSTIC_IDENTITY_UNAVAILABLE,
+)
 from control_plane import odoo_source_probe as probe
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetPolicies
@@ -179,6 +184,15 @@ class DiagnosticFixture:
                 "ODOO_ADMIN_LOGIN": "fixture_admin",
                 "ODOO_ADMIN_PASSWORD": PRIVATE,
             },
+            diagnostic_identity=OdooDiagnosticIdentity(
+                product=self.identity.product,
+                context=self.identity.context,
+                instance=self.identity.instance,
+                database="fixture_db",
+                login="diagnostic-reader",
+                password=SecretStr("diagnostic-password"),
+                user_id=7,
+            ),
         )
 
 
@@ -382,6 +396,12 @@ class DiagnosticTests(unittest.TestCase):
                 )
                 mocked.side_effect = old
 
+    def test_missing_diagnostic_identity_remains_an_explicit_unavailable_error(self) -> None:
+        self.mocks[0].side_effect = reads._diagnostic_unavailable()
+        with self.assertRaises(reads.OdooRuntimeReadError) as caught:
+            self.run_diagnostic()
+        self.assertEqual(caught.exception.status_code, 503)
+
 
 class AppliedReadTests(unittest.TestCase):
     def test_fixed_read_discards_values_and_rechecks_health(self) -> None:
@@ -393,6 +413,8 @@ class AppliedReadTests(unittest.TestCase):
         ) -> object:
             calls.append((path, params))
             if path.endswith("authenticate"):
+                self.assertEqual(params["login"], "diagnostic-reader")
+                self.assertEqual(params["password"], "diagnostic-password")
                 return {"uid": 7}
             if path.endswith("destroy"):
                 return None
@@ -706,6 +728,12 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
             self.assertNotIn(PRIVATE, response.text)
+            execute.side_effect = reads._diagnostic_unavailable()
+            unavailable = await request(app, "GET", path)
+            self.assertEqual(unavailable.status_code, 503, unavailable.text)
+            self.assertEqual(unavailable.json()["detail"]["code"], DIAGNOSTIC_IDENTITY_UNAVAILABLE)
+            self.assertNotIn(PRIVATE, unavailable.text)
+            execute.side_effect = None
             execute.reset_mock()
             for bad_path in (
                 path.replace("/testing/", "/prod/"),
