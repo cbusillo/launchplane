@@ -41,7 +41,12 @@ from control_plane.storage.product_authority_bundle import ProductAuthorityBundl
 from control_plane.workflows.ship import utc_now_timestamp
 
 ROUTE = TESTING_PUBLIC_INGRESS_ROUTE
-_MARKER = "launchplane_testing_public_ingress"
+_AUDIT_PREFIX = "testing-public-ingress-"
+
+
+def _marker(digest: str) -> str:
+    # A generated comment survives the provider's API; NPMplus discards legacy meta.
+    return "# launchplane testing public ingress " + digest + "\n"
 
 
 class TestingPublicIngressRequest(BaseModel):
@@ -59,6 +64,10 @@ class TestingPublicIngressClient(Protocol):
     def list_proxy_hosts(self) -> tuple[NpmplusProxyHost, ...]: ...
 
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate: ...
+
+    def list_other_host_domains(self) -> tuple[str, ...]: ...
+
+    def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost: ...
 
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost: ...
 
@@ -107,10 +116,15 @@ class TestingPublicIngressAdapter:
             raise ValueError("The current testing generation does not match this operation.")
         profile = self.store.read_product_profile_record(self.product)
         lane = next(
-            lane
-            for lane in profile.lanes
-            if (lane.context, lane.instance) == (self.request.context, "testing")
+            (
+                lane
+                for lane in profile.lanes
+                if (lane.context, lane.instance) == (self.request.context, "testing")
+            ),
+            None,
         )
+        if lane is None:
+            raise ValueError("The current testing lane is not declared.")
         target = self.store.read_dokploy_target_record(
             context_name=self.request.context, instance_name="testing"
         )
@@ -204,6 +218,34 @@ class TestingPublicIngressAdapter:
             }
         )
 
+    def _clean_template(
+        self, template: NpmplusProxyHost, binding: EnvironmentRouteBindingRecord
+    ) -> bool:
+        if not template.advanced_config:
+            return True
+        record_id = binding.ingress.provider_evidence.get("audit_record", "")
+        if not isinstance(record_id, str) or not record_id.startswith(_AUDIT_PREFIX):
+            return False
+        digest = record_id.removeprefix(_AUDIT_PREFIX)
+        if len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest):
+            return False
+        if template.advanced_config != _marker(digest):
+            return False
+        audit = self.store.read_ingress_route_audit_record(record_id)
+        return (
+            audit.product == self.product
+            and audit.context == self.request.context
+            and audit.provider == "npmplus"
+            and audit.mode == "apply"
+            and audit.status == "applied"
+            and audit.requested_domains == template.domain_names
+            and audit.edge_endpoint_key == binding.ingress.endpoint_key
+            and bool(audit.testing_generation_sha256)
+            and bool(audit.testing_authority_sha256)
+            and audit.provider_host_id == template.id
+            and audit.provider_route_sha256 == canonical_json_sha256(_host_payload(template))
+        )
+
     def _plan(
         self, custody: IngressRouteAuditRecord | None = None
     ) -> tuple[dict[str, object], NpmplusProxyHostPayload, ProductAuthorityBundle]:
@@ -221,15 +263,16 @@ class TestingPublicIngressAdapter:
         templates = [h for h in hosts if old_domains.issubset(set(h.domain_names))]
         if len(templates) != 1:
             raise ValueError("The existing edge route is unavailable or ambiguous.")
-        template = templates[0]
+        template = self.client.get_proxy_host(templates[0].id, public_only=True)
         if (
-            not template.enabled
+            not old_domains.issubset(set(template.domain_names))
+            or not template.enabled
             or type(template.certificate_id) is not int
             or template.certificate_id < 1
             or not template.ssl_forced
             or (template.forward_host, template.forward_port, template.forward_scheme)
             != (endpoint.upstream_host, endpoint.upstream_port, endpoint.upstream_scheme)
-            or template.advanced_config
+            or not self._clean_template(template, binding)
             or template.locations
             or template.access_list_id
             or template.npmplus_auth_request != "none"
@@ -247,6 +290,7 @@ class TestingPublicIngressAdapter:
                 **_host_payload(template),
                 "domain_names": (generation.domain_host,),
                 "meta": {},
+                "advanced_config": "",
             }
         )
         material.update(
@@ -255,6 +299,11 @@ class TestingPublicIngressAdapter:
             desired=desired.model_dump(mode="json"),
         )
         plan_sha = canonical_json_sha256(material)
+        desired.advanced_config = _marker(
+            self.request.reviewed_plan_sha256 if custody else plan_sha
+        )
+        # Validate current provider wire compatibility before crossing the effect checkpoint.
+        desired.to_api_payload()
         if custody is not None and (
             custody.record_id != "testing-public-ingress-" + self.request.reviewed_plan_sha256
             or custody.product != self.product
@@ -268,7 +317,6 @@ class TestingPublicIngressAdapter:
             or custody.provider_route_sha256 != canonical_json_sha256(_host_payload(desired))
         ):
             raise ValueError("The pending edge operation no longer owns this route.")
-        desired.meta[_MARKER] = self.request.reviewed_plan_sha256 if custody else plan_sha
         self._candidate(
             self._audit(None, "preflight", desired=desired).model_copy(update={"status": "applied"})
         )
@@ -279,11 +327,15 @@ class TestingPublicIngressAdapter:
                     name.startswith("*.") and generation.domain_host.endswith(name[1:])
                 )
                 if name.startswith("~") or matches:
-                    if (
-                        _host_payload(h) != desired.model_dump(mode="json", exclude={"meta"})
-                        or h.meta.get(_MARKER) != desired.meta[_MARKER]
-                    ):
+                    if _host_payload(h) != desired.model_dump(mode="json", exclude={"meta"}):
                         raise ValueError("The testing hostname already has foreign edge authority.")
+        for name in self.client.list_other_host_domains():
+            if (
+                name == generation.domain_host
+                or name.startswith("~")
+                or (name.startswith("*.") and generation.domain_host.endswith(name[1:]))
+            ):
+                raise ValueError("Another provider host type owns the testing hostname.")
         return (
             {
                 "plan_sha256": plan_sha,
@@ -403,14 +455,14 @@ class TestingPublicIngressAdapter:
         ]
         if len(matches) != 1 or (
             matches[0].domain_names != (generation.domain_host,)
-            or matches[0].meta.get(_MARKER) != self.request.reviewed_plan_sha256
+            or matches[0].advanced_config != _marker(self.request.reviewed_plan_sha256)
             or not matches[0].enabled
             or not matches[0].ssl_forced
             or tuple(d.domain_name for d in binding.domains) != (generation.domain_host,)
         ):
             raise ValueError("The testing edge route and binding are not verified.")
         endpoint = self.store.read_edge_endpoint_record(binding.ingress.endpoint_key)
-        current = matches[0]
+        current = self.client.get_proxy_host(matches[0].id, public_only=True)
         audit = self.store.read_ingress_route_audit_record(
             "testing-public-ingress-" + self.request.reviewed_plan_sha256
         )
@@ -490,10 +542,8 @@ class TestingPublicIngressAdapter:
                 actual = matches[0]
             else:
                 raise ValueError("Testing edge authority is ambiguous.")
-            if (
-                _host_payload(actual) != desired.model_dump(mode="json", exclude={"meta"})
-                or actual.meta.get(_MARKER) != self.request.reviewed_plan_sha256
-            ):
+            actual = self.client.get_proxy_host(actual.id, public_only=True)
+            if _host_payload(actual) != desired.model_dump(mode="json", exclude={"meta"}):
                 raise ValueError("The provider did not preserve the exact testing route.")
             result_host.append(actual)
 

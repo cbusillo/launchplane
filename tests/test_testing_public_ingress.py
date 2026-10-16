@@ -56,6 +56,16 @@ class EdgeClient(_FakeNpmplusIngressClient):
             .replace(tzinfo=None)
             .isoformat(sep=" "),
         )
+        self.other_domains: tuple[str, ...] = ()
+        self.restricted_hosts: set[int] = set()
+
+    def list_other_host_domains(self) -> tuple[str, ...]:
+        return self.other_domains
+
+    def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> Any:
+        if public_only and host_id in self.restricted_hosts:
+            raise ValueError("The fixture host has private TLS or unloaded config")
+        return next(host for host in self.proxy_hosts if host.id == host_id)
 
     def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
         if certificate_id != self.certificate.id:
@@ -228,6 +238,44 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
 
 
 class TestingPublicIngressTests(TestingPublicIngressScenario):
+    def test_private_or_unloaded_template_refuses_before_creation(self) -> None:
+        self.client.restricted_hosts.add(self.client.proxy_hosts[0].id)
+        with self.assertRaises(ValueError):
+            self.edge().plan()
+        self.assertNotIn("create", self.client.calls)
+
+    def test_other_provider_host_types_refuse_before_creation(self) -> None:
+        self.client.other_domains = (self.request.domain_host,)
+        with self.assertRaises(ValueError):
+            self.edge().plan()
+        self.assertNotIn("create", self.client.calls)
+
+    def test_audited_generated_comment_can_template_a_later_testing_generation(self) -> None:
+        self.review_edge()
+        self.publish()
+        binding = self.store.read_route_binding_record(
+            product=self.profile.product, context_name=self.fixture.context, instance_name="testing"
+        )
+        self.assertTrue(self.edge()._clean_template(self.client.proxy_hosts[-1], binding))
+        changed = self.client.proxy_hosts[-1].model_copy(
+            update={"advanced_config": "return 302 /foreign;"}
+        )
+        self.assertFalse(self.edge()._clean_template(changed, binding))
+
+    def test_missing_testing_lane_is_rejected_without_stranding_provider_custody(self) -> None:
+        self.review_edge()
+        profile = self.store.read_product_profile_record(self.profile.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(lane for lane in profile.lanes if lane.instance != "testing")
+                }
+            )
+        )
+        with self.assertRaises(ProviderMutationRejectedError):
+            self.publish()
+        self.assertNotIn("create", self.client.calls)
+
     def test_pending_recovery_refuses_changed_binding_authority(self) -> None:
         self.review_edge()
         create = self.client.create_proxy_host
@@ -536,7 +584,7 @@ class TestingPublicIngressTests(TestingPublicIngressScenario):
         self.review_edge()
         self.publish()
         self.client.proxy_hosts[-1] = self.client.proxy_hosts[-1].model_copy(
-            update={"advanced_config": "return 302 /elsewhere;"}
+            update={"forward_port": 444}
         )
         with self.assertRaises(ValueError):
             self.edge().readback()

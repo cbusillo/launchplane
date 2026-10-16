@@ -658,6 +658,12 @@ and its edge from the lane's existing active service-owned NPMplus binding.
 Live provider placement must agree with that recorded endpoint. The existing
 edge host must be public, enabled, free of custom locations/config/access
 controls, and use an existing unexpired certificate covering the new domain.
+The only allowed template config is this operation's own audited identity
+comment. Its generated comment is preserved by the current provider API;
+legacy `meta` is neither accepted on writes nor returned by that API.
+Fresh provider reads must show loaded Nginx configuration and no private TLS,
+extra location/directory config or authentication upstream before publication
+and during readback.
 Only that certificate's public metadata is read; DNS credentials and private
 keys never leave the provider. No certificate is issued by this operation.
 Unknown placement, certificate coverage, foreign/wildcard edge authority,
@@ -685,6 +691,10 @@ targets, storage, passwords, restored database and capture records.
 
 Recovery is forward-only under the original edge key: a lost create response
 can adopt only the exact provider route carrying the reviewed plan's marker.
+That marker is a generated Nginx comment, with no directives or caller-supplied
+config. The service also refuses active redirection/404 host claims before
+creation. Provider legacy protocol settings must retain their supported
+defaults; enable/disable remains the provider's separate lifecycle operation.
 Its pending audit binds the generation, route authority and exact provider
 payload, so certificate renewal with the same ID and unrelated metadata refresh
 do not strand adoption. Meaningful authority or payload drift still refuses;
