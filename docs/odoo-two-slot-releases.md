@@ -97,7 +97,9 @@ before its guarded startup.
 
 The `OdooRecoveryTuple` records both backup IDs, image, selected database,
 recovery timestamp and dump/filestore hashes. Image-only rollback of a
-database-changing release refuses. Use the existing authorized coherent-tuple
+database-changing release refuses. Rollback target resolution and the product
+path check share that same refusal: `rollback_requires_coherent_restore` is a
+blocked image-rollback path, never a recorded usable target. Use the existing authorized coherent-tuple
 restore workflow; source cutover work never authorizes restoring a live site's
 data or overwriting later business writes.
 
