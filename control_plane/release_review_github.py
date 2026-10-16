@@ -34,8 +34,9 @@ _NOTE_LINK = re.compile(
 )
 
 _RELEASE_PROCESS_INSTRUCTION = re.compile(
-    r"(?P<join>,\s*then\s+|(?<=[.!?])\s+(?:then\s+)?|^[ \t]*(?:then\s+)?)"
-    r"(?P<instruction>(?:accept|approve)\b[^.!?]*[.!?]?)",
+    r"(?P<join>,[ \t]*then[ \t]+|(?<=[.!?])[ \t]+(?:then[ \t]+)?"
+    r"|^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:then[ \t]+)?)"
+    r"(?P<instruction>(?:accept|approve)\b(?:https?://\S+|[^.!?\n])*[.!?]?)",
     re.IGNORECASE | re.MULTILINE,
 )
 

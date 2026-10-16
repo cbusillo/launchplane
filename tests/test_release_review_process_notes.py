@@ -57,3 +57,27 @@ class ReleaseProcessNotesTests(unittest.TestCase):
         )
         self.assertTrue(changed)
         self.assertEqual(displayed, "")
+
+    def test_unpunctuated_process_line_preserves_following_checks_and_batch_blockers(self) -> None:
+        from control_plane.release_review_github import pull_requests_missing_owner_test_notes
+
+        notes = (
+            "Check the contact form.\n"
+            "Then accept the release through Launchplane after cleanup evidence is recorded\n\n"
+            "### #124 Another change\n\n#124 has no Client test notes.\n"
+            "Check the checkout total matches the cart."
+        )
+        displayed, changed = release_test_notes(notes)
+        self.assertTrue(changed)
+        self.assertIn("Check the contact form.", displayed)
+        self.assertIn("Check the checkout total matches the cart.", displayed)
+        self.assertEqual(pull_requests_missing_owner_test_notes(displayed), (124,))
+
+    def test_process_list_items_and_urls_leave_no_fragments(self) -> None:
+        for prefix in ("", "- ", "2. "):
+            with self.subTest(prefix=prefix):
+                notes = prefix + (
+                    "Accept the release in Launchplane once cleanup is recorded at "
+                    "https://control.example.invalid/evidence."
+                )
+                self.assertEqual(release_test_notes(notes), ("", True))
