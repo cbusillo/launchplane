@@ -26,6 +26,7 @@ from control_plane.http_routes.support import (
 from control_plane.drivers import native_routes
 from control_plane.odoo_walkthrough import (
     WalkthroughAdapter,
+    WalkthroughPrerequisiteError,
     InterruptedWalkthroughAdapter,
     plan_walkthrough,
 )
@@ -157,6 +158,9 @@ def register_walkthrough_route(
                     plan = plan_walkthrough(
                         record_store, dependencies.control_plane_root, payload, actor
                     )
+                except WalkthroughPrerequisiteError as error:
+                    refuse(error.code.value, "The testing task prerequisite did not pass.")
+                    raise AssertionError
                 except Exception:
                     refuse(
                         "testing_task_refused",

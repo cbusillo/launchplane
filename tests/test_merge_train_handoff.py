@@ -56,7 +56,10 @@ from tests.test_merge_train_github import (
     _github_pull_request,
 )
 from tests.test_merge_train_dependency_refresh import _change
-from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
+from tests.support.merge_train import (
+    _FakeExpandedMergeTrainSnapshotReader,
+    planned_stack_merge_tree,
+)
 from tests.test_merge_train_dependency_requalification import (
     _controller,
     _DependencyState,
@@ -552,6 +555,7 @@ class GitHubHandoffTests(unittest.TestCase):
             branch_client=_RecordingStackCollapseBranchClient(merge_commit_shas=("d" * 40,)),
             child_readiness_reasons=lambda _: (),
             updated_at="2026-10-16T09:30:00Z",
+            checkpoint=lambda progress: None,
         )
         for changed, expected in (
             ("none", "ready"),
@@ -583,6 +587,7 @@ class GitHubHandoffTests(unittest.TestCase):
                         [_comment(user={"id": 20, "login": "example"})],
                         {
                             "sha": "d" * 40,
+                            "tree": {"sha": collapsed.mutations[0].expected_merge_tree_sha},
                             "parents": [
                                 {"sha": "e" * 40 if changed == "parents" else HEAD},
                                 {"sha": child.head_sha},
@@ -635,6 +640,11 @@ class GitHubHandoffTests(unittest.TestCase):
                     responses += (
                         {
                             "sha": current,
+                            "tree": {
+                                "sha": planned_stack_merge_tree(
+                                    member.head_sha, members[2].head_sha
+                                )
+                            },
                             "parents": [{"sha": member.head_sha}, {"sha": members[2].head_sha}],
                         },
                     )
@@ -767,6 +777,7 @@ class GitHubHandoffTests(unittest.TestCase):
                         responses += (
                             {
                                 "sha": current,
+                                "tree": {"sha": planned_stack_merge_tree(*edges[current])},
                                 "parents": [{"sha": value} for value in edges[current]],
                             },
                         )
@@ -813,6 +824,7 @@ class GitHubHandoffTests(unittest.TestCase):
             branch_client=_RecordingStackCollapseBranchClient(merge_commit_shas=("d" * 40,)),
             child_readiness_reasons=lambda _: (),
             updated_at="2026-10-16T09:30:00Z",
+            checkpoint=lambda progress: None,
         )
         pull = _github_pull_request(
             1, head_sha="d" * 40, repository=REPOSITORY, author_association="OWNER"
@@ -825,7 +837,11 @@ class GitHubHandoffTests(unittest.TestCase):
                 _github_branch(),
                 [pull],
                 [_comment(user={"id": 20, "login": "example"})],
-                {"sha": "d" * 40, "parents": [{"sha": HEAD}, {"sha": members[1].head_sha}]},
+                {
+                    "sha": "d" * 40,
+                    "tree": {"sha": collapsed.mutations[0].expected_merge_tree_sha},
+                    "parents": [{"sha": HEAD}, {"sha": members[1].head_sha}],
+                },
                 pull,
                 _combined_status(),
                 {"check_runs": [_check_run("completed", "success")]},
