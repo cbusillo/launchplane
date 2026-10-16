@@ -10738,6 +10738,10 @@
             "title": "Endpoint Digest",
             "type": "string"
           },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
           "profile_digest": {
             "title": "Profile Digest",
             "type": "string"
@@ -10757,6 +10761,7 @@
         },
         "required": [
           "endpoint_digest",
+          "expires_at",
           "profile_digest",
           "request_fingerprint",
           "secret_id",
@@ -10791,10 +10796,6 @@
             "default": "testing",
             "title": "Environment",
             "type": "string"
-          },
-          "expires_at": {
-            "title": "Expires At",
-            "type": "integer"
           },
           "kind": {
             "const": "agent_session_token_file_v1",
@@ -10841,7 +10842,6 @@
           "directory",
           "endpoint_key",
           "environment",
-          "expires_at",
           "kind",
           "product",
           "public_key",

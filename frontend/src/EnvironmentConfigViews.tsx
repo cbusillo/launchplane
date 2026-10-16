@@ -102,7 +102,6 @@ export function RuntimeSettingsView({
   );
 }
 
-
 export function ManagedSecretsView({
   configResource,
   detail,

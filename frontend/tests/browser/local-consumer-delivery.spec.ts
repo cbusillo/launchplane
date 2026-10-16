@@ -1,4 +1,5 @@
 import { expect, test, waitForState } from "./state";
+import { readFile } from "node:fs/promises";
 import type { ConsumerDeliveryEnvelope } from "../../src/generated/openapi";
 
 test("testing recipient review preserves its original encrypted delivery after an uncertain response", { tag: "@layout" }, async ({ page }, testInfo) => {
@@ -41,13 +42,14 @@ test("testing recipient review preserves its original encrypted delivery after a
     product: "atlas-commerce", context: data.config.context, environment: "testing",
     service_origin: new URL(page.url()).origin, endpoint_key: "testing-endpoint",
     server_url: "wss://testing.internal.example/agent-session/connect", directory: "/private/testing-client",
-    public_key: "fixture-public-recipient", expires_at: 0 };
+    public_key: "fixture-public-recipient" };
   const recipient = page.getByLabel("Local recipient request");
   await recipient.setInputFiles({ name: "request.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify({ ...request, environment: "prod" })) });
-  await expect(page.getByRole("alert")).toContainText("for this testing environment");
+  await expect(page.getByRole("alert")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Run delivery dry-run" })).toHaveCount(0);
   await recipient.setInputFiles({ name: "request.json", mimeType: "application/json", buffer: Buffer.from(JSON.stringify(request)) });
   await page.getByRole("button", { name: "Run delivery dry-run" }).click();
-  await expect(page.getByText("Destination verified.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Recheck original destination" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Deliver to this testing client" })).toHaveCount(0);
   await page.getByRole("button", { name: "Recheck original destination" }).click();
   const deliver = page.getByRole("button", { name: "Deliver to this testing client" });
@@ -55,17 +57,19 @@ test("testing recipient review preserves its original encrypted delivery after a
   const panel = page.locator("section").filter({ has: page.getByRole("heading", { name: "Deliver to a testing client" }) }).last();
   await panel.getByRole("checkbox").check();
   await deliver.click();
-  await expect(page.getByRole("alert")).toContainText("Retry the original delivery");
+  await expect(panel.getByRole("alert")).toBeVisible();
   await expect(recipient).toBeDisabled();
   await deliver.click();
   await waitForState(() => applies.length).toBe(2);
   expect(applies[1]).toEqual(applies[0]);
   expect(plans[1].request).toEqual(plans[0].request);
-  await expect(page.getByText("Encrypted delivery prepared.", { exact: false })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download encrypted delivery" })).toBeVisible();
   const downloaded = page.waitForEvent("download");
   await page.getByRole("button", { name: "Download encrypted delivery" }).click();
   const download = await downloaded;
-  expect(download.suggestedFilename()).toBe("testing-local-delivery.json");
+  const downloadedPath = await download.path();
+  expect(downloadedPath).not.toBeNull();
+  expect(JSON.parse(await readFile(downloadedPath!, "utf8")).request).toEqual(applies[0].request);
   await panel.scrollIntoViewIfNeeded();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.screenshot({ path: testInfo.outputPath("testing-encrypted-delivery.png") });

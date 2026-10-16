@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from datetime import datetime, timezone
+import time
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -38,7 +38,10 @@ def https_origin(value: str) -> str:
         or parsed.path not in {"", "/"}
     ):
         raise ValueError("The service requires an HTTPS origin without credentials or path.")
-    return f"https://{parsed.netloc}"
+    hostname = parsed.hostname.encode("idna").decode().lower()
+    hostname = f"[{hostname}]" if ":" in hostname else hostname
+    port = parsed.port
+    return f"https://{hostname}" + (f":{port}" if port not in {None, 443} else "")
 
 
 class ConsumerRequest(BaseModel):
@@ -55,7 +58,6 @@ class ConsumerRequest(BaseModel):
     server_url: str = Field(max_length=2048)
     directory: str = Field(min_length=1, max_length=4096)
     public_key: str = Field(min_length=1, max_length=2048)
-    expires_at: int
 
     @model_validator(mode="after")
     def validate_destination(self) -> "ConsumerRequest":
@@ -79,11 +81,6 @@ class ConsumerRequest(BaseModel):
             raise ValueError("The recipient requires an RSA-3072 key.")
         return self
 
-    def require_fresh(self, now: int | None = None) -> None:
-        current = now if now is not None else int(datetime.now(timezone.utc).timestamp())
-        if not current < self.expires_at <= current + DELIVERY_LIFETIME_SECONDS:
-            raise ValueError("The delivery request expired; prepare a new testing destination.")
-
 
 class ConsumerPlan(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -93,6 +90,12 @@ class ConsumerPlan(BaseModel):
     version_id: str
     profile_digest: str
     endpoint_digest: str
+    expires_at: int
+
+    def require_fresh(self, now: int | None = None) -> None:
+        current = now if now is not None else int(time.time())
+        if not current < self.expires_at <= current + DELIVERY_LIFETIME_SECONDS:
+            raise ValueError("The delivery review expired; prepare a new testing destination.")
 
 
 class ConsumerPackage(BaseModel):

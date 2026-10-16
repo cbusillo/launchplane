@@ -62,7 +62,7 @@ def receive(directory: Path, package_file: Path) -> None:
     except Exception:
         raise click.ClickException(
             "Delivery incomplete. Keep the original request/package for retry. Verify testing "
-            "server sync, identity and receipt; changed or expired requests need a new directory."
+            "server sync, identity and receipt; changed or expired reviews need a new directory."
         ) from None
     click.echo(json.dumps(result))
 

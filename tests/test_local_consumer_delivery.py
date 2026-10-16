@@ -1,10 +1,12 @@
 import json
 import os
 import stat
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import Mock, patch
+from unittest.mock import patch
+from urllib.parse import urlsplit
 
 from click.testing import CliRunner
 from cryptography.fernet import Fernet
@@ -18,12 +20,14 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.local_consumer import prepare_consumer, receive_consumer
 from control_plane.local_consumer_contract import (
     BRIDGE_BINDING,
+    DELIVERY_LIFETIME_SECONDS,
     DELIVERY_ROUTE,
     VERIFY_ROUTE,
     ConsumerPackage,
     ConsumerRequest,
     canonical,
     digest,
+    https_origin,
 )
 from control_plane.local_consumer_delivery import (
     issue_delivery,
@@ -282,7 +286,7 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
     def test_expired_request_and_changed_profile_invalidate_receipt(self) -> None:
         package = self.issue()
         with self.assertRaises(ValueError):
-            self.request.require_fresh(now=self.request.expires_at)
+            package.plan.require_fresh(now=package.plan.expires_at)
         self.store.write_product_profile_record(
             self.profile.model_copy(update={"display_name": "Renamed product"})
         )
@@ -293,15 +297,13 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         package = self.issue()
         downloaded = self.package_file(package)
         with (
-            patch("control_plane.local_consumer._verify_service") as verify,
-            patch("control_plane.local_consumer._verify_bridge") as bridge,
+            patch("control_plane.local_consumer._verify_service"),
+            patch("control_plane.local_consumer._verify_bridge"),
         ):
             result = receive_consumer(self.directory, downloaded)
             # A lost local receipt is recovered from the original authenticated package.
             (self.directory / "delivery.json").unlink()
             self.assertEqual(result, receive_consumer(self.directory, downloaded))
-        self.assertEqual(verify.call_count, 4)
-        self.assertEqual(bridge.call_args.args, (self.request, FAKE_VALUE))
         self.assertEqual((self.directory / "bridge.token").read_text(), FAKE_VALUE)
         for name in ("bridge.token", "codex-bridge.toml", "recipient.pem", "delivery.json"):
             self.assertEqual(stat.S_IMODE((self.directory / name).stat().st_mode), 0o600)
@@ -426,70 +428,245 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.issue()
 
-    def test_actual_transport_checks_identity_and_only_authenticates_exact_websocket(self) -> None:
-        from control_plane.local_consumer import _verify_bridge
+    def test_pre_entry_preparation_does_not_start_the_value_ready_review_timer(self) -> None:
+        later = int(time.time()) + DELIVERY_LIFETIME_SECONDS * 2
+        with patch("time.time", return_value=later):
+            package = self.issue()
+            verify_delivery(self.store, package)
+            self.assertGreater(package.plan.expires_at, later)
 
+    def test_invalid_destination_does_not_create_a_directory_and_origin_is_canonical(self) -> None:
+        self.assertEqual(
+            https_origin("https://LAUNCHPLANE.example:443"), "https://launchplane.example"
+        )
+        destination = self.root / "invalid-destination"
+        with self.assertRaises(ValueError):
+            prepare_consumer(
+                directory=destination,
+                service_origin="https://LAUNCHPLANE.example:443",
+                product="example-site",
+                context="example-site",
+                endpoint_key="testing-bridge",
+                server_url="ws://127.0.0.1/incorrect",
+            )
+        self.assertFalse(destination.exists())
+
+    async def test_key_safety_failure_returns_structured_not_ready(self) -> None:
+        package = self.issue()
+        for policy in self.store.list_runtime_key_safety_policy_records():
+            self.store.write_runtime_key_safety_policy_record(
+                policy.model_copy(update={"status": "superseded"})
+            )
+        response = await self.post({"request": self.request.model_dump(mode="json")})
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertTrue(response.json()["error"]["code"])
+        response = await _asgi_request(
+            self.app, "POST", VERIFY_ROUTE, payload=package.model_dump(mode="json")
+        )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertNotIn(FAKE_VALUE, response.text)
+
+    def test_receiver_rechecks_current_custody_before_writing_any_file(self) -> None:
+        downloaded = self.package_file(self.issue())
+        with (
+            patch(
+                "control_plane.local_consumer._verify_service",
+                side_effect=[None, ValueError("rotated")],
+            ),
+            patch("control_plane.local_consumer._verify_bridge"),
+            self.assertRaises(ValueError),
+        ):
+            receive_consumer(self.directory, downloaded)
+        self.assertFalse((self.directory / "bridge.token").exists())
+
+    def test_real_tls_delivery_authenticates_without_logs_commands_redirects_or_proxies(
+        self,
+    ) -> None:
+        import ipaddress
+        import logging
+        import ssl
+        import threading
+        from datetime import datetime, timedelta, timezone
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+        from websockets.datastructures import Headers
+        from websockets.exceptions import InvalidStatus
+        from websockets.http11 import Request as WsRequest, Response as WsResponse
+        from websockets.sync.server import ServerConnection, serve
+
+        from control_plane.local_consumer import _verify_bridge, _verify_service
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "local fake-data fixture")])
+        now = datetime.now(timezone.utc)
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(name)
+            .issuer_name(name)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(hours=1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(
+                x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        cert_file, key_file = self.root / "test-ca.pem", self.root / "test-tls.key"
+        cert_file.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+        key_file.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.PKCS8,
+                serialization.NoEncryption(),
+            )
+        )
+        key_file.chmod(0o600)
+        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.load_cert_chain(cert_file, key_file)
+        quiet = logging.Logger("local-consumer-fixture")
+        quiet.disabled = True
+        ws_paths: list[str] = []
+        messages: list[str | bytes] = []
+        ws_state = {"redirect": False, "production": False}
         identity = {
             "product": self.request.product,
             "context": self.request.context,
             "instance": "testing",
-            "deployment_record_id": "fixture-deployment",
+            "deployment_record_id": "fixture-deploy",
             "artifact_id": "fixture-artifact",
             "source_git_ref": "fixture-source",
             "environment_kind": "stable",
         }
-        with (
-            patch("control_plane.local_consumer.requests.Session") as factory,
-            patch("control_plane.local_consumer.socket.create_connection") as socket_factory,
-            patch("control_plane.local_consumer.connect") as websocket,
+
+        def respond(status: int, body: bytes = b"", **headers: str) -> WsResponse:
+            return WsResponse(
+                status, "fixture", Headers({"Content-Length": str(len(body)), **headers}), body
+            )
+
+        def intercept(connection: ServerConnection, request: WsRequest) -> WsResponse | None:
+            ws_paths.append(request.path)
+            if request.path == "/health":
+                runtime = {**identity, "instance": "prod"} if ws_state["production"] else identity
+                return respond(
+                    200, json.dumps({"status": "ok", "runtime_identity": runtime}).encode()
+                )
+            if ws_state["redirect"] and request.path == "/agent-session/connect":
+                return respond(302, Location=f"wss://{request.headers['Host']}/unexpected")
+            if request.headers.get("Authorization") != f"Bearer {FAKE_VALUE}":
+                return respond(401)
+            return None
+
+        def websocket_handler(connection: ServerConnection) -> None:
+            messages.extend(connection)
+
+        server = serve(
+            websocket_handler,
+            "127.0.0.1",
+            0,
+            ssl=tls,
+            process_request=intercept,
+            logger=quiet,
+            close_timeout=1,
+        )
+        ws_thread = threading.Thread(target=server.serve_forever)
+        ws_thread.start()
+        self.addCleanup(ws_thread.join, 3)
+        self.addCleanup(server.shutdown)
+        ws_port = server.socket.getsockname()[1]
+        control_paths: list[str] = []
+        control_headers: list[dict[str, str]] = []
+        control_state = {"redirect": False}
+        store = self.store
+
+        class ControlHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *args: object) -> None:
+                pass
+
+            def do_POST(self) -> None:
+                control_paths.append(self.path)
+                control_headers.append(dict(self.headers))
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                if control_state["redirect"]:
+                    self.send_response(302)
+                    self.send_header("Location", "/unexpected")
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                verified = verify_delivery(store, ConsumerPackage.model_validate_json(body))
+                result = json.dumps({"status": "current", "package_digest": verified}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(result)))
+                self.end_headers()
+                self.wfile.write(result)
+
+            def do_GET(self) -> None:
+                control_paths.append(self.path)
+                self.send_error(404)
+
+        control = ThreadingHTTPServer(("127.0.0.1", 0), ControlHandler)
+        control.socket = tls.wrap_socket(control.socket, server_side=True)
+        control_thread = threading.Thread(
+            target=control.serve_forever, kwargs={"poll_interval": 0.05}
+        )
+        control_thread.start()
+        self.addCleanup(control.server_close)
+        self.addCleanup(control_thread.join, 3)
+        self.addCleanup(control.shutdown)
+        origin = f"https://127.0.0.1:{control.server_port}"
+        bridge = f"wss://127.0.0.1:{ws_port}/agent-session/connect"
+        self.store.write_private_health_endpoint_record(
+            self.endpoint.model_copy(update={"url": f"https://127.0.0.1:{ws_port}/health"})
+        )
+        self.directory = self.root / "tls-client"
+        self.request = prepare_consumer(
+            directory=self.directory,
+            service_origin=origin,
+            product="example-site",
+            context="example-site",
+            endpoint_key=self.endpoint.endpoint_key,
+            server_url=bridge,
+        )
+        package = self.issue()
+        downloaded = self.package_file(package)
+        with patch.dict(
+            os.environ,
+            {
+                "SSL_CERT_FILE": str(cert_file),
+                "HTTPS_PROXY": "http://127.0.0.1:9",
+                "ALL_PROXY": "http://127.0.0.1:9",
+                "NO_PROXY": "",
+                "no_proxy": "",
+            },
         ):
-            session = factory.return_value.__enter__.return_value
-            response = session.get.return_value
-            response.status_code = 200
-            response.content = b"fixture-health"
-            response.json.return_value = {"status": "ok", "runtime_identity": identity}
-            _verify_bridge(self.request, FAKE_VALUE)
-            self.assertFalse(session.trust_env)
-            self.assertFalse(session.get.call_args.kwargs["allow_redirects"])
-            self.assertNotIn("headers", session.get.call_args.kwargs)
-            self.assertIsNone(websocket.call_args.kwargs["proxy"])
-            self.assertIs(
-                websocket.call_args.kwargs["sock"],
-                socket_factory.return_value.__enter__.return_value,
-            )
-            self.assertEqual(websocket.call_args.args, (self.request.server_url,))
-            self.assertEqual(
-                websocket.call_args.kwargs["additional_headers"],
-                {"Authorization": f"Bearer {FAKE_VALUE}"},
-            )
-            with self.assertNoLogs(level="DEBUG"):
-                websocket.call_args.kwargs["logger"].debug("Authorization: %s", FAKE_VALUE)
-            websocket.return_value.__enter__.return_value.send.assert_not_called()
-            websocket.reset_mock()
-            response.json.return_value = {
-                "status": "ok",
-                "runtime_identity": {**identity, "instance": "prod"},
-            }
-            with self.assertRaises(ValueError):
-                _verify_bridge(self.request, FAKE_VALUE)
-            websocket.assert_not_called()
-
-
-class LocalConsumerTransportTests(unittest.TestCase):
-    def test_service_verification_uses_original_https_origin_without_redirects_or_credentials(
-        self,
-    ) -> None:
-        from control_plane.local_consumer import _verify_service
-
-        package = Mock()
-        package.request.service_origin = "https://control.example"
-        package.model_dump.return_value = {"ciphertext": "encrypted-fixture"}
-        response = Mock(status_code=302, content=b"")
-        with patch("control_plane.local_consumer.requests.Session") as factory:
-            session = factory.return_value.__enter__.return_value
-            session.post.return_value = response
+            with self.assertLogs(level="DEBUG") as logs:
+                receive_consumer(self.directory, downloaded)
+            self.assertNotIn(FAKE_VALUE, "\n".join(logs.output))
+            self.assertEqual((self.directory / "bridge.token").read_text(), FAKE_VALUE)
+            self.assertFalse(messages)
+            self.assertFalse(any("Authorization" in headers for headers in control_headers))
+            control_state["redirect"] = True
+            control_paths.clear()
             with self.assertRaises(ValueError):
                 _verify_service(package)
-            self.assertFalse(session.trust_env)
-            self.assertFalse(session.post.call_args.kwargs["allow_redirects"])
-            self.assertNotIn("headers", session.post.call_args.kwargs)
+            self.assertEqual(control_paths, [VERIFY_ROUTE])
+            ws_state["redirect"] = True
+            ws_paths.clear()
+            with self.assertRaises((ValueError, InvalidStatus)):
+                _verify_bridge(self.request, FAKE_VALUE)
+            self.assertEqual(ws_paths, [urlsplit(self.endpoint.url).path, urlsplit(bridge).path])
+            ws_state.update(redirect=False, production=True)
+            ws_paths.clear()
+            with self.assertRaises(ValueError):
+                _verify_bridge(self.request, FAKE_VALUE)
+            self.assertEqual(ws_paths, [urlsplit(self.endpoint.url).path])
+            ws_state["production"] = False
+            with self.assertRaises(InvalidStatus):
+                _verify_bridge(self.request, "wrong-fictional-token")

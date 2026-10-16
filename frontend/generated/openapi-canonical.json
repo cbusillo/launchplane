@@ -4116,6 +4116,10 @@
             "title": "Endpoint Digest",
             "type": "string"
           },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
           "profile_digest": {
             "title": "Profile Digest",
             "type": "string"
@@ -4138,7 +4142,8 @@
           "secret_id",
           "version_id",
           "profile_digest",
-          "endpoint_digest"
+          "endpoint_digest",
+          "expires_at"
         ],
         "title": "ConsumerPlan",
         "type": "object"
@@ -4169,10 +4174,6 @@
             "default": "testing",
             "title": "Environment",
             "type": "string"
-          },
-          "expires_at": {
-            "title": "Expires At",
-            "type": "integer"
           },
           "kind": {
             "const": "agent_session_token_file_v1",
@@ -4222,8 +4223,7 @@
           "endpoint_key",
           "server_url",
           "directory",
-          "public_key",
-          "expires_at"
+          "public_key"
         ],
         "title": "ConsumerRequest",
         "type": "object"

@@ -376,6 +376,7 @@ export type ConsumerPackage = {
 
 export type ConsumerPlan = {
     endpoint_digest: string;
+    expires_at: number;
     profile_digest: string;
     request_fingerprint: string;
     secret_id: string;
@@ -387,7 +388,6 @@ export type ConsumerRequest = {
     directory: string;
     endpoint_key: string;
     environment: 'testing';
-    expires_at: number;
     kind: 'agent_session_token_file_v1';
     product: string;
     public_key: string;

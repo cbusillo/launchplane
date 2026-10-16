@@ -8,7 +8,6 @@ import os
 import secrets
 import socket
 import stat
-import time
 from contextlib import contextmanager
 from collections.abc import Iterator
 from pathlib import Path
@@ -22,7 +21,6 @@ from websockets.sync.client import connect
 
 from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
 from control_plane.local_consumer_contract import (
-    DELIVERY_LIFETIME_SECONDS,
     VERIFY_ROUTE,
     ConsumerPackage,
     ConsumerRequest,
@@ -58,14 +56,11 @@ def _write_once(path: Path, value: bytes) -> None:
         if not secrets.compare_digest(_private_file(path), value):
             raise ValueError("The destination changed; preserve it and prepare another directory.")
         return
-    try:
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(value)
-            output.flush()
-            os.fsync(output.fileno())
-    except BaseException:
-        # Preserve uncertain bytes for explicit recovery instead of overwriting.
-        raise
+    # Preserve uncertain bytes for explicit recovery instead of overwriting.
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(value)
+        output.flush()
+        os.fsync(output.fileno())
 
 
 def _directory(path: Path) -> Path:
@@ -112,8 +107,8 @@ def prepare_consumer(
     parent = destination.parent.stat()
     if parent.st_uid != os.getuid() or parent.st_mode & 0o022:
         raise ValueError("Choose a private, owner-controlled parent directory.")
-    # Exclusive creation is what preserves existing production/client paths.
-    destination.mkdir(mode=0o700)
+    if destination.exists():
+        raise FileExistsError(destination)
     private_key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
     request = ConsumerRequest(
         request_id=secrets.token_hex(32),
@@ -126,8 +121,9 @@ def prepare_consumer(
         public_key=private_key.public_key()
         .public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
         .decode(),
-        expires_at=int(time.time()) + DELIVERY_LIFETIME_SECONDS,
     )
+    # Validate before creating anything. Exclusive creation preserves existing clients.
+    destination.mkdir(mode=0o700)
     _write_once(
         destination / "recipient.pem",
         private_key.private_bytes(
@@ -148,6 +144,7 @@ def _verify_service(package: ConsumerPackage) -> None:
             json=package.model_dump(mode="json"),
             timeout=15,
             allow_redirects=False,
+            verify=os.environ.get("SSL_CERT_FILE") or True,
         )
         if response.status_code != 200 or len(response.content) > 4096:
             raise ValueError("The original service could not verify the delivery.")
@@ -189,7 +186,12 @@ def _verify_bridge(request: ConsumerRequest, token: str) -> None:
     )
     with requests.Session() as session:
         session.trust_env = False
-        response = session.get(health_url, timeout=15, allow_redirects=False)
+        response = session.get(
+            health_url,
+            timeout=15,
+            allow_redirects=False,
+            verify=os.environ.get("SSL_CERT_FILE") or True,
+        )
         if response.status_code != 200 or len(response.content) > 65536:
             raise ValueError("The testing runtime is not ready.")
         payload = response.json()
@@ -237,7 +239,7 @@ def receive_consumer(directory: Path, package_file: Path) -> dict[str, str]:
     package = ConsumerPackage.model_validate_json(encoded)
     if package.request != request or package.plan.request_fingerprint != digest(request):
         raise ValueError("The delivery does not match the original reviewed destination.")
-    request.require_fresh()
+    package.plan.require_fresh()
     with _locked(directory):
         _verify_service(package)
         token = _decrypt(package, directory)

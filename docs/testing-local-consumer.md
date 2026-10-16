@@ -49,8 +49,10 @@ here means the supported flow never sends these values to an agent, browser
 plaintext, chat, CLI argument or log. Use fake isolated data for engineering.
 
 The output contains only `request_file` and a SHA-256 recipient fingerprint.
-The request expires after 15 minutes. Prepare close to the actual hand action;
-an expired request needs a new private testing generation directory.
+Preparation carries no credential or service authority and starts no delivery
+timer. The service starts a 15-minute review/delivery window only when the
+credential is ready and its first value-ready dry run is recorded. An expired
+review needs a new private testing generation directory.
 
 ## Signed-in UI
 
@@ -99,6 +101,12 @@ comparison requires the unguessable request id and exact ciphertext; it returns
 only `current` and that package's digest, no credential, record or authorization.
 There is no offline-install fallback.
 
+For a private certificate issuer, Chris can select an already reviewed CA bundle
+with `SSL_CERT_FILE=/absolute/path/to/ca-bundle.pem` for both the receiver and the
+testing bridge process. The bundle must cover the Launchplane HTTPS service and
+testing HTTPS/WSS issuer. Both HTTP and WebSocket verification stay enabled;
+the helper does not install a CA or offer an insecure mode.
+
 After decrypting in memory, the receiver verifies healthy testing runtime
 identity over HTTPS and performs one token-authenticated WebSocket upgrade at
 the exact WSS endpoint. It sends no hello, session or Discord command. The
@@ -122,7 +130,7 @@ delivery is not product UI acceptance or permission to release production.
 ## Rotation, revocation and recovery
 
 Rotation or disabling the source record/binding, a changed classification,
-profile or endpoint, key-safety failure, expired request, bad ciphertext, wrong
+profile or endpoint, key-safety failure, expired review, bad ciphertext, wrong
 recipient, unavailable service, unhealthy/wrong-lane runtime or rejected bridge
 authentication stops installation. No status is inferred from a failed request.
 Keep the original request and package for an uncertain retry within its lifetime.

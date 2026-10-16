@@ -4,6 +4,7 @@ from typing import Annotated
 
 import click
 from fastapi import Depends, Request, Response
+from control_plane.live_target_runtime import LiveTargetRuntimeError
 
 from control_plane.http_routes.support import ApiRouteRegistrar, ReadRouteDependencies
 from control_plane.local_consumer_contract import (
@@ -102,7 +103,7 @@ def register_local_consumer_delivery_routes(
                 code="local_credential_not_ready",
                 message="The destination is verified; the testing credential is not ready.",
             ) from None
-        except (ValueError, FileNotFoundError, click.ClickException):
+        except (ValueError, FileNotFoundError, click.ClickException, LiveTargetRuntimeError):
             raise common.http_error(
                 status_code=409,
                 trace_id=trace_id,
@@ -131,7 +132,7 @@ def register_local_consumer_delivery_routes(
             if not isinstance(record_store, PostgresRecordStore):
                 raise ValueError("Database custody required.")
             package_digest = verify_delivery(record_store, package)
-        except (ValueError, FileNotFoundError, click.ClickException):
+        except (ValueError, FileNotFoundError, click.ClickException, LiveTargetRuntimeError):
             raise common.http_error(
                 status_code=409,
                 trace_id=common.next_trace_id(),

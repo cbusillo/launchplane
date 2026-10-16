@@ -128,7 +128,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
 - [testing-local-consumer.md](testing-local-consumer.md) — Recipient-encrypted
-  delivery of one testing bridge credential to an local local client.
+  delivery of one testing bridge credential to a local client.
 - [github-actions-security.md](github-actions-security.md) — GitHub Actions
   supply-chain pinning, source classification, provenance, and update policy.
 - [dependency-health-contract.md](dependency-health-contract.md) — causal

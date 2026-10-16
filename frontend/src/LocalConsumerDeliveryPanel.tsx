@@ -39,8 +39,8 @@ export function LocalConsumerDeliveryPanel({ product, context, environment }: {
       }));
     } catch {
       setError(apply
-        ? "Delivery is unconfirmed. Retry the original delivery here; keep its request and destination. A changed or expired request needs a new private testing directory."
-        : "Delivery is not ready. Check the testing bridge binding, HTTPS endpoint and request expiry. Enter no token here.");
+        ? "Delivery is unconfirmed. Retry the original delivery here; keep its request and destination. A changed or expired review needs a new private testing directory."
+        : "Delivery is not ready. Check the testing bridge binding, HTTPS endpoint and review expiry. Enter no token here.");
     } finally { setBusy(false); }
   }
 
