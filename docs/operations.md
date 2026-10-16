@@ -4844,3 +4844,34 @@ failures do not hide other source observations. Responses, errors and logs
 contain no passwords, hashes, host/account values or raw grant rows. This read
 changes no configuration, binding, account, grants, runtime, source data or
 business data, and invokes no importer, deployment or synchronization.
+
+### Daily waiting-release digest
+
+The service's daily release-digest scheduler lists source changes ahead of each
+active product's recorded production version. It does not create incidents,
+change product colors, send Client invitations, or start or approve a release.
+The list includes an immutable source comparison, a short list of changes, source
+age, testing/review blockers, and the Launchplane promotion or invitation step.
+The digest stays quiet when production already contains the current source.
+Unavailable or diverged evidence records a partial scheduler result rather than
+inventing a waiting release. Source age is informational, never a failure signal.
+
+A signed-in admin can opt a Director-owned Discord destination into this digest
+through the existing notification-policy plan/apply service surface by setting
+`release_digest_enabled: true`. Use a product/lane policy without check-name or
+check-kind filters and only the Director's intended Discord destinations. Existing
+policies default to false; configuring health alerts alone does not opt anyone in.
+The service's existing public OAuth URL supplies Launchplane links. Without that
+bootstrap URL or an opted-in policy no digest is sent. Source delivery alone does
+not activate a destination or claim a live Discord receipt.
+
+Daily receipts use the existing idempotency store; per-product, policy,
+destination and message-part outbox keys deduplicate restarts and replicas.
+The existing outbox worker delivers the separate `release_digest` kind. It
+rechecks current policy and product scope and drops expired daily messages.
+Failures before sending remain recorded; a Discord timeout or interrupted send
+retains its provider marker and uncertain outcome, and is not blindly repeated.
+Evidence failures wait for the next daily slot. Outbox records and scheduler
+receipts are the maintenance/diagnostic path. Disable the policy's digest flag
+through the same service surface to stop future and queued sends; it leaves
+health alerts and historical delivery evidence intact.

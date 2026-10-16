@@ -892,6 +892,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
+from control_plane.release_digest import ReleaseDigestScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -3833,6 +3834,7 @@ def _public_ingress_notification_policy_summary(
         "instance": policy.instance,
         "status": policy.status,
         "reminder_interval_seconds": policy.reminder_interval_seconds,
+        "release_digest_enabled": policy.release_digest_enabled,
         "destination_count": len(policy.destinations),
         "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
         "created_at": policy.created_at,
@@ -4312,6 +4314,7 @@ def create_launchplane_fastapi_app(
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
+    release_digest_scheduler: ReleaseDigestScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4388,6 +4391,8 @@ def create_launchplane_fastapi_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
+            if release_digest_scheduler is not None:
+                await run_in_threadpool(release_digest_scheduler.start)
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
             if testing_drill_scheduler is not None:
@@ -4403,6 +4408,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
+            if release_digest_scheduler is not None:
+                await run_in_threadpool(release_digest_scheduler.stop)
             if preview_lifecycle_scheduler is not None:
                 await run_in_threadpool(preview_lifecycle_scheduler.stop)
             if testing_drill_scheduler is not None:

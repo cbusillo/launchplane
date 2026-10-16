@@ -41058,6 +41058,11 @@
             "title": "Product",
             "type": "string"
           },
+          "release_digest_enabled": {
+            "default": false,
+            "title": "Release Digest Enabled",
+            "type": "boolean"
+          },
           "reminder_interval_seconds": {
             "default": 21600,
             "maximum": 604800.0,

@@ -838,6 +838,9 @@ class PublicIngressNotificationDestination(BaseModel):
 class PublicIngressNotificationPolicyRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Explicitly opt existing Director Discord destinations into calm release lists.
+    release_digest_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
+
     schema_version: int = Field(default=1, ge=1)
     policy_id: str
     product: str = ""
