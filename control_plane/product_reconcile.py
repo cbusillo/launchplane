@@ -333,9 +333,7 @@ class PreviewProviderHooks:
 class TestingProviderHooks:
     """The provider a generic-web testing deploy runs through; tests replace it with a fake."""
 
-    generic_web_deploy_provider: Callable[[], GenericWebDeployProvider] = (
-        default_generic_web_deploy_provider
-    )
+    generic_web_deploy_provider: Callable[[], GenericWebDeployProvider] | None = None
 
 
 class _TestingLaneAuthorityStore(
@@ -759,7 +757,13 @@ def _deploy_generic_web_testing(
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
-        provider = testing_hooks.generic_web_deploy_provider()
+        provider = (
+            default_generic_web_deploy_provider(
+                record_store=record_store, control_plane_root=control_plane_root
+            )
+            if testing_hooks.generic_web_deploy_provider is None
+            else testing_hooks.generic_web_deploy_provider()
+        )
         adapter = GenericWebDeployProviderMutationAdapter(
             control_plane_root=control_plane_root,
             record_store=record_store,

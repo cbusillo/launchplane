@@ -1415,5 +1415,14 @@ def _validate_dokploy_provider_target(
         )
 
 
-def default_generic_web_deploy_provider() -> GenericWebDeployProvider:
-    return DokployGenericWebDeployProvider()
+def default_generic_web_deploy_provider(
+    *, record_store: object | None = None, control_plane_root: Path | None = None
+) -> GenericWebDeployProvider:
+    from control_plane.dokploy.service_cutover import service_web_cutover_factory
+
+    factory = (
+        service_web_cutover_factory(record_store, control_plane_root)
+        if record_store is not None and control_plane_root is not None
+        else None
+    )
+    return DokployGenericWebDeployProvider(cutover_provider_factory=factory)
