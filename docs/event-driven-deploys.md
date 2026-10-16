@@ -757,6 +757,13 @@ supersession rather than asserting that old effects were safe. Until either
 path's prerequisites are met, the old operation remains fenced. These paths do
 not require a new cancellation grant or an alternate workflow identity.
 
+An incomplete fresh generation whose legacy authority preimage is missing can
+first enter [retained generation custody](disposable-lanes.md#retire-an-incomplete-legacy-generation-into-custody).
+That reviewed database-only step leaves the operation held and its unknown
+history intact. Automatic recovery cannot cancel or retry it; the ordinary
+isolated successor preparation and supersession must finish before another
+generation can run.
+
 The worker holds an operation execution lock through provider effects and local
 publication. Each provider mutation first records a value-free dispatch intent
 on the operation's `recovery_journal`; acknowledgement, target identity, schedule
