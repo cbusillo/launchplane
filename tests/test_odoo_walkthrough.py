@@ -8,6 +8,7 @@ import json
 import logging
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -24,13 +25,20 @@ from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_ROUTE,
     OdooWalkthroughRequest,
     WalkthroughStep,
+    walkthrough_activity_scope,
+    WALKTHROUGH_DISPATCH_SECONDS,
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
-from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.dokploy.odoo_walkthrough import ACCOUNT_ODOO_PROGRAM, ACCOUNT_HOST_PROGRAM
+from control_plane.dokploy.odoo_walkthrough import (
+    ACCOUNT_ODOO_PROGRAM,
+    ACCOUNT_HOST_PROGRAM,
+    WALKTHROUGH_JOURNAL_DIRECTORY,
+)
 from control_plane.http_routes.odoo_walkthrough import (
     WalkthroughDependencies,
     register_walkthrough_route,
+    walkthrough_actor,
+    walkthrough_fingerprint,
 )
 from control_plane.http_routes.support import ApiRouteRegistrar
 from control_plane.odoo_runtime_reads import (
@@ -163,6 +171,9 @@ class TaskRouteTests(unittest.TestCase):
                 return_value=True,
             )
         )
+        self.unused = self.stack.enter_context(
+            patch("control_plane.odoo_walkthrough.testing_task_unused", return_value=True)
+        )
         self.stack.enter_context(
             patch(
                 "control_plane.odoo_walkthrough.source.read_dokploy_config",
@@ -286,7 +297,7 @@ class TaskRouteTests(unittest.TestCase):
         self.assertNotIn("provider-private-password", json.dumps(response))
         self.assertEqual(self.account.call_count, 1)
         original = self.store.read_idempotency_record(
-            scope="odoo-walkthrough:example-odoo",
+            scope=walkthrough_activity_scope(task_request().product),
             route_path=WALKTHROUGH_ROUTE,
             idempotency_key="unknown",
         )
@@ -304,7 +315,7 @@ class TaskRouteTests(unittest.TestCase):
         self.account.assert_not_called()
         self.assertIsNone(
             self.store.read_idempotency_record(
-                scope="odoo-walkthrough:example-odoo",
+                scope=walkthrough_activity_scope(task_request().product),
                 route_path=WALKTHROUGH_ROUTE,
                 idempotency_key="not-dispatched",
             )
@@ -313,18 +324,20 @@ class TaskRouteTests(unittest.TestCase):
     def test_live_original_lease_cannot_be_settled_or_inspected_as_an_ended_dispatch(self) -> None:
         provision = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)
         identity = LocalOperatorIdentity(subject="test-agent", token_label="test-token")
-        actor = f"{type(identity).__name__}:{identity.subject}"
+        actor = walkthrough_actor(identity)
         self.store.reserve_mutation(
-            scope="odoo-walkthrough:example-odoo",
+            scope=walkthrough_activity_scope(task_request().product),
             route_path=WALKTHROUGH_ROUTE,
             idempotency_key="live",
-            request_fingerprint=canonical_json_sha256([actor, provision.model_dump(mode="json")]),
+            request_fingerprint=walkthrough_fingerprint(actor, provision),
             lease_owner="other-live-worker",
             reconciliation_key=self.plan.digest,
             provider_target_key="active-fixture-target",
         )
         self.planner.side_effect = ValueError("current lane is held")
-        self.assertEqual(self.invoke(provision, "live")[0], 409)
+        status, response = self.invoke(provision, "live")
+        self.assertEqual(status, 409)
+        self.assertEqual(response["detail"]["code"], "testing_task_reconciliation_required")
         self.finished.assert_not_called()
         self.account.assert_not_called()
 
@@ -342,7 +355,7 @@ class TaskRouteTests(unittest.TestCase):
             first["result"]["screenshot_sha256"], replay["result"]["screenshot_sha256"]
         )
         stored = self.store.read_idempotency_record(
-            scope="odoo-walkthrough:example-odoo",
+            scope=walkthrough_activity_scope(task_request().product),
             route_path=WALKTHROUGH_ROUTE,
             idempotency_key="screenshot",
         )
@@ -355,6 +368,56 @@ class TaskRouteTests(unittest.TestCase):
         second = first.model_copy(update={"task_id": "2" * 32})
         self.assertEqual(self.invoke(second, "same-key")[0], 409)
         self.assertEqual(self.account.call_count, 1)
+
+    def test_definite_consumer_refusal_is_terminal_and_does_not_block_cleanup(self) -> None:
+        self.account.return_value = {"account_id": 0, "status": "fail"}
+        status, receipt = self.invoke(
+            task_request(mode="apply", reviewed_plan_sha256=self.plan.digest), "refused"
+        )
+        self.assertEqual((status, receipt["result"]["status"]), (200, "fail"))
+        self.browser.assert_not_called()
+        self.account.return_value = {"account_id": 0, "status": "pass"}
+        cleanup = task_request(
+            operation="cleanup", mode="apply", reviewed_plan_sha256=self.plan.digest
+        )
+        self.assertEqual(self.invoke(cleanup, "after-refusal")[1]["result"]["status"], "pass")
+        self.assertTrue(
+            all(record.status == "disabled" for record in self.store.list_secret_records())
+        )
+
+    def test_cleanup_needs_no_password_or_secret_record(self) -> None:
+        self.account.return_value = {"account_id": 0, "status": "pass"}
+        with patch(
+            "control_plane.odoo_walkthrough._decrypt_secret_value",
+            side_effect=AssertionError("cleanup must not decrypt"),
+        ):
+            status, receipt = self.invoke(
+                task_request(
+                    operation="cleanup", mode="apply", reviewed_plan_sha256=self.plan.digest
+                ),
+                "empty-cleanup",
+            )
+        self.assertEqual((status, receipt["result"]["status"]), (200, "pass"))
+        self.assertEqual(self.store.list_secret_records(), ())
+        self.assertNotIn("password", self.account.call_args.kwargs["payload"])
+
+    def test_new_staff_activity_stops_browser_before_another_step(self) -> None:
+        self.invoke(task_request(mode="apply", reviewed_plan_sha256=self.plan.digest), "provision")
+        self.unused.return_value = False
+
+        def browser(**kwargs: Any) -> tuple[int, tuple[str, ...]]:
+            kwargs["checkpoint"]()
+            raise AssertionError("Browser must stop at the usage checkpoint")
+
+        self.browser.side_effect = browser
+        with patch("control_plane.odoo_walkthrough.require_drill_use_unprotected"):
+            status, _ = self.invoke(
+                task_request(operation="run", mode="apply", reviewed_plan_sha256=self.plan.digest),
+                "staff-arrived",
+            )
+        self.assertEqual(status, 409)
+        self.unused.assert_called_once()
+        self.assertNotIn("password", self.unused.call_args.kwargs["intent"])
 
 
 class AccountProgramTests(unittest.TestCase):
@@ -400,6 +463,7 @@ class AccountProgramTests(unittest.TestCase):
             "operation": "provision",
             "groups": ["base.group_user"],
             "password": "test-only-secret",
+            "dispatch_deadline": int(time.time()) + WALKTHROUGH_DISPATCH_SECONDS,
         }
 
     def execute(self) -> dict[str, Any]:
@@ -447,7 +511,12 @@ class AccountProgramTests(unittest.TestCase):
 
     def test_cleanup_archives_only_the_witnessed_task_and_changes_its_password(self) -> None:
         self.execute()
-        self.env.cr.execute.side_effect = RuntimeError("login history unavailable")
+
+        def execute(query: str, *args: Any) -> None:
+            if "res_users_log" in query:
+                raise RuntimeError("login history unavailable")
+
+        self.env.cr.execute.side_effect = execute
         self.request["operation"] = "cleanup"
         self.user.write.side_effect = lambda values: setattr(self.user, "active", values["active"])
         self.execute()
@@ -482,6 +551,26 @@ class AccountProgramTests(unittest.TestCase):
             self.execute()
         self.user.write.assert_not_called()
 
+    def test_run_and_cleanup_use_stored_groups_without_repeating_provision_input(self) -> None:
+        self.request["groups"] = ["stock.group_stock_user"]
+        self.execute()
+        self.request.update(operation="run", groups=["base.group_user"])
+        self.execute()
+        self.user.write.assert_not_called()
+        self.request["operation"] = "cleanup"
+        self.user.write.side_effect = lambda values: setattr(self.user, "active", values["active"])
+        self.execute()
+        self.assertFalse(self.user.active)
+
+    def test_late_consumer_refuses_before_account_or_parameter_writes(self) -> None:
+        self.request["dispatch_deadline"] = int(time.time()) - 1
+        before = self.parameters.copy()
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.assertEqual(self.parameters, before)
+        self.users.create.assert_not_called()
+        self.user.write.assert_not_called()
+
     def test_groups_implying_administration_refuse_before_commit(self) -> None:
         self.user.has_group.return_value = True
         with self.assertRaises(RuntimeError):
@@ -497,6 +586,15 @@ class AccountProgramTests(unittest.TestCase):
     def test_fixed_host_wrapper_executes_stdin_consumer_and_writes_only_terminal_journal(
         self,
     ) -> None:
+        self._exercise_fixed_host_wrapper()
+
+    def test_fixed_host_wrapper_rolls_back_clean_refusal_and_finishes_its_journal(self) -> None:
+        self.env.ref.side_effect = ValueError("private consumer refusal")
+        self._exercise_fixed_host_wrapper(consumer_refuses=True)
+        self.env.cr.rollback.assert_called_once()
+        self.env.cr.commit.assert_not_called()
+
+    def _exercise_fixed_host_wrapper(self, *, consumer_refuses: bool = False) -> None:
         identity = RuntimeIdentity(
             product="example-odoo",
             context="example",
@@ -574,7 +672,7 @@ class AccountProgramTests(unittest.TestCase):
                 "pathlib.Path",
                 side_effect=lambda path: (
                     original_path(self.directory.name) / "journal"
-                    if path == "/tmp/launchplane-walkthrough"
+                    if path == WALKTHROUGH_JOURNAL_DIRECTORY
                     else original_path(path)
                 ),
             ),
@@ -582,6 +680,11 @@ class AccountProgramTests(unittest.TestCase):
             exec(compile(ACCOUNT_HOST_PROGRAM, "account-host", "exec"), {})
         self.assertNotIn(self.request["password"], output.getvalue())
         self.assertNotIn("private startup noise", output.getvalue())
+        self.assertNotIn("private consumer refusal", output.getvalue())
+        self.assertEqual(
+            json.loads(output.getvalue().removeprefix("FRAME:"))["status"],
+            "fail" if consumer_refuses else "pass",
+        )
         self.assertTrue(
             json.loads(
                 (original_path(self.directory.name) / "journal" / ("d" * 64 + ".json")).read_text()
@@ -607,7 +710,9 @@ class AccountProgramTests(unittest.TestCase):
                     [
                         "host",
                         base64.b64encode(
-                            json.dumps({"dispatch_id": payload["dispatch_id"]}).encode()
+                            json.dumps(
+                                {"dispatch_id": payload["dispatch_id"], "mode": "quiescence"}
+                            ).encode()
                         ).decode(),
                         "FRAME:",
                     ],
@@ -616,13 +721,13 @@ class AccountProgramTests(unittest.TestCase):
                     "pathlib.Path",
                     side_effect=lambda path: (
                         original_path(self.directory.name) / "journal"
-                        if path == "/tmp/launchplane-walkthrough"
+                        if path == WALKTHROUGH_JOURNAL_DIRECTORY
                         else original_path(path)
                     ),
                 ),
             ):
                 exec(compile(ACCOUNT_JOURNAL_READ_PROGRAM, "journal-reader", "exec"), {})
-            return json.loads(receipt.getvalue().removeprefix("FRAME:"))["finished"] is True
+            return json.loads(receipt.getvalue().removeprefix("FRAME:"))["clear"] is True
 
         self.assertTrue(read_journal())
         journal = (

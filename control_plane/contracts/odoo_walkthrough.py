@@ -9,6 +9,15 @@ WALKTHROUGH_ROUTE = "/v1/drivers/odoo/testing-walkthrough"
 WALKTHROUGH_ACTION = "odoo_testing_walkthrough.execute"
 WALKTHROUGH_PLAN_ACTION = "odoo_testing_walkthrough.plan"
 WALKTHROUGH_LOGIN_PREFIX = "lp_walk_"
+WALKTHROUGH_MARKER_PREFIX = "launchplane.walkthrough."
+WALKTHROUGH_LOCK_PREFIX = "launchplane.walkthrough:"
+WALKTHROUGH_ACTIVE_STATE = "active"
+WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS = 4 * 60 * 60
+WALKTHROUGH_DISPATCH_SECONDS = 120
+
+
+def walkthrough_activity_scope(product: str) -> str:
+    return "odoo-walkthrough:" + product
 
 
 class WalkthroughStep(BaseModel):
@@ -30,7 +39,7 @@ class WalkthroughStep(BaseModel):
                 or parsed.query
                 or "\\" in self.value
                 or any(ord(c) < 32 for c in self.value)
-                or parsed.path not in {"/web", "/odoo"}
+                or not (parsed.path in {"/web", "/odoo"} or parsed.path.startswith("/odoo/"))
             ):
                 raise ValueError("Open accepts only the testing web client and its fragment.")
         elif self.action != "screenshot" and not self.selector.strip():

@@ -14,6 +14,7 @@ from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
     OdooWalkthroughResponse,
     OdooWalkthroughResult,
+    walkthrough_activity_scope,
 )
 from control_plane.http_routes.support import (
     ApiRouteRegistrar,
@@ -47,6 +48,18 @@ class WalkthroughDependencies:
     http_error: HttpErrorFactory
     control_plane_root: Path
     error_response_model: type[BaseModel]
+
+
+def walkthrough_actor(identity: LaunchplaneIdentity) -> str:
+    if isinstance(identity, GitHubHumanIdentity):
+        return f"github:{identity.github_id}"
+    if isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity):
+        return f"{type(identity).__name__}:{identity.subject}"
+    return ""
+
+
+def walkthrough_fingerprint(actor: str, request: OdooWalkthroughRequest) -> str:
+    return canonical_json_sha256([actor, request.model_dump(mode="json")])
 
 
 def register_walkthrough_route(
@@ -92,18 +105,12 @@ def register_walkthrough_route(
         if not isinstance(record_store, PostgresRecordStore):
             refuse("database_required", "Testing tasks require shared database storage.", 503)
         assert isinstance(record_store, PostgresRecordStore)
-        actor = (
-            f"github:{identity.github_id}"
-            if isinstance(identity, GitHubHumanIdentity)
-            else f"{type(identity).__name__}:{identity.subject}"
-            if isinstance(identity, LocalOperatorIdentity | LocalAdminIdentity)
-            else ""
-        )
+        actor = walkthrough_actor(identity)
         key = idempotency_key.strip()
         if payload.mode == "apply" and (not key or len(key) > 200):
             refuse("idempotency_key_required", "Apply requires a bounded Idempotency-Key.", 400)
-        scope = "odoo-walkthrough:" + payload.product
-        fingerprint = canonical_json_sha256([actor, payload.model_dump(mode="json")])
+        scope = walkthrough_activity_scope(payload.product)
+        fingerprint = walkthrough_fingerprint(actor, payload)
 
         def execute() -> OdooWalkthroughResponse:
             if payload.mode == "apply":

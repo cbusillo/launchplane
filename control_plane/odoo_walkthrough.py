@@ -14,6 +14,8 @@ from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
     OdooWalkthroughResult,
     WALKTHROUGH_LOGIN_PREFIX,
+    WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS,
+    WALKTHROUGH_DISPATCH_SECONDS,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
@@ -22,6 +24,7 @@ from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
 from control_plane.dokploy.odoo_walkthrough import (
     testing_account_command,
     testing_account_dispatch_finished,
+    testing_task_unused,
 )
 from control_plane.dokploy import source
 from control_plane.odoo_runtime_reads import (
@@ -162,13 +165,15 @@ def plan_walkthrough(
     )
     if request.operation == "provision" and secret is None and recent_signins:
         raise ValueError("Testing has recent sign-ins before this task account exists.")
-    if request.operation in {"run", "cleanup"} and secret is None:
+    if request.operation == "run" and secret is None:
         raise ValueError("There is no task account for this testing copy.")
     if secret is not None and secret.status != "configured" and request.operation != "cleanup":
         raise ValueError("The task account is closed.")
     if secret is not None and request.operation != "cleanup":
         created = datetime.fromisoformat(secret.created_at.replace("Z", "+00:00"))
-        if created.tzinfo is None or datetime.now(timezone.utc) - created > timedelta(hours=4):
+        if created.tzinfo is None or datetime.now(timezone.utc) - created > timedelta(
+            seconds=WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS
+        ):
             raise ValueError("The task account expired; clean it up and use a new task ID.")
     digest = canonical_json_sha256(
         [
@@ -205,6 +210,7 @@ class WalkthroughAdapter:
             trace,
         )
         self.transient_screenshots: tuple[str, ...] = ()
+        self.dispatch_deadline = int(time.time()) + WALKTHROUGH_DISPATCH_SECONDS
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -219,7 +225,20 @@ class WalkthroughAdapter:
         return self.plan.digest
 
     def original_intent(self) -> dict[str, object]:
-        return {"host": self.plan.connection.host, "server_id": self.plan.connection.server_id}
+        return {
+            "host": self.plan.connection.host,
+            "server_id": self.plan.connection.server_id,
+            "project": self.plan.connection.app_name,
+            "identity": self.plan.connection.selection.identity.model_dump(mode="json"),
+            "identity_key": RUNTIME_IDENTITY_ENV_KEY,
+            "image": self.plan.connection.selection.identity.image_reference,
+            "database": self.plan.database,
+            "copy_binding": self.plan.copy_binding,
+            "binding": self.plan.binding,
+            "task_id": self.request.task_id,
+            "usage_since": self.plan.usage_since,
+            "dispatch_deadline": self.dispatch_deadline,
+        }
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
@@ -243,6 +262,10 @@ class WalkthroughAdapter:
             task_id=self.request.task_id,
             operation=self.request.operation,
             code="task_outcome_unknown",
+            product=self.request.product,
+            context=self.request.context,
+            deployment_record_id=self.plan.connection.selection.identity.deployment_record_id,
+            artifact_id=self.plan.connection.selection.identity.artifact_id,
         )
         lease.assert_current()
         try:
@@ -262,7 +285,7 @@ class WalkthroughAdapter:
                 context=self.request.context,
                 instance="testing",
             )
-            if secret is None:
+            if secret is None and self.request.operation != "cleanup":
                 if self.request.operation != "provision":
                     raise ValueError("No task credential exists.")
                 write_secret_value(
@@ -284,13 +307,11 @@ class WalkthroughAdapter:
                     context=self.request.context,
                     instance="testing",
                 )
-            assert secret is not None
-            version = self.store.read_secret_version(secret.current_version_id)
-            password = (
-                _decrypt_secret_value(version.ciphertext, version.key_id)
-                if self.request.operation != "cleanup"
-                else ""
-            )
+            password = ""
+            if self.request.operation != "cleanup":
+                assert secret is not None
+                version = self.store.read_secret_version(secret.current_version_id)
+                password = _decrypt_secret_value(version.ciphertext, version.key_id)
             connection = self.plan.connection
             assert_selection_current(self.store, connection.selection)
             lease.checkpoint_effect("account_dispatch")
@@ -299,6 +320,11 @@ class WalkthroughAdapter:
                 token=connection.token,
                 server_id=connection.server_id,
                 payload={
+                    **{
+                        key: value
+                        for key, value in self.original_intent().items()
+                        if key not in {"host", "server_id"}
+                    },
                     "instance": "testing",
                     "dispatch_id": hashlib.sha256(provider_operation_key.encode()).hexdigest(),
                     "project": connection.app_name,
@@ -315,11 +341,17 @@ class WalkthroughAdapter:
                     "operation": self.request.operation,
                 },
             )
+            if account.get("status") == "fail":
+                result.status = "fail"
+                result.code = "testing_task_refused_cleanup_required"
+                return ProviderMutationOutcome(
+                    response_status_code=200, response_payload=self.response(result)
+                )
             uid = int(str(account["account_id"]))
             if uid <= 2 and not (uid == 0 and self.request.operation == "cleanup"):
                 raise ValueError("Invalid testing account ID.")
             result.account_id = uid or None
-            if self.request.operation == "cleanup":
+            if self.request.operation == "cleanup" and secret is not None:
                 # Revoke in Odoo before disabling the internal secret. Retain
                 # encrypted history and the marker for audit/retry, never reuse it.
                 now = utc_now_timestamp()
@@ -355,6 +387,15 @@ class WalkthroughAdapter:
                     require_drill_use_unprotected(
                         self.store, self.request.product, self.request.context
                     )
+                    if not testing_task_unused(
+                        host=connection.host,
+                        token=connection.token,
+                        server_id=connection.server_id,
+                        intent=self.original_intent(),
+                    ):
+                        raise ValueError(
+                            "Testing task usage or account identity changed or is unreadable."
+                        )
 
                 passed, screenshots = run_walkthrough_browser(
                     origin=connection.selection.base_url.rstrip("/"),
@@ -381,9 +422,6 @@ class WalkthroughAdapter:
             raise ProviderMutationUnknownError(
                 "Task outcome is unknown; reconcile the original dispatch before cleanup."
             ) from None
-        result.product, result.context = self.request.product, self.request.context
-        result.deployment_record_id = self.plan.connection.selection.identity.deployment_record_id
-        result.artifact_id = self.plan.connection.selection.identity.artifact_id
         return ProviderMutationOutcome(
             response_status_code=200, response_payload=self.response(result)
         )
@@ -423,6 +461,7 @@ class InterruptedWalkthroughAdapter:
                     token=token,
                     server_id=str(intent["server_id"]),
                     dispatch_id=hashlib.sha256(provider_operation_key.encode()).hexdigest(),
+                    original_intent=intent,
                 ):
                     return ProviderObservation("unknown")
             except Exception:

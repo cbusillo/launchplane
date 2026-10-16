@@ -15,6 +15,7 @@ from control_plane.odoo_runtime_reads import (
 )
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.odoo_walkthrough import plan_walkthrough, WALKTHROUGH_SECRET_INTEGRATION
+from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS
 from tests.test_odoo_walkthrough import task_request
 
 
@@ -180,7 +181,11 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.store.find_secret_record.assert_not_called()
 
     def test_closed_missing_and_expired_credentials_refuse_browser_work(self) -> None:
-        for secret in (None, self.secret(disabled=True), self.secret(age=timedelta(hours=5))):
+        for secret in (
+            None,
+            self.secret(disabled=True),
+            self.secret(age=timedelta(seconds=WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS + 1)),
+        ):
             self.store.find_secret_record.return_value = secret
             with self.assertRaises(ValueError):
                 self.plan("run")
@@ -191,7 +196,9 @@ class WalkthroughPlanTests(unittest.TestCase):
             self.plan()
 
     def test_cleanup_still_qualifies_physical_copy_but_does_not_require_unused_lane(self) -> None:
-        self.store.find_secret_record.return_value = self.secret(age=timedelta(hours=5))
+        self.store.find_secret_record.return_value = self.secret(
+            age=timedelta(seconds=WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS + 1)
+        )
         self.usage.side_effect = ValueError("login history unavailable")
         self.hold.side_effect = ValueError("staff hold")
         self.plan("cleanup")

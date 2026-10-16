@@ -4,7 +4,7 @@ import base64
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
-from playwright.sync_api import Route, sync_playwright
+from playwright.sync_api import Locator, Route, sync_playwright
 
 from control_plane.contracts.odoo_walkthrough import WalkthroughStep
 from control_plane.contracts.runtime_identity import (
@@ -13,6 +13,18 @@ from control_plane.contracts.runtime_identity import (
 )
 from control_plane.odoo_runtime_reads import require_runtime_identity
 from control_plane.workflows.verireel_testing_post_deploy import launch_testing_browser
+
+
+def require_safe_browser_control(locator: Locator) -> None:
+    safe = locator.evaluate("""element =>
+        element.ownerDocument.defaultView === window.top &&
+        !['password', 'hidden', 'file'].includes(element.type) &&
+        !element.closest('iframe') &&
+        !/password|token|secret|api.?key/i.test(
+            [element.name, element.id, element.autocomplete].join(' '))
+    """)
+    if safe is not True:
+        raise ValueError("Sensitive browser controls cannot be selected.")
 
 
 def run_walkthrough_browser(
@@ -129,15 +141,7 @@ def run_walkthrough_browser(
                         if locator.count() != 1:
                             raise ValueError("A step must select exactly one element.")
                         # Browser scripts may not fill secrets or select an iframe.
-                        safe = locator.evaluate("""element =>
-                            element.ownerDocument.defaultView === window.top &&
-                            !['password', 'hidden', 'file'].includes(element.type) &&
-                            !element.closest('iframe') &&
-                            !/password|token|secret|api.?key/i.test(
-                                [element.name, element.id, element.autocomplete].join(' '))
-                        """)
-                        if safe is not True:
-                            raise ValueError("Sensitive browser controls cannot be selected.")
+                        require_safe_browser_control(locator)
                         if step.action == "fill":
                             locator.fill(step.value)
                         elif step.action == "click":

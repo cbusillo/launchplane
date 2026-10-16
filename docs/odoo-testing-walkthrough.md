@@ -13,7 +13,7 @@ rejected before provider or secret resolution.
 
 The API is `POST /v1/drivers/odoo/testing-walkthrough`. Its operations are
 `provision`, `run`, and `cleanup`, each with `mode=dry-run` followed by
-`mode=apply`, the returned `reviewed_plan_sha256`, and a distinct, stable
+`mode=apply`, `result.plan_sha256` as `reviewed_plan_sha256`, and a distinct, stable
 `Idempotency-Key`. Use the same `task_id` for the account's lifecycle; choose
 a random UUID's 32 lowercase hex characters for each new task. No password,
 cookie, browser handle, trace, HAR, HTML, session token, storage state, or
@@ -53,7 +53,8 @@ Account groups are explicit native business group XML IDs. The default is
 `base.group_user`; supply only the business roles required by the checklist.
 Odoo administration groups and business groups that imply administration are
 refused. This API cannot change the groups of an existing task account.
-Run and cleanup requests retain the provisioned group selection.
+Run and cleanup use the account's stored groups; the caller need not repeat
+the provisioned group selection.
 
 ## Admin and browser procedure
 
@@ -114,7 +115,11 @@ of two MiB each are returned per run. Contexts close on success and failure;
 PNG bytes are returned only on the first successful HTTP response and are not
 persisted in Launchplane. Durable receipts retain their SHA-256 digests; exact
 replays omit the PNGs. The harness keeps needed screenshots in its task evidence.
-no reusable browser context is handed to the harness. Receipt step counts
+If that HTTP response is lost, preserve the original transaction receipt and
+use a new run containing only `open`, `visible` and `screenshot` to inspect the
+current state. This does not reconstruct the lost historical screenshot, and
+must not repeat the original business-write steps.
+No reusable browser context is handed to the harness. Receipt step counts
 prove completed interactions, not business correctness: the product checklist
 still owns its pass/fail observations and screenshot interpretation.
 
@@ -141,14 +146,21 @@ An exact completed retry replays its redacted receipt and never repeats browser
 transactions. After a disconnect or crash, retry only the original request/key.
 A recovered interrupted dispatch returns `unknown` and releases that original
 reservation only after its value-free host completion journal proves the native
-consumer finished, or the durable phase proves no native dispatch began. It
+consumer finished, or a read-only check proves it quiescent after the dispatch
+deadline. Definite consumer refusals roll back and return a terminal `fail`
+receipt; they do not strand the target. The native consumer and the read-only
+probe share a task-specific PostgreSQL transaction advisory lock: after the
+deadline, a future consumer refuses before account writes, and an already
+running transaction prevents a quiescent observation. It
 does not replan the current lane or repeat browser/account work. Recovery can
 therefore settle the original receipt even after expiry or a staff hold.
 Then run cleanup with a fresh reviewed digest and key. A live lease or changed
 copy/target still refuses. Preserve the original receipt/key and use supported
 operation recovery; do not reset fences or modify a retained old database.
-An absent/incomplete journal or unreachable original host remains unknown and
-keeps the fence; it is never treated as an absent effect. Tiny value-free
+An absent/incomplete journal can settle only after that deadline and positive
+quiescence proof from the exact original testing receiver. An unreachable or
+changed receiver remains unknown and keeps the fence. Unknown outcome is never
+a passing walkthrough, and no account/browser dispatch is repeated. Tiny value-free
 dispatch journals live in the original host's private
 `/tmp/launchplane-walkthrough` directory. Preserve them until the original
 receipt is settled; host temporary-file disposal can remove old recovery proof.
