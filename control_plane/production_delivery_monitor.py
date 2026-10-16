@@ -14,7 +14,6 @@ from starlette.concurrency import run_in_threadpool
 from control_plane.build_provenance import BuildProvenanceTransport
 from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -29,12 +28,14 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.product_reconcile import resolve_build_provenance_transport
 from control_plane.source_control_change import read_branch_revision
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.delivery_evidence import DeliveryEvidenceIndex, DeliveryEvidenceWork
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.public_ingress_monitor import _store_monitor_observation
 from control_plane.workflows.ship import utc_now_timestamp
 
 Store = PostgresRecordStore | FilesystemRecordStore
 DELIVERY_CHECK_PREFIX = "production-delivery-"
+DELIVERY_EVIDENCE_PAGE_SIZE = 100
 _SCOPE = "launchplane:production-delivery-monitor"
 _ROUTE = "service:production-delivery-monitor"
 _LOGGER = logging.getLogger(__name__)
@@ -360,9 +361,8 @@ def _monitor_lane(
         [object, LaunchplaneProductProfileRecord], BuildProvenanceTransport
     ],
 ) -> None:
-    deployments = store.list_deployment_records(context_name=lane.context, instance_name="prod")
     try:
-        _scan_failures(store, profile, lane, now, deployments)
+        _scan_failures(store, profile, lane, now)
     except Exception:
         _LOGGER.exception("Production delivery failure scan failed for %s", profile.product)
         _monitor_availability(store, profile, lane, now, component="evidence", available=False)
@@ -382,138 +382,228 @@ def _monitor_lane(
     _monitor_availability(store, profile, lane, now, component="source", available=True)
 
 
+def _release_dependencies(
+    profile: LaunchplaneProductProfileRecord, decision: object
+) -> tuple[str, ...]:
+    from control_plane.client_release import (
+        CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+        client_release_step_operation_id,
+        client_release_steps,
+    )
+    from control_plane.contracts.release_review import ReleaseReviewDecisionRecord
+    from control_plane.contracts.odoo_prod_rollback_operation import (
+        build_odoo_prod_rollback_operation_id,
+    )
+
+    assert isinstance(decision, ReleaseReviewDecisionRecord)
+    keys = []
+    for step in client_release_steps(decision.release_start):
+        operation_id = client_release_step_operation_id(
+            profile=profile, decision=decision, step=step
+        )
+        table = (
+            "launchplane_verireel_prod_backup_gate_operations"
+            if step.kind == "backup"
+            else "launchplane_idempotency_records"
+            if profile.driver_id == "generic-web"
+            else "launchplane_odoo_prod_promotion_operations"
+            if step.kind == "promote"
+            else "launchplane_odoo_prod_rollback_operations"
+        )
+        keys.append(table + ":" + operation_id)
+        if step.kind == "promote" and profile.driver_id != "generic-web":
+            recovery_id = build_odoo_prod_rollback_operation_id(
+                product=profile.product,
+                context=next(lane.context for lane in profile.lanes if lane.instance == "prod"),
+                idempotency_key=operation_id + ":failure-recovery",
+                idempotency_scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            )
+            keys.append("launchplane_odoo_prod_rollback_operations:" + recovery_id)
+    return tuple(keys)
+
+
+def _work_events(
+    store: Store,
+    profile: LaunchplaneProductProfileRecord,
+    index: DeliveryEvidenceIndex,
+    work: DeliveryEvidenceWork,
+    now: str,
+) -> list[tuple[str, str, str, str, str]]:
+    if work.kind in {"deployment", "promotion"}:
+        try:
+            record = (
+                store.read_deployment_record(work.source_id)
+                if work.kind == "deployment"
+                else store.read_promotion_record(work.source_id)
+            )
+        except FileNotFoundError:
+            if not isinstance(store, FilesystemRecordStore):
+                raise
+            index.forget_missing(work.key, work.version)
+            return []
+        if (
+            not isinstance(store, PostgresRecordStore)
+            or store.database_dialect_name != "postgresql"
+        ):
+            index.reconcile_source(work, record.model_dump(mode="json"))
+        if record.failure is not None or any(
+            status == "fail"
+            for status in (
+                record.deploy.status,
+                record.post_deploy_update.status,
+                record.destination_health.status,
+            )
+        ):
+            return [
+                (
+                    record.record_id,
+                    record.artifact_identity.artifact_id
+                    if record.artifact_identity
+                    else record.source_git_ref
+                    if isinstance(record, DeploymentRecord)
+                    else record.record_id,
+                    record.failure.code if record.failure else "deployment_failed",
+                    record.record_id,
+                    record.deploy.finished_at or record.deploy.started_at,
+                )
+            ]
+        return []
+    if not isinstance(store, PostgresRecordStore):
+        return []
+    if work.kind == "decision":
+        from control_plane.client_release import read_client_release_step_views
+
+        decision = store.read_release_review_decision_record(
+            product=profile.product, record_id=work.source_id
+        )
+        # Register even unstarted operations before reading them. A subsequent
+        # worker write dirties the decision in that same source transaction.
+        index.bind(decision.record_id, _release_dependencies(profile, decision), now=now)
+        return [
+            (
+                step.operation_id,
+                decision.checklist.candidate.artifact_id,
+                step.failure.code,
+                step.failure.trace_id or step.failure.record_id,
+                step.failure.recorded_at,
+            )
+            for step in read_client_release_step_views(
+                store=store, profile=profile, decision=decision
+            )
+            if step.failure is not None and step.status != "cancelled"
+        ]
+    operation = store.read_odoo_prod_promotion_operation_record(work.source_id)
+    if index.has_release_dependency("launchplane_odoo_prod_promotion_operations:" + work.source_id):
+        return []
+    if operation.idempotency_scope == "client-release":
+        try:
+            store.read_release_review_decision_record(
+                product=profile.product, record_id=operation.idempotency_key.rsplit(":", 1)[0]
+            )
+        except FileNotFoundError:
+            pass
+        else:
+            # During paged bootstrap its decision may not have been bound yet.
+            return []
+    if operation.status != "fail":
+        return []
+    candidate = (
+        operation.result.artifact_id if operation.result else ""
+    ) or operation.request.expected_artifact_id
+    return [
+        (
+            operation.operation_id,
+            candidate or "request:" + _candidate_key(operation.idempotency_key),
+            operation.error_code or "promotion_failed",
+            operation.runner_trace_id or operation.operation_id,
+            operation.finished_at or operation.updated_at,
+        )
+    ]
+
+
 def _scan_failures(
     store: Store,
     profile: LaunchplaneProductProfileRecord,
     lane: ProductLaneProfile,
     now: str,
-    deployments: tuple[DeploymentRecord, ...],
 ) -> None:
-    scan_key = "failures:" + profile.product
-    scan = store.read_idempotency_record(scope=_SCOPE, route_path=_ROUTE, idempotency_key=scan_key)
-    seen = dict(scan.response_payload.get("seen", {})) if scan else {}
-    # Evidence times are not ingestion watermarks: a runner can post a record late.
-    events: list[tuple[str, str, str, str, str, bool]] = []
-    passing_times = [
-        record.deploy.finished_at
-        for record in deployments
-        if deployment_record_passed(record) and record.deploy.finished_at
-    ]
-    latest_success = max((_time(value) for value in passing_times), default=None)
-
-    def eligible_at_start(finished: str, latest: bool) -> bool:
-        if not latest or latest_success is None:
-            return latest
-        try:
-            return bool(finished and _time(finished) >= latest_success)
-        except ValueError:
-            return False
-
-    promotions = store.list_promotion_records(context_name=lane.context, to_instance_name="prod")
-    histories: tuple[tuple[DeploymentRecord | PromotionRecord, ...], ...] = (
-        deployments,
-        promotions,
-    )
-    for records in histories:
-        for index, record in enumerate(records):
-            if record.failure is not None or any(
-                status == "fail"
-                for status in (
-                    record.deploy.status,
-                    record.post_deploy_update.status,
-                    record.destination_health.status,
-                )
-            ):
-                events.append(
-                    (
-                        record.record_id,
-                        record.artifact_identity.artifact_id
-                        if record.artifact_identity
-                        else record.source_git_ref
-                        if isinstance(record, DeploymentRecord)
-                        else record.record_id,
-                        record.failure.code if record.failure else "deployment_failed",
-                        record.record_id,
-                        record.deploy.finished_at or record.deploy.started_at,
-                        eligible_at_start(
-                            record.deploy.finished_at or record.deploy.started_at, index == 0
-                        ),
-                    )
-                )
-    if isinstance(store, PostgresRecordStore):
-        from control_plane.client_release import read_client_release_step_views
-
-        release_candidates: dict[str, str] = {}
-        for index, decision in enumerate(
-            store.list_release_review_decision_records(product=profile.product)
-        ):
-            try:
-                steps = read_client_release_step_views(
-                    store=store, profile=profile, decision=decision
-                )
-            except Exception:
-                _LOGGER.exception("Release delivery evidence unavailable for %s", profile.product)
-                continue
-            for step in steps:
-                release_candidates[step.operation_id] = decision.checklist.candidate.artifact_id
-                if step.failure is not None and step.status != "cancelled":
-                    failure = step.failure
-                    events.append(
-                        (
-                            step.operation_id,
-                            decision.checklist.candidate.artifact_id,
-                            failure.code,
-                            failure.trace_id or failure.record_id,
-                            failure.recorded_at,
-                            eligible_at_start(failure.recorded_at, index == 0),
-                        )
-                    )
-        for index, operation in enumerate(
-            store.list_odoo_prod_promotion_operation_records(
-                product=profile.product,
-                context_name=lane.context,
-                instance_name="prod",
+    with (
+        store.delivery_evidence_index() as index,
+        index.lane_lock(lane.context, profile.product) as acquired,
+    ):
+        if not acquired:
+            return
+        checkpoint = index.checkpoint(lane.context, profile.product)
+        if checkpoint is None:
+            # Read the previous monitor's receipt once for bootstrap. Leave it
+            # unchanged so an overlapping or rolled-back reader keeps its dedup.
+            legacy = store.read_idempotency_record(
+                scope=_SCOPE, route_path=_ROUTE, idempotency_key="failures:" + profile.product
             )
+            checkpoint = index.initialize(
+                lane.context,
+                profile.product,
+                baseline=legacy is None,
+                legacy_seen=dict(legacy.response_payload.get("seen", {})) if legacy else {},
+            )
+        latest = checkpoint["latest"]
+        legacy_seen = checkpoint["legacy_seen"]
+        failed = False
+        for work in index.pending(
+            lane.context,
+            profile.product,
+            limit=DELIVERY_EVIDENCE_PAGE_SIZE,
+            now=now,
+            initial_latest=latest,
         ):
-            if operation.operation_id in release_candidates:
-                continue
-            if operation.status == "fail":
-                candidate = (
-                    operation.result.artifact_id if operation.result else ""
-                ) or operation.request.expected_artifact_id
-                events.append(
-                    (
-                        operation.operation_id,
-                        candidate or "request:" + _candidate_key(operation.idempotency_key),
-                        operation.error_code or "promotion_failed",
-                        operation.runner_trace_id or operation.operation_id,
-                        operation.finished_at or operation.updated_at,
-                        eligible_at_start(
-                            operation.finished_at or operation.updated_at, index == 0
-                        ),
-                    )
-                )
-    for record_id, candidate, reason, trace, finished, initial_eligible in events:
-        signature = _candidate_key(reason + ":" + finished)
-        if seen.get(record_id) == signature:
-            continue
-        if scan is not None or initial_eligible:
             try:
-                record_production_delivery_failure(
-                    store,
-                    profile,
-                    lane,
-                    candidate=candidate,
-                    reason=reason,
-                    trace_id=trace,
-                    observed_at=finished or now,
-                )
+                index.start(work)
+                events = _work_events(store, profile, index, work, now)
+                processed = dict(work.processed)
+                for record_id, candidate, reason, trace, finished in events:
+                    signature = _candidate_key(reason + ":" + finished)
+                    if processed.get(record_id, legacy_seen.get(record_id)) == signature:
+                        processed[record_id] = signature
+                        continue
+                    initial_eligible = work.source_id == latest.get(work.kind)
+                    if initial_eligible and latest.get("success"):
+                        try:
+                            initial_eligible = bool(
+                                finished and _time(finished) >= _time(latest["success"])
+                            )
+                        except ValueError:
+                            initial_eligible = False
+                    if not work.baseline or not checkpoint["initial"] or initial_eligible:
+                        record_production_delivery_failure(
+                            store,
+                            profile,
+                            lane,
+                            candidate=candidate,
+                            reason=reason,
+                            trace_id=trace,
+                            observed_at=finished or now,
+                        )
+                    processed[record_id] = signature
+                # Preserve the last failure for each fixed-plan step through
+                # pass/running transitions, so an identical replay stays silent.
+                index.acknowledge(work, processed)
             except Exception:
-                _LOGGER.exception("Could not persist delivery failure for %s", profile.product)
-                continue
-        seen[record_id] = signature
-    _write_receipt(store, key=scan_key, now=now, payload={"seen": seen})
-    # The matching delivery may be followed by another release between two polls.
+                failed = True
+                index.retry_later(work)
+                _LOGGER.exception("Could not process delivery evidence for %s", profile.product)
+        index.finish_bootstrap(lane.context, profile.product)
+        _recover_delivery_failures(store, profile, lane, now, index)
+        if failed:
+            raise RuntimeError("Production delivery evidence remains pending")
+
+
+def _recover_delivery_failures(
+    store: Store,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    now: str,
+    index: DeliveryEvidenceIndex,
+) -> None:
     for incident in store.list_public_ingress_incident_records(
         product=profile.product,
         context_name=lane.context,
@@ -530,28 +620,39 @@ def _scan_failures(
             }
         ):
             continue
-        for deployment in deployments:
-            if not deployment_record_passed(deployment) or not deployment.deploy.finished_at:
-                continue
-            keys = {_candidate_key(deployment.source_git_ref)}
-            if deployment.artifact_identity:
-                keys.add(_candidate_key(deployment.artifact_identity.artifact_id))
-            if incident.check_name in {DELIVERY_CHECK_PREFIX + key for key in keys} and _time(
-                deployment.deploy.finished_at
-            ) > _time(incident.opened_at):
-                _observe(
-                    store,
-                    profile,
-                    lane,
-                    check_name=incident.check_name,
-                    failed=False,
-                    summary="The matching production delivery succeeded.",
-                    observed_at=now,
-                )
-                break
-        else:
-            if incident.latest_observed_at == now:
-                continue
+        key = incident.check_name.removeprefix(DELIVERY_CHECK_PREFIX)
+
+        def verify_file(record_id: str) -> bool:
+            try:
+                record = store.read_deployment_record(record_id)
+            except FileNotFoundError:
+                return False
+            keys = {_candidate_key(record.source_git_ref)}
+            if record.artifact_identity:
+                keys.add(_candidate_key(record.artifact_identity.artifact_id))
+            return bool(
+                deployment_record_passed(record)
+                and key in keys
+                and record.deploy.finished_at
+                and _time(record.deploy.finished_at) > _time(incident.opened_at)
+            )
+
+        if index.matching_success(
+            lane.context,
+            key,
+            incident.opened_at,
+            verify_file if isinstance(store, FilesystemRecordStore) else None,
+        ):
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=incident.check_name,
+                failed=False,
+                summary="The matching production delivery succeeded.",
+                observed_at=now,
+            )
+        elif incident.latest_observed_at != now:
             reason = (
                 incident.material_fingerprint.route_authority.provider_check.rsplit("/", 1)[-1]
                 if incident.material_fingerprint

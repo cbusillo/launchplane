@@ -21,6 +21,7 @@ from tests import test_product_retirement_previews as integrated_retirement_test
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
+from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -28,7 +29,7 @@ from uuid import uuid4
 from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-from sqlalchemy import create_engine, event, insert, inspect, select, text, update
+from sqlalchemy import create_engine, delete, event, insert, inspect, select, text, update
 from sqlalchemy.engine import Engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -1117,6 +1118,14 @@ class RealPostgresIntegratedProductRetirementTests(
         return self.enterContext(_head_postgres_database())
 
 
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldRehearsalTests):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
 class RealPostgresHistoricalEffectRepositoryFenceTests(
     historical_storage_tests.HistoricalEffectRepositoryFenceTests
 ):
@@ -1613,6 +1622,49 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_delivery_index_migration_backfills_existing_production_history(self) -> None:
+        from importlib import import_module
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+        from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
+
+        migration = import_module(
+            "control_plane.storage.migrations.versions.d3e7a1b5c9f2_index_delivery_evidence"
+        )
+        case = DeliveryEvidenceIndexTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        case.setup_store("sqlite")
+        record = case.deploy("historical", failed=True)
+        assert record.artifact_identity is not None
+        with _isolated_postgres_database() as database_url:
+            config = _alembic_config(database_url)
+            alembic_command.upgrade(config, migration.down_revision)
+            engine = create_engine(database_url)
+            self.addCleanup(engine.dispose)
+            with engine.begin() as connection:
+                connection.execute(
+                    insert(LaunchplaneDeploymentRow).values(
+                        record_id=record.record_id,
+                        context=record.context,
+                        instance="prod",
+                        artifact_id=record.artifact_identity.artifact_id,
+                        source_git_ref=record.source_git_ref,
+                        deploy_started_at="",
+                        deploy_finished_at=record.deploy.finished_at,
+                        payload={
+                            **record.model_dump(mode="json"),
+                            "retired_legacy_field": "historical",
+                        },
+                    )
+                )
+            alembic_command.upgrade(config, "head")
+            store = PostgresRecordStore(database_url=database_url)
+            self.addCleanup(store.close)
+            with store.delivery_evidence_index() as index:
+                self.assertEqual(index.latest_deployment_id(record.context), record.record_id)
+                (work,) = index.pending(record.context, case.profile.product, limit=1)
+                self.assertEqual(work.source_id, record.record_id)
+
     def test_first_override_write_requires_the_reviewed_absence(self) -> None:
         from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 
@@ -4528,6 +4580,227 @@ def _owner_control_shadow_envelope(
 
 
 class RealPostgresStorageConcurrencyTests(unittest.TestCase):
+    def test_delivery_projection_uses_canonical_times_and_candidate_identities(self) -> None:
+        from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+        from control_plane.storage.delivery_evidence import sources, normalized_time
+        from control_plane.production_delivery_monitor import _candidate_key
+
+        case = DeliveryEvidenceIndexTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        with _store_for_fresh_head_database() as store:
+            case.store = store
+            store.write_product_profile_record(case.profile)
+            record = case.deploy("current")
+            moment = case.now.replace(microsecond=0)
+            payload = record.model_dump(mode="json")
+            payload["source_git_ref"] = "\t source-revision\u00a0"
+            payload["artifact_identity"] = None
+            payload["deploy"]["finished_at"] = moment.replace(tzinfo=None).isoformat()
+            with store._engine.begin() as connection:
+                connection.execute(text("SET LOCAL timezone = 'America/New_York'"))
+                connection.execute(
+                    update(LaunchplaneDeploymentRow)
+                    .where(LaunchplaneDeploymentRow.record_id == record.record_id)
+                    .values(payload=payload)
+                )
+            with store.delivery_evidence_index() as index:
+                with index.engine.connect() as connection:
+                    projection = (
+                        connection.execute(
+                            select(sources).where(sources.c.source_id == record.record_id)
+                        )
+                        .mappings()
+                        .one()
+                    )
+                self.assertEqual(
+                    projection["source_key"], _candidate_key(payload["source_git_ref"])
+                )
+                self.assertFalse(projection["artifact_key"])
+                self.assertEqual(projection["finished_at"], normalized_time(moment.isoformat()))
+                self.assertFalse(
+                    index.matching_success(
+                        record.context,
+                        _candidate_key(payload["source_git_ref"]),
+                        moment.isoformat(),
+                    ),
+                    "An equally timed success cannot recover a failure",
+                )
+                self.assertTrue(
+                    index.matching_success(
+                        record.context,
+                        _candidate_key(payload["source_git_ref"]),
+                        (moment - timedelta(seconds=1)).isoformat(),
+                    )
+                )
+
+    def test_delivery_capture_observes_core_writes_without_runtime_hooks(self) -> None:
+        from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
+        from control_plane.storage.postgres import (
+            LaunchplaneDeploymentRow,
+            LaunchplaneIdempotencyRow,
+        )
+        from control_plane.generic_web_promotion_http import GENERIC_WEB_PROD_PROMOTION_ROUTE
+        from control_plane.client_release import CLIENT_RELEASE_IDEMPOTENCY_SCOPE
+        from tests.test_release_review_storage import standing_decision
+
+        case = DeliveryEvidenceIndexTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        with _store_for_fresh_head_database() as store:
+            case.store = store
+            store.write_product_profile_record(case.profile)
+            record = case.deploy("current")
+            case.monitor()
+            assert record.artifact_identity is not None
+            failed = record.model_copy(
+                update={
+                    "record_id": "old-writer",
+                    "deploy": record.deploy.model_copy(update={"status": "fail"}),
+                }
+            )
+            with store._engine.begin() as connection:
+                connection.execute(
+                    insert(LaunchplaneDeploymentRow).values(
+                        record_id=failed.record_id,
+                        context=failed.context,
+                        instance="prod",
+                        artifact_id=record.artifact_identity.artifact_id,
+                        source_git_ref=failed.source_git_ref,
+                        deploy_started_at="",
+                        deploy_finished_at=failed.deploy.finished_at,
+                        payload=failed.model_dump(mode="json"),
+                    )
+                )
+            case.monitor()
+            self.assertTrue(
+                any(
+                    "old-writer" in incident.summary
+                    for incident in store.list_public_ingress_incident_records(status="open")
+                )
+            )
+            success = record.model_copy(
+                update={
+                    "record_id": failed.record_id,
+                    "deploy": record.deploy.model_copy(
+                        update={"finished_at": (case.now + timedelta(seconds=1)).isoformat()}
+                    ),
+                }
+            )
+            with store._engine.begin() as connection:
+                connection.execute(
+                    update(LaunchplaneDeploymentRow)
+                    .where(LaunchplaneDeploymentRow.record_id == success.record_id)
+                    .values(
+                        payload=success.model_dump(mode="json"),
+                        deploy_finished_at=success.deploy.finished_at,
+                    )
+                )
+            case.monitor()
+            self.assertFalse(store.list_public_ingress_incident_records(status="open"))
+            # A release step written through Core also wakes an acknowledged decision.
+            decision = standing_decision(store)
+            store.write_release_review_decision_record(decision)
+            store.reserve_mutation(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=decision.record_id + ":promote-1",
+                request_fingerprint="f" * 64,
+                lease_owner="old-worker",
+            )
+            reservation = store.read_idempotency_record(
+                scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+                route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                idempotency_key=decision.record_id + ":promote-1",
+            )
+            assert reservation is not None
+            profile = store.read_product_profile_record(decision.product)
+            context = next(lane.context for lane in profile.lanes if lane.instance == "prod")
+            with store.delivery_evidence_index() as index:
+                index.bind(
+                    decision.record_id,
+                    ("launchplane_idempotency_records:" + reservation.record_id,),
+                )
+                work = next(
+                    work
+                    for work in index.pending(context, profile.product, limit=10)
+                    if work.kind == "decision"
+                )
+                index.acknowledge(work, {})
+                with store._engine.begin() as connection:
+                    connection.execute(
+                        update(LaunchplaneIdempotencyRow)
+                        .where(LaunchplaneIdempotencyRow.record_id == reservation.record_id)
+                        .values(
+                            payload={
+                                **reservation.model_dump(mode="json"),
+                                "response_trace_id": "updated-worker-trace",
+                            }
+                        )
+                    )
+                self.assertIn(
+                    "decision:" + decision.record_id,
+                    {work.key for work in index.pending(context, profile.product, limit=10)},
+                )
+
+    def test_delivery_index_commits_with_source_and_fences_replica_acknowledgement(self) -> None:
+        from tests.test_delivery_evidence_index import DeliveryEvidenceIndexTests
+        from control_plane.storage.delivery_evidence import sources
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+
+        case = DeliveryEvidenceIndexTests()
+        case.setUp()
+        self.addCleanup(case.doCleanups)
+        with _store_for_fresh_head_database() as store:
+            case.store = store
+            store.write_product_profile_record(case.profile)
+            case.deploy("candidate")
+            case.monitor()
+            case.deploy("candidate", failed=True)
+            with store.delivery_evidence_index() as index:
+                (old,) = index.pending(case.lane.context, case.profile.product, limit=1)
+                with index.lane_lock(case.lane.context, case.profile.product) as first:
+                    self.assertTrue(first)
+                    with index.lane_lock(case.lane.context, case.profile.product) as second:
+                        self.assertFalse(second)
+                case.deploy("candidate", failed=True, code="later_stage_failed")
+                index.acknowledge(old, {})
+                self.assertTrue(index.pending(case.lane.context, case.profile.product, limit=1))
+                with index.engine.begin() as connection:
+                    connection.execute(
+                        delete(LaunchplaneDeploymentRow).where(
+                            LaunchplaneDeploymentRow.record_id == "candidate"
+                        )
+                    )
+                with index.engine.connect() as connection:
+                    self.assertFalse(connection.execute(select(sources.c.key)).all())
+            # Rollback includes the marker created by the mapper hook.
+            record = case.deploy("retained")
+            with store._session_factory() as session:
+                session.add(
+                    LaunchplaneDeploymentRow(
+                        record_id="rolled-back",
+                        context=record.context,
+                        instance="prod",
+                        artifact_id="image@rolled-back",
+                        source_git_ref="rolled-back",
+                        deploy_started_at="",
+                        deploy_finished_at=record.deploy.finished_at,
+                        payload={**record.model_dump(mode="json"), "record_id": "rolled-back"},
+                    )
+                )
+                session.flush()
+                session.rollback()
+            with store.delivery_evidence_index() as index:
+                self.assertNotIn(
+                    "deployment:rolled-back",
+                    {
+                        work.key
+                        for work in index.pending(case.lane.context, case.profile.product, limit=10)
+                    },
+                )
+
     def test_evidence_window_is_reserved_once_across_database_connections(self) -> None:
         from control_plane.health_alert_drill import DRILL_ROUTE
 

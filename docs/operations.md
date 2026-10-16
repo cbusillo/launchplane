@@ -1915,6 +1915,47 @@ policy covers provider incidents when qualifying notification delivery. The
 route must have passed its existing product-scope authorization check; ordinary
 in-progress retries and idempotency-protocol errors do not open delivery incidents.
 
+Recurring delivery evidence reads use a derived storage index, not an event-time
+watermark. Each pass reads at most `DELIVERY_EVIDENCE_PAGE_SIZE` changed sources
+and recovery queries use the indexed matching successful
+candidate, including successes between polls. Database triggers capture source
+inserts, updates and deletes in their transaction, including writes by an older
+running service or Core SQL, so late/backdated records and changes to old steps
+remain visible.
+Release dependencies include unstarted steps and failure recovery; creating or
+updating a step wakes its decision. A per-lane monitor lock excludes overlapping
+scans, and acknowledgement compares the source version so concurrent updates
+remain pending. Failed persistence leaves work pending for retry after restart.
+This does not add release or authorization authority.
+
+The index has at most one row and one pending version per retained source.
+Acknowledged signatures are bounded by that source's fixed event/step plan, and
+DB retention deletes remove its row and release bindings, including bulk deletes.
+The new per-product checkpoint stays constant size after bootstrap. The previous
+monitor's failure receipt is read once and preserved unchanged for overlapping
+old replicas and rollback compatibility; the current monitor never appends to or
+rewrites it. Its growth ends with the last old monitor pass. The migration traverses old
+DB sources once; filesystem rehearsals do the same on first index use and mark
+pending work before atomic source replacement under the bundle lock. Existing
+processed identities are consumed during paged bootstrap and then removed from
+the new checkpoint, while the original legacy receipt remains intact. The filesystem index lives at `.delivery-evidence.sqlite3` under
+the explicit state directory. Use store APIs for file-backed evidence writes;
+editing historical JSON files directly does not update its derived index.
+New or changed evidence runs ahead of initial historical backfill, so an
+upgrade backlog cannot postpone a new failure behind the old history. The fixed
+latest identities from the first-scan snapshot are also read by key, so its
+existing latest failure can alert on the first pass while old pages drain. The
+migration uses a frozen schema and raw-JSON projection without validating
+historical rows against current runtime models or acquiring a lock per row.
+Installing capture and backfilling are one migration transaction: source-table
+writes, including idempotency writes, wait until that transaction commits. Use
+the existing drained service migration/restart path; this is a one-time upgrade
+cost, and a rollback image may still read its preserved legacy receipt.
+File-backed history is backfilled by the first monitor pass; a damaged old file
+can make monitoring unavailable but cannot block a new source write.
+Storage outcomes and the incident/outbox remain the authorities; the index owns
+only discovery, ordering and deduplication bookkeeping.
+
 Merged default-branch source waiting for release is not a production failure,
 regardless of its age. Client acceptance starts a release; engineering-only
 changes may wait on testing until a later release. This wait never opens a red
@@ -3295,9 +3336,51 @@ alone is not proof that an existing testing copy has been repaired.
   and `testing-hold-apply` with the saved dry-run evidence, expected digest,
   reviewed acknowledgement and idempotency key. Use the same exact
   `--product`, `--context`, `--instance testing` for review and apply. A lift
-  requests testing reconciliation and can deploy: the Director's agent may
-  plan it, but existing write authority still governs apply (`local_operator`
-  lift applies remain refused). See the hold's
+  requests testing reconciliation and can deploy. The original Director agent
+  may set and lift a rehearsal hold on a currently qualified disposable testing
+  lane without a new grant. For rehearsal holds use the repo's
+  `scripts/stage-testing-separation.py` with `--hold-purpose staff_testing`,
+  `--require-rehearsal` and
+  `--operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py`.
+  Its `hold-read`, `hold-dry-run`, `hold-apply`, `lift-dry-run` and `lift-apply`
+  modes use that same configured authenticated transport. Planning saves a private
+  `--evidence-file` outside the checkout; apply requires that same file,
+  `--reviewed-dry-run` and a stable `--idempotency-key`. Use separate evidence
+  files/keys for set and lift and keep the same product, context and reason
+  between each plan and its apply. The catalog's hold projection does not yet
+  accept rehearsal provenance (tracked in [codex-skills#1881](https://github.com/cbusillo/codex-skills/issues/1881)).
+  The service marks the hold
+  with `rehearsal` provenance only when setting it on an unused, reproducible,
+  isolated lane with current binding-matched service safety evidence and no
+  active or uncertain execution. An ordinary staff hold, a foreign actor's hold,
+  and an isolation-staging interlock cannot acquire this permission by changing
+  a reason or purpose. The request's explicit `rehearsal=true` opt-in selects
+  qualification, never supplies its provenance. Ordinary/default staff hold
+  requests do not opt in, even when the lane is currently unused.
+  Complete this short rehearsal before the original qualification expires:
+  current executor-produced observations last five minutes (the safety schema
+  permits at most fifteen). No current producer refreshes the original unheld
+  binding while a hold is present. Expiry or a new protective observation
+  requires an administrator to retain/resolve the hold; do not clear evidence,
+  relabel it as staging or assert that staff are absent. This is not the way to
+  end a real staff testing session. Reasserting an ordinary protective hold,
+  even with the same reason, removes rehearsal provenance.
+  Lift rechecks those facts under the service authority lock; only the hold's
+  own metadata is removed from the safety comparison. Configuration/resource
+  drift, stale/unknown facts, actual use, only-copy custody, shared resources,
+  and unresolved operations keep the hold. A mismatched reviewed digest refuses
+  even if the requested state already exists. The rehearsal hold change,
+  reconcile request and idempotency response commit atomically: a failure before
+  commit keeps all three unchanged; a lost response after commit replays the
+  saved response without new effects, even after safety expires. A fresh lift
+  with no original rehearsal hold refuses. A successful normal lift requests
+  testing reconciliation. Existing explicit authority can still set an ordinary
+  protective hold when disposable qualification is unavailable; lifting that
+  hold remains an administrator action. Plans stay read-only for protected lanes
+  and do not manufacture missing safety evidence. The general observation
+  collector does not establish unused/reproducible/isolated facts; use the
+  current executor-produced qualification, or report that prerequisite.
+  See the hold's
   [dispatch limits](event-driven-deploys.md#staff-testing-hold) before isolation
   staging; a hold is not proof of executor/provider quiescence.
   The [generic-web exclusion read and maintained-transport consumer](event-driven-deploys.md#generic-web-testing-exclusion-inspection)

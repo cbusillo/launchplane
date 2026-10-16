@@ -1359,6 +1359,48 @@ class GenericWebClientReleaseTests(unittest.TestCase):
         assert run is not None
         self.assertEqual(run.steps[2].status, "not_started")
 
+    def test_delivery_monitor_rechecks_a_running_step_when_its_lease_expires(self) -> None:
+        from unittest.mock import Mock
+        from control_plane.production_delivery_monitor import monitor_production_delivery_once
+
+        accepted = self.accept()
+        self.advance()
+        self.capture()
+        self.store.reserve_mutation(
+            scope=CLIENT_RELEASE_IDEMPOTENCY_SCOPE,
+            route_path=GENERIC_WEB_PROD_PROMOTION_ROUTE,
+            idempotency_key=f"{accepted.record_id}:promote-1",
+            request_fingerprint="f" * 64,
+            lease_owner="crashed-worker",
+            lease_seconds=300,
+        )
+
+        def monitor(now: datetime) -> None:
+            monitor_production_delivery_once(
+                self.store,
+                observed_at=now.isoformat(),
+                transport_factory=lambda _store, _profile: Mock(
+                    get_json=Mock(
+                        side_effect=lambda path: (
+                            {"sha": HEAD} if "/commits/" in path else {"status": "behind"}
+                        )
+                    )
+                ),
+            )
+
+        now = datetime.now(UTC)
+        monitor(now)
+        self.assertFalse(self.store.list_public_ingress_incident_records(status="open"))
+        future = now + timedelta(seconds=600)
+        with patch("control_plane.client_release.datetime") as clock:
+            clock.now.return_value = future
+            monitor(future)
+            run = read_client_release_run(store=self.store, profile=self.profile, decision=accepted)
+        assert run is not None
+        incidents = self.store.list_public_ingress_incident_records(status="open")
+        self.assertEqual(len(incidents), 1)
+        self.assertIn(run.steps[-1].status, incidents[0].summary)
+
     def test_expired_running_promotion_reports_reconciliation(self) -> None:
         accepted = self.accept()
         self.advance()

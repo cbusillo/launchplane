@@ -14,6 +14,13 @@ from typing import Any, Literal, TypeVar, cast
 
 from pydantic import BaseModel
 
+from control_plane.storage.delivery_evidence import (
+    DeliveryEvidenceIndex,
+    FILESYSTEM_TYPES,
+    filesystem_index,
+    source_changed,
+)
+
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -351,6 +358,19 @@ def _lease_expires_at(*, observed_at: str, lease_seconds: int) -> str:
 
 
 class FilesystemRecordStore:
+    @contextmanager
+    def delivery_evidence_index(self) -> Iterator[DeliveryEvidenceIndex]:
+        # Initialization may scan old files once. Release the bundle lock before
+        # observations write through the normal store path.
+        with self._product_authority_bundle_lock():
+            manager = filesystem_index(self.state_dir)
+            index = manager.__enter__()
+            index.initialization_lock = self._product_authority_bundle_lock
+        try:
+            yield index
+        finally:
+            manager.__exit__(None, None, None)
+
     odoo_stable_bootstrap_reservation_settle_timeout_seconds = 30.0
     odoo_stable_bootstrap_reservation_poll_seconds = 0.01
     odoo_target_replacement_reservation_settle_timeout_seconds = 30.0
@@ -386,6 +406,17 @@ class FilesystemRecordStore:
                 )
                 record_file.flush()
                 os.fsync(record_file.fileno())
+            if record_type in FILESYSTEM_TYPES:
+                # Publish pending work first, under the same bundle lock as the
+                # atomic file replacement. A crash can leave retryable extra work,
+                # but cannot publish a source without its pending marker.
+                with (
+                    filesystem_index(self.state_dir, backfill=False) as index,
+                    index.engine.begin() as connection,
+                ):
+                    source_changed(
+                        connection, FILESYSTEM_TYPES[record_type], model.model_dump(mode="json")
+                    )
             os.replace(temporary_path, record_path)
         finally:
             Path(temporary_path).unlink(missing_ok=True)
