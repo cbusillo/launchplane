@@ -13,16 +13,72 @@ from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH, ODOO_WEB_START_C
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceAuthorizationDenied
 
 
+# Public diagnostics are a closed vocabulary, never exception text or topology.
+ODOO_USAGE_PROBE_REASON_CODES = frozenset(
+    [
+        "container_identity_changed",
+        "container_inventory_unavailable",
+        "container_probe_unavailable",
+        "database_cleanup_unavailable",
+        "database_connection_unavailable",
+        "database_driver_unavailable",
+        "database_network_unavailable",
+        "login_history_unavailable",
+        "probe_result_invalid",
+        "process_inventory_unavailable",
+        "runtime_changed",
+        "service_ambiguous_or_stopped",
+        "service_unavailable",
+        "serving_configuration_mismatch",
+        "serving_process_absent",
+        "session_alias_unsupported",
+        "session_file_unavailable",
+        "session_file_unreadable",
+        "session_inventory_exceeds_bound",
+        "session_layout_unsupported",
+        "session_location_unavailable",
+        "session_store_unavailable",
+        "testing_environment_unavailable",
+        "testing_identity_mismatch",
+        "unsupported_lane",
+        "web_command_unsupported",
+        "web_configuration_unavailable",
+        "web_database_mismatch",
+    ]
+)
+ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
+    [
+        "complete",
+        "diagnostics_unavailable",
+        "diagnostics_unrecognized",
+        "not_collected",
+        "provider_config_unavailable",
+        "provider_target_changed",
+        "provider_target_unavailable",
+        "provider_transport_unavailable",
+        "staff_testing_hold",
+        "target_alias",
+        "target_unavailable",
+    ]
+)
+
+
 @dataclass(frozen=True)
 class OdooTestingUsage:
     usage: Literal["unknown", "unused", "in_use"] = "unknown"
     recent_signins: bool | None = None
     authenticated_sessions: bool | None = None
+    reason_code: str = "not_collected"
 
     def payload(self) -> dict[str, object]:
         return {
             "recent_signins": self.recent_signins,
             "authenticated_sessions": self.authenticated_sessions,
+            "reason_code": (
+                self.reason_code
+                if self.reason_code in ODOO_USAGE_REASON_CODES
+                else "probe_result_invalid"
+            ),
         }
 
 
@@ -31,8 +87,12 @@ class OdooTestingUsage:
 ODOO_TESTING_USAGE_CONTAINER_PROGRAM = r"""
 import argparse, configparser, json, os, re, stat
 from pathlib import Path
-import psycopg2
 CONFIG_PATH=__CONFIG_PATH__
+checkpoint='testing_environment_unavailable'
+
+class UsageUnavailable(ValueError):
+    pass
+
 
 def serving_configured(process, options, database):
     arguments=[arg.decode() for arg in process]
@@ -59,62 +119,79 @@ def serving_configured(process, options, database):
             and args.db_filter=='^'+re.escape(database)+'$')
 
 def read_sessions(path, database):
+    global checkpoint
+    checkpoint='session_store_unavailable'
     # Count every authenticated or partially authenticated file, regardless of
     # age. A database/device row is not proof that a browser session has ended.
     # Bound traversal and bytes; truncation or an unreadable file is unknown.
     if path.is_symlink() or not path.is_dir():
-        raise ValueError('Session store unavailable')
+        raise UsageUnavailable('session_store_unavailable')
     pending=[path]
     visited=0
     used=False
     while pending:
+        checkpoint='session_store_unavailable'
         current=pending.pop()
         for entry in current.iterdir():
+            checkpoint='session_file_unavailable'
             visited+=1
             if visited>20000:
-                raise ValueError('Session inventory exceeds bound')
+                raise UsageUnavailable('session_inventory_exceeds_bound')
             info=entry.lstat()
             if stat.S_ISLNK(info.st_mode):
-                raise ValueError('Session alias is unsupported')
+                raise UsageUnavailable('session_alias_unsupported')
             if stat.S_ISDIR(info.st_mode):
                 if current!=path:
-                    raise ValueError('Unsupported session layout')
+                    raise UsageUnavailable('session_layout_unsupported')
                 pending.append(entry)
                 continue
             if not stat.S_ISREG(info.st_mode) or info.st_size>1024*1024:
-                raise ValueError('Session file unavailable')
+                raise UsageUnavailable('session_file_unavailable')
             # Include legacy flat files and in-progress writes. Incomplete JSON
             # cannot establish absence. Never deserialize executable pickle data.
+            checkpoint='session_file_unreadable'
             with entry.open(encoding='utf-8') as handle:
                 data=json.load(handle)
             if not isinstance(data,dict):
-                raise ValueError('Session file unreadable')
+                raise UsageUnavailable('session_file_unreadable')
             if data.get('db')==database and (data.get('uid') or data.get('pre_uid')):
                 used=True
     return used
 
 def probe():
+    global checkpoint
+    checkpoint='database_driver_unavailable'
+    import psycopg2
+    checkpoint='testing_environment_unavailable'
     if os.environ.get('PLATFORM_INSTANCE')!='testing':
-        raise ValueError('Testing only')
+        raise UsageUnavailable('unsupported_lane')
     database=os.environ['ODOO_DB_NAME']
+    checkpoint='web_configuration_unavailable'
     config=configparser.ConfigParser(interpolation=None)
     if config.read(CONFIG_PATH)!=[CONFIG_PATH]:
-        raise ValueError('Web configuration unavailable')
+        raise UsageUnavailable('web_configuration_unavailable')
     options=config['options']
+    if any(key not in options for key in ('db_user','db_password')):
+        raise UsageUnavailable('web_configuration_unavailable')
     if options.get('db_name')!=database or options.get('db_host')!='database':
-        raise ValueError('Web database configuration changed')
+        raise UsageUnavailable('web_database_mismatch')
+    checkpoint='session_location_unavailable'
     data_dir=Path(options['data_dir'])
     if not data_dir.is_absolute():
-        raise ValueError('Session location unavailable')
+        raise UsageUnavailable('session_location_unavailable')
     # The supported startup hands this configuration to Odoo. A waiting gate,
     # custom command or another config cannot qualify this read.
+    checkpoint='process_inventory_unavailable'
     processes=[[a for a in p.read_bytes().split(b'\0') if a]
                for p in Path('/proc').glob('[0-9]*/cmdline')]
     odoo_processes=[p for p in processes if any(
         arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'} for arg in p[:2])]
-    if not odoo_processes or not all(serving_configured(p,options,database) for p in odoo_processes):
-        raise ValueError('Serving configuration unavailable')
+    if not odoo_processes:
+        raise UsageUnavailable('serving_process_absent')
+    if not all(serving_configured(p,options,database) for p in odoo_processes):
+        raise UsageUnavailable('serving_configuration_mismatch')
     session_use=read_sessions(data_dir/'sessions',database)
+    checkpoint='database_connection_unavailable'
     connection=psycopg2.connect(
         host='database',port=options.get('db_port') or '5432',
         user=options['db_user'],password=options['db_password'],
@@ -122,6 +199,7 @@ def probe():
         options='-c default_transaction_read_only=on -c statement_timeout=10000',
     )
     try:
+        checkpoint='login_history_unavailable'
         with connection.cursor() as cursor:
             cursor.execute('SET TRANSACTION READ ONLY')
             # Include all accounts, including portal/admin/automation. Restored
@@ -129,7 +207,8 @@ def probe():
             cursor.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= (CURRENT_TIMESTAMP AT TIME ZONE 'UTC') - interval '24 hours')")
             recent=cursor.fetchone()[0]
             if type(recent) is not bool:
-                raise ValueError('Login history unavailable')
+                raise UsageUnavailable('login_history_unavailable')
+        checkpoint='database_cleanup_unavailable'
         connection.rollback()
     finally:
         connection.close()
@@ -141,8 +220,10 @@ def probe():
 if __name__=='__main__':
     try:
         result=probe()
+    except UsageUnavailable as error:
+        result={'type':'complete','unavailable':True,'reason_code':str(error)}
     except Exception:
-        result={'type':'complete','unavailable':True}
+        result={'type':'complete','unavailable':True,'reason_code':checkpoint}
     print(json.dumps(result),flush=True)
 """.replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH))
 
@@ -152,6 +233,11 @@ import base64,json,subprocess,sys
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
 START_COMMAND=__START_COMMAND__
+checkpoint='container_inventory_unavailable'
+
+class UsageUnavailable(ValueError):
+    pass
+
 
 def docker(*args,stdin=None):
     return subprocess.run(['docker',*args],input=stdin,capture_output=True,check=True,timeout=25).stdout
@@ -159,54 +245,59 @@ def docker(*args,stdin=None):
 def containers():
     ids=docker('ps','-aq','--filter','label=com.docker.compose.project='+spec['project']).decode().split()
     if not ids or len(ids)>16:
-        raise ValueError('Container inventory unavailable')
+        raise UsageUnavailable('container_inventory_unavailable')
     values=json.loads(docker('inspect',*ids))
     if not isinstance(values,list) or len(values)!=len(ids):
-        raise ValueError('Container inventory incomplete')
+        raise UsageUnavailable('container_inventory_unavailable')
     services={}
     for value in values:
         config=value['Config']
         labels=config['Labels']
         if labels.get('com.docker.compose.project')!=spec['project']:
-            raise ValueError('Container changed')
+            raise UsageUnavailable('container_identity_changed')
         service=labels.get('com.docker.compose.service')
         if service not in {'web','database'}:
             continue
         if service in services or value['State'].get('Running') is not True:
-            raise ValueError('Ambiguous or stopped service')
+            raise UsageUnavailable('service_ambiguous_or_stopped')
         services[service]=value
     if set(services)!={'web','database'}:
-        raise ValueError('Service unavailable')
+        raise UsageUnavailable('service_unavailable')
     web=services['web']
     env=dict(item.split('=',1) for item in web['Config']['Env'] if '=' in item)
     if env.get('PLATFORM_CONTEXT')!=spec['context'] or env.get('PLATFORM_INSTANCE')!='testing' or env.get('ODOO_DB_HOST')!='database':
-        raise ValueError('Testing identity unavailable')
+        raise UsageUnavailable('testing_identity_mismatch')
     # A custom startup may select a different config/session store.
     command=web['Config'].get('Cmd') or []
     if not any(START_COMMAND in arg for arg in command):
-        raise ValueError('Unsupported web command')
+        raise UsageUnavailable('web_command_unsupported')
     networks=web['NetworkSettings']['Networks']
     db_networks=services['database']['NetworkSettings']['Networks']
     if not set(networks)&set(db_networks):
-        raise ValueError('Local database unavailable')
+        raise UsageUnavailable('database_network_unavailable')
     return {key:{'Id':value['Id'],'Config':value['Config'],'Mounts':value['Mounts'],
                  'NetworkSettings':value['NetworkSettings'],
                  'StartedAt':value['State']['StartedAt']} for key,value in services.items()}
 
 try:
     before=containers()
+    checkpoint='container_probe_unavailable'
     output=docker('exec','-i',before['web']['Id'],'python3','-',stdin=spec['container_program'].encode())
+    checkpoint='container_inventory_unavailable'
     after=containers()
     # Compare full Docker snapshots: identities, start times, env, command,
     # mounts and network changes invalidate the observation.
     if before!=after:
-        raise ValueError('Runtime changed')
+        raise UsageUnavailable('runtime_changed')
+    checkpoint='probe_result_invalid'
     result=json.loads(output)
     if not isinstance(result,dict) or result.get('type')!='complete':
-        raise ValueError('Read incomplete')
+        raise UsageUnavailable('probe_result_invalid')
     print(prefix+json.dumps(result),flush=True)
+except UsageUnavailable as error:
+    print(prefix+json.dumps({'type':'complete','unavailable':True,'reason_code':str(error)}),flush=True)
 except Exception:
-    print(prefix+json.dumps({'type':'complete','unavailable':True}),flush=True)
+    print(prefix+json.dumps({'type':'complete','unavailable':True,'reason_code':checkpoint}),flush=True)
 """.replace("__START_COMMAND__", repr(ODOO_WEB_START_COMMAND))
 
 
@@ -218,20 +309,23 @@ def read_odoo_testing_usage(
     database_url: str,
 ) -> OdooTestingUsage:
     if target.instance != "testing" or target.target_type != "compose":
-        return OdooTestingUsage()
+        return OdooTestingUsage(reason_code="unsupported_lane")
+    checkpoint = "provider_config_unavailable"
     try:
         host, token = source.read_dokploy_config(
             control_plane_root=control_plane_root, database_url=database_url
         )
+        checkpoint = "provider_target_unavailable"
         provider = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=target_id.target_id
         )
         if not isinstance(provider, dict) or str(provider.get("name") or "") != target.target_name:
-            return OdooTestingUsage()
+            return OdooTestingUsage(reason_code="provider_target_unavailable")
         project = str(provider.get("appName") or "")
         if not project:
-            return OdooTestingUsage()
+            return OdooTestingUsage(reason_code="provider_target_unavailable")
         frames: list[dict[str, object]] = []
+        checkpoint = "provider_transport_unavailable"
         _read_remote(
             host=host,
             token=token,
@@ -245,29 +339,47 @@ def read_odoo_testing_usage(
             timeout_seconds=90,
             receive=frames.append,
         )
+        checkpoint = "provider_target_unavailable"
         current = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=target_id.target_id
         )
         if not isinstance(current, dict) or any(
             current.get(key) != provider.get(key) for key in ("name", "appName", "serverId")
         ):
-            return OdooTestingUsage()
+            return OdooTestingUsage(reason_code="provider_target_changed")
+        checkpoint = "probe_result_invalid"
+        if (
+            len(frames) == 1
+            and isinstance(frames[0], dict)
+            and set(frames[0]) == {"type", "unavailable", "reason_code"}
+        ):
+            frame = frames[0]
+            reason = frame["reason_code"]
+            if (
+                frame["type"] == "complete"
+                and frame["unavailable"] is True
+                and isinstance(reason, str)
+                and reason in ODOO_USAGE_PROBE_REASON_CODES
+            ):
+                return OdooTestingUsage(reason_code=reason)
         if (
             len(frames) != 1
             or set(frames[0]) != {"type", "recent_signins", "authenticated_sessions"}
             or frames[0]["type"] != "complete"
         ):
-            return OdooTestingUsage()
+            return OdooTestingUsage(reason_code="probe_result_invalid")
         recent, sessions = frames[0]["recent_signins"], frames[0]["authenticated_sessions"]
         if type(recent) is not bool or type(sessions) is not bool:
-            return OdooTestingUsage()
-        return OdooTestingUsage("in_use" if recent or sessions else "unused", recent, sessions)
+            return OdooTestingUsage(reason_code="probe_result_invalid")
+        return OdooTestingUsage(
+            "in_use" if recent or sessions else "unused", recent, sessions, "complete"
+        )
     except NativeSourceAuthorizationDenied:
         raise
     except api.DokployRequestFailed as error:
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied("The provider refused the usage read.") from None
-        return OdooTestingUsage()
+        return OdooTestingUsage(reason_code=checkpoint)
     except (
         ValueError,
         OSError,
@@ -277,4 +389,4 @@ def read_odoo_testing_usage(
         WebSocketException,
         click.ClickException,
     ):
-        return OdooTestingUsage()
+        return OdooTestingUsage(reason_code=checkpoint)
