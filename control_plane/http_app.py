@@ -187,6 +187,14 @@ from control_plane.contracts.authz_access_read import (
     EffectiveAccessEvaluateResponse,
     EffectiveAccessRequestSummary,
 )
+from control_plane.authz_rule_retirement import (
+    ROUTE as WORKFLOW_RULE_RETIREMENT_ROUTE,
+    WorkflowRuleRetirementRequest,
+    workflow_rule_retirement_plan,
+)
+from control_plane.http_routes.runtime_setting_removal import (
+    register_runtime_setting_removal_routes,
+)
 from control_plane.authz_retirement_evidence import build_retirement_evidence
 from control_plane.contracts.authz_retirement_evidence import (
     AuthzRetirementEvidenceRequest,
@@ -20332,6 +20340,56 @@ def create_launchplane_fastapi_app(
             )
         return result
 
+    def read_workflow_rule_retirement_plan(
+        payload: WorkflowRuleRetirementRequest,
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(read_nonpersisting_sensitive_identity)],
+        record_store: Annotated[object, Depends(get_record_store)],
+    ) -> dict[str, object]:
+        trace_id = next_trace_id()
+        response.headers["Cache-Control"] = "no-store"
+        _, active_record = require_authz_policy_administration_read(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        # Full selectors span products. Client-scoped readers cannot export them.
+        if not director_agent_identity(identity) and not active_record.policy.allows(
+            identity=identity,
+            action=AUTHZ_POLICY_ADMINISTRATION_READ_ACTION,
+            product="launchplane",
+            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            inherit_agent_read_role=False,
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Full rule scopes require service-wide policy read authority.",
+            )
+        try:
+            result = workflow_rule_retirement_plan(active_record, payload)
+        except ValueError:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="workflow_rule_selection_changed",
+                message="Refresh the exact policy/rule selection.",
+            ) from None
+        _, final_record = require_authz_policy_administration_read(
+            identity=identity,
+            record_store=record_store,
+            trace_id=trace_id,
+        )
+        if final_record != active_record:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="workflow_rule_selection_changed",
+                message="Policy changed during planning.",
+            )
+        return {"status": "ok", "trace_id": trace_id, "result": result}
+
     async def read_authz_policy_health(
         identity: Annotated[LaunchplaneIdentity, Depends(read_identity)],
         record_store: Annotated[object, Depends(get_record_store)],
@@ -29079,6 +29137,15 @@ def create_launchplane_fastapi_app(
     )
 
     app.add_api_route(
+        WORKFLOW_RULE_RETIREMENT_ROUTE,
+        read_workflow_rule_retirement_plan,
+        methods=["POST"],
+        operation_id="read_workflow_rule_retirement_plan",
+        summary="Inspect exact workflow rule scopes and plan selected removal without applying",
+        responses=authz_policy_route_responses,
+    )
+
+    app.add_api_route(
         _AUTHZ_RETIREMENT_EVIDENCE_ROUTE,
         read_authz_retirement_evidence,
         methods=["POST"],
@@ -29530,6 +29597,11 @@ def create_launchplane_fastapi_app(
     )
 
     register_product_generic_web_transition_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+    )
+    register_runtime_setting_removal_routes(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,

@@ -12216,3 +12216,39 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
                 fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
                 before,
             )
+
+
+class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
+    def test_removal_atomicity_replay_and_drift_on_postgres(self) -> None:
+        from tests.test_reviewed_runtime_setting_removal import RuntimeRemovalTests
+
+        for scenario in (
+            RuntimeRemovalTests.test_exact_deletion_survivors_archive_readback_and_lost_reply_replay,
+            RuntimeRemovalTests.test_last_key_removes_record_and_keeps_delete_event_and_preimage,
+            RuntimeRemovalTests.test_last_value_preserves_retirement_intent,
+            RuntimeRemovalTests.test_transaction_failure_keeps_values_and_no_success_receipt,
+            RuntimeRemovalTests.test_drift_type_changes_and_key_or_reason_changes_refuse,
+        ):
+            with self.subTest(scenario=scenario.__name__), _head_postgres_database() as url:
+                fixture = RuntimeRemovalTests(scenario.__name__)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    scenario(fixture)
+                finally:
+                    fixture.doCleanups()
+
+    def test_concurrent_same_key_removal_commits_once(self) -> None:
+        from tests.test_reviewed_runtime_setting_removal import (
+            RuntimeRemovalTests,
+            RuntimeRemovalPostgresScenarios,
+        )
+
+        with _head_postgres_database() as url:
+            fixture = RuntimeRemovalTests()
+            fixture.database_url = url
+            try:
+                fixture.setUp()
+                RuntimeRemovalPostgresScenarios.simultaneous_keys(fixture.store)
+            finally:
+                fixture.doCleanups()
