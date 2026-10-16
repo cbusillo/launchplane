@@ -10,6 +10,19 @@ from control_plane.dokploy import api
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
+DOKPLOY_COMPOSE_METADATA_LABELS = frozenset(
+    {
+        "dokploy.organization.id",
+        "dokploy.project.id",
+        "dokploy.project",
+        "dokploy.environment.id",
+        "dokploy.environment",
+        "dokploy.application.id",
+        "dokploy.application",
+        "dokploy.service",
+    }
+)
+
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 ODOO_DATABASE_DATA_DIRECTORY = "/var/lib/postgresql/data"

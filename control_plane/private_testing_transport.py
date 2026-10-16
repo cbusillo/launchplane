@@ -18,6 +18,7 @@ from control_plane.generic_web_testing_exclusion import _bind
 from control_plane.storage.postgres import PostgresRecordStore
 
 ROUTE = "/v1/products/{product}/private-testing-transport/plan"
+PRODUCT_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
 
 
 class PrivateTestingTransportRequest(BaseModel):
@@ -62,23 +63,33 @@ class PrivateTestingTransportRefused(ValueError):
     """Evidence is incomplete or differs from the reviewed preparation."""
 
 
-def nginx_configuration(*, service: str, runtime_port: int) -> str:
+def nginx_configuration(
+    *,
+    service: str,
+    runtime_port: int,
+    listen: str = "8443",
+    certificate_file: str = "/run/secrets/private_tls_certificate",
+    key_file: str = "/run/secrets/private_tls_key",
+    pid_file: str = "/tmp/nginx.pid",
+) -> str:
     """Preserve URI and authorization through precisely two routes."""
-    return f"""pid /tmp/nginx.pid;
+    return f"""pid {pid_file};
 error_log /dev/stderr warn;
 events {{}}
 http {{
     access_log off;
+    resolver 127.0.0.11 ipv6=off valid=5s;
     server {{
-        listen 8443 ssl;
-        ssl_certificate /run/secrets/private_tls_certificate;
-        ssl_certificate_key /run/secrets/private_tls_key;
+        listen {listen} ssl;
+        ssl_certificate {certificate_file};
+        ssl_certificate_key {key_file};
         ssl_protocols TLSv1.2 TLSv1.3;
+        set $runtime_backend {service}:{runtime_port};
         location = /health {{
-            proxy_pass http://{service}:{runtime_port};
+            proxy_pass http://$runtime_backend;
         }}
         location = /agent-session/connect {{
-            proxy_pass http://{service}:{runtime_port};
+            proxy_pass http://$runtime_backend;
             proxy_http_version 1.1;
             proxy_set_header Upgrade $http_upgrade;
             proxy_set_header Connection "upgrade";
@@ -142,15 +153,20 @@ def _baseline(
     current: dict[str, object], overlay: dict[str, object], *, readback: bool
 ) -> dict[str, object]:
     baseline = deepcopy(current)
+    # An exact installed overlay can be re-reviewed after a baseline redeploy.
+    # Partial or modified additions are never adopted by a fresh dry run.
+    installed = readback or any(
+        name in _object(current.get(section, {}))
+        for section, additions in overlay.items()
+        for name in _object(additions)
+    )
     for section, additions in overlay.items():
         actual = _object(baseline.get(section, {}))
         for name, expected in _object(additions).items():
-            if readback:
+            if installed:
                 if actual.get(name) != expected:
                     raise PrivateTestingTransportRefused("Private listener readback differs.")
                 del actual[name]
-            elif name in actual:
-                raise PrivateTestingTransportRefused("Private listener resource already exists.")
         if actual:
             baseline[section] = actual
         else:
@@ -158,11 +174,46 @@ def _baseline(
     return baseline
 
 
+def _without_provider_metadata(
+    current: dict[str, object],
+    *,
+    target_id: str,
+    app_name: str,
+) -> dict[str, object]:
+    current = deepcopy(current)
+    name = current.pop("name", app_name)
+    if name != app_name:
+        raise PrivateTestingTransportRefused("Provider Compose names a different project.")
+    services = _object(current.get("services"))
+    for service_name, raw_service in services.items():
+        service = _object(raw_service)
+        labels = service.pop("labels", {})
+        if isinstance(labels, list):
+            if any(not isinstance(label, str) or "=" not in label for label in labels):
+                raise PrivateTestingTransportRefused("Provider labels are unqualified.")
+            labels = dict(label.split("=", 1) for label in labels)
+        labels = _object(labels)
+        if labels and (
+            set(labels) - compose.DOKPLOY_COMPOSE_METADATA_LABELS
+            or labels.get("dokploy.application.id") != target_id
+            or labels.get("dokploy.service") != service_name
+        ):
+            raise PrivateTestingTransportRefused("Provider metadata names another target or route.")
+    networks = current.get("networks")
+    # Like testing activation, ignore only Dokploy's unused root declaration.
+    # An attachment, alias, other declaration or provider option remains refused.
+    if networks == {"dokploy-network": {"external": True}} and all(
+        not _object(service).get("networks") for service in services.values()
+    ):
+        current.pop("networks")
+    return current
+
+
 def _validate_compose(baseline: dict[str, object], runtime_service: str) -> None:
     services = _object(baseline.get("services"))
     if runtime_service not in services:
         raise PrivateTestingTransportRefused("Testing runtime service is not prepared.")
-    if baseline.get("networks"):
+    if set(baseline) - {"services", "volumes"}:
         raise PrivateTestingTransportRefused(
             "Preparation requires the target's own default network."
         )
@@ -171,27 +222,29 @@ def _validate_compose(baseline: dict[str, object], runtime_service: str) -> None
         # A compose-scoped volume has no explicit global name/host driver options.
         if volume not in (None, {}):
             raise PrivateTestingTransportRefused("Testing storage is not compose-scoped.")
-    if baseline.get("secrets") or baseline.get("configs"):
-        raise PrivateTestingTransportRefused(
-            "Existing external configuration custody is unqualified."
-        )
     for raw_service in services.values():
         service = _object(raw_service)
-        if any(
-            service.get(key)
-            for key in (
-                "ports",
-                "network_mode",
-                "networks",
-                "privileged",
-                "external_links",
-                "volumes_from",
-                "devices",
-                "container_name",
-                "extends",
-                "labels",
-            )
-        ):
+        if set(service) - {
+            "image",
+            "environment",
+            "entrypoint",
+            "command",
+            "volumes",
+            "depends_on",
+            "expose",
+            "healthcheck",
+            "user",
+            "working_dir",
+            "restart",
+            "init",
+            "read_only",
+            "stop_grace_period",
+            "stop_signal",
+            "cpus",
+            "mem_limit",
+            "pids_limit",
+            "shm_size",
+        }:
             raise PrivateTestingTransportRefused(
                 "Testing service network/isolation is unqualified."
             )
@@ -253,6 +306,9 @@ def plan_private_testing_transport(
         current = _object(yaml.safe_load(rendered))
     except yaml.YAMLError as error:
         raise PrivateTestingTransportRefused("Provider Compose evidence is invalid.") from error
+    current = _without_provider_metadata(
+        current, target_id=target_id.target_id, app_name=str(placement["appName"])
+    )
     baseline = _baseline(current, overlay, readback=request.mode == "readback")
     _validate_compose(baseline, request.runtime_service)
     # Recheck records after both provider reads. A changed lane needs a fresh plan.
@@ -286,7 +342,7 @@ def plan_private_testing_transport(
         "certificate_verified": False,
         "activation_supported": False,
         "overlay": overlay,
-        "endpoint": {
+        "endpoint_proposal": {
             "endpoint_key": request.endpoint_key,
             "product": product,
             "context": request.context,
@@ -295,12 +351,14 @@ def plan_private_testing_transport(
         },
         "server_url": f"wss://{authority}/agent-session/connect",
         "trust": {
-            "issuer": "private",
+            "issuer_intent": "private",
             "required_ip_san": str(request.private_ip),
             "ca_bundle_sha256": request.ca_bundle_sha256,
             "certificate_sha256": request.certificate_sha256,
-            "monitor_environment": {"SSL_CERT_FILE": request.monitor_ca_bundle_path},
-            "receiver_environment": {"SSL_CERT_FILE": request.receiver_ca_bundle_path},
+            "monitor_trust_scope": "process",
+            "monitor_requires_existing_roots": True,
+            "monitor_environment_intent": {"SSL_CERT_FILE": request.monitor_ca_bundle_path},
+            "receiver_environment_intent": {"SSL_CERT_FILE": request.receiver_ca_bundle_path},
             "review": request.trust_review,
         },
         "activation_prerequisites": [

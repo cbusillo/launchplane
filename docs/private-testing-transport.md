@@ -57,16 +57,32 @@ bindings after the provider reads. Shared targets, public domains, absent source
 or runtime service, host/external networking, published upstream ports, globally
 named/external/bind storage and unqualified configuration are refused. The narrow
 supported source uses its own default network and Compose-scoped named volumes.
+Only top-level `services` and `volumes` are accepted. Service fields are limited
+to image, environment, entrypoint/command, named volumes, depends_on, expose,
+healthcheck, user/working_dir, restart/init/read_only, stop settings and CPU,
+memory, PID and shared-memory limits. Runtime files can be delivered through
+the existing managed environment contract and target-local state volume. A
+source using another shape needs qualification; no unknown Compose extension
+becomes evidence of isolation. Host PID/IPC/user namespaces, extra capabilities,
+security overrides and host env files are excluded along with host networking.
+Before that check, the service recognizes Dokploy's exact target/service-bound
+metadata labels, a matching provider project name and its unused root-only
+`dokploy-network` declaration. This follows the existing testing activation
+contract and shared metadata-label catalog. An actual network attachment,
+foreign project/target label or public routing label is still refused.
 An empty target must first receive a supported immutable runtime Compose source;
 do not invent source or mark an empty target qualified to satisfy this planner.
 
 The response provides a deterministic `plan_sha256`, target/source binding,
-new listener overlay, private HTTPS endpoint metadata and WSS address on exactly
+new listener overlay, an `endpoint_proposal` and WSS address on exactly
 the same authority. The overlay carries no existing workload environment or
 credential. It publishes only the selected private IPv4/TCP port. Nginx has no
 public ingress labels, HTTP redirect listener, CA issuer, access logger or admin
 listener. It forwards only `/health` and `/agent-session/connect`, including the
 WebSocket upgrade and original authorization header. Other paths return 404.
+Nginx resolves the runtime service through Docker's embedded resolver with a
+bounded cache, allowing container IP changes during redeploy. An unavailable
+runtime produces a failing route, never a fabricated health response.
 See [Nginx's WebSocket contract](https://nginx.org/en/docs/http/websocket.html).
 
 ## Activation and trust boundary
@@ -92,12 +108,20 @@ its review/idempotency/recovery contract and these exact prerequisites:
    dedicated proxy UID able to read the key. Compose mounts them read-only as
    secrets; no agent reads or copies a real key and no shared production key is
    reused. Missing or unreadable files stop Nginx.
-4. The selected per-purpose CA bundles cover the issuer, and the receiver bundle
-   also covers Launchplane's HTTPS origin. The monitor's existing Python TLS
-   path and the [receiver](testing-local-consumer.md) both use `SSL_CERT_FILE`
-   with normal chain/hostname verification. Selecting/installing real bundles
-   and restarting an installed monitor/client remain separately authorized.
-   No insecure mode or global trust-store modification is supplied.
+4. The selected bundles cover the private issuer. **The monitor's
+   `SSL_CERT_FILE` selection affects its entire process**, including public
+   HTTPS/TLS checks and other outbound clients using Python's default context.
+   Its bundle must preserve every existing trusted public root that process
+   needs, and the trust review must account for the whole process's affected
+   products. This is not check-scoped CA isolation. Do not change a shared
+   production monitor's trust under a testing-only activation. First obtain
+   that separate trust/custody decision or qualify an isolated monitoring
+   process through supported deployment. The receiver's selected bundle must
+   also cover Launchplane's HTTPS origin. Both paths retain normal chain and
+   hostname verification. The response's `*_environment_intent` and issuer/
+   certificate metadata describe reviewed input, not measured trust. Real
+   bundle selection/installation and installed process restarts remain
+   separately authorized; no insecure mode or trust-store modification occurs.
 
 After separate activation, retain the original payload and set `mode=readback`
 and `expected_plan_sha256` to the reviewed plan digest. The service reads current
@@ -106,12 +130,20 @@ rebinding the unchanged baseline/placement/records. Missing, partial, different
 or stale configuration is refused. This comparison does not inspect host port
 bindings, mounted file bytes, running containers or certificates. A configuration
 match still returns `transport_verified=false` and `certificate_verified=false`.
+After a normal runtime redeploy or record revision, the old digest is stale.
+Run a fresh `dry-run` with the original intent and no expected digest: an exact
+installed overlay is recognized and rebound to the current baseline. Review
+the new digest before `readback`. A partial/different listener is never adopted
+by this refresh; recover that original activation through its own operation.
 
 An uncertain **planning** response is safe to repeat: it writes nothing. A
 changed digest requires fresh review. An uncertain **activation** is recovered
 only by its original supported operation/key and readback; do not send another
 apply, bypass a refusal, or treat this planner as a mutation receipt. No live
 activation/recovery operation is introduced here.
+Provider/network evidence failures return 503 and explicitly allow retry of
+the inert plan. Incomplete source, isolation or stale-review refusals return
+409; fix or qualify those inputs before re-planning.
 
 ## Endpoint, monitoring and recipient sequence
 
@@ -148,9 +180,9 @@ uv run --extra dev python scripts/qualify-private-testing-transport.py \
   --nginx-binary /absolute/task-artifact/nginx
 ```
 
-The rehearsal creates temporary certificates, keys and loopback listeners, runs
+The rehearsal creates a disposable CA and separately signed server leaf, keys and loopback listeners, runs
 the generated Nginx routes (relocating mount paths, pid and listener port into
-the fixture namespace), uses the real private monitor and receiver, and checks
+the fixture namespace through generator parameters), uses the real private monitor and receiver, and checks
 untrusted issuer, wrong hostname, wrong credential, production identity and
 unrelated-path refusals. It sends no bridge command. It installs nothing and
 does not qualify an installed image, actual routing, production or a live token.

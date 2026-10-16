@@ -12,6 +12,7 @@ import logging
 import os
 from pathlib import Path
 import socket
+import ssl
 import subprocess
 from tempfile import TemporaryDirectory
 import threading
@@ -21,7 +22,7 @@ from unittest.mock import patch
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.x509.oid import NameOID
+from cryptography.x509.oid import NameOID, ExtendedKeyUsageOID
 import requests
 from websockets.datastructures import Headers
 from websockets.exceptions import InvalidStatus
@@ -36,26 +37,62 @@ from control_plane.workflows.public_ingress_monitor import fetch_private_health_
 def qualify(binary: Path) -> None:
     with TemporaryDirectory(prefix="lp-private-tls-fixture-") as temporary:
         root = Path(temporary).resolve()
+        ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Disposable fixture issuer")])
         now = datetime.now(timezone.utc)
-        certificate = (
+        ca_certificate = (
             x509.CertificateBuilder()
             .subject_name(name)
+            .issuer_name(name)
+            .public_key(ca_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(minutes=1))
+            .not_valid_after(now + timedelta(hours=1))
+            .add_extension(x509.BasicConstraints(ca=True, path_length=0), critical=True)
+            .add_extension(
+                x509.SubjectKeyIdentifier.from_public_key(ca_key.public_key()), critical=False
+            )
+            .add_extension(
+                x509.KeyUsage(
+                    digital_signature=True,
+                    content_commitment=False,
+                    key_encipherment=False,
+                    data_encipherment=False,
+                    key_agreement=False,
+                    key_cert_sign=True,
+                    crl_sign=True,
+                    encipher_only=False,
+                    decipher_only=False,
+                ),
+                critical=True,
+            )
+            .sign(ca_key, hashes.SHA256())
+        )
+        certificate = (
+            x509.CertificateBuilder()
+            .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Fixture bridge")]))
             .issuer_name(name)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
             .not_valid_before(now - timedelta(minutes=1))
             .not_valid_after(now + timedelta(hours=1))
-            .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+            .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()),
+                critical=False,
+            )
+            .add_extension(x509.ExtendedKeyUsage([ExtendedKeyUsageOID.SERVER_AUTH]), critical=False)
             .add_extension(
                 x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
                 critical=False,
             )
-            .sign(key, hashes.SHA256())
+            .sign(ca_key, hashes.SHA256())
         )
         cert_file, key_file = root / "fixture.crt", root / "fixture.key"
         cert_file.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
+        ca_file = root / "fixture-ca.pem"
+        ca_file.write_bytes(ca_certificate.public_bytes(serialization.Encoding.PEM))
         key_file.write_bytes(
             key.private_bytes(
                 serialization.Encoding.PEM,
@@ -114,12 +151,13 @@ def qualify(binary: Path) -> None:
                 # Relocate only mount paths, pid and listener port into this run's
                 # namespace. Route directives are the production generator's output.
                 config = nginx_configuration(
-                    service="127.0.0.1", runtime_port=backend.socket.getsockname()[1]
+                    service="127.0.0.1",
+                    runtime_port=backend.socket.getsockname()[1],
+                    listen=f"127.0.0.1:{listener_port}",
+                    pid_file=str(root / "nginx.pid"),
+                    certificate_file=str(cert_file),
+                    key_file=str(key_file),
                 )
-                config = config.replace("listen 8443 ssl", f"listen 127.0.0.1:{listener_port} ssl")
-                config = config.replace("/tmp/nginx.pid", str(root / "nginx.pid"))
-                config = config.replace("/run/secrets/private_tls_certificate", str(cert_file))
-                config = config.replace("/run/secrets/private_tls_key", str(key_file))
                 (root / "nginx.conf").write_text(config)
                 (root / "logs").mkdir()
                 command = [str(binary), "-p", str(root), "-c", str(root / "nginx.conf")]
@@ -151,9 +189,10 @@ def qualify(binary: Path) -> None:
                             endpoint_key="fixture-testing",
                             server_url=origin.replace("https:", "wss:") + "/agent-session/connect",
                         )
-                        with patch.dict(os.environ, {"SSL_CERT_FILE": str(cert_file)}):
+                        with patch.dict(os.environ, {"SSL_CERT_FILE": str(ca_file)}):
                             monitor = fetch_private_health_url(origin + "/health", 5)
-                            assert monitor.status_code == 200
+                            if monitor.status_code != 200:
+                                raise AssertionError("Private monitor did not reach the runtime.")
                             _verify_bridge(consumer, fake_value)
                             try:
                                 _verify_bridge(consumer, "wrong-fictional-value")
@@ -168,28 +207,46 @@ def qualify(binary: Path) -> None:
                                 pass
                             else:
                                 raise AssertionError("Production identity was accepted.")
+                            state["instance"] = "testing"
                             with requests.Session() as session:
                                 session.trust_env = False
                                 response = session.get(
-                                    origin + "/unrelated", verify=str(cert_file), timeout=5
+                                    origin + "/unrelated", verify=str(ca_file), timeout=5
                                 )
-                                assert response.status_code == 404
-                                for url, bundle in (
-                                    (origin + "/health", requests.utils.DEFAULT_CA_BUNDLE_PATH),
-                                    (
-                                        origin.replace("127.0.0.1", "localhost") + "/health",
-                                        str(cert_file),
-                                    ),
-                                ):
-                                    try:
-                                        session.get(url, verify=bundle, timeout=5)
-                                    except requests.exceptions.SSLError:
-                                        pass
-                                    else:
-                                        raise AssertionError(
-                                            "Untrusted or wrong-host TLS was accepted."
-                                        )
-                        assert not messages
+                                if response.status_code != 404:
+                                    raise AssertionError("Unrelated route was accepted.")
+                        for wrong_host, bundle in (
+                            (False, requests.utils.DEFAULT_CA_BUNDLE_PATH),
+                            (True, str(ca_file)),
+                        ):
+                            bad_origin = (
+                                origin.replace("127.0.0.1", "localhost") if wrong_host else origin
+                            )
+                            bad_consumer = consumer.model_copy(
+                                update={
+                                    "server_url": bad_origin.replace("https:", "wss:")
+                                    + "/agent-session/connect"
+                                }
+                            )
+                            with patch.dict(os.environ, {"SSL_CERT_FILE": bundle}):
+                                try:
+                                    fetch_private_health_url(bad_origin + "/health", 5)
+                                except ssl.SSLError:
+                                    pass
+                                else:
+                                    raise AssertionError(
+                                        "Monitor accepted untrusted or wrong-host TLS."
+                                    )
+                                try:
+                                    _verify_bridge(bad_consumer, fake_value)
+                                except requests.exceptions.SSLError:
+                                    pass
+                                else:
+                                    raise AssertionError(
+                                        "Receiver accepted untrusted or wrong-host TLS."
+                                    )
+                        if messages:
+                            raise AssertionError("Transport qualification sent bridge messages.")
                     finally:
                         process.terminate()
                         process.wait(timeout=10)

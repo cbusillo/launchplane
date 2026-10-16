@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -50,11 +51,15 @@ def private_testing_plan(
     payload_file: Path,
 ) -> None:
     """Plan/read back private testing TLS through the service; never apply."""
-    from control_plane.private_testing_transport import ROUTE, PrivateTestingTransportRequest
+    from control_plane.private_testing_transport import (
+        ROUTE,
+        PRODUCT_PATTERN,
+        PrivateTestingTransportRequest,
+    )
 
     if not service_url.startswith("https://"):
         raise click.ClickException("Private transport planning requires the HTTPS service origin.")
-    if not product or any(c not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for c in product):
+    if not re.fullmatch(PRODUCT_PATTERN, product):
         raise click.ClickException("Product must be a canonical product identifier.")
     try:
         request = PrivateTestingTransportRequest.model_validate_json(payload_file.read_bytes())

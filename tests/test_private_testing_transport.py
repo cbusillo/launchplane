@@ -14,9 +14,13 @@ from pydantic import ValidationError
 import yaml
 
 from control_plane.cli import main
+from control_plane.dokploy.api import fetch_dokploy_target_payload as actual_fetch_target
+from control_plane.dokploy.compose import (
+    fetch_dokploy_converted_compose_file as actual_fetch_compose,
+)
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord, PublicHostEffect
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -111,9 +115,23 @@ class PrivateTestingTransportTests(unittest.TestCase):
         self.converted = self.enterContext(
             patch(
                 "control_plane.dokploy.compose.fetch_dokploy_converted_compose_file",
-                side_effect=lambda **_kwargs: yaml.safe_dump(self.compose),
+                side_effect=self.rendered_compose,
             )
         )
+
+    def rendered_compose(self, **_kwargs: object) -> str:
+        document = deepcopy(self.compose)
+        document.setdefault("name", self.placement["appName"])
+        document.setdefault("networks", {"dokploy-network": {"external": True}})
+        for service_name, service in document.get("services", {}).items():
+            service.setdefault(
+                "labels",
+                {
+                    "dokploy.application.id": self.placement["composeId"],
+                    "dokploy.service": service_name,
+                },
+            )
+        return yaml.safe_dump(document)
 
     def plan(self, **changes: object) -> dict[str, Any]:
         return cast(
@@ -130,27 +148,25 @@ class PrivateTestingTransportTests(unittest.TestCase):
         before = self.store.read_dokploy_target_record(
             context_name="example-site", instance_name="prod"
         )
-        with patch("control_plane.dokploy.api.dokploy_request") as write:
-            result = self.plan()
-            self.assertFalse(result["applied"])
-            self.assertFalse(result["transport_verified"])
-            self.assertFalse(result["activation_supported"])
-            endpoint = PrivateHealthEndpointRecord.model_validate(
-                {**result["endpoint"], "updated_at": self.profile.updated_at}
-            )
-            self.assertEqual(endpoint.instance, "testing")
-            self.assertEqual(
-                result["server_url"].replace("wss:", "https:").split("/agent-")[0],
-                endpoint.url.removesuffix("/health"),
-            )
-            self.assertEqual(self.plan()["plan_sha256"], result["plan_sha256"])
-            # Simulate a separately authorized provider activation, not an apply API.
-            for section, additions in result["overlay"].items():
-                self.compose.setdefault(section, {}).update(additions)
-            readback = self.plan(mode="readback", expected_plan_sha256=result["plan_sha256"])
-            self.assertTrue(readback["configuration_matches"])
-            self.assertFalse(readback["certificate_verified"])
-            write.assert_not_called()
+        result = self.plan()
+        self.assertFalse(result["applied"])
+        self.assertFalse(result["transport_verified"])
+        self.assertFalse(result["activation_supported"])
+        endpoint = PrivateHealthEndpointRecord.model_validate(
+            {**result["endpoint_proposal"], "updated_at": self.profile.updated_at}
+        )
+        self.assertEqual(endpoint.instance, "testing")
+        self.assertEqual(
+            result["server_url"].replace("wss:", "https:").split("/agent-")[0],
+            endpoint.url.removesuffix("/health"),
+        )
+        self.assertEqual(self.plan()["plan_sha256"], result["plan_sha256"])
+        # Simulate a separately authorized provider activation, not an apply API.
+        for section, additions in result["overlay"].items():
+            self.compose.setdefault(section, {}).update(additions)
+        readback = self.plan(mode="readback", expected_plan_sha256=result["plan_sha256"])
+        self.assertTrue(readback["configuration_matches"])
+        self.assertFalse(readback["certificate_verified"])
         self.assertEqual(
             before,
             self.store.read_dokploy_target_record(
@@ -182,7 +198,7 @@ class PrivateTestingTransportTests(unittest.TestCase):
         self.converted.side_effect = click.ClickException("fixture timeout")
         with self.assertRaises(click.ClickException):
             self.plan()
-        self.converted.side_effect = lambda **_kwargs: yaml.safe_dump(self.compose)
+        self.converted.side_effect = self.rendered_compose
         self.assertEqual(self.plan()["plan_sha256"], original["plan_sha256"])
         self.compose = {}
         with self.assertRaises(ValueError):
@@ -248,6 +264,98 @@ class PrivateTestingTransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan()
 
+    def test_installed_listener_can_be_rereviewed_after_runtime_redeploy(self) -> None:
+        original = self.plan()
+        for section, additions in original["overlay"].items():
+            self.compose.setdefault(section, {}).update(additions)
+        self.compose["services"]["bridge"]["image"] = "fixture@sha256:" + "f" * 64
+        target = self.store.read_dokploy_target_record(
+            context_name="example-site", instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(update={"source_label": "redeploy"})
+        )
+        refreshed = self.plan()
+        self.assertNotEqual(refreshed["plan_sha256"], original["plan_sha256"])
+        self.assertTrue(
+            self.plan(mode="readback", expected_plan_sha256=refreshed["plan_sha256"])[
+                "configuration_matches"
+            ]
+        )
+
+    def test_host_sharing_options_and_unknown_compose_extensions_are_refused(self) -> None:
+        clean = deepcopy(self.compose)
+        for key, value in (
+            ("pid", "host"),
+            ("ipc", "host"),
+            ("userns_mode", "host"),
+            ("cap_add", ["NET_ADMIN"]),
+            ("security_opt", ["seccomp:unconfined"]),
+            ("cgroup", "host"),
+            ("runtime", "custom-runtime"),
+            ("env_file", ["/prod.env"]),
+        ):
+            self.compose = deepcopy(clean)
+            self.compose["services"]["bridge"][key] = value
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.plan()
+        self.compose = deepcopy(clean)
+        self.compose["name"] = "production-project"
+        with self.assertRaises(ValueError):
+            self.plan()
+
+    def test_public_declarations_and_provider_domains_refuse_private_plan(self) -> None:
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"public_website": "required"})
+        )
+        with self.assertRaises(ValueError):
+            self.plan()
+        self.store.write_product_profile_record(self.profile)
+        target = self.store.read_dokploy_target_record(
+            context_name="example-site", instance_name="testing"
+        )
+        for changes in (
+            {"domains": ("public.example.test",)},
+            {"public_hosts": ("public.example.test",)},
+            {
+                "pending_public_host_effects": (
+                    PublicHostEffect(
+                        host="public.example.test",
+                        provider_host="https://provider.test",
+                        target_id="fixture-testing",
+                        runtime_port=self.profile.runtime_port,
+                    ),
+                )
+            },
+        ):
+            self.store.write_dokploy_target_record(target.model_copy(update=changes))
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.plan()
+        self.store.write_dokploy_target_record(target)
+        for domains in (None, [{"host": "public.example.test"}]):
+            self.placement["domains"] = domains
+            with self.subTest(domains=domains), self.assertRaises(ValueError):
+                self.plan()
+
+    def test_planning_provider_transport_is_get_only(self) -> None:
+        self.provider.side_effect = actual_fetch_target
+        self.converted.side_effect = actual_fetch_compose
+        reads: list[str] = []
+
+        def provider(**kwargs: Any) -> Any:
+            self.assertEqual(kwargs.get("method", "GET"), "GET")
+            path = kwargs["path"]
+            reads.append(path)
+            if path == "/api/compose.one":
+                return deepcopy(self.placement)
+            if path == "/api/compose.getConvertedCompose":
+                return self.rendered_compose()
+            self.fail(f"Unexpected provider operation: {path}")
+
+        with patch("control_plane.dokploy.api.dokploy_request", side_effect=provider):
+            self.assertFalse(self.plan()["applied"])
+        self.assertTrue(reads)
+
     def test_cli_validates_before_http_and_forwards_only_inert_mode(self) -> None:
         path = self.root / "plan.json"
         path.write_text(json.dumps(self.payload))
@@ -270,10 +378,13 @@ class PrivateTestingTransportTests(unittest.TestCase):
                 result = runner.invoke(main, args)
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertEqual(post.call_args.kwargs["payload"]["mode"], "dry-run")
-                self.assertNotIn("fictional-fixture-only", result.output)
                 path.write_text(json.dumps({**self.payload, "mode": "apply"}))
                 result = runner.invoke(main, args)
                 self.assertNotEqual(result.exit_code, 0)
+                self.assertEqual(post.call_count, 1)
+                path.write_text(json.dumps(self.payload))
+                args[args.index("--product") + 1] = "-invalid"
+                self.assertNotEqual(runner.invoke(main, args).exit_code, 0)
                 self.assertEqual(post.call_count, 1)
 
     def test_service_plan_uses_authorization_and_refuses_apply_or_production(self) -> None:
@@ -313,6 +424,15 @@ class PrivateTestingTransportTests(unittest.TestCase):
             )
             self.assertEqual(response.status_code, 200, response.text)
             self.assertFalse(response.json()["result"]["applied"])
+            self.converted.side_effect = click.ClickException("fixture provider timeout")
+            unavailable = await http_request(
+                app,
+                "POST",
+                ROUTE.format(product="example-site"),
+                headers=headers,
+                payload=self.payload,
+            )
+            self.assertEqual(unavailable.status_code, 503)
 
         asyncio.run(exercise())
 
