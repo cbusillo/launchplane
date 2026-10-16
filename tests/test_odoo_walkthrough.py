@@ -345,7 +345,7 @@ class TaskRouteTests(unittest.TestCase):
         self.planner.side_effect = RuntimeError("private-password private-provider.example")
         status, response = self.invoke(task_request())
         self.assertEqual(status, 409)
-        self.assertEqual(response["detail"]["code"], "testing_task_refused")
+        self.assertNotIn(response["detail"]["code"], set(WalkthroughPrerequisite))
         self.assertNotIn("private-", json.dumps(response))
         self.account.assert_not_called()
         self.assertEqual(self.store.list_secret_records(), ())

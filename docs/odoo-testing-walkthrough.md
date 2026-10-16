@@ -76,7 +76,10 @@ new record, account, policy change or alternate identity:
 | `testing_task_isolation_or_usage_unverified` | Current native connection-isolation or protected-sign-in readback failed or was unreadable. Use supported isolation readback and preserve protected use. |
 | `testing_task_credential_custody_unavailable` | Task secret metadata is unreadable, closed, expired or missing for a browser run. Follow this task's supported lifecycle; do not read or replace passwords. |
 
-An unexpected planning failure still returns `testing_task_refused`. Older
+Each code identifies the checkpoint that could not complete, including
+unreadable dependencies or unexpected failures inside that checkpoint. It
+does not establish a specific bad record or defect. Planning failures outside
+these classified checkpoint reads still return `testing_task_refused`. Older
 service images return that generic code for every checkpoint; an old trace
 cannot retrospectively prove a specific prerequisite. After normal delivery
 of a compatible service, repeat only the inert dry run with the same nonsecret
