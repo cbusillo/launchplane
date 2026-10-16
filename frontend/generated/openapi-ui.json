@@ -1397,6 +1397,7 @@
             "schema": {
               "default": "managed-secret-reencryption",
               "enum": [
+                "production-backup-policy",
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
                 "managed-merge-train-policy-import",
@@ -2437,6 +2438,96 @@
           }
         },
         "summary": "Preflight"
+      }
+    },
+    "/v1/production-backup-authority/proposals": {
+      "get": {
+        "operationId": "list_backup_policy_proposals",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPolicyProposalListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Backup Policy Proposals"
       }
     },
     "/v1/production-backup-gates/operations/{operation_id}": {
@@ -7516,6 +7607,87 @@
         "summary": "Dry-run or apply typed production backup authority"
       }
     },
+    "/v1/production-backup-authority/proposals/{operation_id}/decision": {
+      "post": {
+        "operationId": "decide_backup_policy_proposal",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupPolicyDecision"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPolicyDecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Decide Backup Policy Proposal"
+      }
+    },
     "/v1/production-backup-gates": {
       "post": {
         "operationId": "enqueue_production_backup_gate",
@@ -10343,6 +10515,260 @@
           "status"
         ],
         "title": "BackupGateRecord",
+        "type": "object"
+      },
+      "BackupPolicyDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "approve",
+              "decline"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "source_event_id"
+        ],
+        "title": "BackupPolicyDecision",
+        "type": "object"
+      },
+      "BackupPolicyDecisionResponse": {
+        "properties": {
+          "proposal": {
+            "$ref": "#/components/schemas/BackupPolicyProposalReview"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal",
+          "status",
+          "trace_id"
+        ],
+        "title": "BackupPolicyDecisionResponse",
+        "type": "object"
+      },
+      "BackupPolicyExecutionEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "default": false,
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "failure_code",
+          "reconciliation_required",
+          "result_digest",
+          "result_status"
+        ],
+        "title": "BackupPolicyExecutionEvidence",
+        "type": "object"
+      },
+      "BackupPolicyHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "backup_max_age_seconds": {
+            "title": "Backup Max Age Seconds",
+            "type": "integer"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "plan_digest": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_revision": {
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "result_status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Result Status",
+            "type": "string"
+          },
+          "retention_count": {
+            "title": "Retention Count",
+            "type": "integer"
+          },
+          "review_after": {
+            "title": "Review After",
+            "type": "string"
+          },
+          "snapshot_max_age_seconds": {
+            "title": "Snapshot Max Age Seconds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "backup_max_age_seconds",
+          "context",
+          "effective_at",
+          "instance",
+          "plan_digest",
+          "policy_revision",
+          "product",
+          "promotion_action",
+          "result_status",
+          "retention_count",
+          "review_after",
+          "snapshot_max_age_seconds"
+        ],
+        "title": "BackupPolicyHumanEvidence",
+        "type": "object"
+      },
+      "BackupPolicyProposalInput": {
+        "additionalProperties": false,
+        "properties": {
+          "authority": {
+            "$ref": "#/components/schemas/ProductionBackupAuthorityWriteEnvelope"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "related_issue": {
+            "default": "",
+            "title": "Related Issue",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authority",
+          "reason",
+          "related_issue"
+        ],
+        "title": "BackupPolicyProposalInput",
+        "type": "object"
+      },
+      "BackupPolicyProposalListResponse": {
+        "properties": {
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/BackupPolicyProposalReview"
+            },
+            "title": "Proposals",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposals",
+          "status",
+          "trace_id"
+        ],
+        "title": "BackupPolicyProposalListResponse",
+        "type": "object"
+      },
+      "BackupPolicyProposalReview": {
+        "additionalProperties": false,
+        "properties": {
+          "can_approve": {
+            "title": "Can Approve",
+            "type": "boolean"
+          },
+          "can_decline": {
+            "title": "Can Decline",
+            "type": "boolean"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "protection": {
+            "$ref": "#/components/schemas/BackupPolicyHumanEvidence"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "can_approve",
+          "can_decline",
+          "operation_id",
+          "protection",
+          "status"
+        ],
+        "title": "BackupPolicyProposalReview",
         "type": "object"
       },
       "BootstrapEvidence": {
@@ -24256,6 +24682,7 @@
           },
           "descriptor_id": {
             "enum": [
+              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -24679,6 +25106,7 @@
           },
           "descriptor_id": {
             "enum": [
+              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -24695,6 +25123,9 @@
           },
           "evidence": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicyHumanEvidence"
+              },
               {
                 "$ref": "#/components/schemas/ManagedSecretReencryptionHumanEvidence"
               },
@@ -24731,6 +25162,9 @@
           "execution": {
             "anyOf": [
               {
+                "$ref": "#/components/schemas/BackupPolicyExecutionEvidence"
+              },
+              {
                 "$ref": "#/components/schemas/PrivilegedOperationExecutionEvidence"
               },
               {
@@ -24758,6 +25192,9 @@
           },
           "request": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicyProposalInput"
+              },
               {
                 "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
               },
@@ -24940,6 +25377,7 @@
           },
           "descriptor_id": {
             "enum": [
+              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -34022,8 +34460,13 @@
           }
         },
         "required": [
+          "expected_current_policy_record_id",
+          "expected_current_target_record_ids",
           "mode",
-          "policy"
+          "policy",
+          "reviewed_authority_digest",
+          "schema_version",
+          "targets"
         ],
         "title": "ProductionBackupAuthorityWriteEnvelope",
         "type": "object"
@@ -34331,17 +34774,23 @@
           }
         },
         "required": [
-          "product",
           "context",
-          "instance",
-          "promotion_action",
-          "policy_revision",
+          "effective_at",
           "fast_snapshot",
           "independent_backup",
-          "effective_at",
+          "instance",
+          "policy_digest",
+          "policy_id",
+          "policy_revision",
+          "product",
+          "promotion_action",
+          "reason",
+          "record_id",
           "review_after",
+          "schema_version",
           "source",
-          "reason"
+          "status",
+          "supersedes_record_id"
         ],
         "title": "ProductionBackupPolicyRecord",
         "type": "object"
@@ -34491,13 +34940,18 @@
           }
         },
         "required": [
-          "target_id",
-          "target_revision",
           "destination",
           "effective_at",
+          "reason",
+          "record_id",
           "review_after",
+          "schema_version",
           "source",
-          "reason"
+          "status",
+          "supersedes_record_id",
+          "target_digest",
+          "target_id",
+          "target_revision"
         ],
         "title": "ProductionBackupTargetRecord",
         "type": "object"
@@ -34593,10 +35047,11 @@
           }
         },
         "required": [
-          "source_target_id",
-          "snapshot_prefix",
+          "max_evidence_age_seconds",
+          "operation",
           "retention_count",
-          "max_evidence_age_seconds"
+          "snapshot_prefix",
+          "source_target_id"
         ],
         "title": "ProductionFastSnapshotPolicy",
         "type": "object"
@@ -34626,9 +35081,10 @@
           }
         },
         "required": [
-          "source_target_id",
           "destination_target_id",
-          "max_evidence_age_seconds"
+          "max_evidence_age_seconds",
+          "operation",
+          "source_target_id"
         ],
         "title": "ProductionIndependentBackupPolicy",
         "type": "object"
@@ -34998,10 +35454,12 @@
           }
         },
         "required": [
-          "host",
-          "username",
+          "destination_kind",
+          "guest_id",
           "guest_kind",
-          "guest_id"
+          "host",
+          "provider_type",
+          "username"
         ],
         "title": "ProxmoxGuestBackupDestinationReference",
         "type": "object"
@@ -35035,9 +35493,11 @@
           }
         },
         "required": [
+          "destination_kind",
           "host",
-          "username",
-          "storage_id"
+          "provider_type",
+          "storage_id",
+          "username"
         ],
         "title": "ProxmoxStorageBackupDestinationReference",
         "type": "object"

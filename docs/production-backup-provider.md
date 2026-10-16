@@ -280,3 +280,50 @@ The typed policy and targets already supply the host/login/guest/storage tuple,
 snapshot prefix and retention. Do not create generic topology environment keys
 from retired product-prefixed settings. Legacy settings can be retired only
 after their consumer/parity evidence is accounted for by the owning rollout.
+
+## Review a proposed backup policy
+
+Backup authority proposals use the existing privileged-policy proposal lifecycle,
+with descriptor `production-backup-policy`. An agent posts a private envelope to
+`POST /v1/agent/privileged-operations/plans`: `source_event_id`, `descriptor_id`,
+and `request` containing `authority` (the existing backup authority envelope with
+`mode: dry_run` and no reviewed digest), `reason`, and optional `related_issue`.
+Reuse the same source event and identical payload after an interrupted response.
+A changed payload conflicts. No backup authority record changes at submission.
+The service runs the dry run and saves its exact authority digest in the pending
+record; the agent cannot provide the pinned digest.
+
+The proposal response supplies a stable `review_path` on the product's production
+Actions page, including its proposal ID. An authenticated agent needs existing
+`production_backup_authority.plan` or write authority for that exact lane.
+No new policy grant is installed by this feature. The existing
+`privileged-policy-propose` helper must support this descriptor before using it;
+the service schema is the input authority.
+
+The Director opens that link on any tab or device. The card reads pending records
+from the service and shows snapshot retention, snapshot and independent-backup
+freshness, the policy revision and review date. It explains the whole-guest scope.
+There is no upload, local proposal storage, manual dry run, or digest comparison.
+`GET /v1/production-backup-authority/proposals` requires backup read authority and
+an exact product/context/instance. Its allowlisted projection contains no host,
+login, guest ID, storage ID, private request, or free-text preparation reason.
+The generic privileged-operation raw-detail and transition routes refuse this
+descriptor; its product card owns review and decisions.
+
+**Approve** and **Decline** send only the proposal ID, decision and stable source
+event to `/v1/production-backup-authority/proposals/{operation_id}/decision`.
+Decisions require a signed-in administrator, CSRF/origin validation, current
+lane write authority and immutable-ID managed approval provenance. The proposer
+can never decide a proposal or use its local-operator credentials to apply backup
+authority directly. Decline persists cancellation. Approval rechecks the pinned
+plan and records the human decision. The existing privileged-operation worker
+then rechecks the human's current authority and the exact plan before an atomic
+backup-record write, with a stable per-proposal idempotency receipt for recovery.
+A changed record or permission refuses application. Shared targets can be reused
+without rewriting them; revising one through a single-product proposal refuses
+when another active product policy uses it.
+
+Approval starts no capture, restore or release and changes no credential or host
+configuration. Existing capture qualification and accepted-release gates still
+apply. The separate testing-client delivery file supplies a recipient public key
+and binds an encrypted delivery destination; it is not a backup-policy proposal.

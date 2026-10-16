@@ -80,7 +80,11 @@ from control_plane.privileged_operation_service import (
     require_privileged_operation_store,
 )
 from control_plane.service_auth import AuthorizationTarget, GitHubHumanIdentity
-from control_plane.storage.postgres import DbOnlyMutationRequest
+from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
+from control_plane.contracts.backup_policy_proposal import (
+    BackupPolicyProposalInput,
+    BackupPolicyExecutionEvidence,
+)
 
 
 PRIVILEGED_OPERATION_EXECUTION_LEASE_SECONDS = 300
@@ -338,11 +342,16 @@ def _construct_approver_authorization(
             policy_schema_version = 3
         case _:
             raise ValueError("approval_policy_schema_unsupported")
+    backup_policy = (
+        record.request.authority.policy
+        if isinstance(record.request, BackupPolicyProposalInput)
+        else None
+    )
     return DurableOperationAuthorization(
-        action=descriptor.approve_action,
-        product="launchplane",
-        context="launchplane",
-        instances=("global",),
+        action="production_backup_authority.write" if backup_policy else descriptor.approve_action,
+        product=backup_policy.product if backup_policy else "launchplane",
+        context=backup_policy.context if backup_policy else "launchplane",
+        instances=(backup_policy.instance,) if backup_policy else ("global",),
         managed_set_id=approval.managed_set_id,
         managed_rule_id=approval.managed_rule_id,
         policy_record_id=policy_record.record_id,
@@ -378,7 +387,9 @@ def _approver_is_still_authorized(
         action=authorization.action,
         product=authorization.product,
         context=authorization.context,
-        target=AuthorizationTarget(scope="global"),
+        target=AuthorizationTarget(scope="instance", instances=authorization.instances)
+        if authorization.action == "production_backup_authority.write"
+        else AuthorizationTarget(scope="global"),
     )
 
 
@@ -790,6 +801,13 @@ def _failed_execution_evidence(
     failure_code: str,
     reconciliation_required: bool,
 ) -> PrivilegedOperationTerminalEvidence:
+    if record.descriptor_id == "production-backup-policy":
+        return BackupPolicyExecutionEvidence(
+            result_status="error",
+            result_digest=_digest({"failure_code": failure_code}),
+            reconciliation_required=reconciliation_required,
+            failure_code=failure_code,
+        )
     if record.descriptor_id == "ordinary-agent-delivery-activation":
         action: Literal["setup", "revoke_activation"] = (
             record.request.action
@@ -849,6 +867,53 @@ def _failed_execution_evidence(
         payload={"failure_code": failure_code},
         reconciliation_required=reconciliation_required,
         failure_code=failure_code,
+    )
+
+
+def _execute_backup_policy(
+    *, store: object, record: PrivilegedOperationRecord, now: Callable[[], datetime] = _utc_now
+) -> BackupPolicyExecutionEvidence:
+    from control_plane.production_backup_authority import (
+        ProductionBackupAuthorityWriteEnvelope,
+        lane_bound_target_revision_refusal,
+    )
+
+    if (
+        not isinstance(store, PostgresRecordStore)
+        or not isinstance(record.request, BackupPolicyProposalInput)
+        or record.approval is None
+    ):
+        raise ValueError("backup_policy_storage_required")
+    envelope = ProductionBackupAuthorityWriteEnvelope.model_validate(
+        record.request.authority.model_dump(mode="json")
+        | {"mode": "apply", "reviewed_authority_digest": record.approval.plan_digest}
+    )
+
+    def revision_guard(policy_records: Any) -> str:
+        # Recheck approver authority as part of the same locked write. Shared
+        # targets are not revised through a single product's approval card.
+        _authorize_approved_operation(record=record, record_store=store)
+        return lane_bound_target_revision_refusal(policy_records=policy_records, envelope=envelope)
+
+    result = store.compare_and_apply_production_backup_authority(
+        envelope=envelope,
+        mutation=DbOnlyMutationRequest(
+            scope="backup-policy-proposal",
+            route_path="service-internal:backup-policy-proposal",
+            idempotency_key=record.operation_id,
+            request_fingerprint=_digest(envelope.model_dump(mode="json")),
+            lease_owner=record.operation_id,
+            response_status_code=200,
+            response_trace_id=record.operation_id,
+            response_payload={},
+        ),
+        response_payload_builder=lambda value: {"authority_digest": value.authority_digest},
+        revision_guard=revision_guard,
+    )
+    if result.status not in {"written", "replayed"}:
+        raise ValueError("backup_policy_application_unconfirmed")
+    return BackupPolicyExecutionEvidence(
+        result_status="ok", result_digest=record.approval.plan_digest
     )
 
 
@@ -1226,7 +1291,9 @@ def reconcile_stale_privileged_operations(
                 record=record,
                 record_store=record_store,
             )
-            if record.descriptor_id == "managed-authz-policy-set":
+            if record.descriptor_id == "production-backup-policy":
+                terminal_evidence = _execute_backup_policy(store=store, record=record, now=now)
+            elif record.descriptor_id == "managed-authz-policy-set":
                 terminal_evidence = _recover_managed_authz_policy_set(
                     store=store,
                     record=record,
@@ -1380,7 +1447,10 @@ def execute_approved_privileged_operations_once(
                 != approval.pre_state_digest
             ):
                 raise ValueError("approved_plan_drift")
-            if claimed.descriptor_id == "managed-authz-policy-set":
+            if claimed.descriptor_id == "production-backup-policy":
+                operation_execution = _execute_backup_policy(store=store, record=claimed, now=now)
+                effect_completed = True
+            elif claimed.descriptor_id == "managed-authz-policy-set":
 
                 def mark_effect_completed() -> None:
                     nonlocal effect_completed

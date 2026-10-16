@@ -303,6 +303,59 @@ export type BackupGateRecord = {
     status: 'pending' | 'pass' | 'fail' | 'skipped';
 };
 
+export type BackupPolicyDecision = {
+    decision: 'approve' | 'decline';
+    source_event_id: string;
+};
+
+export type BackupPolicyDecisionResponse = {
+    proposal: BackupPolicyProposalReview;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type BackupPolicyExecutionEvidence = {
+    failure_code: string;
+    reconciliation_required: boolean;
+    result_digest: string;
+    result_status: 'ok' | 'error';
+};
+
+export type BackupPolicyHumanEvidence = {
+    backup_max_age_seconds: number;
+    context: string;
+    effective_at: string;
+    instance: string;
+    plan_digest: string;
+    policy_revision: number;
+    product: string;
+    promotion_action: string;
+    result_status: 'ok';
+    retention_count: number;
+    review_after: string;
+    snapshot_max_age_seconds: number;
+};
+
+export type BackupPolicyProposalInput = {
+    authority: ProductionBackupAuthorityWriteEnvelope;
+    reason: string;
+    related_issue: string;
+};
+
+export type BackupPolicyProposalListResponse = {
+    proposals: Array<BackupPolicyProposalReview>;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type BackupPolicyProposalReview = {
+    can_approve: boolean;
+    can_decline: boolean;
+    operation_id: string;
+    protection: BackupPolicyHumanEvidence;
+    status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
+};
+
 export type BootstrapEvidence = {
     attempted: boolean;
     detail: string;
@@ -2639,7 +2692,7 @@ export type PrivilegedOperationAgentActor = {
 
 export type PrivilegedOperationApproval = {
     approver: PrivilegedOperationActor;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+    descriptor_id: 'production-backup-policy' | 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
     descriptor_version: number;
     evidence_digest: string;
     expires_at: string;
@@ -2713,18 +2766,18 @@ export type PrivilegedOperationLocalOperatorActor = {
 export type PrivilegedOperationRecord = {
     approval: PrivilegedOperationApproval | null;
     created_at: string;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+    descriptor_id: 'production-backup-policy' | 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
     descriptor_version: number;
-    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence | ({
+    evidence: BackupPolicyHumanEvidence | ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence | ({
         action: 'setup';
     } & OrdinaryAgentDeliveryActivationSetupHumanEvidence) | ({
         action: 'revoke_activation';
     } & OrdinaryAgentDeliveryActivationRevokeHumanEvidence);
     evidence_digest: string;
-    execution: PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | OrdinaryAgentDeliveryActivationExecutionEvidence | null;
+    execution: BackupPolicyExecutionEvidence | PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | OrdinaryAgentDeliveryActivationExecutionEvidence | null;
     expires_at: string;
     operation_id: string;
-    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
+    request: BackupPolicyProposalInput | ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
     request_digest: string;
     requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
     safety_class: 'secret_backed' | 'policy_admin';
@@ -2751,7 +2804,7 @@ export type PrivilegedOperationSemanticReview = {
     can_approve: boolean;
     can_revoke: boolean;
     change: PrivilegedOperationSemanticReviewChange;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+    descriptor_id: 'production-backup-policy' | 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
     descriptor_version: number;
     evidence: PrivilegedOperationSemanticReviewEvidence;
     lifecycle: PrivilegedOperationSemanticReviewLifecycle;
@@ -4222,15 +4275,15 @@ export type ProductionBackupAuthorityStatus = {
 };
 
 export type ProductionBackupAuthorityWriteEnvelope = {
-    expected_current_policy_record_id?: string;
-    expected_current_target_record_ids?: {
+    expected_current_policy_record_id: string;
+    expected_current_target_record_ids: {
         [key: string]: string;
     };
     mode: 'dry_run' | 'apply';
     policy: ProductionBackupPolicyRecord;
-    reviewed_authority_digest?: string;
-    schema_version?: number;
-    targets?: Array<ProductionBackupTargetRecord>;
+    reviewed_authority_digest: string;
+    schema_version: number;
+    targets: Array<ProductionBackupTargetRecord>;
 };
 
 export type ProductionBackupAuthorityWriteResponse = {
@@ -4279,18 +4332,18 @@ export type ProductionBackupPolicyRecord = {
     fast_snapshot: ProductionFastSnapshotPolicy;
     independent_backup: ProductionIndependentBackupPolicy;
     instance: string;
-    policy_digest?: string;
-    policy_id?: string;
+    policy_digest: string;
+    policy_id: string;
     policy_revision: number;
     product: string;
     promotion_action: string;
     reason: string;
-    record_id?: string;
+    record_id: string;
     review_after: string;
-    schema_version?: number;
+    schema_version: number;
     source: string;
-    status?: 'active' | 'superseded' | 'retired';
-    supersedes_record_id?: string | null;
+    status: 'active' | 'superseded' | 'retired';
+    supersedes_record_id: string | null;
 };
 
 export type ProductionBackupPolicySummary = {
@@ -4313,13 +4366,13 @@ export type ProductionBackupTargetRecord = {
     } & ProxmoxStorageBackupDestinationReference);
     effective_at: string;
     reason: string;
-    record_id?: string;
+    record_id: string;
     review_after: string;
-    schema_version?: number;
+    schema_version: number;
     source: string;
-    status?: 'active' | 'superseded' | 'retired';
-    supersedes_record_id?: string | null;
-    target_digest?: string;
+    status: 'active' | 'superseded' | 'retired';
+    supersedes_record_id: string | null;
+    target_digest: string;
     target_id: string;
     target_revision: number;
 };
@@ -4337,7 +4390,7 @@ export type ProductionBackupTargetSummary = {
 
 export type ProductionFastSnapshotPolicy = {
     max_evidence_age_seconds: number;
-    operation?: 'fast_snapshot';
+    operation: 'fast_snapshot';
     retention_count: number;
     snapshot_prefix: string;
     source_target_id: string;
@@ -4346,7 +4399,7 @@ export type ProductionFastSnapshotPolicy = {
 export type ProductionIndependentBackupPolicy = {
     destination_target_id: string;
     max_evidence_age_seconds: number;
-    operation?: 'independent_backup';
+    operation: 'independent_backup';
     source_target_id: string;
 };
 
@@ -4413,18 +4466,18 @@ export type ProviderTargetRecord = {
 };
 
 export type ProxmoxGuestBackupDestinationReference = {
-    destination_kind?: 'proxmox_guest';
+    destination_kind: 'proxmox_guest';
     guest_id: string;
     guest_kind: 'lxc' | 'qemu';
     host: string;
-    provider_type?: 'proxmox';
+    provider_type: 'proxmox';
     username: string;
 };
 
 export type ProxmoxStorageBackupDestinationReference = {
-    destination_kind?: 'proxmox_storage';
+    destination_kind: 'proxmox_storage';
     host: string;
-    provider_type?: 'proxmox';
+    provider_type: 'proxmox';
     storage_id: string;
     username: string;
 };
@@ -5618,7 +5671,7 @@ export type ListHumanPrivilegedOperationsData = {
     path?: never;
     query?: {
         status?: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled' | null;
-        descriptor_id?: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+        descriptor_id?: 'production-backup-policy' | 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
         limit?: number;
     };
     url: '/v1/privileged-operations/plans';
@@ -5902,6 +5955,34 @@ export type QualifyProductionBackupPreflightResponses = {
 };
 
 export type QualifyProductionBackupPreflightResponse = QualifyProductionBackupPreflightResponses[keyof QualifyProductionBackupPreflightResponses];
+
+export type ListBackupPolicyProposalsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        product: string;
+        context: string;
+        instance: string;
+    };
+    url: '/v1/production-backup-authority/proposals';
+};
+
+export type ListBackupPolicyProposalsErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ListBackupPolicyProposalsError = ListBackupPolicyProposalsErrors[keyof ListBackupPolicyProposalsErrors];
+
+export type ListBackupPolicyProposalsResponses = {
+    200: BackupPolicyProposalListResponse;
+};
+
+export type ListBackupPolicyProposalsResponse = ListBackupPolicyProposalsResponses[keyof ListBackupPolicyProposalsResponses];
 
 export type ReadProductionBackupGateOperationData = {
     body?: never;
@@ -7184,6 +7265,32 @@ export type ApplyProductionBackupAuthorityResponses = {
 };
 
 export type ApplyProductionBackupAuthorityResponse = ApplyProductionBackupAuthorityResponses[keyof ApplyProductionBackupAuthorityResponses];
+
+export type DecideBackupPolicyProposalData = {
+    body: BackupPolicyDecision;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/production-backup-authority/proposals/{operation_id}/decision';
+};
+
+export type DecideBackupPolicyProposalErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type DecideBackupPolicyProposalError = DecideBackupPolicyProposalErrors[keyof DecideBackupPolicyProposalErrors];
+
+export type DecideBackupPolicyProposalResponses = {
+    200: BackupPolicyDecisionResponse;
+};
+
+export type DecideBackupPolicyProposalResponse = DecideBackupPolicyProposalResponses[keyof DecideBackupPolicyProposalResponses];
 
 export type EnqueueProductionBackupGateData = {
     body: ProductionBackupGateRequest;

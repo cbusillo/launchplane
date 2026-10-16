@@ -62,6 +62,10 @@ from control_plane.contracts.privileged_operation import (
     PrivilegedOperationSafetyClass,
 )
 from control_plane.service_auth import AgentConsumerActionSafety, action_safety
+from control_plane.contracts.backup_policy_proposal import (
+    BackupPolicyProposalInput,
+    BackupPolicyHumanEvidence,
+)
 
 
 class PrivilegedOperationDescriptor(BaseModel):
@@ -76,6 +80,7 @@ class PrivilegedOperationDescriptor(BaseModel):
     approve_action: str
     revoke_action: str
     agent_summary_read_action: str | None = None
+    dedicated_product_review: bool = False
 
     @model_validator(mode="after")
     def _validate_descriptor(self) -> "PrivilegedOperationDescriptor":
@@ -93,6 +98,19 @@ class PrivilegedOperationDescriptor(BaseModel):
             if self.agent_summary_read_action is not None
             else required_actions
         )
+        # The backup adapter reuses scoped planning/read/write authority. Its
+        # decisions share one existing write permission rather than new grants.
+        if self.descriptor_id == "production-backup-policy":
+            if self.safety_class != "policy_admin" or actions != (
+                "production_backup_authority.plan",
+                "production_backup_authority.read",
+                "production_backup_authority.write",
+                "production_backup_authority.write",
+                "production_backup_authority.write",
+                "production_backup_authority.read",
+            ):
+                raise ValueError("Backup policy descriptor must reuse scoped backup authority.")
+            return self
         if any(not action.strip() for action in actions):
             raise ValueError("Privileged-operation descriptor actions must be non-empty")
         if len(set(actions)) != len(actions):
@@ -555,7 +573,94 @@ def plan_managed_merge_train_policy_import(
     )
 
 
+def plan_backup_policy_proposal(
+    record_store: object, request: PrivilegedOperationRequest
+) -> BackupPolicyHumanEvidence:
+    from control_plane.production_backup_authority import (
+        plan_production_backup_authority_write,
+        require_production_backup_authority_store,
+    )
+
+    if not isinstance(request, BackupPolicyProposalInput):
+        raise PrivilegedOperationPlannerError("Backup planner received an invalid request.")
+    try:
+        from control_plane.drivers.registry import read_driver_descriptor, effective_driver_actions
+
+        read_profile = getattr(record_store, "read_product_profile_record", None)
+        if not callable(read_profile):
+            raise ValueError("Product profile storage is required.")
+        profile = read_profile(request.authority.policy.product)
+        policy = request.authority.policy
+        if not any(
+            lane.context == policy.context
+            and lane.instance == policy.instance
+            and lane.instance == "prod"
+            for lane in profile.lanes
+        ):
+            raise ValueError("Backup proposal does not name this product's production lane.")
+        actions = effective_driver_actions(read_driver_descriptor(profile.driver_id))
+        if not any(
+            action.requires_production_backup_policy
+            and action.authz_action == policy.promotion_action
+            for action in actions
+        ):
+            raise ValueError("Backup proposal does not protect the current production promotion.")
+        plan = plan_production_backup_authority_write(
+            record_store=require_production_backup_authority_store(record_store),
+            envelope=request.authority,
+        )
+        from datetime import datetime, timezone
+
+        observed_at = datetime.now(timezone.utc)
+        bound_ids = {target.record_id for target in plan.result.targets}
+        bound_records = [
+            target for target in plan.future_target_records if target.record_id in bound_ids
+        ]
+        validity_windows = [(policy.effective_at, policy.review_after)] + [
+            (target.effective_at, target.review_after) for target in bound_records
+        ]
+        for effective_at, review_after in validity_windows:
+            if (
+                not datetime.fromisoformat(effective_at.replace("Z", "+00:00"))
+                <= observed_at
+                < datetime.fromisoformat(review_after.replace("Z", "+00:00"))
+            ):
+                raise ValueError("Backup protection is not currently effective or needs review.")
+    except (TypeError, ValueError, LookupError, FileNotFoundError) as error:
+        raise PrivilegedOperationPlannerError(
+            "Backup proposal cannot be planned against current authority."
+        ) from error
+    policy = request.authority.policy
+    return BackupPolicyHumanEvidence(
+        plan_digest=plan.result.authority_digest,
+        product=policy.product,
+        context=policy.context,
+        instance=policy.instance,
+        promotion_action=policy.promotion_action,
+        policy_revision=policy.policy_revision,
+        retention_count=policy.fast_snapshot.retention_count,
+        snapshot_max_age_seconds=policy.fast_snapshot.max_evidence_age_seconds,
+        backup_max_age_seconds=policy.independent_backup.max_evidence_age_seconds,
+        effective_at=policy.effective_at,
+        review_after=policy.review_after,
+    )
+
+
 _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDescriptor] = {
+    "production-backup-policy": RegisteredPrivilegedOperationDescriptor(
+        descriptor=PrivilegedOperationDescriptor(
+            descriptor_id="production-backup-policy",
+            dedicated_product_review=True,
+            safety_class="policy_admin",
+            plan_action="production_backup_authority.plan",
+            human_read_action="production_backup_authority.read",
+            cancel_action="production_backup_authority.write",
+            approve_action="production_backup_authority.write",
+            revoke_action="production_backup_authority.write",
+            agent_summary_read_action="production_backup_authority.read",
+        ),
+        planner=plan_backup_policy_proposal,
+    ),
     "managed-secret-reencryption": RegisteredPrivilegedOperationDescriptor(
         descriptor=MANAGED_SECRET_REENCRYPTION_DESCRIPTOR,
         planner=plan_managed_secret_reencryption,
