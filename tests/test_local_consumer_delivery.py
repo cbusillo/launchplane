@@ -49,6 +49,7 @@ from tests.http_app_test_support import (
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import sqlite_database_url, _write_runtime_key_safety_policy
 from tests.support.auth import _local_operator_policy
+from tests.support.tls import server_tls_context
 
 FAKE_VALUE = "fictional-testing-bridge-credential"
 
@@ -485,7 +486,6 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
     ) -> None:
         import ipaddress
         import logging
-        import ssl
         import threading
         from datetime import datetime, timedelta, timezone
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -529,9 +529,7 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         key_file.chmod(0o600)
-        tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        tls.minimum_version = ssl.TLSVersion.TLSv1_2
-        tls.load_cert_chain(cert_file, key_file)
+        tls = server_tls_context(cert_file, key_file)
         quiet = logging.Logger("local-consumer-fixture")
         quiet.disabled = True
         ws_paths: list[str] = []

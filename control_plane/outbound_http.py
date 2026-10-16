@@ -366,6 +366,7 @@ def request_private_http(
     max_redirects: int = 10,
     max_response_body_bytes: int = 256 * 1024,
     connection_factory: PublicHttpConnectionFactory | None = None,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> PublicHttpResponse:
     if timeout_seconds <= 0:
         raise ValueError("Private HTTP timeout must be positive.")
@@ -374,7 +375,11 @@ def request_private_http(
     if max_response_body_bytes < 0:
         raise ValueError("Private HTTP response body limit must not be negative.")
     deadline = monotonic() + timeout_seconds
-    open_connection = connection_factory or _private_http_connection
+    open_connection = connection_factory or (
+        (lambda destination, timeout: _private_http_connection(destination, timeout, ssl_context))
+        if ssl_context is not None
+        else _private_http_connection
+    )
     current_url = url
     current_method = method.strip().upper() or "GET"
     current_body = body
@@ -777,7 +782,15 @@ def _public_http_connection(
 def _private_http_connection(
     destination: PublicHttpDestination,
     timeout_seconds: float,
+    ssl_context: ssl.SSLContext | None = None,
 ) -> _HttpConnection:
+    if destination.scheme == "https" and ssl_context is not None:
+        return cast(
+            _HttpConnection,
+            HTTPSConnection(
+                destination.hostname, destination.port, timeout=timeout_seconds, context=ssl_context
+            ),
+        )
     connection_type = HTTPSConnection if destination.scheme == "https" else HTTPConnection
     return cast(
         _HttpConnection,
