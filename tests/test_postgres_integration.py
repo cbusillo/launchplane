@@ -103,6 +103,7 @@ from tests.test_every_code_feedback_resume_storage import (
 )
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapPrerequisiteScenario
 from tests import test_testing_public_ingress as public_ingress_tests
+from tests import test_testing_verification as testing_verification_tests
 from tests.test_merge_train_historical_completion import (
     _HistoricalCompletionFixture,
     _ReadOnlyTransport,
@@ -11008,6 +11009,33 @@ class RealPostgresTestingPublicIngressTests(public_ingress_tests.TestingPublicIn
     def setUp(self) -> None:
         self.database_url = self.enterContext(_head_postgres_database())
         super().setUp()
+
+
+class RealPostgresTestingVerificationTests(testing_verification_tests.TestingVerificationTests):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+
+
+class RealPostgresTestingVerificationHttpTests(
+    testing_verification_tests.TestingVerificationHttpTests
+):
+    def setUp(self) -> None:
+        self.database_url = self.enterContext(_head_postgres_database())
+        super().setUp()
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id=build_authz_policy_record_id(
+                    revision=1, policy_sha256=authz_policy_sha256(policy)
+                ),
+                revision=1,
+                status="active",
+                source="test:testing-verification",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
 
 
 class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteScenario):
