@@ -26,13 +26,12 @@ title: Testing Style
   contention under parallel execution. Retain separate expired/stolen-lease
   refusal coverage with the real storage implementation.
 - Keep fixtures small and inline unless they are reused heavily.
-- When a full suite is justified, the local entrypoint is
-  `uv run --extra dev launchplane ci unittest-shard local`.
 
 ## Local test loop
 
 During the one-week [Q326 trial](https://github.com/cbusillo/codex-skills/issues/1884#issuecomment-6194586961)
-approved October 15, 2026, routine changes use focused local behavior tests for
+approved October 15, 2026 and refined by [Q375](https://github.com/cbusillo/codex-skills/issues/1884#issuecomment-6215129557)
+on October 16, routine changes use focused local behavior tests for
 the changed code, plus lint, type checks, and IDE inspection. Choose the
 relevant modules or test cases; substitute them in the targeted command rather
 than running an unselected unittest discovery:
@@ -48,8 +47,9 @@ only if the numbers support it.
 
 Use `.github/github.json` for the lint and type-check commands and inspection
 configuration. `qualityGate.test.local` is the focused command template;
-`qualityGate.test.ci` names the full-suite command, also available locally for
-the exceptions below. For a documentation or metadata change with no affected code,
+`qualityGate.test.localSafety` takes whole safety module names, and
+`qualityGate.test.ci` names the complete suite for CI only. For a documentation
+or metadata change with no affected code,
 record why behavior tests or IDE inspection do not apply; do not add tests that
 assert instruction wording or config text.
 
@@ -62,26 +62,34 @@ does not replace that evidence. The trial does not change CI workflows or
 required checks.
 
 Safety, authorization, approval-rule, destructive-helper, and shared-infrastructure
-changes are excluded from the focused-only trial and still run the full local
-suite before review. Credential handling falls under the safety and authorization
-exceptions. Shared test helpers, shard tooling, and CI runner selection are
-shared infrastructure. Broaden local validation when an affected shared contract,
-storage boundary, generated surface, observed failure, or other risk requires
-it. The full local suite remains available through:
+changes keep their safety classification. Credential handling falls under safety
+and authorization; shared test helpers, shard tooling, and CI runner selection
+are shared infrastructure. For these changes, run focused behavior tests plus
+the **whole test modules** covering each safety area touched: authorization,
+secrets, recovery, and credentials. Select modules by the changed behavior and
+its callers, including relevant tests in broadly named modules; a filename
+keyword search alone is not a complete selection. Pass module names, not
+individual classes or methods, to `qualityGate.test.localSafety`:
 
 ```bash
-uv run --extra dev launchplane ci unittest-shard local
+uv run --extra dev python -m unittest tests.test_operation_authorization tests.test_product_secret_copy
 ```
 
-The local gate computes one deterministic plan, runs every shard in an isolated
-Python subprocess, reports all failing shard indexes in one result, and writes
-the next local timing history only after every shard passes. Its defaults match
-same-repo CI: 12 shards with a 20-test/30-second split threshold. `--jobs`
-controls only local concurrency and defaults to the detected CPU count capped at
-12; it does not change the shard topology. Local timing history is stored under
-the ignored `.ci-cache/` directory and remains a balancing hint rather than test
-authority. A failed run leaves the previous timing history unchanged instead of
-learning from a partial suite.
+These are selection examples, not a mandatory inventory for every change.
+Record the classification, touched areas, selected modules and results in the
+PR. When no executable safety area is touched (for example, this test guidance
+itself), record that reason and obtain the required model review. Do not run
+unrelated safety modules just because the repository is a control plane.
+Broaden local coverage within the affected areas for shared contracts, storage,
+generated surfaces or observed failures; the complete 12-shard suite runs only
+in CI, including for safety-classified changes.
+
+The CI suite uses the command named by `qualityGate.test.ci`; its historical
+`unittest-shard local` subcommand name describes the all-shard runner, not a
+requirement to run it on the developer host. CI plans once and runs the complete
+inventory across 12 shards, with the coverage aggregate required by `ci-gate`.
+The all-shard CLI remains implemented for compatibility; it is not a local
+review, ready or closeout gate under this trial.
 
 Storage tests that instantiate `PostgresRecordStore` with `sqlite+pysqlite://`
 are portability and local rehearsal tests. They prove ORM mapping, payload round
@@ -224,10 +232,11 @@ the run. An `always()` aggregate can retain the old workflow's concurrency slot
 while it waits for a runner, preventing the new head's CI from starting.
 
 GitHub Actions remains the source of truth for required pull-request gates.
-Follow the mandatory full-local exceptions in [Local test loop](#local-test-loop).
-Otherwise, local validation should be proportionate: use targeted behavior proof by
-default, then add the full suite, PostgreSQL integration, browser, generated-
-contract, or other gate when the affected boundary or observed risk requires it.
+Follow the safety module selection in [Local test loop](#local-test-loop).
+Local validation uses targeted behavior proof plus whole modules for touched
+safety areas. Add PostgreSQL integration, browser, generated-contract or other
+affected-area gates when the boundary or observed risk requires them; the
+complete suite stays CI-only.
 When PostgreSQL storage semantics require proof, the PostgreSQL integration
 command is the official production storage-semantics proof with a local or CI
 PostgreSQL service.

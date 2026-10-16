@@ -81,6 +81,8 @@
   "qualityGate": {
     "test": {
       "local": "uv run --extra dev python -m unittest {modules}",
+      "localSafety": "uv run --extra dev python -m unittest {safety_modules}",
+      "scope": "docs/style/testing.md#local-test-loop: focused local tests plus whole modules for touched safety areas; complete suite CI-only; green current-head CI before ready and merge",
       "ci": "uv run --extra dev launchplane ci unittest-shard local",
       "serviceRestartRehearsal": "LP_REHEARSAL_OPERATOR_HELPER=<installed-launchplane-skill>/scripts/launchplane-write-action.py uv run --extra dev python scripts/qualify-lane-service-restart.py",
       "postgresIntegration": "LAUNCHPLANE_TEST_POSTGRES_URL=postgresql+psycopg://... uv run --extra dev launchplane ci postgres-integration",
