@@ -689,6 +689,49 @@ class ClientReleaseTests(unittest.TestCase):
                 make_stale()
                 self.assertEqual(self.advance(), ())
 
+    def test_monitor_indexes_unstarted_release_then_detects_changed_backup_without_history_scan(
+        self,
+    ) -> None:
+        from control_plane.production_delivery_monitor import monitor_production_delivery_once
+
+        self.switch("promote")
+        self.accept()
+        profile = self.store.read_product_profile_record(PRODUCT)
+
+        def monitor() -> None:
+            monitor_production_delivery_once(
+                self.store,
+                transport_factory=lambda _store, _profile: Mock(
+                    get_json=Mock(
+                        side_effect=lambda path: (
+                            {"sha": HEAD} if "/commits/" in path else {"status": "behind"}
+                        )
+                    )
+                ),
+            )
+
+        monitor()
+        (backup_id,) = self.advance()
+        self.finish(backup_id, "fail")
+        with patch.object(
+            self.store,
+            "list_release_review_decision_records",
+            side_effect=AssertionError("Full decision scan"),
+        ):
+            monitor()
+        incidents = self.store.list_public_ingress_incident_records(status="open")
+        self.assertEqual(len(incidents), 1)
+        from control_plane.client_release import read_client_release_step_views
+
+        accepted = self.store.list_release_review_decision_records(product=profile.product)[0]
+        failure = read_client_release_step_views(
+            store=self.store, profile=profile, decision=accepted
+        )[0].failure
+        assert failure is not None
+        self.assertIn(failure.code, incidents[0].summary)
+        self.assertIn(failure.trace_id or failure.record_id, incidents[0].summary)
+        self.assertEqual(profile.product, incidents[0].product)
+
     def test_a_failed_step_stops_the_release(self) -> None:
         self.switch("promote")
         accepted = self.accept()
