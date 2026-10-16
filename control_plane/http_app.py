@@ -3,7 +3,6 @@ from control_plane.dokploy_target_comparison import (
     require_provider_target_expectation,
 )
 from control_plane import odoo_website_settings as control_plane_odoo_website_settings
-from control_plane.authz_scope import VERIREEL_APP_MAINTENANCE_ACTION
 from control_plane.dokploy.api import DokployScheduleExecutionFailed
 from control_plane.odoo_connection_isolation import (
     ConnectionIsolationOutcomeUnknown,
@@ -371,15 +370,6 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_idempotency_record_id,
     build_launchplane_mutation_reservation_id,
     complete_launchplane_mutation_reservation,
-)
-from control_plane.verireel_app_maintenance_http import (
-    VERIREEL_APP_MAINTENANCE_ROUTE as _VERIREEL_APP_MAINTENANCE_ROUTE,
-    VeriReelAppMaintenanceEnvelope,
-    VeriReelRouteDependencyError,
-    VeriReelProductMismatchError,
-    apply_verireel_app_maintenance_result,
-    resolve_verireel_route_authorization,
-    should_store_verireel_result_idempotency,
 )
 from control_plane.http_routes.release_review import (
     ReleaseReviewRouteDependencies,
@@ -25464,106 +25454,6 @@ def create_launchplane_fastapi_app(
             )
         return response
 
-    async def apply_verireel_app_maintenance(
-        request: Request,
-        maintenance_request: VeriReelAppMaintenanceEnvelope,
-        identity: Annotated[LaunchplaneIdentity, Depends(read_write_identity)],
-        record_store: Annotated[object, Depends(get_record_store)],
-        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
-    ) -> AcceptedEvidenceResponse | JSONResponse:
-        trace_id = next_trace_id()
-        try:
-            authorization_product, authorization_context = resolve_verireel_route_authorization(
-                record_store=record_store,
-                product=maintenance_request.product,
-                context=maintenance_request.maintenance.context,
-                instance=maintenance_request.maintenance.instance,
-            )
-        except VeriReelRouteDependencyError:
-            return driver_route_dependency_not_found_response(
-                trace_id=trace_id,
-                route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
-            )
-        except VeriReelProductMismatchError as error:
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="product_driver_mismatch",
-                message="Product is not configured for the requested driver route.",
-            ) from error
-        if not resolved_authz_policy_runtime.allows(
-            action=VERIREEL_APP_MAINTENANCE_ACTION,
-            identity=identity,
-            product=authorization_product,
-            context=authorization_context,
-            target=AuthorizationTarget(
-                scope="instance", instances=(maintenance_request.maintenance.instance,)
-            ),
-        ):
-            raise _launchplane_http_error(
-                status_code=403,
-                trace_id=trace_id,
-                code="authorization_denied",
-                message=(
-                    "Workflow cannot execute the VeriReel app maintenance driver"
-                    " for the requested product/context."
-                ),
-            )
-        (
-            normalized_key,
-            payload_fingerprint,
-            replayed_response,
-        ) = await replay_apply_idempotency(
-            request=request,
-            record_store=record_store,
-            identity=identity,
-            route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
-            idempotency_key=idempotency_key,
-            trace_id=trace_id,
-            check_replay=bool(idempotency_key.strip()),
-        )
-        if replayed_response is not None:
-            return replayed_response
-        try:
-            records, result = apply_verireel_app_maintenance_result(
-                control_plane_root=resolved_control_plane_root,
-                request=maintenance_request,
-            )
-        except FileNotFoundError as error:
-            raise _launchplane_http_error(
-                status_code=404,
-                trace_id=trace_id,
-                code="not_found",
-                message=f"No Launchplane route for {_VERIREEL_APP_MAINTENANCE_ROUTE}.",
-            ) from error
-        except (ValueError, click.ClickException) as error:
-            raise _launchplane_http_error(
-                status_code=400,
-                trace_id=trace_id,
-                code="invalid_request",
-                message="Request could not be completed.",
-            ) from error
-        except Exception as error:
-            _LOGGER.exception("Unexpected Launchplane service error", extra={"trace_id": trace_id})
-            raise _launchplane_http_error(
-                status_code=500,
-                trace_id=trace_id,
-                code="internal_error",
-                message="Unexpected Launchplane service error. Use trace_id to inspect service logs.",
-            ) from error
-        response = accepted_evidence_response(trace_id=trace_id, records=records, result=result)
-        if should_store_verireel_result_idempotency(result):
-            store_apply_idempotency(
-                record_store=record_store,
-                identity=identity,
-                route_path=_VERIREEL_APP_MAINTENANCE_ROUTE,
-                idempotency_key=normalized_key,
-                request_fingerprint_value=payload_fingerprint,
-                trace_id=trace_id,
-                response=response,
-            )
-        return response
-
     async def apply_ingress_canary_route(
         request: Request,
         canary_request: IngressCanaryRouteApplyEnvelope,
@@ -27109,35 +26999,6 @@ def create_launchplane_fastapi_app(
         response_model_exclude_none=True,
         operation_id="inspect_generic_web_deploy_recovery_provider_evidence",
         summary="Inspect exact provider evidence for a generic web deploy reservation",
-        responses={
-            400: {"model": LaunchplaneErrorResponse},
-            401: {"model": LaunchplaneErrorResponse},
-            403: {"model": LaunchplaneErrorResponse},
-            404: {"model": LaunchplaneErrorResponse},
-            409: {"model": LaunchplaneErrorResponse},
-            503: {"model": LaunchplaneErrorResponse},
-        },
-    )
-
-    app.add_api_route(
-        _VERIREEL_APP_MAINTENANCE_ROUTE,
-        apply_verireel_app_maintenance,
-        methods=["POST"],
-        status_code=202,
-        response_model=AcceptedEvidenceResponse,
-        response_model_exclude_none=True,
-        openapi_extra={
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {
-                        "schema": _openapi_model_schema(VeriReelAppMaintenanceEnvelope)
-                    }
-                },
-            }
-        },
-        operation_id="apply_verireel_app_maintenance",
-        summary="Execute VeriReel app maintenance",
         responses={
             400: {"model": LaunchplaneErrorResponse},
             401: {"model": LaunchplaneErrorResponse},

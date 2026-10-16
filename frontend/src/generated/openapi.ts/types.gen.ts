@@ -793,6 +793,7 @@ export type GenericWebApplicationSchedule = {
     cron_expression: string;
     enabled: boolean;
     name: string;
+    on_reset: boolean;
     timeout_seconds: number;
 };
 
@@ -848,12 +849,14 @@ export type GenericWebLaneExtensions = {
 export type GenericWebMaintenanceCommand = {
     command: string;
     name: string;
+    on_reset: boolean;
     timeout_seconds: number;
 };
 
 export type GenericWebPreviewDeclaration = {
     app_name_suffix?: string;
     data_transport_mode: 'none' | 'driver';
+    generic_web_extensions?: GenericWebLaneExtensions | null;
     transport_database_prefix?: string;
     transport_extension?: '' | 'verireel-postgres';
 };
@@ -3735,6 +3738,7 @@ export type ProductPreviewProfile = {
     data_transport_mode: 'none' | 'driver';
     domain_certificate_type: 'none' | 'letsencrypt';
     enabled: boolean;
+    generic_web_extensions?: GenericWebLaneExtensions;
     readonly historical_transport?: {
         [key: string]: string;
     };
@@ -5288,6 +5292,7 @@ export type ProductPreviewProfileWritable = {
     data_transport_mode: 'none' | 'driver';
     domain_certificate_type: 'none' | 'letsencrypt';
     enabled: boolean;
+    generic_web_extensions?: GenericWebLaneExtensions;
     omitted_env_keys: Array<string>;
     override_env: {
         [key: string]: string;

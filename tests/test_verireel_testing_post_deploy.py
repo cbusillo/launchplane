@@ -187,8 +187,9 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
                 Path("."),
                 bound,
                 GenericWebPostDeployGuard(),
-                action="migrate",
-                intent="stable-testing-migration",
+                action="grant-sponsored",
+                intent="stable-testing-remote-e2e-grant-sponsored",
+                email="fixture@example.com",
             )
         resolve.assert_called_once_with(control_plane_root=Path("."), context_name=bound.context)
         target = execute.call_args.kwargs["testing_target"]
@@ -224,33 +225,11 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
             ),
         ):
             result = self.execute()
-        self.assertEqual(events, ["migration", "verification"])
+        self.assertEqual(events, ["verification"])
         self.assertEqual(result.status, "pass")
         self.assertEqual(result.evidence["deployment_record_id"], self.context.deployment_record_id)
         self.assertEqual(result.evidence["source_git_ref"], self.context.source_git_ref)
         self.assertEqual(result.evidence["artifact_id"], self.context.artifact_id)
-
-    def test_migration_failure_does_not_call_the_browser_or_report_healthy(self) -> None:
-        with (
-            patch(
-                "control_plane.workflows.verireel_testing_post_deploy._maintenance",
-                side_effect=click.ClickException("failed"),
-            ),
-            patch(
-                "control_plane.workflows.verireel_testing_post_deploy.verify_verireel_testing_product"
-            ) as verify,
-            patch(
-                "control_plane.workflows.verireel_testing_post_deploy.assert_verireel_testing_identity"
-            ),
-            patch(
-                "control_plane.workflows.verireel_testing_post_deploy._resolve_stable_testing_base_url",
-                return_value="https://video.test",
-            ),
-        ):
-            result = self.execute()
-        self.assertEqual(result.status, "fail")
-        self.assertEqual(result.evidence["migration_status"], "fail")
-        verify.assert_not_called()
 
     def test_unavailable_browser_makes_no_migration_or_fixture_change(self) -> None:
         with (
@@ -270,7 +249,6 @@ class VeriReelTestingPostDeployTests(unittest.TestCase):
             result = self.execute()
         self.assertEqual(result.status, "fail")
         self.assertEqual(result.evidence["failure_kind"], "transient")
-        self.assertEqual(result.evidence["migration_status"], "skipped")
         maintain.assert_not_called()
 
     def test_gateway_outage_is_transient_and_a_missing_route_is_a_product_failure(self) -> None:

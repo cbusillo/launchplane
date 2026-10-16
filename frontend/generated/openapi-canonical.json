@@ -9886,6 +9886,11 @@
             "title": "Name",
             "type": "string"
           },
+          "on_reset": {
+            "default": false,
+            "title": "On Reset",
+            "type": "boolean"
+          },
           "timeout_seconds": {
             "default": 300,
             "maximum": 3600.0,
@@ -10684,6 +10689,11 @@
             "title": "Product",
             "type": "string"
           },
+          "reset": {
+            "default": false,
+            "title": "Reset",
+            "type": "boolean"
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -10788,6 +10798,11 @@
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "on_reset": {
+            "default": false,
+            "title": "On Reset",
+            "type": "boolean"
           },
           "timeout_seconds": {
             "default": 300,
@@ -10901,6 +10916,16 @@
             ],
             "title": "Data Transport Mode",
             "type": "string"
+          },
+          "generic_web_extensions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenericWebLaneExtensions"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "transport_database_prefix": {
             "default": "",
@@ -15867,7 +15892,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "default": 1,
+            "default": 2,
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
@@ -36326,6 +36351,10 @@
             "title": "Enabled",
             "type": "boolean"
           },
+          "generic_web_extensions": {
+            "$ref": "#/components/schemas/GenericWebLaneExtensions",
+            "x-launchplane-optional-response": true
+          },
           "historical_transport": {
             "additionalProperties": {
               "type": "string"
@@ -51389,110 +51418,6 @@
         "title": "ValidationError",
         "type": "object"
       },
-      "VeriReelAppMaintenanceEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "maintenance": {
-            "$ref": "#/components/schemas/VeriReelAppMaintenanceRequest"
-          },
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "product",
-          "maintenance"
-        ],
-        "title": "VeriReelAppMaintenanceEnvelope",
-        "type": "object"
-      },
-      "VeriReelAppMaintenanceRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "enum": [
-              "migrate",
-              "grant-sponsored",
-              "promote-owner",
-              "delete-user",
-              "reset-testing"
-            ],
-            "title": "Action",
-            "type": "string"
-          },
-          "application_name": {
-            "default": "",
-            "title": "Application Name",
-            "type": "string"
-          },
-          "context": {
-            "default": "verireel",
-            "enum": [
-              "verireel",
-              "verireel-testing"
-            ],
-            "title": "Context",
-            "type": "string"
-          },
-          "email": {
-            "default": "",
-            "title": "Email",
-            "type": "string"
-          },
-          "instance": {
-            "default": "testing",
-            "enum": [
-              "testing",
-              "preview"
-            ],
-            "title": "Instance",
-            "type": "string"
-          },
-          "intent": {
-            "enum": [
-              "stable-testing-migration",
-              "stable-testing-reset",
-              "stable-testing-remote-e2e-grant-sponsored",
-              "remote-e2e-grant-sponsored",
-              "remote-e2e-delete-user",
-              "owner-route-promote-owner",
-              "owner-route-delete-user"
-            ],
-            "title": "Intent",
-            "type": "string"
-          },
-          "preview_slug": {
-            "default": "",
-            "title": "Preview Slug",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "timeout_seconds": {
-            "default": 300,
-            "minimum": 1.0,
-            "title": "Timeout Seconds",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "action",
-          "intent"
-        ],
-        "title": "VeriReelAppMaintenanceRequest",
-        "type": "object"
-      },
       "VeriReelProdBackupGateOperationWorkerReconcileResponse": {
         "additionalProperties": false,
         "properties": {
@@ -59490,6 +59415,11 @@
                       "product": {
                         "title": "Product",
                         "type": "string"
+                      },
+                      "reset": {
+                        "default": false,
+                        "title": "Reset",
+                        "type": "boolean"
                       },
                       "schema_version": {
                         "default": 1,
@@ -68920,220 +68850,6 @@
           }
         },
         "summary": "Write Odoo website-bootstrap override"
-      }
-    },
-    "/v1/drivers/verireel/app-maintenance": {
-      "post": {
-        "operationId": "apply_verireel_app_maintenance",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Idempotency-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$defs": {
-                  "VeriReelAppMaintenanceRequest": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "action": {
-                        "enum": [
-                          "migrate",
-                          "grant-sponsored",
-                          "promote-owner",
-                          "delete-user",
-                          "reset-testing"
-                        ],
-                        "title": "Action",
-                        "type": "string"
-                      },
-                      "application_name": {
-                        "default": "",
-                        "title": "Application Name",
-                        "type": "string"
-                      },
-                      "context": {
-                        "default": "verireel",
-                        "enum": [
-                          "verireel",
-                          "verireel-testing"
-                        ],
-                        "title": "Context",
-                        "type": "string"
-                      },
-                      "email": {
-                        "default": "",
-                        "title": "Email",
-                        "type": "string"
-                      },
-                      "instance": {
-                        "default": "testing",
-                        "enum": [
-                          "testing",
-                          "preview"
-                        ],
-                        "title": "Instance",
-                        "type": "string"
-                      },
-                      "intent": {
-                        "enum": [
-                          "stable-testing-migration",
-                          "stable-testing-reset",
-                          "stable-testing-remote-e2e-grant-sponsored",
-                          "remote-e2e-grant-sponsored",
-                          "remote-e2e-delete-user",
-                          "owner-route-promote-owner",
-                          "owner-route-delete-user"
-                        ],
-                        "title": "Intent",
-                        "type": "string"
-                      },
-                      "preview_slug": {
-                        "default": "",
-                        "title": "Preview Slug",
-                        "type": "string"
-                      },
-                      "schema_version": {
-                        "default": 1,
-                        "minimum": 1,
-                        "title": "Schema Version",
-                        "type": "integer"
-                      },
-                      "timeout_seconds": {
-                        "default": 300,
-                        "minimum": 1,
-                        "title": "Timeout Seconds",
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "action",
-                      "intent"
-                    ],
-                    "title": "VeriReelAppMaintenanceRequest",
-                    "type": "object"
-                  }
-                },
-                "$ref": "#/components/schemas/VeriReelAppMaintenanceEnvelope",
-                "additionalProperties": false,
-                "properties": {
-                  "maintenance": {
-                    "$ref": "#/$defs/VeriReelAppMaintenanceRequest"
-                  },
-                  "product": {
-                    "title": "Product",
-                    "type": "string"
-                  },
-                  "schema_version": {
-                    "default": 1,
-                    "minimum": 1,
-                    "title": "Schema Version",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "product",
-                  "maintenance"
-                ],
-                "title": "VeriReelAppMaintenanceEnvelope",
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Execute VeriReel app maintenance"
       }
     },
     "/v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel": {
