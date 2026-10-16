@@ -1915,13 +1915,13 @@ policy covers provider incidents when qualifying notification delivery. The
 route must have passed its existing product-scope authorization check; ordinary
 in-progress retries and idempotency-protocol errors do not open delivery incidents.
 
-The same monitor compares each Live product's recorded default branch with
-production through the existing read-only source adapter. A durable pending
-source receipt raises attention after one hour (`PRODUCTION_DELIVERY_LAG_SECONDS`),
-including missing/failed builds, testing qualification, held Client acceptance,
-backup refusals and stalled promotion. New merges and service restarts do not
-reset an outstanding deadline. The source's recorded merge-commit time starts the
-deadline when available, otherwise first observation does. Source-read failure
+Merged default-branch source waiting for release is not a production failure,
+regardless of its age. Client acceptance starts a release; engineering-only
+changes may wait on testing until a later release. This wait never opens a red
+incident or sends a failure alert. Release reminders are separate from failure
+monitoring. The monitor still reads each Live product's default branch through
+the existing read-only source adapter to detect unavailable source evidence.
+Source-read failure
 opens separate monitoring-unavailable attention and cannot resolve a delivery
 incident. A later verified source read resolves only that monitoring incident.
 Explicit lifecycle retirement resolves automatic delivery monitoring; prelaunch
@@ -1931,8 +1931,16 @@ never acceptance or a release gate.
 Exact replays of an unresolved candidate retain its original reason and trace and
 reuse the incident/outbox. A different failure stage updates that incident, and
 the existing policy controls reminders. Healthy checks of the old artifact cannot clear it.
-A later successful delivery clears only the matching candidate. Production-lag
-attention clears when production reaches the observed default-branch source.
+A later successful delivery clears only the matching candidate. Historical
+`production-delivery-lag` incidents are automatically reconciled as retired
+monitoring, preserving their evidence without a recovery notification. Queued
+notifications for that obsolete check are skipped by the normal outbox worker
+before consulting a destination or sending anything. A provider-start marker
+still retains an unknown delivery outcome; retiring the check does not prove
+whether a previously interrupted send happened. No policy change or manual
+alert clearing is needed. Other delivery failures remain actionable.
+Previously sent external messages remain historical evidence; this reconciliation
+does not retract them or close an external issue.
 Unidentified requests retain their request identity rather than borrowing a
 testing artifact, especially for rollback; they require matching recovery
 evidence and are never cleared by an unrelated promotion. Unexpected Client
@@ -2670,6 +2678,30 @@ return a typed blocked result rather than guessing a domain.
 
 ## Runtime Environment Contracts
 
+- For retirement investigation, use the repo-owned bounded client:
+
+  ```sh
+  uv run python scripts/inspect-retirement-inventory.py \
+    --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+    settings --context <context> [--instance <instance>]
+  ```
+
+  It reads the existing service settings route and prints key names, scopes and
+  timestamps only. It omits all
+  values, including non-secret values. Its coverage is caller-visible records;
+  an empty result does not prove global or hidden-record absence.
+  The `policy` subcommand reads managed GitHub Actions rule IDs and fingerprints
+  from the active policy summary. Optional `--repository OWNER/REPO` and repeatable
+  `--workflow OWNER/REPO/.github/workflows/FILE.yml` compare exact unmanaged caller
+  workflows through the service's read-only retirement-evidence operation;
+  `--binding job_workflow_ref` selects reusable-workflow bindings instead.
+  The client resolves routes from canonical OpenAPI and uses the installed
+  admin helper's existing configuration, transport and bounded errors. It
+  has no apply mode, creates no grant and never switches identity or retries a
+  refusal. Policy summary fingerprints do not expose full workflow scopes, and
+  unmanaged comparison results do not inventory managed rules' dependencies.
+  Any missing scope/dependency proof must be resolved before removal. This is
+  a repo-owned bounded client, not an installed catalog command.
 - `GET /v1/contexts/{context}/runtime-settings` and
   `GET /v1/contexts/{context}/instances/{instance}/runtime-settings` return the
   plain settings that apply (global, the context's, and the lane's), with

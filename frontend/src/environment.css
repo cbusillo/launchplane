@@ -1343,11 +1343,13 @@
   outline-offset: 1px;
 }
 
-.product-config-field input:disabled {
+.product-config-field input:disabled,
+.product-config-field textarea:disabled {
   cursor: not-allowed;
   opacity: 0.52;
 }
 
+.product-config-field textarea,
 .product-config-reason textarea {
   min-height: 72px;
   resize: vertical;

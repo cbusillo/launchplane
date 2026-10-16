@@ -573,7 +573,10 @@ the context, instance, scope, and source label itself. Managed secrets must be
 profile-declared bindings. The runtime-settings form also records the site's
 own settings the profile does not declare, which must be plain settings rather
 than credentials, and retires provider keys the lane no longer uses; both go
-through the same dry-run and apply. A managed-secret selection
+through the same dry-run and apply. Declared replacement values and site-added
+values use multiline controls that preserve line breaks, including structured
+text such as TOML, through editing, dry-run, apply and original-operation
+recovery. Editing either value invalidates the previous review. A managed-secret selection
 includes both its displayed integration and binding key so repeated binding-key
 names remain unambiguous; the server resolves that pair against the stored
 profile rather than trusting it as target authority. The browser does not send a
