@@ -50647,6 +50647,11 @@
             "title": "Domain Host",
             "type": "string"
           },
+          "initial_generation": {
+            "default": false,
+            "title": "Initial Generation",
+            "type": "boolean"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -50819,6 +50824,11 @@
             "title": "Context",
             "type": "string"
           },
+          "initial_generation": {
+            "default": false,
+            "title": "Initial Generation",
+            "type": "boolean"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -50830,13 +50840,14 @@
             "enum": [
               "dry-run",
               "apply",
-              "readback"
+              "readback",
+              "release"
             ],
             "title": "Mode",
             "type": "string"
           },
           "operation_id": {
-            "minLength": 1,
+            "default": "",
             "title": "Operation Id",
             "type": "string"
           },
@@ -50850,11 +50861,19 @@
             "pattern": "^(?:[a-f0-9]{64})?$",
             "title": "Reviewed Plan Sha256",
             "type": "string"
+          },
+          "source_mode": {
+            "default": "ssh",
+            "enum": [
+              "ssh",
+              "container-export"
+            ],
+            "title": "Source Mode",
+            "type": "string"
           }
         },
         "required": [
           "context",
-          "operation_id",
           "reason"
         ],
         "title": "TestingReplacementResourcesRequest",

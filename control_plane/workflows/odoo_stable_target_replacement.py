@@ -1416,6 +1416,25 @@ def build_odoo_stable_target_replacement_plan(
             context_name=lane.context, instance_name=lane.instance
         )
     )
+    if _requires_two_slot_release(lane, inventory):
+        return OdooStableTargetReplacementPlan(
+            plan_status="blocked",
+            product=profile.product,
+            context=lane.context,
+            instance=lane.instance,
+            strategy=request.strategy,
+            target_record_found=target_record is not None,
+            target_id_record_found=target_id_record is not None,
+            inventory_found=inventory is not None,
+            expected_next_target_name="",
+            allow_empty_data=request.allow_empty_data,
+            data_source_mode=request.data_source_mode,
+            blocker_codes=("two_slot_cutover_required",),
+            blockers=(
+                "Use the lane's two-slot release path. Stable target replacement cannot "
+                "replace a configured or recorded two-slot serving project.",
+            ),
+        )
     blockers: list[str] = []
     blocker_codes: list[str] = []
     blocker_keys: dict[str, tuple[str, ...]] = {}
@@ -1821,6 +1840,14 @@ def build_odoo_stable_target_replacement_plan(
     )
 
 
+def _requires_two_slot_release(lane: ProductLaneProfile, inventory: object) -> bool:
+    return lane.odoo_cutover is not None or bool(
+        isinstance(inventory, EnvironmentInventory)
+        and inventory.runtime_identity is not None
+        and inventory.runtime_identity.slot
+    )
+
+
 def _resolve_recorded_runtime_values(
     *,
     record_store: OdooStableTargetReplacementStore,
@@ -1896,6 +1923,18 @@ def execute_odoo_stable_target_replacement_apply(
 
     profile = record_store.read_product_profile_record(request.product)
     lane = _read_lane(profile=profile, instance=request.instance)
+    if _requires_two_slot_release(
+        lane,
+        _read_optional(
+            lambda: record_store.read_environment_inventory(
+                context_name=lane.context, instance_name=lane.instance
+            )
+        ),
+    ):
+        raise OdooTargetReplacementStageError(
+            "plan_not_ready.two_slot_cutover_required",
+            "Use the lane's two-slot release path; stable target replacement is refused.",
+        )
     target_record = record_store.read_dokploy_target_record(
         context_name=plan.context, instance_name=plan.instance
     )

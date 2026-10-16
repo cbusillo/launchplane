@@ -118,6 +118,16 @@ def build_product_profile_record(
             ProductLaneProfile(
                 instance=lane.instance,
                 context=lane.context,
+                odoo_cutover=next(
+                    (
+                        old.odoo_cutover
+                        for old in existing_profile.lanes
+                        if old.instance == lane.instance and old.context == lane.context
+                    ),
+                    None,
+                )
+                if existing_profile
+                else None,
                 generic_web_cutover=next(
                     (
                         old.generic_web_cutover

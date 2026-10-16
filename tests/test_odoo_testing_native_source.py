@@ -962,20 +962,16 @@ class NativeIdentityCompatibilityTests(unittest.TestCase):
         self.assertNotEqual(generation_binding(native), generation_binding(record))
 
     def test_existing_wire_and_request_identity_preserve_old_recovery_keys(self) -> None:
-        request = TestingReplacementBootstrapRequest(
-            context="example",
-            operation_id="fixture-operation",
-            domain_host="testing.example.invalid",
-            reason="fixture",
+        # Immutable wire/identity evidence captured from the fixture's recorded
+        # source revision, before initial-generation fields existed.
+        artifact = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "legacy_testing_bootstrap_request.json"
+            ).read_text()
         )
-        old_wire = request.model_dump(mode="json", exclude={"source_mode"})
-        self.assertEqual(bootstrap_wire_payload(request), old_wire)
-        old_identity = {
-            key: value
-            for key, value in old_wire.items()
-            if key not in {"mode", "reviewed_plan_sha256"}
-        }
-        self.assertEqual(bootstrap_request_sha256(request), canonical_json_sha256(old_identity))
+        request = TestingReplacementBootstrapRequest.model_validate(artifact["wire_payload"])
+        self.assertEqual(bootstrap_wire_payload(request), artifact["wire_payload"])
+        self.assertEqual(bootstrap_request_sha256(request), artifact["request_sha256"])
         native = request.model_copy(update={"source_mode": "container-export"})
         self.assertNotEqual(bootstrap_request_sha256(native), bootstrap_request_sha256(request))
 

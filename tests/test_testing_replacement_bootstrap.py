@@ -37,7 +37,7 @@ from tests import test_testing_replacement_resources as resource_tests
 
 
 class FreshTestingBootstrapScenario(unittest.TestCase):
-    def seed(self, store_url: str) -> None:
+    def seed(self, store_url: str, *, initial_generation: bool = False) -> None:
         self.fixture = resource_tests.TestingReplacementResourceHttpTests()
         self.fixture.database_url = store_url
         self.fixture.setUp()
@@ -68,12 +68,47 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
         self.production_before = self.store.read_dokploy_target_record(
             context_name=fixture.context, instance_name="prod"
         )
-        self.assertTrue(
-            self.store.prepare_disposable_testing_replacement(fixture.operation, "fixture-director")
-        )
+        if initial_generation:
+            self.legacy_operation = fixture.operation.model_copy(
+                update={
+                    "status": "pass",
+                    "error_code": "",
+                    "error_message": "",
+                    "phase": "completed",
+                    "finished_at": fixture.operation.updated_at,
+                }
+            )
+            self.store.write_odoo_stable_target_replacement_operation_record(self.legacy_operation)
+            fixture.operation = fixture.operation.model_copy(
+                update={"operation_id": "initial-fixture"}
+            )
+            initial_request = TestingReplacementResourcesRequest(
+                context=fixture.context,
+                operation_id=fixture.operation.operation_id,
+                initial_generation=True,
+                reason="fixture isolated resources",
+            )
+            self.store.prepare_initial_testing_generation(
+                product=profile.product, request=initial_request, prepared_by="fixture-director"
+            )
+            initial = self.store.read_disposable_resource_preparation(
+                fixture.operation.operation_id
+            )
+            assert initial is not None
+            self.store.activate_initial_testing_preparation(initial)
+        else:
+            self.assertTrue(
+                self.store.prepare_disposable_testing_replacement(
+                    fixture.operation, "fixture-director"
+                )
+            )
         allocation = self.store.read_disposable_resource_preparation(fixture.operation.operation_id)
         assert allocation is not None
-        assigned = allocation.model_copy(update={"resource_namespace": "lp-testing-" + "a" * 32})
+        assigned = (
+            allocation
+            if initial_generation
+            else allocation.model_copy(update={"resource_namespace": "lp-testing-" + "a" * 32})
+        )
         self.store.compare_and_write_disposable_resource_preparation(
             expected=allocation, replacement=assigned
         )
@@ -122,6 +157,7 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
                 context=fixture.context,
                 operation_id=fixture.operation.operation_id,
                 reason="fixture isolated resources",
+                initial_generation=initial_generation,
             ),
             "fixture",
         )
@@ -145,6 +181,7 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
             operation_id=fixture.operation.operation_id,
             domain_host="fresh.example.invalid",
             reason="prepare fixture sanitized source copy",
+            initial_generation=initial_generation,
         )
         self.routes: list[dict[str, Any]] = []
         self.route_writes = 0
