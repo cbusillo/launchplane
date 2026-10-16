@@ -685,7 +685,9 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
 
         self.assertFalse(prerequisites.storage_ready)
 
-    async def test_config_status_checks_every_runtime_secret_policy_rule(self) -> None:
+    async def test_config_entry_is_available_but_the_submitted_binding_must_pass_policy(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
                 Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -730,15 +732,37 @@ class FastApiProductEnvironmentConfigStatusTests(unittest.IsolatedAsyncioTestCas
                 clear=True,
             ):
                 response = await _get_config_status(app)
+                plan = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/product-config/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "foreign-rule-plan",
+                    },
+                    payload={
+                        "mode": "dry-run",
+                        "product": "example-site",
+                        "context": "example-site",
+                        "instance": "prod",
+                        "reason": "Review the proposed credential",
+                        "secrets": [
+                            {
+                                "binding_key": "RESEND_API_KEY",
+                                "integration": "runtime_environment",
+                                "value": "fake-key-for-policy-refusal",
+                            }
+                        ],
+                    },
+                )
+            self.assertEqual(store.list_secret_records(), ())
             store.close()
 
         self.assertEqual(response.status_code, 200)
         managed_secrets = response.json()["config_status"]["write_availability"]["managed_secrets"]
-        self.assertFalse(managed_secrets["plan"]["enabled"])
-        self.assertIn(
-            "Runtime key-safety policy is unavailable.",
-            managed_secrets["plan"]["disabled_reasons"],
-        )
+        self.assertTrue(managed_secrets["plan"]["enabled"])
+        self.assertEqual(plan.status_code, 400, plan.json())
+        self.assertEqual(plan.json()["error"]["code"], "runtime_key_safety_failed")
 
     async def test_config_status_uses_lane_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

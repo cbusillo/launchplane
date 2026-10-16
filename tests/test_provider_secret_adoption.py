@@ -11,6 +11,7 @@ from httpx2 import Response
 from control_plane import product_config as control_plane_product_config
 from control_plane import secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
@@ -218,6 +219,49 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
         copied = await self._post(self._payload("apply", copy, "testing"), key="copy-once")
         self.assertEqual(copied.status_code, 202, copied.text)
         self.assertEqual(self._lane_values("testing")["REPAIRSHOPR_TOKEN"], PROVIDER_TOKEN)
+
+    async def test_testing_adoption_cannot_override_a_production_rule_or_forge_origin(self) -> None:
+        self.provider_env = "DISCORD_TOKEN=fake-provider-token"
+        _seed_tracked_target_records(
+            database_url=self.database_url,
+            context="example-site",
+            instance="testing",
+            target_id="compose-example-site-testing",
+            target_type="compose",
+            target_name="example-site-testing",
+        )
+        policy = self.store.list_runtime_key_safety_policy_records()[0]
+        self.store.write_runtime_key_safety_policy_record(
+            policy.model_copy(
+                update={
+                    "rules": (
+                        RuntimeSecretSafetyRule(
+                            binding_key="DISCORD_TOKEN",
+                            secret_class="prod_only",
+                            allowed_contexts=("example-site",),
+                            allowed_instances=("prod",),
+                        ),
+                    )
+                }
+            )
+        )
+        response = await self._post(
+            self._payload(
+                "dry-run",
+                [
+                    {
+                        "binding_key": "DISCORD_TOKEN",
+                        "adopt_from_provider": True,
+                        "secret_class": "testing",
+                        "value_source": "supplied",
+                    }
+                ],
+                instance="testing",
+            )
+        )
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.json()["error"]["code"], "runtime_key_safety_failed")
+        self.assertEqual(self.store.list_secret_records(), ())
 
     async def test_apply_requires_a_matching_dry_run(self) -> None:
         response = await self._post(
