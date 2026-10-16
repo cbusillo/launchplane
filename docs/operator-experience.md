@@ -228,12 +228,14 @@ unknown even when a count is recorded; zero recorded is not verified empty.
 Recorded counts remain labelled recorded, stale and unsupported evidence retain
 their uncertainty, and only verified inventory uses active or empty wording.
 
-Product Ops labels combined static lane records separately from operational
-health. A product profile's edit date is labelled as a profile update, never
-presented as the age of its lanes' verification. Route evidence badges describe
-topology records; runtime observation timestamps describe their own evidence.
+Product Ops labels combined lane evidence (route records and runtime observations)
+separately from operational health. A product profile's edit date is labelled as
+a profile update, never presented as the age of its lanes' verification.
+Topology evidence badges include route, placement and observation evidence;
+runtime observation timestamps describe their own evidence.
 An explicit no-public-website declaration makes the public endpoint and TLS
-not applicable, while private checks, identity and incidents still apply.
+not applicable when no observation is returned, while existing observations,
+private checks, identity and incidents remain visible.
 Disabled previews are not applicable; enabled previews without inventory proof
 retain their unknown state and disclose only a recorded count.
 

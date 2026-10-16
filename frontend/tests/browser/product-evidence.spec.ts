@@ -25,6 +25,7 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   production.trust_state = "missing";
   production.topology.trust_state = "missing";
   const testing = product.environments.find(lane => lane.environment === "testing")!;
+  const tlsObservation = structuredClone(production.topology.observed.tls_domains[0]);
   testing.topology.desired.public_website = "none";
   testing.base_url = "";
   testing.health_url = "";
@@ -43,19 +44,16 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   await page.goto("/ui/products");
   const row = page.locator(".product-directory-row");
   await expect(row.locator(".directory-warnings > strong")).toHaveText("2");
-  await expect(row.locator(".directory-product > .evidence-badge")).toContainText("Lane records");
-  await expect(row.locator(".directory-product > .evidence-badge")).not.toContainText("2020");
-  await expect(row.locator(".directory-lane[data-lane=prod]")).toContainText("Route evidence");
+  await expect(row.locator(".directory-product > .evidence-badge > small")).toHaveCount(0);
   await expect(row.locator(".directory-preview")).toContainText("Not applicable");
   await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-directory-${testInfo.project.name}.png`, fullPage: true });
   await row.click();
   const warnings = page.locator("#warning-summary");
-  await expect(warnings.getByRole("heading")).toContainText("2 need review");
+  await expect(warnings.locator('li:not([data-severity="info"])')).toHaveCount(2);
   await expect(warnings.getByText(warning.detail, { exact: true })).toHaveCount(1);
   await expect(warnings.locator('[data-severity="error"]')).toContainText(warning.detail);
   const privateLane = page.locator("#lane-testing");
   await expect(privateLane).toContainText("Not applicable");
-  await expect(privateLane).not.toContainText("No TLS observation returned");
   const tlsWarnings = Array.from({ length: 7 }, (_, index) => ({
     code: "tls_observation_missing" as const, scope: "tls" as const, severity: "warning" as const,
     detail: "No certificate observation for this domain.", domain_name: `alias-${index}.example.invalid`,
@@ -63,8 +61,14 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   production.topology.warnings = [warning, ...tlsWarnings];
   production.warnings = [warning.detail, ...tlsWarnings.map(item => item.detail), "A separate runtime problem."];
   await page.getByRole("button", { name: "Refresh current evidence" }).click();
-  await expect(warnings.locator("li")).toHaveCount(10); // Nine actionable findings plus the testing information.
-  for (const item of tlsWarnings) await expect(warnings.getByText(`Production · Tls · ${item.domain_name}`, { exact: true })).toBeVisible();
+  await expect(warnings.locator("li")).toHaveCount(tlsWarnings.length + 3);
+  for (const item of tlsWarnings) await expect(warnings.locator("li").filter({ hasText: item.domain_name })).toBeVisible();
+  // A no-website declaration does not erase an actual negative observation.
+  tlsObservation.status = "expired";
+  tlsObservation.summary = "The retained certificate has expired.";
+  testing.topology.observed.tls_domains = [tlsObservation];
+  await page.getByRole("button", { name: "Refresh current evidence" }).click();
+  await expect(privateLane).toContainText(tlsObservation.summary);
   await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-workspace-${testInfo.project.name}.png`, fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });

@@ -324,7 +324,7 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
           </span>
           <EvidenceBadge
             state={product.trust_state}
-            qualifier="Lane records"
+            qualifier="Lane evidence"
           />
         </span>
         <DirectoryLane environment={testing} lane="testing" />
@@ -334,7 +334,7 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
           <strong>
             {previewInventoryPresentation(product.preview).headline}
           </strong>
-          {product.preview.enabled && product.preview.trust_state !== "verified" ? <small>{product.preview.active_count} recorded; live inventory unverified</small> : null}
+          {product.preview.enabled && product.preview.trust_state !== "verified" && product.preview.trust_state !== "recorded" ? <small>{product.preview.active_count} recorded; live inventory unverified</small> : null}
           {product.preview.enabled ? <EvidenceBadge compact state={product.preview.trust_state} qualifier="Inventory" /> : <small>Not applicable</small>}
         </span>
         <span className="directory-warnings" data-has-warnings={warnings.length > 0}>
@@ -370,7 +370,7 @@ function DirectoryLane({
         {tone === "danger" ? "Issue · " : tone === "warning" ? "Warning · " : ""}
         {headline}
       </strong>
-      <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Route evidence" />
+      <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
     </span>
   );
 }
@@ -436,7 +436,7 @@ function ProductWorkspace({
               {product.display_name}
             </h1>
             <EvidenceBadge
-              qualifier="Lane records"
+              qualifier="Lane evidence"
               state={product.trust_state}
             />
           </div>
@@ -444,7 +444,7 @@ function ProductWorkspace({
             Stable environments, preview inventory, operational warnings, and the
             next safe inspection for this product.
           </p>
-          <p>Lane records include route and placement evidence; health is evaluated separately. Profile updated {formatEvidenceTime(product.provenance)}.</p>
+          <p>Lane evidence includes route records and runtime observations. Operational health is shown separately.{evidenceTimestamp(product.provenance) ? ` Profile updated ${formatEvidenceTime(product.provenance)}.` : ""}</p>
           <span className="workspace-repository">
             Owning repository · {product.repository || "not recorded"}
           </span>
@@ -499,6 +499,7 @@ function ProductWorkspace({
         <SignalTile
           label="Previews"
           state={product.preview.trust_state}
+          tone={product.preview.enabled ? product.preview.trust_state : "unsupported"}
           value={previewInventoryPresentation(product.preview).headline}
           detail={product.preview.enabled ? undefined : "Not applicable"}
         />
@@ -707,7 +708,7 @@ function EnvironmentRow({
         </div>
         <EvidenceBadge
           compact
-          qualifier="Route evidence"
+          qualifier="Topology evidence"
           state={environment.topology.trust_state}
         />
       </div>
@@ -728,9 +729,9 @@ function EnvironmentRow({
         </div>
         <div>
           <dt>TLS evidence</dt>
-          <dd>{environment.topology.desired.public_website === "none" ? "Not applicable" : tls ? humanize(tls.status) : "Not recorded"}</dd>
+          <dd>{tls ? humanize(tls.status) : environment.topology.desired.public_website === "none" ? "Not applicable" : "Not recorded"}</dd>
           <small>
-            {environment.topology.desired.public_website === "none" ? "This product declares no public website." : tls?.summary || tls?.likely_failure_cause || "No TLS observation returned"}
+            {tls?.summary || tls?.likely_failure_cause || (environment.topology.desired.public_website === "none" ? "This product declares no public website." : "No TLS observation returned")}
           </small>
         </div>
         <div>
@@ -1218,7 +1219,8 @@ function compareEnvironments(
 
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
   if (environment.topology.desired.public_website === "none") {
-    return environmentOperationalTone(environment) === "verified" ? "Private checks passed" : "Private verification incomplete";
+    const tone = environmentOperationalTone(environment);
+    return tone === "verified" ? "Private checks passed" : tone === "danger" ? "Private monitoring needs attention" : "Private verification incomplete";
   }
   const summary = environment.public_ingress.summary.trim();
   if (summary) {
