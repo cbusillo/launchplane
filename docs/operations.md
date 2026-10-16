@@ -4865,7 +4865,11 @@ A signed-in admin can create a dedicated Director Discord digest policy through
 `mode: apply`) with `purpose: release_digest`. It requires an explicit product,
 production context and `instance: prod`, Discord destinations only, and no check
 filters. The existing product/context authorization check still applies; source
-delivery adds no grants. The policy's managed webhook reference must already be
+delivery adds no grants. Policy IDs retain their original purpose and product/context/instance scope; changing
+that tuple returns a conflict. Create a new policy ID in the intended scope and
+disable the old policy in its original scope. A destination's disabled status is
+respected both before queuing and immediately before delivery.
+The policy's managed webhook reference must already be
 applicable to that exact context/prod lane. Missing scope is recorded as unavailable;
 the scheduler never copies secrets or invents access. Incident policies keep their
 default purpose, and digest policies never match incidents. Configuring health

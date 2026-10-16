@@ -199,6 +199,58 @@ class FastApiManagedAuthzReconcileTransportTests(unittest.IsolatedAsyncioTestCas
 
 
 class FastApiNotificationPolicyApplyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_product_digest_cannot_overwrite_incident_or_other_product_policy(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(directory) / "records.db")
+            )
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            for digest_existing in (False, True):
+                original = _public_ingress_notification_policy_record(
+                    policy_id="retained-" + str(digest_existing)
+                )
+                if digest_existing:
+                    original = original.model_copy(
+                        update={
+                            "purpose": "release_digest",
+                            "product": "other-site",
+                            "context": "other-prod",
+                            "instance": "prod",
+                        }
+                    )
+                store.write_public_ingress_notification_policy_record(original)
+                requested = original.model_copy(
+                    update={
+                        "purpose": "release_digest",
+                        "product": "example-site",
+                        "context": "example-prod",
+                        "instance": "prod",
+                    }
+                )
+                app = create_launchplane_fastapi_app(
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=_notification_policy_apply_policy(
+                        action="public_ingress_notification_policy.apply",
+                        product=requested.product,
+                        context=requested.context,
+                    ),
+                    record_store_factory=lambda: store,
+                )
+                response = await _asgi_request(
+                    app,
+                    "POST",
+                    "/v1/public-ingress/notification-policies/apply",
+                    headers={
+                        "Authorization": "Bearer valid-token",
+                        "Idempotency-Key": "collision-" + str(digest_existing),
+                    },
+                    payload={"mode": "apply", "policy": requested.model_dump(mode="json")},
+                )
+                self.assertEqual(response.status_code, 409)
+                self.assertIn(original, store.list_public_ingress_notification_policy_records())
+                self.assertNotIn(requested, store.list_public_ingress_notification_policy_records())
+
     async def test_digest_activation_uses_product_authority_and_preserves_denials(self) -> None:
         with TemporaryDirectory() as directory:
             store = PostgresRecordStore(

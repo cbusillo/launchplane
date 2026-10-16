@@ -209,7 +209,7 @@ class ReleaseDigestTests(unittest.TestCase):
         self.assertTrue(self.scheduler().run_once())
         self.assertEqual(len(self.store.list_outbox_delivery_records(kind="release_digest")), 2)
 
-    def test_own_product_links_promotion_and_lists_testing_and_review_blockers(self) -> None:
+    def test_own_product_with_old_testing_lists_testing_and_review_blockers(self) -> None:
         self.profile = self.profile.model_copy(
             update={"release_on_acceptance": "director_standing"}
         )
@@ -452,3 +452,37 @@ class ReleaseDigestTests(unittest.TestCase):
         for update in ({"product": ""}, {"context": ""}, {"check_kind": "provider"}):
             with self.subTest(update=update), self.assertRaises(ValidationError):
                 type(self.policy).model_validate({**self.policy.model_dump(), **update})
+
+    def test_disabled_destination_suppresses_new_and_already_queued_sends(self) -> None:
+        self.scheduler().run_once()
+        disabled = self.policy.model_copy(
+            update={
+                "destinations": (
+                    self.policy.destinations[0].model_copy(update={"status": "disabled"}),
+                )
+            }
+        )
+        self.store.write_public_ingress_notification_policy_record(disabled)
+        self.assertEqual(self.worker(), "delivered")
+        self.sender.assert_not_called()
+        self.now += timedelta(seconds=self.scheduler().interval)
+        self.scheduler().run_once()
+        self.assertEqual(self.worker(), "idle")
+
+    def test_guarded_policy_update_cannot_retarget_an_existing_id(self) -> None:
+        from control_plane.contracts.public_ingress_monitoring import (
+            NotificationPolicyScopeConflict,
+        )
+
+        self.store.write_public_ingress_notification_policy_record(self.policy, protect_scope=True)
+        changed = self.policy.model_copy(
+            update={"product": "other-product", "context": "other-prod"}
+        )
+        with self.assertRaises(NotificationPolicyScopeConflict):
+            self.store.write_public_ingress_notification_policy_record(changed, protect_scope=True)
+        self.assertEqual(
+            self.store.list_public_ingress_notification_policy_records(), (self.policy,)
+        )
+        disabled = self.policy.model_copy(update={"status": "disabled"})
+        self.store.write_public_ingress_notification_policy_record(disabled, protect_scope=True)
+        self.assertEqual(self.store.list_public_ingress_notification_policy_records(), (disabled,))

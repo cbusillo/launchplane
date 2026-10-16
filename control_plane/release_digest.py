@@ -285,7 +285,7 @@ class ReleaseDigestScheduler(_PreviewScheduler):
                     chunks[-1] += line + "\n"
                 for policy in policies:
                     for destination in policy.destinations:
-                        if destination.kind != "discord":
+                        if destination.kind != "discord" or destination.status != "enabled":
                             continue
                         for index, chunk in enumerate(chunks):
                             key = f"release-digest:{slot}:{profile.product}:{policy.policy_id}:{destination.destination_id}:{index}"
@@ -373,6 +373,7 @@ def deliver_release_digest(
                 and not policy.check_kind
                 for destination in policy.destinations
                 if destination.kind == "discord"
+                and destination.status == "enabled"
                 and destination.destination_id == record.payload["destination_id"]
             ),
             None,

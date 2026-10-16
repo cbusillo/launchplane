@@ -835,6 +835,10 @@ class PublicIngressNotificationDestination(BaseModel):
         return self
 
 
+class NotificationPolicyScopeConflict(ValueError):
+    """An existing notification policy ID belongs to another scope or purpose."""
+
+
 class PublicIngressNotificationPolicyRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

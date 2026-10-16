@@ -26988,19 +26988,53 @@ class PostgresRecordStore(HumanSessionStore):
         return records
 
     def write_public_ingress_notification_policy_record(
-        self, record: PublicIngressNotificationPolicyRecord
+        self, record: PublicIngressNotificationPolicyRecord, *, protect_scope: bool = False
     ) -> None:
-        self._write_row(
-            LaunchplanePublicIngressNotificationPolicyRow(
-                policy_id=record.policy_id,
-                product=record.product,
-                context=record.context,
-                instance=record.instance,
-                status=record.status,
-                updated_at=record.updated_at,
-                payload=self._payload_dict(record),
-            )
+        from control_plane.contracts.public_ingress_monitoring import (
+            NotificationPolicyScopeConflict,
         )
+
+        row = LaunchplanePublicIngressNotificationPolicyRow(
+            policy_id=record.policy_id,
+            product=record.product,
+            context=record.context,
+            instance=record.instance,
+            status=record.status,
+            updated_at=record.updated_at,
+            payload=self._payload_dict(record),
+        )
+        if not protect_scope:
+            self._write_row(row)
+            return
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            if not self.database_url.startswith("sqlite"):
+                # Lock the ID even when it does not exist yet: two creators with
+                # different scopes must not both pass the absent-row check.
+                session.execute(
+                    text("select pg_advisory_xact_lock(hashtextextended(:name, 0))"),
+                    {"name": "launchplane:notification-policy:" + record.policy_id},
+                )
+            existing = session.get(
+                LaunchplanePublicIngressNotificationPolicyRow,
+                record.policy_id,
+                with_for_update=True,
+            )
+            if existing is not None:
+                current = self._read_payload(
+                    model_type=PublicIngressNotificationPolicyRecord, payload=existing.payload
+                )
+                if (current.purpose, current.product, current.context, current.instance) != (
+                    record.purpose,
+                    record.product,
+                    record.context,
+                    record.instance,
+                ):
+                    raise NotificationPolicyScopeConflict(
+                        "Use a new policy ID for a different purpose or lane; disable the old policy in its own scope."
+                    )
+            session.merge(row)
+            session.commit()
 
     def list_public_ingress_notification_policy_records(
         self,

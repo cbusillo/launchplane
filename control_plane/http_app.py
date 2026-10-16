@@ -765,7 +765,10 @@ from control_plane.contracts.route_binding_record import (
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
-from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressNotificationPolicyRecord,
+    NotificationPolicyScopeConflict,
+)
 from control_plane.drivers import native_routes
 from control_plane.drivers.route_paths import (
     INGRESS_ROUTE_APPLY_ROUTE as _INGRESS_ROUTE_APPLY_ROUTE,
@@ -2805,6 +2808,8 @@ class _PublicIngressNotificationPolicyApplyStore(Protocol):
     def write_public_ingress_notification_policy_record(
         self,
         record: PublicIngressNotificationPolicyRecord,
+        *,
+        protect_scope: bool = False,
     ) -> object: ...
 
 
@@ -25674,10 +25679,19 @@ def create_launchplane_fastapi_app(
         if replayed_response is not None:
             return replayed_response
         if policy_request.mode == "apply":
-            cast(
-                _PublicIngressNotificationPolicyApplyStore,
-                database_store,
-            ).write_public_ingress_notification_policy_record(policy_request.policy)
+            try:
+                cast(
+                    _PublicIngressNotificationPolicyApplyStore, database_store
+                ).write_public_ingress_notification_policy_record(
+                    policy_request.policy, protect_scope=True
+                )
+            except NotificationPolicyScopeConflict as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="notification_policy_scope_conflict",
+                    message=str(error),
+                ) from error
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"public_ingress_notification_policy_id": policy_request.policy.policy_id},
