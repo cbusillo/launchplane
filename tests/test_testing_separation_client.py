@@ -1,6 +1,6 @@
 """The staging client preserves reviewed requests and uncertain keys without retrying writes."""
 
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, redirect_stderr
 from email.message import Message
 import io
 import json
@@ -264,7 +264,7 @@ class TestingSeparationClientTests(unittest.TestCase):
             write.assert_not_called()
 
     def test_reviewed_staging_lift_sends_its_purpose_without_deployment(self) -> None:
-        self._exercise_lift("isolation_staging")
+        self._exercise_lift("isolation_staging", rehearsal=False)
 
     def test_reviewed_rehearsal_lift_preserves_provenance_evidence_and_reports_reconcile(
         self,
@@ -287,13 +287,17 @@ class TestingSeparationClientTests(unittest.TestCase):
             evidence = root / "lift.json"
             held_record = {
                 "reason": "private-fixture",
-                "rehearsal": {
-                    "binding_sha256": "b" * 64,
-                    "target_updated_at": "private-stamp",
-                    "target_source_label": "private-source",
-                }
-                if rehearsal
-                else None,
+                **(
+                    {
+                        "rehearsal": {
+                            "binding_sha256": "b" * 64,
+                            "target_updated_at": "private-stamp",
+                            "target_source_label": "private-source",
+                        }
+                    }
+                    if rehearsal
+                    else {}
+                ),
             }
             call = Mock(
                 side_effect=[
@@ -351,17 +355,20 @@ class TestingSeparationClientTests(unittest.TestCase):
                 redirect_stdout(output),
             ):
                 status = client["main"]()
-            if not rehearsal:
+            if not rehearsal and purpose == "staff_testing":
                 self.assertEqual(status, 1)
                 self.assertEqual(call.call_count, 1)
                 self.assertFalse(evidence.exists())
                 return
             self.assertEqual(status, 0, output.getvalue())
             self.assertNotIn("private-fixture", output.getvalue())
-            self.assertEqual(
-                json.loads(evidence.read_text())["result"]["before"]["rehearsal"]["binding_sha256"],
-                "b" * 64,
-            )
+            if rehearsal:
+                self.assertEqual(
+                    json.loads(evidence.read_text())["result"]["before"]["rehearsal"][
+                        "binding_sha256"
+                    ],
+                    "b" * 64,
+                )
             output = io.StringIO()
             with (
                 patch("runpy.run_path", return_value=transport),
@@ -389,3 +396,40 @@ class TestingSeparationClientTests(unittest.TestCase):
 
     def test_server_failure_after_submission_preserves_the_original_key(self) -> None:
         self._exercise_apply("completion_failed", unknown=True, status_code=503)
+
+    def test_invalid_rehearsal_flags_never_echo_the_private_reason_or_load_transport(self) -> None:
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
+        )
+        for extra in (
+            [],
+            ["--hold-purpose", "staff_testing", "--activation-plan-sha256", "a" * 64],
+        ):
+            with self.subTest(extra=extra):
+                output = io.StringIO()
+                with (
+                    patch(
+                        "sys.argv",
+                        [
+                            "client",
+                            "hold-dry-run",
+                            "--require-rehearsal",
+                            "--operator-helper",
+                            "/missing/launchplane-write-action.py",
+                            "--product",
+                            "example",
+                            "--context",
+                            "example",
+                            "--reason",
+                            "private-reason-fixture",
+                            *extra,
+                        ],
+                    ),
+                    patch("runpy.run_path") as transport,
+                    redirect_stderr(output),
+                    self.assertRaises(SystemExit) as error,
+                ):
+                    client["main"]()
+                self.assertEqual(error.exception.code, 2)
+                self.assertNotIn("private-reason-fixture", output.getvalue())
+                transport.assert_not_called()

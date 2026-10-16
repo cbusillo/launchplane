@@ -67,6 +67,12 @@ def main() -> int:
         parser.error("Receipt read requires the original preparation key.")
     holding = args.mode.startswith(("hold-", "lift-"))
     lifting = args.mode.startswith("lift-")
+    if args.require_rehearsal and (
+        not holding or args.hold_purpose != "staff_testing" or args.activation_plan_sha256
+    ):
+        parser.error(
+            "Rehearsal requires a staff-testing hold mode without an activation interlock."
+        )
     if applying and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
         parser.error("Apply requires saved review evidence and its stable idempotency key.")
     reading = args.mode == "hold-read"
@@ -235,14 +241,13 @@ def main() -> int:
                     "status": "accepted",
                     "mode": args.mode,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
-                    "deployment_requested": False,
                     **(
                         {
                             "reconcile_requested": result["reconcile_requested"],
                             "rehearsal": has_rehearsal,
                         }
                         if holding
-                        else {}
+                        else {"deployment_requested": False}
                     ),
                 }
             )

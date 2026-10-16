@@ -9046,20 +9046,9 @@ def create_launchplane_fastapi_app(
                     raise DisposableLaneSafetyUnknown("Testing rehearsal requires service records.")
                 return qualify_testing_hold_rehearsal(record_store, hold_request, actor)
             except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
-                # Reads and inert plans remain available for protected/unknown lanes.
-                # Existing explicit authority may still SET a protective ordinary hold.
-                if planning or (
-                    hold_request.hold
-                    and resolved_authz_policy_runtime.allows(
-                        identity=identity,
-                        action="product_config.apply",
-                        product=hold_request.product,
-                        context=hold_request.context,
-                        target=AuthorizationTarget(
-                            scope="instance", instances=(hold_request.instance,)
-                        ),
-                    )
-                ):
+                # Inert plans stay available. Explicit rehearsal apply never
+                # silently becomes an ordinary protective hold.
+                if planning:
                     return None
                 raise _launchplane_http_error(
                     status_code=409,
@@ -9137,7 +9126,10 @@ def create_launchplane_fastapi_app(
                 if qualified_staff_hold:
                     assert isinstance(record_store, PostgresRecordStore)
                     rehearsal = rehearsal_provenance()
-                    assert rehearsal is not None
+                    if rehearsal is None:
+                        raise control_plane_testing_lane_hold.TestingHoldStale(
+                            "Rehearsal qualification changed before apply."
+                        )
                     applied_plan, expected, replacement = prepare_testing_hold_rehearsal_apply(
                         record_store,
                         hold_request,

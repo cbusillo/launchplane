@@ -206,16 +206,13 @@ def _read_target_record(
         ) from error
 
 
-def _hold_terms(hold: DokployTargetStaffTestingHold | None) -> tuple[str, str, str] | None:
-    return (
-        None
-        if hold is None
-        else (
-            hold.reason,
-            hold.purpose,
-            hold.rehearsal.model_dump_json() if hold.rehearsal else "",
-        )
-    )
+def _hold_terms(
+    hold: DokployTargetStaffTestingHold | None,
+) -> tuple[str, str] | tuple[str, str, str] | None:
+    if hold is None:
+        return None
+    terms = (hold.reason, hold.purpose)
+    return (*terms, hold.rehearsal.model_dump_json()) if hold.rehearsal else terms
 
 
 def _desired_hold(

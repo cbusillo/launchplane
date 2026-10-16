@@ -1,4 +1,5 @@
-from contextlib import nullcontext
+from contextlib import nullcontext, contextmanager
+from collections.abc import Iterator
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -363,15 +364,42 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unqualified_set_cannot_fabricate_rehearsal_provenance(self) -> None:
         record_safety(self.store, _PRODUCT, _CONTEXT, "testing", usage="unknown")
-        plan = await self.post(_payload())
-        self.assertEqual(plan.status_code, 202, plan.text)
-        denied = await self.post(
-            _payload(mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]),
-            "unknown-set",
-        )
-        self.assertEqual(denied.status_code, 409, denied.text)
+        for explicit_grant in (False, True):
+            with self.subTest(explicit_grant=explicit_grant):
+                self.app = self.make_app(explicit_grant=explicit_grant)
+                plan = await self.post(_payload())
+                self.assertEqual(plan.status_code, 202, plan.text)
+                denied = await self.post(
+                    _payload(
+                        mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+                    ),
+                    f"unknown-set-{explicit_grant}",
+                )
+                self.assertEqual(denied.status_code, 409, denied.text)
         forged = await self.post(_payload() | {"rehearsal": {"binding_sha256": "a" * 64}})
         self.assertEqual(forged.status_code, 400, forged.text)
+        self.assertIsNone(_read_hold(self.store))
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+
+    async def test_protection_arriving_before_the_authority_lock_returns_a_refusal(self) -> None:
+        self.app = self.make_app(explicit_grant=True)
+        plan = await self.post(_payload())
+        original_guard = self.store.serialize_disposable_testing_resources
+
+        @contextmanager
+        def changed_before_lock() -> Iterator[object]:
+            record_safety(self.store, _PRODUCT, _CONTEXT, "testing", usage="in_use")
+            with original_guard() as checkpoint:
+                yield checkpoint
+
+        with patch.object(
+            self.store, "serialize_disposable_testing_resources", side_effect=changed_before_lock
+        ):
+            denied = await self.post(
+                _payload(mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]),
+                "new-protection",
+            )
+        self.assertEqual(denied.status_code, 409, denied.text)
         self.assertIsNone(_read_hold(self.store))
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
 
@@ -412,14 +440,21 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_ordinary_reassertion_with_identical_reason_removes_rehearsal(self) -> None:
         await self.set_hold()
-        hold_fixtures._apply(self.store, actor="staff-administrator")
-        hold = _read_hold(self.store)
-        assert hold is not None
-        self.assertEqual(hold.recorded_by, "staff-administrator")
-        self.assertIsNone(hold.rehearsal)
-        denied = await self.reviewed(hold=False, key="actual-use")
-        self.assertEqual(denied.status_code, 409, denied.text)
-        self.assertEqual(_read_hold(self.store), hold)
+        marked = self.store.read_dokploy_target_record(
+            context_name=_CONTEXT, instance_name="testing"
+        )
+        assert marked.policies.staff_testing_hold is not None
+        for actor in ("staff-administrator", marked.policies.staff_testing_hold.recorded_by):
+            with self.subTest(actor=actor):
+                self.store.write_dokploy_target_record(marked)
+                hold_fixtures._apply(self.store, actor=actor)
+                hold = _read_hold(self.store)
+                assert hold is not None
+                self.assertEqual(hold.recorded_by, actor)
+                self.assertIsNone(hold.rehearsal)
+                denied = await self.reviewed(hold=False, key=actor)
+                self.assertEqual(denied.status_code, 409, denied.text)
+                self.assertEqual(_read_hold(self.store), hold)
 
     async def test_provider_only_alias_and_current_provider_mismatch_refuse(self) -> None:
         await self.set_hold()
