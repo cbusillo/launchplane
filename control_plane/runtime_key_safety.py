@@ -381,6 +381,9 @@ def _evaluate_binding(
             binding.value_source == "supplied"
             and target.environment_class in {"testing", "dev"}
             and binding.declared_secret_class in {"testing", "non_prod"}
+            and not is_integration_runtime_key(
+                binding.binding_key, extra_markers=extra_integration_key_markers
+            )
         ):
             return ()
     if rule is not None:

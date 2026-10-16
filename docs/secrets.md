@@ -405,13 +405,17 @@ decryption key state denies the reveal or resolution.
   credential with the same name. This does not apply to shared bindings,
   `shared_safe` declarations, production targets or previews. Their policy rules
   remain in force. An explicit class incompatible with the stable lane is refused.
+  Integration-marker keys never use this precedence exception, including markers
+  added by the active policy.
 - Product-config records the binding's `value_source` as `supplied`, `copy` or
   `provider`, based on the actual value input. Callers cannot assert that origin
   through classification metadata. Copied, provider-adopted and older bindings
   without origin metadata keep key-name policy precedence during planning and
   subsequent delivery; merely declaring them `testing` cannot override that rule.
 - The environment managed-secret form stores independently supplied runtime
-  values for a testing lane with class `testing`. It accepts neither cross-lane
+  values for a testing lane with class `testing` only for ordinary keys. Integration
+  keys retain their policy requirements; the form does not assert a testing class
+  for them on the writer's behalf. It accepts neither cross-lane
   references nor shared binding destinations. Production entry and the separate
   reference-copy path keep their existing rules; a production-only source cannot
   become a testing credential by copying or relabelling its destination.

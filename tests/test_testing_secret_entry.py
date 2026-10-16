@@ -19,7 +19,10 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.product_config_service import apply_product_config_service_request
-from control_plane.runtime_key_safety import evaluate_runtime_key_safety
+from control_plane.runtime_key_safety import (
+    evaluate_runtime_key_safety,
+    evaluate_runtime_key_safety_from_store,
+)
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import (
@@ -60,7 +63,12 @@ class TestingSecretEntryTests(unittest.IsolatedAsyncioTestCase):
                             "instance": instance,
                         }
                         for instance in ("testing", "prod")
-                        for key in ("DISCORD_TOKEN", "AGENT_SESSION_TOKEN")
+                        for key in (
+                            "DISCORD_TOKEN",
+                            "AGENT_SESSION_TOKEN",
+                            "SHOPIFY_ACCESS_TOKEN",
+                            "CUSTOM_CONNECTOR_TOKEN",
+                        )
                     ]
                 }
                 store.write_product_profile_record(
@@ -223,6 +231,73 @@ class TestingSecretEntryTests(unittest.IsolatedAsyncioTestCase):
                     production_versions,
                 )
                 self.assertEqual(store.list_runtime_key_safety_policy_records(), (policy,))
+                delivered = evaluate_runtime_key_safety_from_store(
+                    record_store=store,
+                    target=RuntimeKeySafetyTarget(
+                        context="example-site", instance="testing", environment_class="testing"
+                    ),
+                    required_binding_keys=("DISCORD_TOKEN", "AGENT_SESSION_TOKEN"),
+                )
+                self.assertEqual(delivered.status, "pass")
+
+                # The ordinary first-entry exception must not assert a class for
+                # business integrations, including active-policy custom markers.
+                for key, markers in (
+                    ("SHOPIFY_ACCESS_TOKEN", ()),
+                    ("CUSTOM_CONNECTOR_TOKEN", ("CUSTOM_CONNECTOR",)),
+                ):
+                    for has_rule in (False, True):
+                        with self.subTest(integration=key, has_rule=has_rule):
+                            store.write_runtime_key_safety_policy_record(
+                                policy.model_copy(
+                                    update={
+                                        "integration_key_markers": markers,
+                                        "rules": (
+                                            *policy.rules,
+                                            *(
+                                                (
+                                                    RuntimeSecretSafetyRule(
+                                                        binding_key=key,
+                                                        secret_class="prod_only",
+                                                        allowed_instances=("prod",),
+                                                    ),
+                                                )
+                                                if has_rule
+                                                else ()
+                                            ),
+                                        ),
+                                    }
+                                )
+                            )
+                            refused = await _post_product_environment_config_apply(
+                                app,
+                                {
+                                    "mode": "dry-run",
+                                    "reason": "Verify integration protection",
+                                    "managed_secrets": [
+                                        {
+                                            "integration": "runtime_environment",
+                                            "binding_key": key,
+                                            "value": "fake-integration-token",
+                                        }
+                                    ],
+                                },
+                                environment="testing",
+                                authorization="",
+                                headers=browser_headers(),
+                                idempotency_key=f"integration-{key}-{has_rule}",
+                            )
+                            self.assertEqual(refused.status_code, 400, refused.json())
+                            self.assertEqual(
+                                refused.json()["error"]["code"], "runtime_key_safety_failed"
+                            )
+                            self.assertNotIn(
+                                key,
+                                {
+                                    b.binding_key
+                                    for b in store.list_secret_bindings(instance_name="testing")
+                                },
+                            )
 
 
 class IsolatedBindingClassificationTests(unittest.TestCase):
@@ -230,6 +305,17 @@ class IsolatedBindingClassificationTests(unittest.TestCase):
         binding = self._binding()
         evaluation = self._evaluate(binding)
         self.assertEqual(evaluation.status, "pass")
+
+    def test_dev_binding_requires_a_compatible_nonproduction_class(self) -> None:
+        target = RuntimeKeySafetyTarget(
+            context="example-site", instance="dev", environment_class="dev"
+        )
+        for declared_class, expected in (("non_prod", "pass"), ("testing", "fail")):
+            with self.subTest(declared_class=declared_class):
+                binding = self._binding().model_copy(
+                    update={"instance": "dev", "declared_secret_class": declared_class}
+                )
+                self.assertEqual(self._evaluate(binding, target=target).status, expected)
 
     def test_production_foreign_shared_and_preview_bindings_still_fail(self) -> None:
         for changes, instance, environment_class, expected_code in (

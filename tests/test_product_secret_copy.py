@@ -522,13 +522,15 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(destination.scope, "context_instance")
 
     async def test_copy_cannot_relabel_a_rule_only_production_source_as_testing(self) -> None:
+        binding = self.store.list_secret_bindings()[0]
+        self.store.write_secret_binding(binding.model_copy(update={"binding_key": "DISCORD_TOKEN"}))
         policy = self.store.list_runtime_key_safety_policy_records()[0]
         self.store.write_runtime_key_safety_policy_record(
             policy.model_copy(
                 update={
                     "rules": (
                         RuntimeSecretSafetyRule(
-                            binding_key="REPAIRSHOPR_TOKEN",
+                            binding_key="DISCORD_TOKEN",
                             secret_class="prod_only",
                             allowed_contexts=("example-site",),
                             allowed_instances=("prod",),
@@ -539,7 +541,9 @@ class ProductSecretCopyTests(unittest.IsolatedAsyncioTestCase):
         )
         # The legacy source has no declared class; its production restriction
         # comes only from the policy. A caller cannot forge the new origin proof.
-        self.payload["secrets"][0].update(secret_class="testing", value_source="supplied")
+        self.payload["secrets"][0].update(
+            binding_key="DISCORD_TOKEN", secret_class="testing", value_source="supplied"
+        )
         with patch.object(
             secrets,
             "_decrypt_secret_value",

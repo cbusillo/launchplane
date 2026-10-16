@@ -17481,6 +17481,22 @@ def create_launchplane_fastapi_app(
                 ),
                 (),
             )
+        integration_key_markers: tuple[str, ...] = ()
+        if any(
+            secret.integration == "runtime_environment"
+            for secret in environment_request.managed_secrets
+        ):
+            try:
+                integration_key_markers = latest_active_runtime_key_safety_policy(
+                    database_store
+                ).integration_key_markers
+            except ValueError as error:
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="runtime_key_safety_unavailable",
+                    message="Launchplane runtime key-safety policy is unavailable.",
+                ) from error
         try:
             product_config_request = product_environment_config_apply_request(
                 profile=profile,
@@ -17496,6 +17512,7 @@ def create_launchplane_fastapi_app(
                     )
                 ),
                 current_retired_provider_keys=current_retired_provider_keys,
+                integration_key_markers=integration_key_markers,
             )
         except ProductEnvironmentConfigRefused as error:
             raise _launchplane_http_error(

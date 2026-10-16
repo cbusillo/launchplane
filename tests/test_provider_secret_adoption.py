@@ -221,6 +221,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self._lane_values("testing")["REPAIRSHOPR_TOKEN"], PROVIDER_TOKEN)
 
     async def test_testing_adoption_cannot_override_a_production_rule_or_forge_origin(self) -> None:
+        self.provider_env = "DISCORD_TOKEN=fake-provider-token"
         _seed_tracked_target_records(
             database_url=self.database_url,
             context="example-site",
@@ -235,7 +236,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 update={
                     "rules": (
                         RuntimeSecretSafetyRule(
-                            binding_key="REPAIRSHOPR_TOKEN",
+                            binding_key="DISCORD_TOKEN",
                             secret_class="prod_only",
                             allowed_contexts=("example-site",),
                             allowed_instances=("prod",),
@@ -249,7 +250,7 @@ class ProviderSecretAdoptionTests(unittest.IsolatedAsyncioTestCase):
                 "dry-run",
                 [
                     {
-                        "binding_key": "REPAIRSHOPR_TOKEN",
+                        "binding_key": "DISCORD_TOKEN",
                         "adopt_from_provider": True,
                         "secret_class": "testing",
                         "value_source": "supplied",

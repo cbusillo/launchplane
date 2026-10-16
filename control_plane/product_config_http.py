@@ -27,7 +27,10 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
     product_config_requirement_applies_to_lane,
 )
-from control_plane.runtime_key_safety import runtime_key_safety_environment_class
+from control_plane.runtime_key_safety import (
+    is_integration_runtime_key,
+    runtime_key_safety_environment_class,
+)
 
 
 from control_plane.contracts.public_hosts import normalize_public_hosts
@@ -488,6 +491,7 @@ def product_environment_config_apply_request(
     request: ProductEnvironmentConfigApplyEnvelope,
     owner_submission_resolver: Callable[[ProductSecretConfigRequirement, str], str] | None = None,
     current_retired_provider_keys: tuple[str, ...] = (),
+    integration_key_markers: tuple[str, ...] = (),
 ) -> ProductConfigApplyEnvelope:
     runtime_requirements = {
         requirement.key
@@ -544,6 +548,7 @@ def product_environment_config_apply_request(
                 requirement=secret_requirements[(secret.integration, secret.binding_key)],
                 lane=lane,
                 value=value,
+                integration_key_markers=integration_key_markers,
             )
         )
     runtime_env = None
@@ -584,13 +589,18 @@ def _product_config_secret_input(
     requirement: ProductSecretConfigRequirement,
     lane: ProductLaneProfile,
     value: str,
+    integration_key_markers: tuple[str, ...],
 ) -> ProductConfigSecretInput:
     # This surface accepts a freshly supplied value for this lane, never a copy
     # from another lane. Testing stores its own credentials under the same names
     # as production; the declaration applies only to this exact binding.
     secret_class: RuntimeSecretClass | None = None
-    if requirement.integration == "runtime_environment" and (
-        runtime_key_safety_environment_class(lane.instance) == "testing"
+    if (
+        requirement.integration == "runtime_environment"
+        and runtime_key_safety_environment_class(lane.instance) == "testing"
+        and not is_integration_runtime_key(
+            requirement.binding_key, extra_markers=integration_key_markers
+        )
     ):
         secret_class = "testing"
     return ProductConfigSecretInput(
