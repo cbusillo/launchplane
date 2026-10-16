@@ -842,7 +842,11 @@ See [Sidebar lane status](#sidebar-lane-status) for the sidebar's operational
 signals and its distinct treatment of stale inventory and evidence.
 
 Open product inventories, workspaces, activity, and environment evidence views refresh
-their read resources once a minute after a completed read. Hidden tabs pause
+their read resources at the next evidence deadline or one minute after a
+completed read, whichever comes first. This includes the production monitor's
+short remaining window when a page opens between observations; the browser
+does not wait another full cadence while current service evidence advances.
+Already expired deadlines do not cause immediate retry loops. Hidden tabs pause
 automatic reads and catch up on focus or visibility return when due. Pending
 reads do not overlap; access-denied and missing resources require a manual retry.
 Evidence still expires at its recorded deadline while a read is delayed or
