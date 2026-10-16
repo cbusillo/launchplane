@@ -1,5 +1,7 @@
 import json
 import os
+import re
+from pathlib import Path
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -35,6 +37,46 @@ def _post_launchplane_service_json(**kwargs: object) -> dict[str, object]:
 @click.group()
 def ingress() -> None:
     """Ingress route control commands."""
+
+
+@ingress.command("private-testing-plan")
+@click.option("--service-url", required=True)
+@click.option("--bearer-token-env", default="LAUNCHPLANE_SERVICE_TOKEN", show_default=True)
+@click.option("--product", required=True)
+@click.option("--payload-file", required=True, type=click.Path(exists=True, path_type=Path))
+def private_testing_plan(
+    service_url: str,
+    bearer_token_env: str,
+    product: str,
+    payload_file: Path,
+) -> None:
+    """Plan/read back private testing TLS through the service; never apply."""
+    from control_plane.private_testing_transport import (
+        ROUTE,
+        PRODUCT_PATTERN,
+        PrivateTestingTransportRequest,
+    )
+
+    if not service_url.startswith("https://"):
+        raise click.ClickException("Private transport planning requires the HTTPS service origin.")
+    if not re.fullmatch(PRODUCT_PATTERN, product):
+        raise click.ClickException("Product must be a canonical product identifier.")
+    try:
+        request = PrivateTestingTransportRequest.model_validate_json(payload_file.read_bytes())
+    except (ValueError, OSError) as error:
+        raise click.ClickException(
+            "Private transport payload is invalid; no request sent."
+        ) from error
+    token = os.environ.get(bearer_token_env, "").strip()
+    if not token:
+        raise click.ClickException(f"{bearer_token_env} is required.")
+    result = _post_launchplane_service_json(
+        service_url=service_url,
+        path=ROUTE.format(product=product),
+        payload=request.model_dump(mode="json"),
+        bearer_token=token,
+    )
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
 @ingress.command("route-apply")

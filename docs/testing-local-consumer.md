@@ -26,6 +26,9 @@ must be reachable from Chris's machine through **WSS** on that same authority at
 private endpoint is insufficient; an HTTPS/WSS route is a prerequisite, not a
 reason to bypass transport checks. Real endpoint/placement facts remain service
 records. The helper does not create a listener or an inbound workstation route.
+For a no-website Compose service, use [private transport preparation](private-testing-transport.md)
+to plan the dedicated testing listener and trust references. Activation and live
+transport qualification remain separate from that planner's metadata/readback.
 
 Chris runs the helper himself in a terminal using the qualified Launchplane
 installation. The command contains only non-secret destination metadata:

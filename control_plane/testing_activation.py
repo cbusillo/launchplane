@@ -803,16 +803,10 @@ class TestingActivationAdapter:
                             "The provider added unverified labels.",
                             code=TestingActivationRefusalCode.RECIPIENT_LABELS_UNVERIFIED,
                         ) from error
-                if not isinstance(labels, dict) or set(labels) - {
-                    "dokploy.organization.id",
-                    "dokploy.project.id",
-                    "dokploy.project",
-                    "dokploy.environment.id",
-                    "dokploy.environment",
-                    "dokploy.application.id",
-                    "dokploy.application",
-                    "dokploy.service",
-                }:
+                if (
+                    not isinstance(labels, dict)
+                    or set(labels) - compose.DOKPLOY_COMPOSE_METADATA_LABELS
+                ):
                     raise TestingActivationRefusal(
                         "The provider added an unqualified routing label.",
                         code=TestingActivationRefusalCode.RECIPIENT_LABELS_UNVERIFIED,
