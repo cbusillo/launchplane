@@ -545,6 +545,7 @@ export type DokployTargetStaffTestingHold = {
     reason: string;
     recorded_at: string;
     recorded_by: string;
+    rehearsal?: TestingHoldRehearsal | null;
 };
 
 export type DriverActionDescriptor = {
@@ -4940,6 +4941,12 @@ export type TenantMergeEligibilityDecision = {
 export type TenantMergeEligibilityEvidenceInputs = {
     schema_version: number;
     trusted_maintenance: TenantAdmissionPathResult | null;
+};
+
+export type TestingHoldRehearsal = {
+    binding_sha256: string;
+    target_source_label: string;
+    target_updated_at: string;
 };
 
 export type UrgentReleaseReviewEnvelope = {

@@ -144,6 +144,7 @@ def require_disposable_lane(
     preview_refresh: bool = False,
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
+    testing_hold_actor: str = "",
 ) -> str:
     profile = store.read_product_profile_record(product)
     if instance == "prod" or any(
@@ -194,9 +195,31 @@ def require_disposable_lane(
         raise DisposableLaneSafetyUnknown(
             "The testing or preview target aliases another lane's target."
         )
+    rehearsal_binding = ""
     if target is not None and target.policies.staff_testing_hold is not None:
-        raise DisposableLaneSafetyUnknown(
-            "The lane is held for staff testing; usage must be resolved before disposable work."
+        hold = target.policies.staff_testing_hold
+        if (
+            not testing_hold_actor
+            or instance != "testing"
+            or retirement
+            or separation_only
+            or preview_refresh
+            or hold.purpose != "staff_testing"
+            or hold.recorded_by != testing_hold_actor
+            or hold.rehearsal is None
+        ):
+            raise DisposableLaneSafetyUnknown(
+                "The lane is held for staff testing; usage must be resolved before disposable work."
+            )
+        # Only undo this service's rehearsal-hold metadata for qualification.
+        # All actual resource/configuration changes still invalidate the observation.
+        rehearsal_binding = hold.rehearsal.binding_sha256
+        target = target.model_copy(
+            update={
+                "policies": target.policies.model_copy(update={"staff_testing_hold": None}),
+                "updated_at": hold.rehearsal.target_updated_at,
+                "source_label": hold.rehearsal.target_source_label,
+            }
         )
     evidence = store.read_disposable_lane_safety(product, context, instance)
     if preview_refresh:
@@ -276,6 +299,8 @@ def require_disposable_lane(
         raise DisposableLaneSafetyUnknown(
             "Disposable lane bindings changed after the safety observation."
         )
+    if rehearsal_binding and evidence.binding_sha256 != rehearsal_binding:
+        raise DisposableLaneSafetyUnknown("The rehearsal's original lane binding changed.")
     allowed_resources = {"isolated", "separation_ready"} if separation_only else {"isolated"}
     if (
         evidence.usage != "unused"

@@ -423,7 +423,7 @@ class TestingHoldRouteTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(_read_hold(store), hold)
                 self.assertEqual(store.list_product_reconcile_requests(), ())
 
-    async def test_director_can_plan_a_hold_lift_but_cannot_apply_it(self) -> None:
+    async def test_director_can_plan_an_ordinary_hold_lift_but_cannot_apply_it(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)
             store = self._store(root)
