@@ -17,6 +17,12 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
 )
 from control_plane.odoo_testing_usage import OdooTestingUsage
+from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    build_authz_policy_record_id,
+    authz_policy_sha256,
+)
 from control_plane.odoo_testing_restore import generation_binding
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.testing_never_served import (
@@ -333,6 +339,29 @@ class NeverServedTestingTests(unittest.TestCase):
         self.store.write_fresh_odoo_testing_generation(self.gen)
         self.assertEqual(self.read().usage, "unknown")
 
+    def test_revocation_changes_only_usage_on_an_independently_protected_row(self) -> None:
+        proof = self.read()
+        for protection in NeverServedHttpTests.revocation_protections:
+            with self.subTest(protection=protection):
+                record_safety(
+                    self.store,
+                    self.product,
+                    self.context,
+                    "testing",
+                    usage_evidence=NON_USE_EVIDENCE_PREFIX + proof.proof_sha256,
+                )
+                previous = self.store.read_disposable_lane_safety(
+                    self.product, self.context, "testing"
+                )
+                assert previous is not None
+                previous = previous.model_copy(update=protection)
+                self.store.write_disposable_lane_safety(previous)
+                self.store.invalidate_testing_non_use(self.product, self.context)
+                self.assertEqual(
+                    self.store.read_disposable_lane_safety(self.product, self.context, "testing"),
+                    previous.model_copy(update={"usage": "unknown", "usage_evidence": ""}),
+                )
+
     def hold_cycle(self, writer: str) -> None:
         original = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -450,6 +479,103 @@ class NeverServedTestingTests(unittest.TestCase):
 
 
 class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
+    database_url = ""
+    revocation_protections: tuple[dict[str, str], ...] = (
+        {"data": "only_copy", "production_resources": "unknown"},
+        {"data": "unknown", "production_resources": "shared"},
+        {"data": "unknown", "production_resources": "separation_ready"},
+    )
+
+    async def test_usage_revocation_preserves_independent_copy_and_resource_protection(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+        from tests.support.http import request
+
+        for changes in self.revocation_protections:
+            with self.subTest(protection=changes):
+                fixture = NeverServedTestingTests()
+                fixture.database_url = self.database_url
+                fixture.setUp()
+                self.addCleanup(fixture.doCleanups)
+                policy = LaunchplaneAuthzPolicy()
+                fixture.store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id=build_authz_policy_record_id(
+                            revision=1, policy_sha256=authz_policy_sha256(policy)
+                        ),
+                        revision=1,
+                        status="active",
+                        source="test:never-served-http",
+                        updated_at=fixture.profile.updated_at,
+                        policy=policy,
+                    )
+                )
+                app = fixture.fixture.fixture.app
+                previous = fixture.store.read_disposable_lane_safety(
+                    fixture.product, fixture.context, "testing"
+                )
+                assert previous is not None
+                fixture.store.write_disposable_lane_safety(previous.model_copy(update=changes))
+                body = {
+                    "product": fixture.product,
+                    "context": fixture.context,
+                    "instance": "testing",
+                }
+
+                async def collect() -> dict[str, object]:
+                    inspected = await request(
+                        app,
+                        "POST",
+                        "/v1/disposable-lanes/observations",
+                        headers={"Authorization": "Bearer local-operator-token"},
+                        payload=body,
+                    )
+                    self.assertEqual(inspected.status_code, 202, inspected.text)
+                    response = await request(
+                        app,
+                        "POST",
+                        "/v1/disposable-lanes/observations",
+                        headers={"Authorization": "Bearer local-operator-token"},
+                        payload={
+                            **body,
+                            "mode": "collect",
+                            "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
+                        },
+                    )
+                    self.assertEqual(response.status_code, 202, response.text)
+                    return dict(response.json()["result"])
+
+                with patch(
+                    "control_plane.http_app.read_odoo_testing_usage",
+                    return_value=OdooTestingUsage(
+                        reason_code="serving_container_absent",
+                        never_served_candidate=True,
+                    ),
+                ):
+                    first = await collect()
+                with patch(
+                    "control_plane.http_app.read_odoo_testing_usage",
+                    return_value=OdooTestingUsage(
+                        "in_use",
+                        True,
+                        True,
+                        "complete",
+                    ),
+                ):
+                    positive = await collect()
+                self.assertEqual(first["usage"], "unused")
+                self.assertEqual(first["data"], changes["data"])
+                self.assertEqual(first["production_resources"], changes["production_resources"])
+                self.assertEqual(positive["data"], first["data"])
+                self.assertEqual(positive["production_resources"], first["production_resources"])
+                self.assertEqual(positive["usage"], "in_use")
+                self.assertEqual(fixture.read().usage, "unknown")
+                fixture.store.clear_disposable_lane_safety(
+                    fixture.product, fixture.context, "testing"
+                )
+                self.assertEqual(fixture.read().usage, "unknown")
+
     async def test_unavailable_runtime_uses_only_complete_service_records(self) -> None:
         from unittest.mock import patch
         from tests.support.http import request
@@ -468,6 +594,9 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
             for revoked in (False, True):
                 if revoked:
                     fixture.store.invalidate_testing_non_use(fixture.product, fixture.context)
+                previous = fixture.store.read_disposable_lane_safety(
+                    fixture.product, fixture.context, "testing"
+                )
                 inspected = await request(
                     app,
                     "POST",
@@ -491,8 +620,12 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
                 result = response.json()["result"]
                 self.assertEqual(result["usage"], "unknown" if revoked else "unused")
                 self.assertEqual(
-                    (result["data"], result["production_resources"]), ("unknown", "unknown")
+                    result["production_resources"],
+                    previous.production_resources
+                    if previous is not None
+                    else inspected.json()["result"]["production_resources"],
                 )
+                self.assertEqual(result["data"], "unknown")
                 self.assertIsNone(result["odoo_usage"]["recent_signins"])
                 self.assertIsNone(result["odoo_usage"]["authenticated_sessions"])
                 self.assertIs(result["provider_mutation"], False)

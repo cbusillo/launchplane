@@ -1013,13 +1013,15 @@ through an instance request: those would change what another product or
 another lane, such as production, resolves. Secondary lane writes also carry
 this exclusive-context requirement into the commit-time check described above.
 Dry-runs and unchanged applies do not write and retain their existing behavior.
-Backup authority applies from a
-`local_operators` caller likewise refuse a submitted target revision the
-submitted policy doesn't use, or one another product's active backup policy
-uses; backup targets are global records, so revising one would change another
-product's backup. Referencing a shared target without revising it stays
-allowed. The check runs again inside the locked write against the locked policy
-records, so a concurrent policy change can't slip in between. A `local_operators`
+Backup authority proposals from an agent or `local_operators` caller are inert;
+they use existing exact-lane backup planning authority. The proposer cannot
+approve or directly apply, even when an older rule lists backup write authority.
+A signed-in administrator decides in the production backup card. The service
+refuses target revisions outside the submitted policy or shared with another
+active product policy; shared targets can be referenced without revision. The
+planner and the locked write both enforce that boundary. See the
+[proposal contract](production-backup-provider.md#review-a-proposed-backup-policy).
+A `local_operators`
 caller may set an ordinary protective testing hold. Lifting an ordinary staff
 hold remains an administrator action because it requests testing reconciliation,
 which can deploy. The authenticated Director agent has the separate bounded
@@ -1031,9 +1033,9 @@ does not apply to actual staff use, only-copy data, shared production resources,
 staging/activation holds or unknown outcomes.
 
 What it can reach on a live product: the testing lane's settings and secrets,
-the testing lane's new compose target, and production's backup policy. The
-backup policy is the gate promotions rely on, so its apply is bound to the
-reviewed dry-run digest. It cannot deploy, promote, roll back, run a
+the testing lane's new compose target, and an inert proposal for production's backup policy. The
+Director approves that policy in the signed-in card; the worker applies only its
+service-pinned dry-run digest. It cannot deploy, promote, roll back, run a
 backup, change the Client or release review, or touch another product. Live
 products are therefore listed and accepted.
 

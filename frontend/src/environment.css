@@ -184,10 +184,6 @@
   color: var(--unknown);
 }
 
-.environment-operational-status > span {
-  background: currentColor;
-}
-
 .environment-hero-main > p:not(.eyebrow),
 .activity-hero p:not(.eyebrow),
 .config-view-header p:not(.eyebrow),
@@ -987,7 +983,7 @@
   min-width: 0;
 }
 
-.tls-domain-list strong {
+.tls-domain-list > li > div strong {
   overflow: hidden;
   color: var(--text-strong);
   font-size: 12px;
@@ -995,8 +991,8 @@
   white-space: nowrap;
 }
 
-.tls-domain-list small,
-.tls-domain-list span {
+.tls-domain-list > li > div small,
+.tls-domain-list > li > div span {
   display: -webkit-box;
   overflow: hidden;
   color: var(--muted);

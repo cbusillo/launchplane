@@ -139,13 +139,46 @@ updated first; keep one marked issue per product. Multiple matches on that page
 or incomplete reads refuse publication. Discovery is bounded to 1,000 entries
 (including PRs); for a larger repository, mark its destination before enabling
 the publisher so it appears at the front of the updated-issue list. A closed
-marked issue is intentionally reused; its mentions still notify the Client.
+marked issue is intentionally reused and reopened when a genuine new review
+is ready; its mentions still notify the Client.
 Comment lookup is also bounded to 1,000 entries; keep the requests issue unlocked
 and preserve its receipts. The Client must already be able to read the product
 repository for the mention to notify them; missing access is a reported prerequisite,
 not a reason to grant access automatically.
 The marker functions live in `control_plane/release_invitation.py`; there is no
 checked-in destination catalog.
+
+The publisher reconciles an invitation only if the current Client's saved
+acceptance names the exact candidate now in production and its saved release
+run has passed. Equal versions alone, held
+approval, a running/stopped release, and missing evidence cannot complete an
+invitation. The existing invitation is marked released without another mention,
+with the saved acceptance linked and the original text and delivery receipts
+retained in a collapsed history section. Historical mentions are neutralized.
+Completed or replaced comments and their preserved receipts are excluded from
+later open request, replacement and reminder scans, including renewed requests bound to
+the same saved decision; a later review gets its own reminder.
+The marked issue closes only when testing matches production and there is no
+other outstanding invitation. Older decided invitations remain history;
+newer requests remain pending until the Client decides. A newer testing
+candidate keeps its own request open while the completed invitation settles.
+Renewed requests for the exact version that subsequently released also settle;
+earlier rejected requests keep their history rather than being marked released.
+When the Client changes their decision or retries a release on the same checklist
+without a renewed invitation, its newest open invitation settles from the final
+acceptance and passed run. Older decided invitations remain history.
+Completion receipts make
+retries and replica restarts idempotent, and the product publication lock and
+fresh decision/run/lane checks protect concurrent workers. Workers throttle
+incomplete completion lookups to five minutes and stop looking up confirmed or
+absent historical invitations until the profile or lane versions change, even
+while a newer review waits; a restart recovers
+the durable completion receipts. They do not compile a new checklist for a
+release already completed. No acceptance or release record is
+changed by invitation reconciliation.
+An unavailable historical completion is logged and cannot block publication
+for a newer candidate. Deliberate urgent openings skip historical settlement;
+the routine worker reconciles it separately.
 
 Each request includes `release_invitation_marker(product, candidate)`, derived
 from the candidate's artifact, commit and shared-input identity. The worker

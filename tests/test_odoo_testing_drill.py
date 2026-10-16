@@ -45,6 +45,8 @@ from control_plane.odoo_testing_drill import (
 )
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import generation_binding
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.odoo_testing_storage import prepare_drill_storage
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplaneDisposableReplacementPreparationRow,
@@ -80,6 +82,12 @@ class TestingDrillScenario(unittest.TestCase):
                                 upstream_source=f"{self.profile.product}:{production.context}:prod",
                             ),
                             "odoo_testing_drill_enabled": True,
+                            "odoo_testing_drill_storage": OdooTestingDrillStorageBudget(
+                                database_bytes=100,
+                                filestore_bytes=100,
+                                staging_bytes=100,
+                                reserve_bytes=100,
+                            ),
                         }
                     )
                     if lane.instance == "testing"
@@ -92,7 +100,7 @@ class TestingDrillScenario(unittest.TestCase):
         self.gen = generation().model_copy(
             update={
                 "context": self.context,
-                "completed_at": self.profile.updated_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
                 "reconcile_requested_at": self.profile.updated_at,
             }
         )
@@ -226,6 +234,18 @@ class TestingDrillScenario(unittest.TestCase):
         self.signins = self.enterContext(
             patch("control_plane.odoo_testing_drill.read_drill_recent_signins", return_value=False)
         )
+        self.storage_executor = self.enterContext(
+            patch(
+                "control_plane.odoo_testing_storage.execute_maintenance",
+                side_effect=lambda root, target, spec, dispatch: (
+                    dispatch(lambda: None)
+                    or {
+                        "capacity": True,
+                        "disposals": ["disposed"] * len(spec["storage_maintenance"]["copies"]),
+                    }
+                ),
+            )
+        )
 
     def evidence(self) -> Any:
         return testing_drill_evidence(self.store, self.profile.product, self.context, "testing")
@@ -280,6 +300,9 @@ class TestingDrillScenario(unittest.TestCase):
                 lease_expires_at=datetime.fromtimestamp(self.now + 300, timezone.utc).isoformat(),
             )
         assert operation is not None
+        prepare_drill_storage(
+            self.store, operation, Path("."), now=self.now, checkpoint=lambda: None
+        )
         self.store.activate_odoo_testing_drill(operation, self.now)
         return operation
 
@@ -308,6 +331,129 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertEqual(self.evidence().step, "successful_login_check_unreadable")
         self.assertNotIn("private-provider-value", self.evidence().model_dump_json())
         self.assertEqual(self.evidence().operation_id, "")
+
+    def test_down_lane_queues_without_login_history_and_keeps_resource_qualification(self) -> None:
+        self.assert_down_lane_drill_admitted("unknown")
+
+    def test_down_lane_overrides_historical_use_for_drill_repair(self) -> None:
+        self.assert_down_lane_drill_admitted("in_use")
+
+    def test_down_lane_drill_uses_the_supplied_clock(self) -> None:
+        self.now += DRILL_INTERVAL_SECONDS
+        self.assert_down_lane_drill_admitted("in_use")
+
+    def test_walkthrough_keeps_known_use_protected_on_a_down_lane(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.odoo_walkthrough import plan_walkthrough
+        from control_plane.contracts.odoo_walkthrough import OdooWalkthroughRequest
+        from tests.support.down_lanes import record_lane_health
+
+        record_lane_health(
+            self.store,
+            self.profile.product,
+            self.context,
+            datetime.fromtimestamp(self.now, timezone.utc),
+        )
+        record_safety(self.store, self.profile.product, self.context, "testing", usage="in_use")
+        selection = SimpleNamespace(
+            identity=SimpleNamespace(context=self.context), base_url="https://testing.example.com"
+        )
+        with (
+            patch("control_plane.odoo_walkthrough.select_stable_runtime", return_value=selection),
+            patch("control_plane.odoo_walkthrough.read_drill_recent_signins", return_value=False),
+            patch("control_plane.odoo_walkthrough.connect_runtime") as connection,
+        ):
+            with self.assertRaises(DrillSkipped):
+                plan_walkthrough(
+                    self.store,
+                    Path("."),
+                    OdooWalkthroughRequest(
+                        product=self.profile.product,
+                        context=self.context,
+                        task_id="1" * 32,
+                        operation="provision",
+                    ),
+                    "fixture-agent",
+                )
+            connection.assert_not_called()
+
+    def assert_down_lane_drill_admitted(self, usage: str) -> None:
+        from tests.support.down_lanes import record_lane_health
+        from control_plane.lane_usage import VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX
+
+        record_lane_health(
+            self.store,
+            self.profile.product,
+            self.context,
+            datetime.fromtimestamp(self.now, timezone.utc),
+        )
+        record_safety(self.store, self.profile.product, self.context, "testing", usage=usage)
+        self.signins.return_value = None
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "queued")
+        self.activate()
+        # Re-entering activation uses the continuously leased checkpoint path.
+        self.activate()
+        operation = self.operation()
+        receipt = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+        )
+        assert receipt is not None
+        safety = receipt.response_payload["activation_safety"]
+        assert isinstance(safety, dict)
+        self.assertEqual(safety["usage"], "unknown")
+        self.assertTrue(
+            str(safety["usage_evidence"]).startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
+        )
+        require_drill_checkpoint(self.store, operation)
+        with patch.object(self.store, "list_public_ingress_observation_records", return_value=()):
+            require_drill_checkpoint(self.store, operation)
+            self.activate()
+            historical = self.store.read_disposable_lane_safety(
+                self.profile.product, self.context, "testing"
+            )
+            assert historical is not None
+            self.store.write_disposable_lane_safety(
+                historical.model_copy(
+                    update={
+                        "observed_at": historical.observed_at + timedelta(seconds=1),
+                        "expires_at": historical.expires_at + timedelta(seconds=1),
+                    }
+                )
+            )
+            require_drill_checkpoint(self.store, operation)
+            self.activate()
+            record_safety(
+                self.store,
+                self.profile.product,
+                self.context,
+                "testing",
+                usage="in_use",
+                usage_evidence="fixture:new-use-after-admission",
+            )
+            with self.assertRaises(DrillSkipped):
+                require_drill_checkpoint(self.store, operation)
+
+    def test_new_usage_reader_failures_keep_a_bounded_skip_reason(self) -> None:
+        for name in ("lane_usage_protected", "evaluate_lane_usage"):
+            record_safety(
+                self.store,
+                self.profile.product,
+                self.context,
+                "testing",
+                usage="in_use" if name == "lane_usage_protected" else "unused",
+            )
+            with (
+                self.subTest(reader=name),
+                patch(
+                    "control_plane.odoo_testing_drill." + name,
+                    side_effect=RuntimeError("private-provider-detail"),
+                ),
+            ):
+                self.scheduler.run_once()
+                self.assertEqual(self.evidence().status, "skipped")
+                self.assertNotIn("private-provider-detail", self.evidence().model_dump_json())
+            self.now += DRILL_INTERVAL_SECONDS
 
     def test_idle_lane_runs_without_renewing_general_safety_facts(self) -> None:
         self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
@@ -545,6 +691,27 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertTrue(self.evidence().alert_delivered)
         self.assertNotIn("private provider", str(self.notifications.call_args))
         self.assertEqual(self.operation().operation_id, operation.operation_id)
+
+    def test_legacy_cleanup_marker_does_not_repeat_failed_restore_alert(self) -> None:
+        self.scheduler.run_once()
+        self.complete("fail")
+        operation = self.operation()
+        assert operation.result is not None
+        result = operation.result.model_copy(
+            update={
+                "post_deploy_override_evidence": {
+                    "post_deploy_readback_testing_drill_disposal_deferred": "true"
+                }
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(update={"result": result})
+        )
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().step, "restore_failed")
+        self.assertTrue(self.evidence().alert_delivered)
+        self.scheduler.run_once()
+        self.assertEqual(self.notifications.call_count, 1)
 
     def test_queue_starvation_alerts_and_retains_original_operation(self) -> None:
         self.scheduler.run_once()

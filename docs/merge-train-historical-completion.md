@@ -66,6 +66,10 @@ materialized candidate, but conflicting materialized candidates are ambiguous.
 
 For each of at most 25 selected PRs, the portable observational reader checks
 for an active stack or a controller-retired wait whose root is that PR.
+It also excludes unresolved ordinary effects for the same repository and base
+branch, matching repository names without regard to case and preserving exact
+branch case and stored payloads. Terminal ordinary effects do not exclude the
+portable observation; that observation cannot authorize a disposition.
 The native PostgreSQL service path also validates those stacks in the target
 and excludes overlap as either
 a root or a member. Its queries have no capped history post-filter. It refuses

@@ -1136,7 +1136,9 @@ def _odoo_preview_service_environment(
         )
         environment_values.update(
             control_plane_odoo_instance_overrides.build_post_deploy_environment(
-                bootstrap_record, clear_undeclared_shopify=False
+                bootstrap_record,
+                clear_undeclared_shopify=False,
+                preview_import_source=import_source,
             ).inline_environment
         )
         environment_values.update(import_source.environment)

@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { AppShell } from "./AppShell";
 import { useEvidenceRefresh } from "./use-evidence-refresh";
+import { environmentEvidenceDeadlines } from "./product-environment-signal";
 import { ProductActivityRoute } from "./ActivityRoute";
 import {
   loadDevFixtures,
@@ -91,7 +92,10 @@ export function App() {
   useEvidenceRefresh(route.kind,
     !fixtureMode && authState.status === "signed_in" && authState.identity.role !== "owner" &&
       (route.kind === "product-index" || route.kind === "product-workspace" || route.kind === "product-environment" || route.kind === "product-activity"),
-    productsResource, () => setInventoryRefreshToken(value => value + 1));
+    productsResource, () => setInventoryRefreshToken(value => value + 1),
+    (productsResource.data ?? []).flatMap(product => [
+      ...product.environments.flatMap(environmentEvidenceDeadlines), product.preview.provenance.stale_after,
+    ]));
 
   useEffect(() => {
     const unsubscribe = window.launchplaneTheme.subscribe(setTheme);

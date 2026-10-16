@@ -961,6 +961,161 @@
         "title": "ArtifactReleaseCompatibility",
         "type": "object"
       },
+      "ArtifactRetentionPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "candidates": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "image_repository": {
+            "title": "Image Repository",
+            "type": "string"
+          },
+          "mode": {
+            "const": "dry-run",
+            "default": "dry-run",
+            "title": "Mode",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "permission": {
+            "const": "unconfirmed",
+            "default": "unconfirmed",
+            "title": "Permission",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "retained": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Retained",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "image_repository",
+          "observed_at"
+        ],
+        "title": "ArtifactRetentionPlan",
+        "type": "object"
+      },
+      "ArtifactRetentionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "retention": {
+            "$ref": "#/components/schemas/ArtifactRetentionPlan"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "retention"
+        ],
+        "title": "ArtifactRetentionResponse",
+        "type": "object"
+      },
+      "ArtifactScanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "scan": {
+            "$ref": "#/components/schemas/ArtifactScanResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "scan"
+        ],
+        "title": "ArtifactScanResponse",
+        "type": "object"
+      },
+      "ArtifactScanResult": {
+        "additionalProperties": false,
+        "properties": {
+          "critical": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Critical",
+            "type": "integer"
+          },
+          "high": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "High",
+            "type": "integer"
+          },
+          "image_reference": {
+            "title": "Image Reference",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "scanned_at": {
+            "title": "Scanned At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_reference",
+          "status",
+          "reason",
+          "scanned_at"
+        ],
+        "title": "ArtifactScanResult",
+        "type": "object"
+      },
       "ArtifactSourceBuild": {
         "additionalProperties": false,
         "description": "GitHub build run Launchplane verified for this artifact (docs/artifact-provenance.md).",
@@ -3691,6 +3846,346 @@
           "source"
         ],
         "title": "BackupGateRecord",
+        "type": "object"
+      },
+      "BackupPolicyDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "approve",
+              "decline"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "source_event_id"
+        ],
+        "title": "BackupPolicyDecision",
+        "type": "object"
+      },
+      "BackupPolicyDecisionResponse": {
+        "properties": {
+          "proposal": {
+            "$ref": "#/components/schemas/BackupPolicyProposalReview"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "proposal"
+        ],
+        "title": "BackupPolicyDecisionResponse",
+        "type": "object"
+      },
+      "BackupPolicyExecutionEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "default": false,
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "result_status",
+          "result_digest"
+        ],
+        "title": "BackupPolicyExecutionEvidence",
+        "type": "object"
+      },
+      "BackupPolicyHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "backup_max_age_seconds": {
+            "title": "Backup Max Age Seconds",
+            "type": "integer"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "plan_digest": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_revision": {
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "result_status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Result Status",
+            "type": "string"
+          },
+          "retention_count": {
+            "title": "Retention Count",
+            "type": "integer"
+          },
+          "review_after": {
+            "title": "Review After",
+            "type": "string"
+          },
+          "snapshot_max_age_seconds": {
+            "title": "Snapshot Max Age Seconds",
+            "type": "integer"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/BackupPolicyTargetChange"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "plan_digest",
+          "product",
+          "context",
+          "instance",
+          "promotion_action",
+          "policy_revision",
+          "retention_count",
+          "targets",
+          "snapshot_max_age_seconds",
+          "backup_max_age_seconds",
+          "effective_at",
+          "review_after"
+        ],
+        "title": "BackupPolicyHumanEvidence",
+        "type": "object"
+      },
+      "BackupPolicyProposalInput": {
+        "additionalProperties": false,
+        "properties": {
+          "authority": {
+            "$ref": "#/components/schemas/ProductionBackupAuthorityWriteEnvelope"
+          },
+          "reason": {
+            "maxLength": 4000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "related_issue": {
+            "default": "",
+            "title": "Related Issue",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authority",
+          "reason"
+        ],
+        "title": "BackupPolicyProposalInput",
+        "type": "object"
+      },
+      "BackupPolicyProposalListResponse": {
+        "properties": {
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/BackupPolicyProposalReview"
+            },
+            "title": "Proposals",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "proposals"
+        ],
+        "title": "BackupPolicyProposalListResponse",
+        "type": "object"
+      },
+      "BackupPolicyProposalReview": {
+        "additionalProperties": false,
+        "properties": {
+          "can_approve": {
+            "title": "Can Approve",
+            "type": "boolean"
+          },
+          "can_decline": {
+            "title": "Can Decline",
+            "type": "boolean"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "protection": {
+            "$ref": "#/components/schemas/BackupPolicyHumanEvidence"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "status",
+          "protection",
+          "can_approve",
+          "can_decline"
+        ],
+        "title": "BackupPolicyProposalReview",
+        "type": "object"
+      },
+      "BackupPolicyProposalSummary": {
+        "additionalProperties": false,
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "descriptor_id": {
+            "const": "production-backup-policy",
+            "default": "production-backup-policy",
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "descriptor_version": {
+            "default": 1,
+            "title": "Descriptor Version",
+            "type": "integer"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "result_status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Result Status",
+            "type": "string"
+          },
+          "review_path": {
+            "title": "Review Path",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "status",
+          "created_at",
+          "expires_at",
+          "review_path"
+        ],
+        "title": "BackupPolicyProposalSummary",
+        "type": "object"
+      },
+      "BackupPolicyTargetChange": {
+        "additionalProperties": false,
+        "properties": {
+          "change": {
+            "enum": [
+              "new",
+              "revised",
+              "unchanged"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "destination_kind": {
+            "enum": [
+              "proxmox_guest",
+              "proxmox_storage"
+            ],
+            "title": "Destination Kind",
+            "type": "string"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "destination_kind",
+          "target_revision",
+          "change"
+        ],
+        "title": "BackupPolicyTargetChange",
         "type": "object"
       },
       "BootstrapEvidence": {
@@ -9391,6 +9886,11 @@
             "title": "Name",
             "type": "string"
           },
+          "on_reset": {
+            "default": false,
+            "title": "On Reset",
+            "type": "boolean"
+          },
           "timeout_seconds": {
             "default": 300,
             "maximum": 3600.0,
@@ -10189,6 +10689,11 @@
             "title": "Product",
             "type": "string"
           },
+          "reset": {
+            "default": false,
+            "title": "Reset",
+            "type": "boolean"
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -10293,6 +10798,11 @@
             "minLength": 1,
             "title": "Name",
             "type": "string"
+          },
+          "on_reset": {
+            "default": false,
+            "title": "On Reset",
+            "type": "boolean"
           },
           "timeout_seconds": {
             "default": 300,
@@ -10406,6 +10916,16 @@
             ],
             "title": "Data Transport Mode",
             "type": "string"
+          },
+          "generic_web_extensions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenericWebLaneExtensions"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "transport_database_prefix": {
             "default": "",
@@ -14154,6 +14674,12 @@
             ],
             "title": "Provider Host Id"
           },
+          "provider_route_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Provider Route Sha256",
+            "type": "string"
+          },
           "reason": {
             "title": "Reason",
             "type": "string"
@@ -14187,6 +14713,18 @@
               "unchanged"
             ],
             "title": "Status",
+            "type": "string"
+          },
+          "testing_authority_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Authority Sha256",
+            "type": "string"
+          },
+          "testing_generation_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Generation Sha256",
             "type": "string"
           },
           "tls_owner": {
@@ -15354,7 +15892,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "default": 1,
+            "default": 2,
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"
@@ -23986,6 +24524,26 @@
             "title": "Deployment Record Id",
             "type": "string"
           },
+          "disposal_attention": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Disposal Attention",
+            "type": "integer"
+          },
+          "disposal_pending": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Disposal Pending",
+            "type": "integer"
+          },
+          "disposal_pending_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Disposal Pending Bindings",
+            "type": "array"
+          },
           "observed_at": {
             "title": "Observed At",
             "type": "string"
@@ -24010,6 +24568,17 @@
             "title": "Step",
             "type": "string"
           },
+          "storage_status": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "pass",
+              "insufficient",
+              "unconfigured"
+            ],
+            "title": "Storage Status",
+            "type": "string"
+          },
           "trace": {
             "default": "",
             "title": "Trace",
@@ -24021,6 +24590,48 @@
           "observed_at"
         ],
         "title": "OdooTestingDrillEvidence",
+        "type": "object"
+      },
+      "OdooTestingDrillStorageBudget": {
+        "additionalProperties": false,
+        "description": "Admin-supplied working headroom, never an inferred source-size guarantee.",
+        "properties": {
+          "database_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Database Bytes",
+            "type": "integer"
+          },
+          "filestore_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Filestore Bytes",
+            "type": "integer"
+          },
+          "reserve_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Reserve Bytes",
+            "type": "integer"
+          },
+          "retained_copy_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Copy Bindings",
+            "type": "array"
+          },
+          "staging_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Staging Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "database_bytes",
+          "filestore_bytes",
+          "staging_bytes",
+          "reserve_bytes"
+        ],
+        "title": "OdooTestingDrillStorageBudget",
         "type": "object"
       },
       "OdooTestingRouteBindingRefreshEnvelope": {
@@ -29306,6 +29917,7 @@
           },
           "descriptor_id": {
             "enum": [
+              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -29415,6 +30027,9 @@
           "summary": {
             "anyOf": [
               {
+                "$ref": "#/components/schemas/BackupPolicyProposalSummary"
+              },
+              {
                 "$ref": "#/components/schemas/PrivilegedOperationAgentSummary"
               },
               {
@@ -29447,6 +30062,7 @@
           },
           "descriptor_id": {
             "enum": [
+              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -29766,171 +30382,9 @@
         "title": "PrivilegedOperationExecutionEvidence",
         "type": "object"
       },
-      "PrivilegedOperationHumanResponse": {
+      "PrivilegedOperationHumanRecord": {
         "additionalProperties": false,
-        "properties": {
-          "events": {
-            "items": {
-              "$ref": "#/components/schemas/PrivilegedOperationEventRecord"
-            },
-            "title": "Events",
-            "type": "array"
-          },
-          "record": {
-            "$ref": "#/components/schemas/PrivilegedOperationRecord"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          },
-          "write_status": {
-            "default": "not_applicable",
-            "enum": [
-              "written",
-              "replayed",
-              "not_applicable"
-            ],
-            "title": "Write Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "record",
-          "events"
-        ],
-        "title": "PrivilegedOperationHumanResponse",
-        "type": "object"
-      },
-      "PrivilegedOperationListResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "reviews": {
-            "items": {
-              "$ref": "#/components/schemas/PrivilegedOperationSemanticReview"
-            },
-            "title": "Reviews",
-            "type": "array"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "total": {
-            "minimum": 0.0,
-            "title": "Total",
-            "type": "integer"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "trace_id",
-          "total",
-          "reviews"
-        ],
-        "title": "PrivilegedOperationListResponse",
-        "type": "object"
-      },
-      "PrivilegedOperationLocalOperatorActor": {
-        "additionalProperties": false,
-        "properties": {
-          "identity_type": {
-            "const": "local_operator",
-            "default": "local_operator",
-            "title": "Identity Type",
-            "type": "string"
-          },
-          "login": {
-            "const": "local-operator",
-            "default": "local-operator",
-            "title": "Login",
-            "type": "string"
-          },
-          "principal_sha256": {
-            "title": "Principal Sha256",
-            "type": "string"
-          }
-        },
-        "required": [
-          "principal_sha256"
-        ],
-        "title": "PrivilegedOperationLocalOperatorActor",
-        "type": "object"
-      },
-      "PrivilegedOperationPlanEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "descriptor_id": {
-            "default": "managed-secret-reencryption",
-            "enum": [
-              "managed-secret-reencryption",
-              "managed-authz-policy-set",
-              "managed-merge-train-policy-import",
-              "ordinary-agent-delivery-activation"
-            ],
-            "title": "Descriptor Id",
-            "type": "string"
-          },
-          "expires_in_seconds": {
-            "default": 1800,
-            "maximum": 86400.0,
-            "minimum": 300.0,
-            "title": "Expires In Seconds",
-            "type": "integer"
-          },
-          "request": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Input"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Input"
-              },
-              {
-                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupRequest"
-              },
-              {
-                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeRequest"
-              }
-            ],
-            "title": "Request"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "source_event_id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Source Event Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "source_event_id",
-          "request"
-        ],
-        "title": "PrivilegedOperationPlanEnvelope",
-        "type": "object"
-      },
-      "PrivilegedOperationRecord": {
-        "additionalProperties": false,
+        "description": "The generic browser record excludes private product-card adapters.",
         "properties": {
           "approval": {
             "anyOf": [
@@ -29999,6 +30453,9 @@
           },
           "execution": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicyExecutionEvidence"
+              },
               {
                 "$ref": "#/components/schemas/PrivilegedOperationExecutionEvidence"
               },
@@ -30128,7 +30585,174 @@
           "updated_at",
           "expires_at"
         ],
-        "title": "PrivilegedOperationRecord",
+        "title": "PrivilegedOperationHumanRecord",
+        "type": "object"
+      },
+      "PrivilegedOperationHumanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationEventRecord"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "record": {
+            "$ref": "#/components/schemas/PrivilegedOperationHumanRecord"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "write_status": {
+            "default": "not_applicable",
+            "enum": [
+              "written",
+              "replayed",
+              "not_applicable"
+            ],
+            "title": "Write Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "record",
+          "events"
+        ],
+        "title": "PrivilegedOperationHumanResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "reviews": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationSemanticReview"
+            },
+            "title": "Reviews",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "total": {
+            "minimum": 0.0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "total",
+          "reviews"
+        ],
+        "title": "PrivilegedOperationListResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationLocalOperatorActor": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_type": {
+            "const": "local_operator",
+            "default": "local_operator",
+            "title": "Identity Type",
+            "type": "string"
+          },
+          "login": {
+            "const": "local-operator",
+            "default": "local-operator",
+            "title": "Login",
+            "type": "string"
+          },
+          "principal_sha256": {
+            "title": "Principal Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_sha256"
+        ],
+        "title": "PrivilegedOperationLocalOperatorActor",
+        "type": "object"
+      },
+      "PrivilegedOperationPlanEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "descriptor_id": {
+            "default": "managed-secret-reencryption",
+            "enum": [
+              "production-backup-policy",
+              "managed-secret-reencryption",
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import",
+              "ordinary-agent-delivery-activation"
+            ],
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "expires_in_seconds": {
+            "default": 1800,
+            "maximum": 86400.0,
+            "minimum": 300.0,
+            "title": "Expires In Seconds",
+            "type": "integer"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicyProposalInput"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Input"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Input"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupRequest"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeRequest"
+              }
+            ],
+            "title": "Request"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_event_id",
+          "request"
+        ],
+        "title": "PrivilegedOperationPlanEnvelope",
         "type": "object"
       },
       "PrivilegedOperationRevocationEnvelope": {
@@ -30203,6 +30827,7 @@
           },
           "descriptor_id": {
             "enum": [
+              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -30765,7 +31390,8 @@
             "default": "managed-authz-policy-set",
             "enum": [
               "managed-authz-policy-set",
-              "managed-merge-train-policy-import"
+              "managed-merge-train-policy-import",
+              "production-backup-policy"
             ],
             "title": "Descriptor Id",
             "type": "string"
@@ -30784,6 +31410,9 @@
               },
               {
                 "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Input"
+              },
+              {
+                "$ref": "#/components/schemas/BackupPolicyProposalInput"
               }
             ],
             "title": "Request"
@@ -30819,6 +31448,9 @@
           },
           "summary": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicyProposalSummary"
+              },
               {
                 "$ref": "#/components/schemas/PrivilegedOperationAgentSummary"
               },
@@ -33256,6 +33888,12 @@
             "default": "",
             "title": "Repository",
             "type": "string"
+          },
+          "scan_enabled": {
+            "default": false,
+            "title": "Scan Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "ProductImageProfile",
@@ -34285,6 +34923,17 @@
             "default": false,
             "title": "Odoo Testing Drill Enabled",
             "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
+          "odoo_testing_drill_storage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooTestingDrillStorageBudget"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "x-launchplane-optional-response": true
           }
         },
@@ -35701,6 +36350,10 @@
             "default": false,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "generic_web_extensions": {
+            "$ref": "#/components/schemas/GenericWebLaneExtensions",
+            "x-launchplane-optional-response": true
           },
           "historical_transport": {
             "additionalProperties": {
@@ -41056,6 +41709,15 @@
           "product": {
             "default": "",
             "title": "Product",
+            "type": "string"
+          },
+          "purpose": {
+            "default": "incident_alerts",
+            "enum": [
+              "incident_alerts",
+              "release_digest"
+            ],
+            "title": "Purpose",
             "type": "string"
           },
           "reminder_interval_seconds": {
@@ -46864,6 +47526,154 @@
         "title": "SecretBinding",
         "type": "object"
       },
+      "SecretReferenceEntry": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "reconcile_reference",
+              "already_agrees"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "runtime_key": {
+            "title": "Runtime Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "runtime_key",
+          "action"
+        ],
+        "title": "SecretReferenceEntry",
+        "type": "object"
+      },
+      "SecretReferencePlan": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "default": false,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/SecretReferenceEntry"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "read_back_matches": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Read Back Matches"
+          },
+          "review_digest": {
+            "title": "Review Digest",
+            "type": "string"
+          },
+          "values_redacted": {
+            "default": true,
+            "title": "Values Redacted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "instance",
+          "entries",
+          "review_digest"
+        ],
+        "title": "SecretReferencePlan",
+        "type": "object"
+      },
+      "SecretReferenceRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmation": {
+            "default": "",
+            "title": "Confirmation",
+            "type": "string"
+          },
+          "keys": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Keys",
+            "type": "array"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "review_digest": {
+            "default": "",
+            "title": "Review Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "keys"
+        ],
+        "title": "SecretReferenceRequest",
+        "type": "object"
+      },
+      "SecretReferenceResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/SecretReferencePlan"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "SecretReferenceResponse",
+        "type": "object"
+      },
       "SecretSharingReason": {
         "additionalProperties": false,
         "description": "Why a production integration key may sit on one non-production lane.\n\nThe kinds are the lane integration allowances' (``dev_store``,\n``read_only_source``, ``pre_live``) plus ``site_shared`` for a key the site's\nstable lanes share on purpose. ``evidence`` says who verified the key's\npermissions, when, and what they saw. Launchplane cannot check a token's\npermissions; a person does and records it here.",
@@ -49415,6 +50225,55 @@
         "title": "TestingHoldRehearsal",
         "type": "object"
       },
+      "TestingPublicIngressRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "operation_id",
+          "reason"
+        ],
+        "title": "TestingPublicIngressRequest",
+        "type": "object"
+      },
       "TestingReplacementBootstrapRequest": {
         "additionalProperties": false,
         "properties": {
@@ -50557,110 +51416,6 @@
           "type"
         ],
         "title": "ValidationError",
-        "type": "object"
-      },
-      "VeriReelAppMaintenanceEnvelope": {
-        "additionalProperties": false,
-        "properties": {
-          "maintenance": {
-            "$ref": "#/components/schemas/VeriReelAppMaintenanceRequest"
-          },
-          "product": {
-            "title": "Product",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "product",
-          "maintenance"
-        ],
-        "title": "VeriReelAppMaintenanceEnvelope",
-        "type": "object"
-      },
-      "VeriReelAppMaintenanceRequest": {
-        "additionalProperties": false,
-        "properties": {
-          "action": {
-            "enum": [
-              "migrate",
-              "grant-sponsored",
-              "promote-owner",
-              "delete-user",
-              "reset-testing"
-            ],
-            "title": "Action",
-            "type": "string"
-          },
-          "application_name": {
-            "default": "",
-            "title": "Application Name",
-            "type": "string"
-          },
-          "context": {
-            "default": "verireel",
-            "enum": [
-              "verireel",
-              "verireel-testing"
-            ],
-            "title": "Context",
-            "type": "string"
-          },
-          "email": {
-            "default": "",
-            "title": "Email",
-            "type": "string"
-          },
-          "instance": {
-            "default": "testing",
-            "enum": [
-              "testing",
-              "preview"
-            ],
-            "title": "Instance",
-            "type": "string"
-          },
-          "intent": {
-            "enum": [
-              "stable-testing-migration",
-              "stable-testing-reset",
-              "stable-testing-remote-e2e-grant-sponsored",
-              "remote-e2e-grant-sponsored",
-              "remote-e2e-delete-user",
-              "owner-route-promote-owner",
-              "owner-route-delete-user"
-            ],
-            "title": "Intent",
-            "type": "string"
-          },
-          "preview_slug": {
-            "default": "",
-            "title": "Preview Slug",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "timeout_seconds": {
-            "default": 300,
-            "minimum": 1.0,
-            "title": "Timeout Seconds",
-            "type": "integer"
-          }
-        },
-        "required": [
-          "action",
-          "intent"
-        ],
-        "title": "VeriReelAppMaintenanceRequest",
         "type": "object"
       },
       "VeriReelProdBackupGateOperationWorkerReconcileResponse": {
@@ -53489,6 +54244,186 @@
           }
         },
         "summary": "Read protected artifact inventory"
+      }
+    },
+    "/v1/artifacts/retention": {
+      "get": {
+        "operationId": "read_artifact_retention",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactRetentionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a dry-run image retention plan"
+      }
+    },
+    "/v1/artifacts/scan": {
+      "get": {
+        "operationId": "qualify_product_artifact_scan",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactScanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Qualify a verified artifact scan without deploying or activating it"
       }
     },
     "/v1/auth/session": {
@@ -58480,6 +59415,11 @@
                       "product": {
                         "title": "Product",
                         "type": "string"
+                      },
+                      "reset": {
+                        "default": false,
+                        "title": "Reset",
+                        "type": "boolean"
                       },
                       "schema_version": {
                         "default": 1,
@@ -67910,220 +68850,6 @@
           }
         },
         "summary": "Write Odoo website-bootstrap override"
-      }
-    },
-    "/v1/drivers/verireel/app-maintenance": {
-      "post": {
-        "operationId": "apply_verireel_app_maintenance",
-        "parameters": [
-          {
-            "in": "header",
-            "name": "Idempotency-Key",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Idempotency-Key",
-              "type": "string"
-            }
-          },
-          {
-            "in": "header",
-            "name": "Authorization",
-            "required": false,
-            "schema": {
-              "default": "",
-              "title": "Authorization",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$defs": {
-                  "VeriReelAppMaintenanceRequest": {
-                    "additionalProperties": false,
-                    "properties": {
-                      "action": {
-                        "enum": [
-                          "migrate",
-                          "grant-sponsored",
-                          "promote-owner",
-                          "delete-user",
-                          "reset-testing"
-                        ],
-                        "title": "Action",
-                        "type": "string"
-                      },
-                      "application_name": {
-                        "default": "",
-                        "title": "Application Name",
-                        "type": "string"
-                      },
-                      "context": {
-                        "default": "verireel",
-                        "enum": [
-                          "verireel",
-                          "verireel-testing"
-                        ],
-                        "title": "Context",
-                        "type": "string"
-                      },
-                      "email": {
-                        "default": "",
-                        "title": "Email",
-                        "type": "string"
-                      },
-                      "instance": {
-                        "default": "testing",
-                        "enum": [
-                          "testing",
-                          "preview"
-                        ],
-                        "title": "Instance",
-                        "type": "string"
-                      },
-                      "intent": {
-                        "enum": [
-                          "stable-testing-migration",
-                          "stable-testing-reset",
-                          "stable-testing-remote-e2e-grant-sponsored",
-                          "remote-e2e-grant-sponsored",
-                          "remote-e2e-delete-user",
-                          "owner-route-promote-owner",
-                          "owner-route-delete-user"
-                        ],
-                        "title": "Intent",
-                        "type": "string"
-                      },
-                      "preview_slug": {
-                        "default": "",
-                        "title": "Preview Slug",
-                        "type": "string"
-                      },
-                      "schema_version": {
-                        "default": 1,
-                        "minimum": 1,
-                        "title": "Schema Version",
-                        "type": "integer"
-                      },
-                      "timeout_seconds": {
-                        "default": 300,
-                        "minimum": 1,
-                        "title": "Timeout Seconds",
-                        "type": "integer"
-                      }
-                    },
-                    "required": [
-                      "action",
-                      "intent"
-                    ],
-                    "title": "VeriReelAppMaintenanceRequest",
-                    "type": "object"
-                  }
-                },
-                "$ref": "#/components/schemas/VeriReelAppMaintenanceEnvelope",
-                "additionalProperties": false,
-                "properties": {
-                  "maintenance": {
-                    "$ref": "#/$defs/VeriReelAppMaintenanceRequest"
-                  },
-                  "product": {
-                    "title": "Product",
-                    "type": "string"
-                  },
-                  "schema_version": {
-                    "default": 1,
-                    "minimum": 1,
-                    "title": "Schema Version",
-                    "type": "integer"
-                  }
-                },
-                "required": [
-                  "product",
-                  "maintenance"
-                ],
-                "title": "VeriReelAppMaintenanceEnvelope",
-                "type": "object"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "400": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Bad Request"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Not Found"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Conflict"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
-          }
-        },
-        "summary": "Execute VeriReel app maintenance"
       }
     },
     "/v1/drivers/verireel/prod-backup-gate/operations/{operation_id}/cancel": {
@@ -78782,6 +79508,7 @@
             "schema": {
               "default": "managed-secret-reencryption",
               "enum": [
+                "production-backup-policy",
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
                 "managed-merge-train-policy-import",
@@ -86066,6 +86793,177 @@
         "summary": "Preflight"
       }
     },
+    "/v1/production-backup-authority/proposals": {
+      "get": {
+        "operationId": "list_backup_policy_proposals",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPolicyProposalListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Backup Policy Proposals"
+      }
+    },
+    "/v1/production-backup-authority/proposals/{operation_id}/decision": {
+      "post": {
+        "operationId": "decide_backup_policy_proposal",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupPolicyDecision"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPolicyDecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Decide Backup Policy Proposal"
+      }
+    },
     "/v1/production-backup-gates": {
       "post": {
         "operationId": "enqueue_production_backup_gate",
@@ -88185,6 +89083,250 @@
           }
         },
         "summary": "Reconcile Import Overrides"
+      }
+    },
+    "/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile": {
+      "get": {
+        "operationId": "read_odoo_secret_reference_plan",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretReferenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read Secret Reference Plan"
+      },
+      "post": {
+        "operationId": "reconcile_odoo_secret_references",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SecretReferenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SecretReferenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Reconcile Secret References"
       }
     },
     "/v1/products/{product}/environments/{environment}/outgoing-email": {
@@ -90791,6 +91933,127 @@
           }
         },
         "summary": "Retain an incomplete testing generation without releasing its operation"
+      }
+    },
+    "/v1/products/{product}/testing-public-ingress": {
+      "post": {
+        "operationId": "prepare_testing_public_ingress",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingPublicIngressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Publish one independent testing hostname at its existing public edge"
       }
     },
     "/v1/products/{product}/testing-replacement-bootstrap": {
@@ -97226,6 +98489,7 @@
     "/v1/product-review": "read_product_review",
     "/v1/production-backup-authority": "read_production_backup_authority",
     "/v1/production-backup-authority/preflight": "qualify_production_backup_preflight",
+    "/v1/production-backup-authority/proposals": "list_backup_policy_proposals",
     "/v1/production-backup-gates/operations/{operation_id}": "read_production_backup_gate_operation",
     "/v1/products": "list_products",
     "/v1/products/{product}": "read_product",
@@ -97271,6 +98535,7 @@
     "/v1/product-review/decisions": "write_product_review_decision",
     "/v1/product-review/feedback/retry": "retry_product_review_feedback",
     "/v1/production-backup-authority/apply": "apply_production_backup_authority",
+    "/v1/production-backup-authority/proposals/{operation_id}/decision": "decide_backup_policy_proposal",
     "/v1/production-backup-gates": "enqueue_production_backup_gate",
     "/v1/products/{product}/environments/prod/backup-worker-bindings/apply": "rebind_backup_worker_credentials",
     "/v1/products/{product}/environments/{environment}/config/apply": "apply_product_environment_config",

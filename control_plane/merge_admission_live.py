@@ -282,22 +282,27 @@ class LiveMergeAdmissionEvaluator:
             for plan_entry in landing_plan.entries
             if plan_entry.status not in {"merged", "skipped"}
         )
-        snapshot_reader = self.snapshot_reader
-        if snapshot_reader is None:
-            assert isinstance(
-                self.technical_check_client,
-                (GitHubMergeTrainClient, TenantAdmissionControllerGitHubClient),
-            )
-            snapshot_reader = GitHubMergeTrainSnapshotReader(
-                transport=self.technical_check_client.transport,
-                branch_refresh_store=optional_merge_train_branch_refresh_read_store(self.store),
-            )
         try:
             policy_record = (
                 self.policy_record_provider()
                 if self.policy_record_provider is not None
                 else resolve_merge_train_policy_record(self.store)
             )
+            repository_policy = policy_record.policy.find_repository_policy(
+                repository=landing_plan.repository,
+                base_branch=landing_plan.base_branch,
+            )
+            snapshot_reader = self.snapshot_reader
+            if snapshot_reader is None:
+                assert isinstance(
+                    self.technical_check_client,
+                    (GitHubMergeTrainClient, TenantAdmissionControllerGitHubClient),
+                )
+                snapshot_reader = GitHubMergeTrainSnapshotReader(
+                    transport=self.technical_check_client.transport,
+                    branch_refresh_store=optional_merge_train_branch_refresh_read_store(self.store),
+                    repository_policy=repository_policy,
+                )
             snapshot = self._read_snapshot(
                 snapshot_reader,
                 repository=landing_plan.repository,
@@ -316,10 +321,6 @@ class LiveMergeAdmissionEvaluator:
                 # Already verified heads can briefly report unknown mergeability
                 # after the base moves. Unplanned heads retain their queue hold.
                 planned_dependency_heads=frozenset(expected_queue),
-            )
-            repository_policy = policy_record.policy.find_repository_policy(
-                repository=landing_plan.repository,
-                base_branch=landing_plan.base_branch,
             )
         except (LookupError, ValueError, MergeTrainPolicyStoreMissingError) as error:
             raise MergeAdmissionDeniedError(

@@ -352,16 +352,17 @@ workflows or non-Markdown runtime files in those directories.
 The `.github/github.json` catalog's Launchplane routing fields also retain
 `repo_metadata_ergonomics` evidence: capability booleans, service environment
 variable names, the catalog context/admin helpers and local config example,
-and merge-train label, branch, workflow repository/name/ref, controller mode
-and revision-response field paths. These are hints to the supported surfaces,
-not records of live state. Catalog paths may include the catalog-root `skills/`
-prefix; literal labels may use Unicode, spaces and namespace punctuation while
-URLs, host-and-port endpoints and absolute paths remain findings. Only the documented
-field/value shapes are accepted;
-URLs, private credential paths, product/provider/runtime coordinates, malformed
-routing values and unknown Launchplane fields remain findings. The workflow
-repository allowance applies only to its exact catalog field in this file.
-Omit unused optional fields rather than supplying null or empty routing values.
+with optional catalog-root `skills/` prefixes. URLs, private credential paths,
+product/provider/runtime coordinates, malformed routing values and unknown
+Launchplane fields remain findings. Omit unused optional fields rather than
+supplying null or empty routing values.
+
+Merge-train enrollment, branches, enqueue labels and runner policy belong to
+active Launchplane service records. The removed `launchplane.mergeTrain` fields
+remain findings, including either `enabled` boolean. Remove these copies and
+read Launchplane's merge policy; an unavailable policy read means enrollment
+is unknown. Repository metadata can link the canonical train procedure under
+`docs` without copying those values.
 
 In `pyproject.toml`, Black's `tool.black.target-version` list accepts its
 supported lowercase Python target identifiers with
@@ -403,6 +404,14 @@ topology material. Product repos should use this changed-file gate to reject
 reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
+
+Filesystem paths with `./`, `../`, `/` or `\\` prefixes in Python strings are not
+repository references. A separate owner/repository reference elsewhere in the same string
+is still audited. Historical profile-conversion command constants in
+`control_plane/contracts/*_migration.py` may contain HTTP loopback endpoints:
+they translate in-container behavior into stored declarations. This does not
+classify external hosts, embedded credentials, or runtime defaults outside a
+profile conversion as schema.
 
 For Python source, a fixed protocol identifier can be classified as `schema_only`
 when a single uppercase module binding holds an identifier-shaped string and

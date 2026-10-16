@@ -45,11 +45,12 @@ Treat this file as the launch checklist for each engineering session in
 - Follow [DIRECTION.md](DIRECTION.md) for delivery authority and retired designs.
   After required checks pass and review findings are accounted for, use the
   `launchplane` skill to drive the train if the task explicitly authorizes it.
-  Otherwise comment `Ready for the merge train` on the PR and hand it off to
-  the direction or Supervisor session. That comment is a handoff, not automatic
-  enqueueing; the authorized session applies the configured enqueue label and
-  routes the PR through the train. An executing agent does not merge by hand
-  or operate the train without explicit authority for that task.
+  Otherwise use the checked `gh-pr.py ready` handoff on the current PR head.
+  The train admits trusted, proven current-head handoffs between candidates;
+  see [train admission](docs/merge-train-policy.md#ready-handoffs). Until that
+  source is deployed, the Supervisor's interim watcher supplies enqueue labels.
+  An executing agent does not merge by hand or operate the train without
+  explicit authority for that task.
 - Use [event-driven deploys](docs/event-driven-deploys.md) and
   [artifact provenance](docs/artifact-provenance.md) for the product build handoff,
   and [Client review](docs/owner-acceptance.md) and
@@ -106,17 +107,19 @@ Treat this file as the launch checklist for each engineering session in
 - During the [Q326 trial](docs/style/testing.md#local-test-loop), routine
   changes use focused local tests plus lint, type checks, and IDE inspection.
   The full sharded suite runs in CI and must be green before the checked
-  `gh-pr.py ready` handoff. Run the full local suite for the trial's excluded
-  change kinds or when the affected boundary or observed risk requires it;
-  testing style owns that selection.
+  `gh-pr.py ready` handoff and merge. Under the approved Q375 refinement,
+  safety-classified changes also run whole test modules for touched safety
+  areas locally; the complete suite runs only in CI.
+  [Testing style](docs/style/testing.md#local-test-loop) owns classification
+  and module selection.
 - Changes to agent instructions, execution guidance, approval or safety rules,
   credential handling, or destructive helpers need review by another model
   before delivery. Use the `model-review` skill and its finding-disposition
   rules; record the provider/model and how findings were handled in the PR.
   Reviewer approval is not a merge or completion gate.
 - Add targeted tests whenever contract or storage behavior changes. Broaden to
-  integration or full-suite proof when the changed behavior, a failure, or the
-  configured review/CI gate justifies it.
+  affected-area modules or integration gates when the changed behavior or a
+  failure justifies it; complete-suite proof stays in CI.
 - A test must fail when the product breaks and pass when someone makes an
   intended change. No test may assert a literal defined elsewhere (a version,
   toolchain, pin, hash, or count) or assert workflow, config, or docs text;

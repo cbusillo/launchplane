@@ -422,11 +422,24 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 response = await self.observe(
                     mode=mode, expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
                 )
-            self.assertEqual(response.status_code, 409, response.text)
-            self.assertEqual(
-                self.store.read_disposable_lane_safety("example-site", self.context, "testing"),
-                before,
-            )
+            if mode == "collect":
+                self.assertEqual(response.status_code, 202, response.text)
+                current = self.store.read_disposable_lane_safety(
+                    "example-site", self.context, "testing"
+                )
+                assert current is not None and before is not None
+                self.assertEqual(current.usage, before.usage)
+                self.assertEqual(current.usage_evidence, before.usage_evidence)
+                self.assertEqual(
+                    (current.data, current.production_resources), ("unknown", "unknown")
+                )
+                before = current
+            else:
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(
+                    self.store.read_disposable_lane_safety("example-site", self.context, "testing"),
+                    before,
+                )
 
     async def test_expired_collection_and_aliased_targets_cannot_publish_unused(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage
@@ -562,7 +575,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             self.store.read_disposable_lane_safety("example-site", self.context, "testing")
         )
 
-    async def test_collect_preserves_existing_replacement_linkage_without_qualifying_it(
+    async def test_collect_preserves_existing_replacement_linkage_and_fresh_proofs_without_renewing_them(
         self,
     ) -> None:
         record_safety(
@@ -573,6 +586,8 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             replaces_operation_id="retained-operation",
             replaced_target_id="retained-target",
         )
+        before = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert before is not None
         inspected = await self.observe()
         response = await self.observe(
             mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
@@ -584,7 +599,30 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(evidence.replaced_target_id, "retained-target")
         self.assertEqual(
             (evidence.usage, evidence.data, evidence.production_resources),
-            ("unknown", "unknown", "unknown"),
+            ("unknown", before.data, before.production_resources),
+        )
+        self.assertLessEqual(evidence.expires_at, before.expires_at)
+
+    async def test_collection_does_not_renew_expired_independent_proofs(self) -> None:
+        record_safety(self.store, "example-site", self.context, "testing")
+        previous = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        assert previous is not None
+        self.store.write_disposable_lane_safety(
+            previous.model_copy(
+                update={
+                    "observed_at": previous.observed_at - timedelta(hours=1),
+                    "expires_at": previous.expires_at - timedelta(hours=1),
+                }
+            )
+        )
+        inspected = await self.observe()
+        response = await self.observe(
+            mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertEqual(
+            (response.json()["result"]["data"], response.json()["result"]["production_resources"]),
+            ("unknown", "unknown"),
         )
 
     async def test_collect_does_not_confuse_other_lane_or_provider_kinds_with_production_alias(
