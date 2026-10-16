@@ -340,16 +340,16 @@ class IsolatedBindingClassificationTests(unittest.TestCase):
         evaluation = self._evaluate(binding)
         self.assertEqual(evaluation.status, "pass")
 
-    def test_dev_binding_requires_a_compatible_nonproduction_class(self) -> None:
+    def test_dev_keeps_existing_rule_precedence(self) -> None:
         target = RuntimeKeySafetyTarget(
             context="example-site", instance="dev", environment_class="dev"
         )
-        for declared_class, expected in (("non_prod", "pass"), ("testing", "fail")):
+        for declared_class in ("non_prod", "testing"):
             with self.subTest(declared_class=declared_class):
                 binding = self._binding().model_copy(
                     update={"instance": "dev", "declared_secret_class": declared_class}
                 )
-                self.assertEqual(self._evaluate(binding, target=target).status, expected)
+                self.assertEqual(self._evaluate(binding, target=target).status, "fail")
 
     def test_production_foreign_shared_and_preview_bindings_still_fail(self) -> None:
         for changes, instance, environment_class, expected_code in (

@@ -400,10 +400,10 @@ decryption key state denies the reveal or resolution.
   key safety refuses it when the class is not allowed for the lane, for example
   `prod_only` on a `testing` lane. A declaration covers that binding only; a
   later write without `secret_class` clears it. A valid explicit `testing` or
-  `non_prod` declaration for an exact testing/dev runtime binding whose value was
+  `non_prod` declaration for an exact testing runtime binding whose value was
   independently supplied takes precedence over a key-name rule: the credential is independent of production's
   credential with the same name. This does not apply to shared bindings,
-  `shared_safe` declarations, production targets or previews. Their policy rules
+  `shared_safe` declarations, production/dev targets or previews. Their policy rules
   remain in force. An explicit class incompatible with the stable lane is refused.
   Integration-marker keys never use this precedence exception, including markers
   added by the active policy.

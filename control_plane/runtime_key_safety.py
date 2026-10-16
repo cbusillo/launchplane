@@ -379,7 +379,7 @@ def _evaluate_binding(
         # Shared-safe, production and preview bindings still need the key's rule.
         if (
             binding.value_source == "supplied"
-            and target.environment_class in {"testing", "dev"}
+            and target.environment_class == "testing"
             and binding.declared_secret_class in {"testing", "non_prod"}
             and not is_integration_runtime_key(
                 binding.binding_key, extra_markers=extra_integration_key_markers
