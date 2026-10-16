@@ -1,10 +1,12 @@
 import unittest
+from pydantic import SecretStr
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 from typing import Any
 
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
+from control_plane.odoo_diagnostic_identity import OdooDiagnosticIdentity
 from control_plane.odoo_business_hours import (
     calendar_window,
     read_business_hours_window,
@@ -42,6 +44,19 @@ class BusinessHoursTests(unittest.TestCase):
             "ODOO_ADMIN_LOGIN": "admin",
             "ODOO_ADMIN_PASSWORD": "inert-test-password",
         }
+        connection.selection.identity.product = "example"
+        connection.selection.identity.context = "example"
+        connection.selection.identity.instance = "testing"
+        connection.selection.identity.environment_kind = "stable"
+        connection.diagnostic_identity = OdooDiagnosticIdentity(
+            product="example",
+            context="example",
+            instance="testing",
+            database="example",
+            login="diagnostic-reader",
+            password=SecretStr("diagnostic-password"),
+            user_id=7,
+        )
         now = datetime(2026, 10, 13, 15, tzinfo=UTC)
         rows = [attendance(now.weekday())]
         rows[0].pop("resource_id")
@@ -51,7 +66,9 @@ class BusinessHoursTests(unittest.TestCase):
             _opener: object, _origin: str, path: str, params: dict[str, Any], **_kwargs: object
         ) -> object:
             if path == "/web/session/authenticate":
-                return {"uid": 1}
+                self.assertEqual(params["login"], "diagnostic-reader")
+                self.assertEqual(params["password"], "diagnostic-password")
+                return {"uid": 7}
             if path == "/web/session/destroy":
                 return None
             if params["method"] == "fields_get":
