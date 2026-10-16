@@ -6080,7 +6080,8 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneDisposableTestingResourceAllocationRow
                 | LaunchplaneFreshOdooTestingGenerationRow
                 | LaunchplaneInventoryRow
-                | LaunchplanePrivateHealthEndpointRow,
+                | LaunchplanePrivateHealthEndpointRow
+                | LaunchplaneReleaseReviewDecisionRow,
             )
             authority_row = authority_row or (
                 isinstance(row, LaunchplaneDeploymentRow) and row.instance == "testing"
@@ -9011,6 +9012,10 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Provider effect checkpoints require a reconciliation key.")
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            from control_plane.production_recipient_budget import require_budget_checkpoint
+
+            require_budget_checkpoint(self, session, reservation)
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
@@ -10910,7 +10915,11 @@ class PostgresRecordStore(HumanSessionStore):
             return dict(row.payload) if row else None
 
     def write_production_recipient(
-        self, *, expected: dict[str, Any] | None, replacement: dict[str, Any]
+        self,
+        *,
+        expected: dict[str, Any] | None,
+        replacement: dict[str, Any],
+        reservation: LaunchplaneIdempotencyRecord | None = None,
     ) -> None:
         """Append-only identities and compare-and-write custody, without lane publication."""
         from control_plane.contracts.production_recipient import ProductionRecipientRecord
@@ -10919,12 +10928,29 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
-            from control_plane.production_recipient import authority_snapshot
+            if reservation is not None:
+                from control_plane.production_recipient_publication import require_publication_lease
+
+                require_publication_lease(self, session, reservation)
+            from control_plane.production_recipient import (
+                authority_snapshot,
+                same_recipient_authority,
+            )
 
             superseding = expected is not None and expected.get("plan_sha256") != record.plan_sha256
-            if (expected is None or superseding or record.qualified_at) and (
-                authority_snapshot(self, record.product, record.context)
-                != record.authority_snapshot
+            if (
+                expected is None
+                or superseding
+                or (
+                    record.qualified_at
+                    and not record.publication
+                    and record.phase not in {"rolled_back", "preflight_refused"}
+                )
+            ) and (
+                not same_recipient_authority(
+                    authority_snapshot(self, record.product, record.context),
+                    record.authority_snapshot,
+                )
             ):
                 raise ValueError("Production authority changed before custody committed.")
             row = session.get(
@@ -10989,16 +11015,52 @@ class PostgresRecordStore(HumanSessionStore):
                     "qualified_at",
                     "upstream_proof",
                     "recovery_proof",
+                    "activation",
+                    "activation_history",
+                    "execution",
+                    "writer_custody",
                 }
                 if not superseding and previous.model_dump(exclude=mutable) != record.model_dump(
                     exclude=mutable
                 ):
                     raise ValueError("Production recipient intent and old custody are immutable.")
-                for key in (mutable - {"phase"}) if not superseding else ():
+                if not superseding and any(
+                    record.execution.get(key) != value for key, value in previous.execution.items()
+                ):
+                    raise ValueError("Production execution witnesses are append-only.")
+                if (
+                    not superseding
+                    and record.writer_custody[: len(previous.writer_custody)]
+                    != previous.writer_custody
+                ):
+                    raise ValueError("Peer writer custody is append-only.")
+                if not superseding and record.activation_history != previous.activation_history + (
+                    [previous.activation]
+                    if previous.activation
+                    and previous.activation != record.activation
+                    and not previous.execution
+                    else []
+                ):
+                    raise ValueError("Armed intent history must retain each reviewed revision.")
+                for key in (
+                    (
+                        mutable
+                        - {"phase", "execution", "writer_custody", "activation_history"}
+                        - ({"activation"} if not previous.execution else set())
+                    )
+                    if not superseding
+                    else ()
+                ):
                     if getattr(previous, key) and getattr(previous, key) != getattr(record, key):
                         raise ValueError(
                             "Production recipient identities and receipts are immutable."
                         )
+            if record.phase in {"bootstrapping", "reverting"} and (
+                previous is None or previous.phase != record.phase
+            ):
+                from control_plane.production_recipient_budget import require_budget_admission
+
+                require_budget_admission(self, session, record)
             session.merge(
                 LaunchplaneProductionRecipientRow(
                     product=record.product,
@@ -22176,6 +22238,8 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> ReleaseReviewDecisionRecord:
         """Insert once; a competing replica receives the stored decision unchanged."""
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             row = LaunchplaneReleaseReviewDecisionRow(
                 record_id=record.record_id,
                 product=record.product,
@@ -22240,6 +22304,7 @@ class PostgresRecordStore(HumanSessionStore):
             else self._session_factory() as session
         ):
             self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             statement = select(LaunchplaneReleaseReviewDecisionRow).where(
                 LaunchplaneReleaseReviewDecisionRow.record_id == record_id
             )

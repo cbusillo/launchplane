@@ -8,6 +8,7 @@ from pathlib import Path
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.dokploy import api, post_deploy, source
+from control_plane.production_recipient_fence import fenced_program
 
 
 def resource_spec(record: ProductionRecipientRecord) -> dict[str, object]:
@@ -62,7 +63,7 @@ def inspect_resources(
             "script": "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
             + encoded
             + " <<'LP_RESOURCES'\n"
-            + RESOURCE_PROGRAM
+            + fenced_program(RESOURCE_PROGRAM, record.namespace, record.plan_sha256)
             + "\nLP_RESOURCES\n",
             "serverId": server,
             "userId": lookup if kind == "dokploy-server" else None,
