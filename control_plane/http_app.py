@@ -29803,6 +29803,15 @@ def create_launchplane_fastapi_app(
             error_response_model=LaunchplaneErrorResponse,
         ),
     )
+    from control_plane.http_routes.backup_policy_proposals import (
+        register_backup_policy_proposal_routes,
+    )
+
+    register_backup_policy_proposal_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_owner_review_browser_mutation_identity,
+    )
     register_production_backup_authority_write_routes(
         app,
         dependencies=ProductionBackupAuthorityWriteRouteDependencies(

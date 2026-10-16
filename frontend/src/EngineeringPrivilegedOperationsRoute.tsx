@@ -70,7 +70,7 @@ function DefaultPrivilegedOperationsRoute({
       if (operationId !== null) {
         const result = await readPrivilegedOperationReview(operationId, signal);
         return {
-          descriptorId: result.review.descriptor_id,
+          descriptorId: selectedPlanType(result.review.descriptor_id),
           plans: {
             status: result.status,
             trace_id: result.trace_id,
