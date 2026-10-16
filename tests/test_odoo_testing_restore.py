@@ -26,6 +26,7 @@ from control_plane.odoo_testing_restore import (
     FRESH_TESTING_RESTORE_HOST_PROGRAM,
     FRESH_TESTING_STALE_LOCK_PROGRAM,
     TESTING_COPY_COMPLETION_PARAMETER,
+    TESTING_COPY_VERIFICATION_FRAME,
     TestingCredentialsOverlap,
     TestingCredentialVersionsMissing,
     FreshOdooTestingGeneration,
@@ -417,9 +418,16 @@ class FreshTestingHostProgramTests(unittest.TestCase):
     def test_public_verification_requires_live_copy_digest_identity_and_open_gate_without_writes(
         self,
     ) -> None:
-        import hashlib
         import sqlite3
 
+        # Obtain the persisted gate using the real producer, with provider IO
+        # faked by this scenario. The fixture follows its binding format.
+        payload = "fixture-payload"
+        self.gate_payload = payload
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.calls.clear()
+        (self.root / (self.gen.namespace + "-copy.lock")).unlink()
         self.spec.update(
             inspection_only=True,
             verification_only=True,
@@ -427,8 +435,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         )
         gate = self.root / "verified-gate"
         self.spec["web_gate_path"] = str(gate)
-        payload = "fixture-payload"
-        gate.write_text(hashlib.sha256((self.database + "\n" + payload).encode()).hexdigest())
+        gate.write_text(self.gate_hash)
         # Temporary lock-file loss must not require another restore.
         self.existing_database = True
         for container in self.containers.values():
@@ -486,16 +493,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                 for line in output.splitlines()
                 if line.startswith("fixture:")
             ]
-            self.assertEqual(frames, [{"type": "complete", "copy_verified": True}])
+            self.assertEqual(frames, [TESTING_COPY_VERIFICATION_FRAME])
             for fault in ("witness", "image", "gate"):
                 with self.subTest(fault=fault):
                     witness = "wrong" if fault == "witness" else generation_binding(self.gen)
                     actual_image = "wrong" if fault == "image" else self.spec["image_reference"]
-                    gate.write_text(
-                        "wrong"
-                        if fault == "gate"
-                        else hashlib.sha256((self.database + "\n" + payload).encode()).hexdigest()
-                    )
+                    gate.write_text("wrong" if fault == "gate" else self.gate_hash)
                     status, _ = self.run_program()
                     self.assertNotEqual(status, 0)
         self.assertFalse(

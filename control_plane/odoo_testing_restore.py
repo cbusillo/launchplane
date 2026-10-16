@@ -134,6 +134,7 @@ def fresh_testing_mode_refusal(
 # connection rules run in that same transaction boundary and again after hooks.
 # A missing boundary is an unsupported artifact, never permission to run it.
 TESTING_COPY_COMPLETION_PARAMETER = "launchplane.testing_copy.restore_complete"
+TESTING_COPY_VERIFICATION_FRAME: dict[str, object] = {"type": "complete", "copy_verified": True}
 TESTING_COPY_RUNNER = (
     """import base64
 import logging
@@ -926,7 +927,7 @@ def restore_main():
             docker('exec',runner,'python3','-c',
                 "import hashlib,os,sys;from pathlib import Path;p=os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','');expected=hashlib.sha256((sys.argv[1]+'\\n'+p).encode()).hexdigest();assert Path(sys.argv[2]).read_text()==expected",
                 database,spec['web_gate_path'])
-            print(prefix+json.dumps({'type':'complete','copy_verified':True}),flush=True)
+            print(prefix+json.dumps(__LP_COPY_VERIFICATION_FRAME__),flush=True)
             return
         if spec.get('task_account_cleanup') is True:
             if present != '1':
@@ -1147,7 +1148,7 @@ except Exception:
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
     "__LP_COPY_WITNESS__", TESTING_COPY_COMPLETION_PARAMETER
-)
+).replace("__LP_COPY_VERIFICATION_FRAME__", repr(TESTING_COPY_VERIFICATION_FRAME))
 
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(

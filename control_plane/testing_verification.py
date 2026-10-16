@@ -15,6 +15,7 @@ from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
 from control_plane.dokploy.native_copy_stream import inspect_native_testing_receiver
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 from control_plane.odoo_testing_restore import (
+    TESTING_COPY_VERIFICATION_FRAME,
     fresh_testing_authority_sha256,
     generation_binding,
     read_current_testing_generation,
@@ -244,7 +245,7 @@ class TestingVerification:
             },
             receive=frames.append,
         )
-        if frames != [{"type": "complete", "copy_verified": True}]:
+        if frames != [TESTING_COPY_VERIFICATION_FRAME]:
             raise ValueError("The installed copy witness is unverified.")
         checks = verify_odoo_stable_readiness(
             base_url=lane.base_url, health_url=lane.health_url, timeout_seconds=30
