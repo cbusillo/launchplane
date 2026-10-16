@@ -530,6 +530,7 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         )
         key_file.chmod(0o600)
         tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        tls.minimum_version = ssl.TLSVersion.TLSv1_2
         tls.load_cert_chain(cert_file, key_file)
         quiet = logging.Logger("local-consumer-fixture")
         quiet.disabled = True
