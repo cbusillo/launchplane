@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
+from control_plane.private_testing_activation import ROUTE as PRIVATE_TESTING_ACTIVATION_ROUTE
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
 from control_plane.contracts.disposable_lane import (
     DISPOSABLE_LANE_OBSERVATION_ROUTE,
@@ -94,6 +95,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        PRIVATE_TESTING_ACTIVATION_ROUTE,
+        "Install or remove exact reviewed private testing Compose source using immutable product provenance and original-operation recovery; deployment and live TLS proof remain separate.",
+        ("service_api", "local_cli"),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("expected_plan_sha256", "host_review", "custody_review", "trust_review"),
+    ),
     OperationSpec(
         "POST",
         TESTING_PUBLIC_INGRESS_ROUTE,

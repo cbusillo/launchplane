@@ -2,6 +2,9 @@ import asyncio
 from copy import deepcopy
 import json
 import os
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -27,6 +30,7 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.private_testing_transport import (
     ROUTE,
     PrivateTestingTransportRequest,
+    nginx_entrypoint,
     plan_private_testing_transport,
 )
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
@@ -36,6 +40,38 @@ from tests.support.http import request as http_request
 from tests.support.auth import scoped_agent_transport
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import sqlite_database_url
+
+
+class PrivateTestingEntrypointTests(unittest.TestCase):
+    @unittest.skipUnless(
+        Path("/bin/sh").is_file() and shutil.which("base64", path=os.defpath),
+        "POSIX shell/base64 bootstrap tools are unavailable on this test platform",
+    )
+    def test_entrypoint_materializes_its_own_file_and_never_interprets_payload(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "must-not-execute"
+            payload = {"literal": f"$(touch {marker}) `touch {marker}` $runtime_backend\n'quoted'"}
+            stub = root / "fixture program.py"
+            stub.write_text(
+                "import json, sys\nfrom pathlib import Path\n"
+                "source = Path(sys.argv[sys.argv.index('-c') + 1])\n"
+                "print(json.dumps(json.loads(source.read_text())))\n"
+            )
+            result = subprocess.run(
+                nginx_entrypoint(
+                    json.dumps(payload),
+                    configuration_file=str(root / "own generated config"),
+                    nginx_binary=sys.executable,
+                    nginx_arguments=(str(stub),),
+                ),
+                env={"PATH": os.defpath},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(json.loads(result.stdout), payload)
+            self.assertFalse(marker.exists())
 
 
 class PrivateTestingTransportTests(unittest.TestCase):
@@ -148,6 +184,16 @@ class PrivateTestingTransportTests(unittest.TestCase):
                 request=PrivateTestingTransportRequest.model_validate({**self.payload, **changes}),
             ),
         )
+
+    def test_proxy_material_tampering_cannot_be_adopted_as_provider_metadata(self) -> None:
+        planned = self.plan()
+        for section, additions in planned["overlay"].items():
+            self.compose.setdefault(section, {}).update(deepcopy(additions))
+        service_name = next(iter(planned["overlay"]["services"]))
+        labels = self.compose["services"][service_name]["labels"]
+        labels[next(iter(labels))] = "tampered"
+        with self.assertRaises(ValueError):
+            self.plan(mode="readback", expected_plan_sha256=planned["plan_sha256"])
 
     def test_private_no_website_plan_and_exact_readback_without_mutations(self) -> None:
         before = self.store.read_dokploy_target_record(
