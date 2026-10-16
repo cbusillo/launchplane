@@ -925,11 +925,11 @@ h3 {
   border-left-color: var(--prod);
 }
 
-.directory-lane[data-operational="danger"] strong {
+.directory-lane[data-operational="danger"] > strong {
   color: var(--danger);
 }
 
-.directory-lane[data-operational="warning"] strong {
+.directory-lane[data-operational="warning"] > strong {
   color: var(--warning);
 }
 
@@ -989,7 +989,7 @@ h3 {
   height: 7px;
   flex: 0 0 7px;
   border-radius: 50%;
-  background: var(--unknown);
+  background: currentColor;
 }
 
 .evidence-badge strong {
