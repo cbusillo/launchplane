@@ -57,6 +57,35 @@ dispatched operation.
 Dry runs take only a transient lane reservation and perform authenticated
 provider/host reads; they create no account, secret or operative request.
 
+Prerequisite refusals return HTTP 409 with a fixed `error.code` and trace ID.
+Neither private exception text nor provider output is returned. Diagnose the
+reported checkpoint before retrying; none of these codes authorizes a repair,
+new record, account, policy change or alternate identity:
+
+| Code | Refused prerequisite and next read |
+| --- | --- |
+| `testing_task_identity_unavailable` | Active product, exact testing context, runtime selection or exclusive HTTPS origin. Read the product profile and testing environment identity. |
+| `testing_task_generation_missing` | No current fresh testing generation was returned. A healthy deployment or connection-isolation pass cannot supply this copy witness. |
+| `testing_task_generation_incomplete` | The current qualified generation has no completion record. Follow its original supported operation and retain any unknown outcome. |
+| `testing_task_generation_unverified` | Generation qualification could not read or verify queue receipt, target, credential separation, resource allocation, use/route hold or exclusive ownership. This code alone does not identify which subcheck failed. |
+| `testing_task_use_protected` | Staff hold or recorded use, only-copy custody or shared resources protect the lane, or that protection could not be read. Read existing hold and safety evidence. |
+| `testing_task_physical_copy_unverified` | Fixed host inspection could not qualify the exact copy, storage, network, image or login-history read. Preserve the copy and inspect the original operation. |
+| `testing_task_runtime_unavailable` | The current provider runtime or recipient could not be verified. Compare recorded and observed testing identity. |
+| `testing_task_origin_unverified` | The recorded HTTPS origin could not be verified on the selected testing target. Read its route/domain evidence. |
+| `testing_task_database_unverified` | Recorded and running testing database names are missing, unreadable or disagree. Read configuration metadata without credential values. |
+| `testing_task_isolation_or_usage_unverified` | Current native connection-isolation or protected-sign-in readback failed or was unreadable. Use supported isolation readback and preserve protected use. |
+| `testing_task_credential_custody_unavailable` | Task secret metadata is unreadable, closed, expired or missing for a browser run. Follow this task's supported lifecycle; do not read or replace passwords. |
+
+An unexpected planning failure still returns `testing_task_refused`. Older
+service images return that generic code for every checkpoint; an old trace
+cannot retrospectively prove a specific prerequisite. After normal delivery
+of a compatible service, repeat only the inert dry run with the same nonsecret
+intent to obtain a current code. Do not infer missing generation records from
+response timing. A missing or incomplete generation is not repaired by
+fabricating a completion record or resetting custody: use the supported
+[testing replacement/bootstrap path](disposable-lanes.md) under its own
+current prerequisites and sequencing. This walkthrough performs no repair.
+
 The lane must have a completed qualified fresh Odoo testing generation with
 independent credentials, storage and networks. The service checks current
 product ownership, target aliases, HTTPS origin, exact runtime/image, copy
