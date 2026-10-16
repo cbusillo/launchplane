@@ -28,6 +28,7 @@ from control_plane.dokploy.odoo_walkthrough import (
     WALKTHROUGH_JOURNAL_DIRECTORY,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
+from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 
 
 class ProbeConnection:
@@ -41,6 +42,8 @@ class ProbeConnection:
         self.active = True
         self.statement = ""
         self.parameters: tuple[object, ...] = ()
+        self.isolated = True
+        self.isolation_readable = True
 
     def set_session(self, *, readonly: bool, autocommit: bool) -> None:
         self.readonly = readonly and not autocommit
@@ -58,13 +61,19 @@ class ProbeConnection:
         if not self.readonly or not statement.strip().upper().startswith(("SELECT", "SET", "WITH")):
             raise AssertionError("Probe attempted a write")
         self.statement, self.parameters = statement, parameters
+        if "SELECT count(*) FROM ir_config_parameter" in statement and not self.isolation_readable:
+            raise RuntimeError("Isolation read is unavailable")
 
     def fetchone(self) -> tuple[object, ...]:
+        if "SELECT count(*) FROM ir_config_parameter" in self.statement:
+            return (len(CONNECTION_ISOLATION_PARAMETERS) if self.isolated else 0,)
         if "pg_try_advisory_xact_lock" in self.statement:
             return (self.free,)
         if "res_users_log" in self.statement:
             return (self.used,)
         if "ir_config_parameter" in self.statement:
+            if "SELECT EXISTS" in self.statement:
+                return (False,)
             if self.parameters[0] == TESTING_COPY_COMPLETION_PARAMETER:
                 return (self.copy,)
             return (
@@ -78,6 +87,11 @@ class ProbeConnection:
             )
         if "res_users" in self.statement:
             return (WALKTHROUGH_LOGIN_PREFIX + self.spec["task_id"], self.active)
+        raise AssertionError("Unexpected database read")
+
+    def fetchall(self) -> list[tuple[str]]:
+        if "information_schema.columns" in self.statement:
+            return []
         raise AssertionError("Unexpected database read")
 
     def rollback(self) -> None:
@@ -215,3 +229,16 @@ class NativeProbeTests(unittest.TestCase):
         self.connection.used = False
         self.connection.active = False
         self.assertFalse(self.run_probe())
+
+    def test_isolation_is_current_and_fail_closed_at_every_usage_and_cleanup_probe(self) -> None:
+        for mode in ("lane_usage", "usage", "isolation"):
+            with self.subTest(mode=mode):
+                self.spec["mode"] = mode
+                self.connection.isolated = True
+                self.connection.isolation_readable = True
+                self.assertTrue(self.run_probe())
+                self.connection.isolated = False
+                self.assertFalse(self.run_probe())
+                self.connection.isolated = True
+                self.connection.isolation_readable = False
+                self.assertFalse(self.run_probe())

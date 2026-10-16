@@ -49,7 +49,11 @@ from control_plane.odoo_runtime_reads import (
 )
 from control_plane.odoo_walkthrough import WalkthroughPlan
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
-from control_plane.service_auth import LocalOperatorIdentity
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import request as http_request
 
@@ -67,6 +71,41 @@ def task_request(**changes: Any) -> OdooWalkthroughRequest:
 
 
 class TaskContractTests(unittest.TestCase):
+    def test_standing_rule_covers_future_products_only_on_testing_for_the_exact_agent(self) -> None:
+        identity = LocalOperatorIdentity(subject="director-fixture", token_label="operator-fixture")
+        rule = LocalOperatorPolicyRule(
+            subjects=(identity.subject,),
+            token_labels=(identity.token_label,),
+            instances=("testing",),
+            actions=(WALKTHROUGH_ACTION,),
+        )
+        for product, context in (("example-odoo", "example"), ("future-product", "future-context")):
+            for instance in ("testing", "prod", "stable", "preview-1"):
+                with self.subTest(product=product, instance=instance):
+                    self.assertEqual(
+                        rule.allows(
+                            identity=identity,
+                            action=WALKTHROUGH_ACTION,
+                            product=product,
+                            context=context,
+                            target=AuthorizationTarget(scope="instance", instances=(instance,)),
+                            schema_version=3,
+                        ),
+                        instance == "testing",
+                    )
+        self.assertFalse(
+            rule.allows(
+                identity=LocalOperatorIdentity(
+                    subject="other-agent", token_label=identity.token_label
+                ),
+                action=WALKTHROUGH_ACTION,
+                product="future-product",
+                context="future-context",
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+                schema_version=3,
+            )
+        )
+
     def test_only_testing_and_bounded_declarative_browser_input(self) -> None:
         for instance in ("prod", "production", "preview-1", ""):
             with self.subTest(instance=instance), self.assertRaises(ValidationError):
@@ -184,6 +223,9 @@ class TaskRouteTests(unittest.TestCase):
         )
         self.unused = self.stack.enter_context(
             patch("control_plane.odoo_walkthrough.testing_task_unused", return_value=True)
+        )
+        self.stack.enter_context(
+            patch("control_plane.odoo_walkthrough.testing_connection_isolated", return_value=True)
         )
         self.stack.enter_context(
             patch(
@@ -460,6 +502,19 @@ class AccountProgramTests(unittest.TestCase):
         for model in models.values():
             model.sudo.return_value = model
         self.env.cr.fetchone.return_value = (False,)
+        from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
+
+        self.isolation_count = len(CONNECTION_ISOLATION_PARAMETERS)
+        self.env.cr.fetchone.side_effect = lambda: (
+            (self.isolation_count,)
+            if "SELECT count(*) FROM ir_config_parameter" in self.env.cr.execute.call_args.args[0]
+            else (
+                self.env.cr.fetchone.return_value
+                if "res_users_log" in self.env.cr.execute.call_args.args[0]
+                else (False,)
+            )
+        )
+        self.env.cr.fetchall.return_value = []
         group = MagicMock()
         group._name, group.id = "res.groups", 8
         self.env.ref.return_value = group
@@ -495,6 +550,17 @@ class AccountProgramTests(unittest.TestCase):
         self.execute()
         self.users.create.assert_called_once()
         self.user.write.assert_not_called()
+
+    def test_connection_isolation_must_still_pass_before_each_account_operation(self) -> None:
+        self.isolation_count = 0
+        for operation in ("provision", "run", "cleanup"):
+            with self.subTest(operation=operation):
+                self.request["operation"] = operation
+                with self.assertRaises(RuntimeError):
+                    self.execute()
+        self.users.create.assert_not_called()
+        self.user.write.assert_not_called()
+        self.env.cr.commit.assert_not_called()
 
     def test_existing_login_or_wrong_copy_refuses_without_writing(self) -> None:
         self.users.search_count.return_value = 1

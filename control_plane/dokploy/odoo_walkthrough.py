@@ -2,6 +2,7 @@
 
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
+from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_LOGIN_PREFIX,
     WALKTHROUGH_MARKER_PREFIX,
@@ -84,6 +85,26 @@ def testing_account_dispatch_finished(
 def testing_task_unused(
     *, host: str, token: str, server_id: str, intent: dict[str, object], require_task: bool = True
 ) -> bool:
+    return _testing_read_clear(
+        host=host,
+        token=token,
+        server_id=server_id,
+        intent=intent,
+        mode="usage" if require_task else "lane_usage",
+    )
+
+
+def testing_connection_isolated(
+    *, host: str, token: str, server_id: str, intent: dict[str, object]
+) -> bool:
+    return _testing_read_clear(
+        host=host, token=token, server_id=server_id, intent=intent, mode="isolation"
+    )
+
+
+def _testing_read_clear(
+    *, host: str, token: str, server_id: str, intent: dict[str, object], mode: str
+) -> bool:
     frames: list[dict[str, object]] = []
     _read_remote(
         host=host,
@@ -92,7 +113,7 @@ def testing_task_unused(
         program=ACCOUNT_JOURNAL_READ_PROGRAM,
         payload={
             **intent,
-            "mode": "usage" if require_task else "lane_usage",
+            "mode": mode,
             "probe": ACCOUNT_DATABASE_PROBE,
         },
         receive=frames.append,
@@ -102,7 +123,8 @@ def testing_task_unused(
 
 
 ACCOUNT_DATABASE_PROBE = (
-    r"""
+    connection_isolation_library()
+    + r"""
 import json,os,sys,psycopg2
 spec=json.loads(sys.stdin.read())
 connection=psycopg2.connect(host=os.environ['ODOO_DB_HOST'],port=os.environ.get('ODOO_DB_PORT','5432'),
@@ -114,9 +136,13 @@ try:
         cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',('__LP_COPY_WITNESS__',))
         row=cursor.fetchone()
         if not row or row[0]!=spec['copy_binding']: raise RuntimeError('Testing copy changed')
+        if spec['mode'] in ('usage','lane_usage','isolation') and connection_isolation(cursor, apply=False):
+            raise RuntimeError('Testing connection isolation did not pass')
         if spec['mode']=='quiescence':
             cursor.execute('SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+spec['binding'],))
             clear=cursor.fetchone()[0] is True
+        elif spec['mode']=='isolation':
+            clear=True
         elif spec['mode'] in ('usage','lane_usage'):
             if spec['mode']=='usage':
                 cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',(__TASK_MARKER_PREFIX__+spec['task_id'],))
@@ -163,7 +189,7 @@ try:
             clear=value.get('finished') is True and value.get('needs_quiescence') is not True
         except (OSError,ValueError):
             pass
-    if not clear and (spec.get('mode') in ('usage','lane_usage') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline'])):
+    if not clear and (spec.get('mode') in ('usage','lane_usage','isolation') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline'])):
         def docker(*args,data=None):
             result=subprocess.run(['docker',*args],input=data,capture_output=True,timeout=15)
             if result.returncode: raise RuntimeError('Testing read unavailable')
@@ -271,7 +297,8 @@ except Exception:
 
 
 ACCOUNT_ODOO_PROGRAM = (
-    r"""
+    connection_isolation_library()
+    + r"""
 import json, logging, os, secrets, time
 logging.disable(logging.CRITICAL)
 if request['instance']!='testing': raise RuntimeError('Not testing')
@@ -280,6 +307,8 @@ if time.time()>request['dispatch_deadline']: raise RuntimeError('Dispatch deadli
 parameters=env['ir.config_parameter'].sudo()
 if parameters.get_param('__LP_COPY_WITNESS__')!=request['copy_binding']:
     raise RuntimeError('Testing copy witness changed')
+if connection_isolation(env.cr, apply=False):
+    raise RuntimeError('Testing connection isolation did not pass')
 users=env['res.users'].sudo().with_context(active_test=False,tracking_disable=True,
     mail_create_nosubscribe=True,no_reset_password=True)
 key=__TASK_MARKER_PREFIX__+request['task_id']

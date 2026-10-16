@@ -34,6 +34,17 @@ terminal-agent and GitHub Actions identities are not accepted on this mutation
 surface. Use the existing `local_operator` transport selected by the Director.
 Do not switch identities or use another operation to carry a denied call.
 The Director decides any new grant through the existing policy approval path.
+An exact `local_operator` subject/token-label rule may leave product and context
+selectors empty and select only `instances=["testing"]` to cover current and
+future testing lanes. The execution boundary, rather than a per-lane policy
+list, enforces current connection isolation: the shared SQL readback must pass
+before planning, in each native account transaction, and at each browser
+checkpoint. Missing, failed or unreadable isolation refuses; no repair is
+performed by the walkthrough. This restriction also covers cleanup. If a lane
+loses isolation, use the supported
+[connection-isolation repair and readback](operations.md#repair-copied-carrier-and-customer-sms-connections)
+before retrying cleanup. Outcome reconciliation remains read-only and does not
+require passing isolation to observe an already dispatched operation.
 Dry runs take only a transient lane reservation and perform authenticated
 provider/host reads; they create no account, secret or operative request.
 
