@@ -250,7 +250,10 @@ def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str
             },
         )
     finally:
-        reads._rpc(opener, origin, "/web/session/destroy", {}, expect_result=False)
+        reads.destroy_diagnostic_session(
+            connection,
+            lambda: reads._rpc(opener, origin, "/web/session/destroy", {}, expect_result=False),
+        )
     health()
     if not isinstance(raw, list) or len(raw) > len(keys):
         raise ValueError("Invalid diagnostic rows")

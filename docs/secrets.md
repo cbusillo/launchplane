@@ -112,7 +112,9 @@ bindings, mismatched versions/payloads, and undecryptable values are unavailable
 none selects an admin fallback. Mail and import APIs return HTTP 503 with
 `odoo_diagnostic_identity_unavailable` when the selected identity is unavailable
 or Odoo authentication fails or returns another UID. A failed login establishes
-no session to destroy; a positive but unexpected UID is logged out before refusal.
+no session to destroy; logout is attempted for a positive but unexpected UID.
+Logout transport failure does not replace that identity refusal. Authentication
+transport/protocol errors retain their own codes rather than implying bad credentials.
 Calendar reads refuse and the release-window reader
 continues to hold a release when its calendar is unavailable. Responses and
 exceptions contain no secret payload, and mail text redacts both diagnostic and

@@ -25,7 +25,13 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy, BearerIdentityConfig
 from tests.support.auth import _identity, _StubVerifier
-from tests.http_app_test_support import _post_product_config_apply
+from tests.http_app_test_support import (
+    _post_product_config_apply,
+    _github_oauth_config,
+    _github_human_identity,
+    _browser_mutation_headers,
+)
+from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 
 
@@ -223,9 +229,19 @@ class DiagnosticIdentityTests(unittest.TestCase):
             lambda value: hours.read_company_calendar(value, company_id=7, observed_at=now),
             imports.read_applied_parameters,
         ):
-            for outcome in ("missing", "other_user", "failed_login", "login_error"):
+            for outcome in (
+                "missing",
+                "other_user",
+                "failed_login",
+                "login_error",
+                "transport_error",
+                "logout_error",
+            ):
                 with self.subTest(reader=reader, outcome=outcome), ExitStack() as stack:
                     calls: list[str] = []
+                    transport = reads.OdooRuntimeReadError(
+                        "odoo_read_unavailable", "Transport unavailable"
+                    )
 
                     def rpc(
                         opener: object, origin: str, path: str, *args: object, **kwargs: object
@@ -234,12 +250,16 @@ class DiagnosticIdentityTests(unittest.TestCase):
                         if path.endswith("authenticate"):
                             if outcome == "login_error":
                                 raise reads.OdooRuntimeReadError(
-                                    "odoo_read_rejected", "Private input"
+                                    reads.ODOO_READ_REJECTED, "Private input"
                                 )
+                            if outcome == "transport_error":
+                                raise transport
                             return {"uid": False if outcome == "failed_login" else 999}
                         if path.endswith("destroy"):
                             if outcome == "failed_login":
                                 raise reads.OdooRuntimeReadError("odoo_read_rejected", "No session")
+                            if outcome == "logout_error":
+                                raise transport
                             return None
                         self.fail("A mismatched account must never read diagnostic models")
 
@@ -264,11 +284,14 @@ class DiagnosticIdentityTests(unittest.TestCase):
                     with self.assertRaises(reads.OdooRuntimeReadError) as caught:
                         reader(selected)
                     self.assertEqual(
-                        caught.exception.code, diagnostic.DIAGNOSTIC_IDENTITY_UNAVAILABLE
+                        caught.exception.code,
+                        transport.code
+                        if outcome == "transport_error"
+                        else diagnostic.DIAGNOSTIC_IDENTITY_UNAVAILABLE,
                     )
                     if outcome == "missing":
                         self.assertEqual(calls, [])
-                    elif outcome in {"failed_login", "login_error"}:
+                    elif outcome in {"failed_login", "login_error", "transport_error"}:
                         self.assertEqual(len(calls), 1)
                     else:
                         self.assertTrue(calls[0].endswith("authenticate"))
@@ -357,6 +380,15 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                             "actions": ["product_config.plan", "product_config.apply"],
                         }
                     ],
+                    "github_humans": [
+                        {
+                            "logins": [_github_human_identity().login],
+                            "roles": ["admin"],
+                            "products": [profile.product],
+                            "contexts": [profile.preview.context],
+                            "actions": ["product_config.plan", "product_config.apply"],
+                        }
+                    ],
                     "github_actions": [
                         {
                             "repository": "every/verireel",
@@ -371,10 +403,14 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                     ],
                 }
             )
+            sessions = HumanSessionManager(
+                config=_github_oauth_config(), session_store=InMemoryHumanSessionStore()
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 record_store_factory=lambda: store,
+                human_session_manager=sessions,
                 bearer_identity_config=BearerIdentityConfig(
                     local_admin_token="synthetic-admin-token",
                     local_admin_subject="fixture-admin",
@@ -465,6 +501,32 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                     runtime.model_copy(update={"instance": "example-pr-43"}),
                     identity["database"],
                 )
+
+            for role in ("admin", "read_only"):
+                session = sessions.issue(_github_human_identity(role=role))
+
+                async def browser_send(body: dict[str, Any], key: str) -> Any:
+                    return await _post_product_config_apply(
+                        app,
+                        body,
+                        authorization="",
+                        headers=_browser_mutation_headers(sessions, session),
+                        idempotency_key=key,
+                    )
+
+                browser_plan = await browser_send(payload, "browser-plan-" + role)
+                if role == "admin":
+                    self.assertEqual(browser_plan.status_code, 202, browser_plan.text)
+                    browser_apply = await browser_send(
+                        {**payload, "mode": "apply"}, "browser-apply"
+                    )
+                    self.assertEqual(browser_apply.status_code, 202, browser_apply.text)
+                else:
+                    self.assertEqual(browser_plan.status_code, 403, browser_plan.text)
+                    browser_apply = await browser_send(
+                        {**payload, "mode": "apply"}, "browser-apply-" + role
+                    )
+                    self.assertEqual(browser_apply.status_code, 403, browser_apply.text)
 
             for kind in ("runtime", "integration", "name", "copy", "foreign_product"):
                 unsafe = deepcopy(payload)

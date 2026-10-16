@@ -23,6 +23,7 @@ from control_plane.odoo_runtime_reads import (
     diagnostic_authentication,
     require_diagnostic_user,
     authenticate_diagnostic,
+    destroy_diagnostic_session,
     require_runtime_identity,
     select_stable_runtime,
 )
@@ -184,7 +185,10 @@ def read_company_calendar(
             ["date_from", "date_to"],
         )
     finally:
-        _rpc(opener, origin, "/web/session/destroy", {}, expect_result=False)
+        destroy_diagnostic_session(
+            connection,
+            lambda: _rpc(opener, origin, "/web/session/destroy", {}, expect_result=False),
+        )
     health()
     return calendars[0], attendance, leaves
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Mapping, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,6 +45,8 @@ from control_plane.workflows.odoo_preview_runtime import (
     odoo_compose_has_domain,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+
+ODOO_READ_REJECTED = "odoo_read_rejected"
 
 
 class OdooRuntimeReadError(ValueError):
@@ -354,13 +357,31 @@ def authenticate_diagnostic(
 ) -> object:
     try:
         authenticated = authenticate()
-    except OdooRuntimeReadError:
-        if _production_runtime(connection.selection):
+    except OdooRuntimeReadError as error:
+        if _production_runtime(connection.selection) or error.code != ODOO_READ_REJECTED:
             raise
         raise _diagnostic_unavailable() from None
     if not has_odoo_session(authenticated):
         require_diagnostic_user(connection, authenticated)
     return authenticated
+
+
+def destroy_diagnostic_session(
+    connection: OdooRuntimeConnection, destroy: Callable[[], object]
+) -> None:
+    refusal = sys.exception()
+    try:
+        destroy()
+    except OdooRuntimeReadError:
+        # Preserve an already-decided identity refusal if logout transport fails.
+        # Successful reads still fail on logout errors; production keeps its
+        # previous exception behavior.
+        if (
+            _production_runtime(connection.selection)
+            or not isinstance(refusal, OdooRuntimeReadError)
+            or refusal.code != DIAGNOSTIC_IDENTITY_UNAVAILABLE
+        ):
+            raise
 
 
 def require_diagnostic_user(connection: OdooRuntimeConnection, authenticated: object) -> None:
@@ -565,7 +586,7 @@ def _rpc(
         or (expect_result and "result" not in result)
     ):
         raise OdooRuntimeReadError(
-            "odoo_read_rejected", "Odoo rejected the authenticated mail-status read.", 503
+            ODOO_READ_REJECTED, "Odoo rejected the authenticated mail-status read.", 503
         )
     return result.get("result")
 
@@ -623,7 +644,10 @@ def read_outgoing_email(
         require_diagnostic_user(connection, authenticated)
         result = _search_mail(opener, base_url, fields, query)
     finally:
-        _rpc(opener, base_url, "/web/session/destroy", {}, expect_result=False)
+        destroy_diagnostic_session(
+            connection,
+            lambda: _rpc(opener, base_url, "/web/session/destroy", {}, expect_result=False),
+        )
     health = _http_json(opener, Request(base_url + "/launchplane/health"))
     require_runtime_identity(
         connection.selection.identity, runtime_identity_from_health_payload(health)
