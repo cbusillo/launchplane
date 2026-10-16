@@ -27,6 +27,7 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
     product_config_requirement_applies_to_lane,
 )
+from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
 from control_plane.contracts.public_hosts import normalize_public_hosts
@@ -584,6 +585,14 @@ def _product_config_secret_input(
     lane: ProductLaneProfile,
     value: str,
 ) -> ProductConfigSecretInput:
+    # This surface accepts a freshly supplied value for this lane, never a copy
+    # from another lane. Testing stores its own credentials under the same names
+    # as production; the declaration applies only to this exact binding.
+    secret_class: RuntimeSecretClass | None = None
+    if requirement.integration == "runtime_environment" and (
+        runtime_key_safety_environment_class(lane.instance) == "testing"
+    ):
+        secret_class = "testing"
     return ProductConfigSecretInput(
         scope="context_instance",
         context=lane.context,
@@ -592,6 +601,7 @@ def _product_config_secret_input(
         name=requirement.binding_key,
         binding_key=requirement.binding_key,
         value=value,
+        secret_class=secret_class,
     )
 
 

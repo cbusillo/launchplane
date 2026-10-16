@@ -388,7 +388,8 @@ decryption key state denies the reveal or resolution.
 - A binding stored for exactly the target's context and instance resolves for
   no other lane, so on a `prod`, `testing`, or `dev` target the lane is its
   classification and it needs no policy rule. An explicit rule for the key
-  still applies when one exists. Preview targets never get this: previews copy
+  still applies unless the exact binding independently declares a non-production
+  class as described below. Preview targets never get this: previews copy
   template-lane values, and their check retargets the template's bindings to
   the preview, so a copied lane secret still needs an explicit rule. An Odoo
   preview receives a copied integration credential without such a rule as an
@@ -398,8 +399,22 @@ decryption key state denies the reveal or resolution.
   only). Launchplane stores it on the binding as `declared_secret_class`, and
   key safety refuses it when the class is not allowed for the lane, for example
   `prod_only` on a `testing` lane. A declaration covers that binding only; a
-  later write without `secret_class` clears it. A policy rule for the key still
-  takes precedence.
+  later write without `secret_class` clears it. A valid explicit `testing` or
+  `non_prod` declaration for an exact testing/dev runtime binding takes precedence
+  over a key-name rule: the isolated credential is independent of production's
+  credential with the same name. This does not apply to shared bindings,
+  `shared_safe` declarations, production targets or previews. Their policy rules
+  remain in force. An explicit class incompatible with the stable lane is refused.
+- The environment managed-secret form stores independently supplied runtime
+  values for a testing lane with class `testing`. It accepts neither cross-lane
+  references nor shared binding destinations. Production entry and the separate
+  reference-copy path keep their existing rules; a production-only source cannot
+  become a testing credential by copying or relabelling its destination.
+- Managed-secret form availability checks that an active policy exists, rather
+  than evaluating invented bindings for values that have not been entered.
+  Missing values remain `missing` in config status, and do not disable first
+  entry. An absent policy disables entry; dry-run and apply evaluate the actual
+  proposed bindings and refuse incompatible classification or missing bindings.
 - A production integration credential never takes its classification from a
   `testing` or `dev` lane, because the lane cannot tell a production key from a
   test key. A binding whose key names an integration needs a policy rule or a
