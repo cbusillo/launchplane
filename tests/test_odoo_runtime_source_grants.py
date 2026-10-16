@@ -50,7 +50,11 @@ class RuntimeSourceTests(unittest.TestCase):
         }
         self.database = MagicMock()
         self.cursor = self.database.cursor.return_value.__enter__.return_value
-        self.cursor.fetchmany.side_effect = lambda bound: list(self.values.items())[:bound]
+        self.cursor.fetchmany.side_effect = lambda bound: [
+            (key, value)
+            for key, value in self.values.items()
+            if key in self.cursor.execute.call_args.args[1][0]
+        ][:bound]
         self.mysql = MagicMock()
         cursor = self.mysql.cursor.return_value.__enter__.return_value
         cursor.fetchmany.return_value = [
@@ -131,7 +135,7 @@ class RuntimeSourceTests(unittest.TestCase):
                 self.fixture.connection,
                 tuple(diagnostic.SOURCE_PREFIXES),
                 prefixes=diagnostic.SOURCE_PREFIXES,
-                fields=diagnostic.FIELDS,
+                fields=diagnostic.GRANT_FIELDS,
                 environment_keys=self.keys,
                 observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
             )
@@ -167,6 +171,12 @@ class RuntimeSourceTests(unittest.TestCase):
             if command[:2] == ["docker", "exec"]:
                 self.assertIn(self.full_container_id, command)
 
+    def test_grants_do_not_require_a_producer_specific_database_name_key(self) -> None:
+        for name, prefix in diagnostic.SOURCE_PREFIXES.items():
+            del self.values[prefix + ".db"]
+            del self.env[self.keys[name]["db"]]
+        self.assertTrue(all(value == "read_only" for value in self.run_probe().values()))
+
     def test_equivalent_verified_tls_settings_preserve_runtime_proof(self) -> None:
         self.env[self.keys["cm_data"]["ssl_verify"]] = "true"
         self.assertEqual(self.run_probe()["cm_data"], "read_only")
@@ -193,7 +203,7 @@ class RuntimeSourceTests(unittest.TestCase):
     def test_parameter_binding_tls_and_identity_mismatch_never_authenticate(self) -> None:
         original_env = self.env.copy()
         original_values = self.values.copy()
-        for kind in ("password", "host", "user", "db", "port", "ssl_verify", "identity"):
+        for kind in ("password", "host", "user", "port", "ssl_verify", "identity"):
             with self.subTest(kind=kind):
                 self.env = original_env.copy()
                 self.values = original_values.copy()
@@ -221,7 +231,7 @@ class RuntimeSourceTests(unittest.TestCase):
                     original,
                     ("cm_data",),
                     prefixes=diagnostic.SOURCE_PREFIXES,
-                    fields=diagnostic.FIELDS,
+                    fields=diagnostic.GRANT_FIELDS,
                     environment_keys=self.keys,
                     observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
                 ),

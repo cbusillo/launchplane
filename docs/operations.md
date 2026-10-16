@@ -4874,8 +4874,10 @@ import-override reconciliation. A read-only service-origin observation cannot
 substitute for runtime-origin privileges.
 
 The service verifies the testing lane, immutable artifact and container and
-requires already-delivered runtime values to match the currently selected safe
-managed binding. It sends only fixed code and non-secret identity metadata
+requires already-delivered authentication settings to match the currently selected
+safe managed binding. Database-name keys differ by producer and are not required
+by this account-wide SHOW GRANTS read, which selects no default database; their
+agreement remains with import-override reconciliation. It sends only fixed code and non-secret identity metadata
 through its registered provider transport. Inside the container, a read-only
 PostgreSQL session reads only the fixed source parameter keys and requires
 those applied values to agree with installed settings. Source passwords never

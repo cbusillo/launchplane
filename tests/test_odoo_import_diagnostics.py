@@ -318,6 +318,14 @@ class DiagnosticTests(unittest.TestCase):
         self.mocks[-1].assert_not_called()
         self.assertNotIn(PRIVATE, result.model_dump_json())
 
+    def test_runtime_only_grants_ignore_database_name_setting_choice(self) -> None:
+        for prefix in diagnostic.SOURCE_PREFIXES.values():
+            del self.environment[config_parameter_runtime_key(prefix + ".db")]
+        result = self.run_runtime_diagnostic()
+        self.assertTrue(
+            all(source.applied_connection_grants == "read_only" for source in result.sources)
+        )
+
     def test_runtime_only_refuses_mismatch_and_discards_binding_drift(self) -> None:
         self.environment[config_parameter_secret_env_key("cm_data.db.password")] = "stale-fixture"
 

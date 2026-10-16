@@ -48,6 +48,9 @@ SOURCE_PREFIXES = {
     for name in ("cm_data", "repairshopr", "fishbowl")
 }
 FIELDS = ("host", "user", "db", "port", "ssl_verify")
+# SHOW GRANTS is account-wide and selects no database. Producer database-name
+# keys differ; they belong to independent setting agreement, not grant identity.
+GRANT_FIELDS = tuple(field for field in FIELDS if field != "db")
 Agreement = Literal["match", "mismatch", "missing", "unknown"]
 ProbeKey = tuple[str, str, str, str, str]
 _PROBE_LOCK = threading.Lock()
@@ -384,7 +387,7 @@ def runtime_origin_grants(
                 tuple(active),
                 observed_identity=environment.get(RUNTIME_IDENTITY_ENV_KEY, ""),
                 prefixes=SOURCE_PREFIXES,
-                fields=FIELDS,
+                fields=GRANT_FIELDS,
                 environment_keys={
                     name: {
                         field: (
@@ -579,7 +582,7 @@ def diagnose_runtime_source_grants(
                         ),
                     )
                     == "match"
-                    for key in (*FIELDS, "password")
+                    for key in (*GRANT_FIELDS, "password")
                 ):
                     selected[name] = source
                 sources.append(SourceDiagnostic(source=source_name, binding="selected"))
