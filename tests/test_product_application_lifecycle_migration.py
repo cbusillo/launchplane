@@ -60,6 +60,34 @@ class ApplicationLifecycleMigrationTests(unittest.TestCase):
         ).model_dump(mode="json")
         self.assertEqual(migrate_product_application_lifecycle_payload(saved), saved)
 
+    def test_an_explicit_legacy_import_is_saved_as_current_without_restoring_removed_commands(
+        self,
+    ) -> None:
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from control_plane.storage.filesystem import FilesystemRecordStore
+        from control_plane.contracts.product_profile_record import (
+            CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
+        )
+
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            migrate_product_application_lifecycle_payload(self.payload())
+        )
+        imported = profile.model_copy(
+            update={
+                "schema_version": 1,
+                "preview": profile.preview.model_copy(
+                    update={"generic_web_extensions": GenericWebLaneExtensions()}
+                ),
+            }
+        ).validate_write_contract()
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            store.write_product_profile_record(imported)
+            readback = store.read_product_profile_record(imported.product)
+        self.assertEqual(readback.schema_version, CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION)
+        self.assertEqual(readback.preview.generic_web_extensions, GenericWebLaneExtensions())
+
     def test_generic_profiles_have_no_product_defaults(self) -> None:
         payload = _profile().model_dump(mode="json")
         self.assertEqual(migrate_product_application_lifecycle_payload(payload), payload)

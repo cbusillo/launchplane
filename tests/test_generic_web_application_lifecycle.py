@@ -242,6 +242,24 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
                 )
             )
 
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(
+            update={
+                "instance": "prod",
+                "generic_web_extensions": GenericWebLaneExtensions(
+                    maintenance=(
+                        GenericWebMaintenanceCommand(
+                            name="reset", command="./reset", on_reset=True
+                        ),
+                    )
+                ),
+            }
+        )
+        with self.assertRaises(ValueError):
+            type(profile).model_validate(
+                profile.model_copy(update={"lanes": (lane,)}).model_dump(mode="json")
+            )
+
     def test_preview_receipt_storage_failure_cannot_pause_a_job(self) -> None:
         self._api_context()
         store = _GenericWebDeployStore(_profile())

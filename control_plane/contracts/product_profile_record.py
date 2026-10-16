@@ -790,6 +790,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
         if self.lifecycle_state != "active" and self.preview.enabled:
             raise ValueError("non-active product profiles cannot retain enabled previews")
         for lane in self.lanes:
+            if lane.instance != "testing" and any(
+                item.on_reset for item in lane.generic_web_extensions.maintenance
+            ):
+                raise ValueError("Reset-only commands require the recorded testing lane.")
             if lane.generic_web_extensions.verification_extension and (
                 self.driver_id.strip() != "generic-web" or lane.instance != "testing"
             ):
@@ -827,6 +831,7 @@ class LaunchplaneProductProfileRecord(BaseModel):
         )
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
+        self.schema_version = max(self.schema_version, CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION)
         for lane in self.lanes:
             for check in lane.health_monitoring.checks:
                 if not check.enabled:
