@@ -10,7 +10,6 @@ import unittest
 from typing import Any
 from unittest.mock import MagicMock, patch
 
-from control_plane import odoo_runtime_reads as reads
 from control_plane import odoo_import_diagnostics as diagnostic
 from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
 from control_plane.odoo_source_probe import GrantStatus
@@ -214,7 +213,7 @@ class RuntimeSourceTests(unittest.TestCase):
                 self.inspections = 0
                 self.assertTrue(all(value == "unknown" for value in self.run_probe().values()))
 
-    def test_transport_failure_and_missing_identity_are_value_free(self) -> None:
+    def test_transport_failure_is_value_free_and_no_odoo_identity_is_required(self) -> None:
         original = self.fixture.connection
         with patch.object(runtime, "_read_remote", side_effect=OSError(PRIVATE)):
             self.assertEqual(
@@ -231,14 +230,4 @@ class RuntimeSourceTests(unittest.TestCase):
         self.fixture.connection = original.__class__(
             **{**original.__dict__, "diagnostic_identity": None}
         )
-        with patch.object(runtime, "_read_remote") as remote:
-            with self.assertRaises(reads.OdooRuntimeReadError):
-                runtime.runtime_grants(
-                    self.fixture.connection,
-                    ("cm_data",),
-                    prefixes=diagnostic.SOURCE_PREFIXES,
-                    fields=diagnostic.FIELDS,
-                    environment_keys=self.keys,
-                    observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
-                )
-            remote.assert_not_called()
+        self.assertTrue(all(value == "read_only" for value in self.run_probe().values()))

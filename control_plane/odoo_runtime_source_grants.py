@@ -161,8 +161,6 @@ def runtime_grants(
     unknown: dict[str, GrantStatus] = {name: "unknown" for name in sources}
     if not sources or connection.selection.identity.instance != "testing":
         return unknown
-    # This is not a fallback for missing diagnostic identity.
-    reads.diagnostic_authentication(connection)
     program = CONTAINER_PROGRAM
     for key, value in {
         "__PREFIXES__": repr(prefixes),

@@ -433,15 +433,6 @@ def diagnose_imports(
             diagnostics=True,
         )
         applied = read_applied_parameters(connection)
-        runtime_environment = reads.inspect_runtime_container(
-            connection.host,
-            connection.token,
-            connection.server_id,
-            connection.evidence.container_id,
-            connection.app_name,
-            selection.identity,
-        )
-        runtime_sources: dict[str, SourceAuthority] = {}
         results: list[SourceDiagnostic] = []
         for name, prefix in SOURCE_PREFIXES.items():
             source_name = cast(Literal["cm_data", "repairshopr", "fishbowl"], name)
@@ -485,23 +476,6 @@ def diagnose_imports(
                     )
                     for key in (*FIELDS, "password")
                 )
-                # Runtime evidence needs every applied field and the already
-                # delivered container values to agree with this selected binding.
-                if all(item.agreement == "match" for item in parameters) and all(
-                    parameter_agreement(
-                        key,
-                        settings[key],
-                        runtime_environment.get(
-                            config_parameter_secret_env_key(prefix + ".password")
-                            if key == "password"
-                            else config_parameter_runtime_key(prefix + "." + key),
-                            "",
-                        ),
-                    )
-                    == "match"
-                    for key in (*FIELDS, "password")
-                ):
-                    runtime_sources[name] = selected
                 results.append(
                     SourceDiagnostic(
                         source=source_name,
@@ -528,30 +502,19 @@ def diagnose_imports(
                 )
             except Exception:
                 results.append(SourceDiagnostic(source=source_name))
-        runtime_results = runtime_origin_grants(connection, runtime_sources, runtime_environment)
-        results = [
-            result.model_copy(
-                update={"applied_connection_grants": runtime_results.get(result.source, "unknown")}
-            )
-            for result in results
-        ]
         reads.assert_selection_current(store, selection)
         if import_authority(store, product).private_snapshot != authority.private_snapshot:
             return unknown_result()
         # Observe the same immutable container again, including its image and
         # runtime payload, after source I/O and before releasing any agreement.
-        if (
-            reads.inspect_runtime_container(
-                connection.host,
-                connection.token,
-                connection.server_id,
-                connection.evidence.container_id,
-                connection.app_name,
-                selection.identity,
-            )
-            != runtime_environment
-        ):
-            return unknown_result()
+        reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
         if read_applied_parameters(connection) != applied:
             return unknown_result()
         if import_authority(store, product).private_snapshot != authority.private_snapshot:
@@ -565,4 +528,90 @@ def diagnose_imports(
     except Exception:
         # No provider/RPC/driver/decryption exception text or chained context is
         # returned. This fixed response contains no caller/server-controlled text.
+        return unknown_result()
+
+
+def diagnose_runtime_source_grants(
+    *, store: DiagnosticStore, product: str, control_plane_root: Path, database_url: str | None
+) -> ImportDiagnosticResult:
+    """Fixed container read, independent of the login-based Odoo diagnostic."""
+    try:
+        authority = import_authority(store, product)
+        selection = reads.select_stable_runtime(store, authority.profile, "testing")
+        connection = reads.connect_runtime(
+            store=store,
+            selection=selection,
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
+        environment = reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
+        selected: dict[str, SourceAuthority] = {}
+        sources: list[SourceDiagnostic] = []
+        for name, prefix in SOURCE_PREFIXES.items():
+            source_name = cast(Literal["cm_data", "repairshopr", "fishbowl"], name)
+            source = authority.sources.get(name)
+            if source is None:
+                sources.append(SourceDiagnostic(source=source_name))
+                continue
+            try:
+                settings = {
+                    **source.settings,
+                    "password": _decrypt_secret_value(
+                        source.version.ciphertext, source.version.key_id
+                    ),
+                }
+                if all(
+                    parameter_agreement(
+                        key,
+                        settings[key],
+                        environment.get(
+                            config_parameter_secret_env_key(prefix + ".password")
+                            if key == "password"
+                            else config_parameter_runtime_key(prefix + "." + key),
+                            "",
+                        ),
+                    )
+                    == "match"
+                    for key in (*FIELDS, "password")
+                ):
+                    selected[name] = source
+                sources.append(SourceDiagnostic(source=source_name, binding="selected"))
+            except Exception:
+                sources.append(SourceDiagnostic(source=source_name))
+        grants = runtime_origin_grants(connection, selected, environment)
+        reads.assert_selection_current(store, selection)
+        if import_authority(store, product).private_snapshot != authority.private_snapshot:
+            return unknown_result()
+        if (
+            reads.inspect_runtime_container(
+                connection.host,
+                connection.token,
+                connection.server_id,
+                connection.evidence.container_id,
+                connection.app_name,
+                selection.identity,
+            )
+            != environment
+        ):
+            return unknown_result()
+        if import_authority(store, product).private_snapshot != authority.private_snapshot:
+            return unknown_result()
+        reads.assert_selection_current(store, selection)
+        return ImportDiagnosticResult(
+            runtime="verified",
+            sources=tuple(
+                result.model_copy(
+                    update={"applied_connection_grants": grants.get(result.source, "unknown")}
+                )
+                for result in sources
+            ),
+        )
+    except Exception:
         return unknown_result()

@@ -241,7 +241,15 @@ class DiagnosticTests(unittest.TestCase):
             database_url=None,
         )
 
-    def test_agreement_and_runtime_grants_are_value_free(self) -> None:
+    def run_runtime_diagnostic(self) -> diagnostic.ImportDiagnosticResult:
+        return diagnostic.diagnose_runtime_source_grants(
+            store=self.fixture.store,
+            product=self.fixture.profile.product,
+            control_plane_root=Path("fixture"),
+            database_url=None,
+        )
+
+    def test_agreement_is_value_free_and_not_runtime_grant_proof(self) -> None:
         with (
             contextlib.redirect_stdout(io.StringIO()) as stdout,
             contextlib.redirect_stderr(io.StringIO()) as stderr,
@@ -252,7 +260,7 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(source.binding, "selected")
             self.assertTrue(all(item.agreement == "match" for item in source.parameters))
             self.assertEqual(source.managed_connection_grants, "read_only")
-            self.assertEqual(source.applied_connection_grants, "read_only")
+            self.assertEqual(source.applied_connection_grants, "unknown")
         for private in (PRIVATE, "fixture_reader", ".invalid", "fixture-ciphertext"):
             self.assertNotIn(
                 private, result.model_dump_json() + stdout.getvalue() + stderr.getvalue()
@@ -263,32 +271,84 @@ class DiagnosticTests(unittest.TestCase):
         ]
         self.assertEqual(writes, [])
 
+    def test_runtime_only_read_needs_no_odoo_identity_or_http_login(self) -> None:
+        self.mocks[0].return_value = self.fixture.connection.__class__(
+            **{**self.fixture.connection.__dict__, "diagnostic_identity": None}
+        )
+        with patch.object(reads, "_rpc", side_effect=AssertionError("Odoo login is forbidden")):
+            result = diagnostic.diagnose_runtime_source_grants(
+                store=self.fixture.store,
+                product=self.fixture.profile.product,
+                control_plane_root=Path("fixture"),
+                database_url=None,
+            )
+        self.assertEqual(result.runtime, "verified")
+        self.assertTrue(
+            all(source.applied_connection_grants == "read_only" for source in result.sources)
+        )
+        self.assertTrue(
+            all(
+                source.managed_connection_grants == "unknown" and not source.parameters
+                for source in result.sources
+            )
+        )
+        self.mocks[2].assert_not_called()
+        self.mocks[-1].assert_not_called()
+        self.assertNotIn(PRIVATE, result.model_dump_json())
+
+    def test_runtime_only_refuses_mismatch_and_discards_binding_drift(self) -> None:
+        self.environment[config_parameter_secret_env_key("cm_data.db.password")] = "stale-fixture"
+
+        def run() -> diagnostic.ImportDiagnosticResult:
+            return diagnostic.diagnose_runtime_source_grants(
+                store=self.fixture.store,
+                product=self.fixture.profile.product,
+                control_plane_root=Path("fixture"),
+                database_url=None,
+            )
+
+        result = run()
+        self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
+        self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
+
+        def drift(connection: object, sources: tuple[str, ...], **kwargs: object) -> dict[str, str]:
+            self.fixture.bindings.clear()
+            return {name: "read_only" for name in sources}
+
+        self.runtime_mock.side_effect = drift
+        result = run()
+        self.assertEqual(result.runtime, "unknown")
+        self.assertTrue(
+            all(source.applied_connection_grants == "unknown" for source in result.sources)
+        )
+
     def test_origin_privileges_are_independent(self) -> None:
         self.runtime_mock.side_effect = lambda connection, sources, **kw: {
             name: "unsafe" if name == "cm_data" else "read_only" for name in sources
         }
-        result = self.run_diagnostic()
-        self.assertEqual(result.sources[0].managed_connection_grants, "read_only")
+        result = self.run_runtime_diagnostic()
+        self.assertEqual(self.run_diagnostic().sources[0].managed_connection_grants, "read_only")
+        self.assertEqual(result.sources[0].managed_connection_grants, "unknown")
         self.assertEqual(result.sources[0].applied_connection_grants, "unsafe")
         self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
         self.runtime_mock.side_effect = lambda connection, sources, **kw: {
             name: "unknown" for name in sources
         }
-        result = self.run_diagnostic()
+        result = self.run_runtime_diagnostic()
         self.assertTrue(
             all(source.applied_connection_grants == "unknown" for source in result.sources)
         )
         self.assertTrue(
-            all(source.managed_connection_grants == "read_only" for source in result.sources)
+            all(source.managed_connection_grants == "unknown" for source in result.sources)
         )
 
     def test_runtime_never_receives_mismatched_or_unsafe_sources(self) -> None:
-        self.fixture.applied["cm_data.db.user"] = "writer"
+        self.environment[config_parameter_runtime_key("cm_data.db.user")] = "writer"
         self.environment[config_parameter_secret_env_key("repairshopr.sync_db.password")] = "stale"
         self.fixture.bindings[2] = self.fixture.bindings[2].model_copy(
             update={"declared_secret_class": "prod_only"}
         )
-        result = self.run_diagnostic()
+        result = self.run_runtime_diagnostic()
         self.assertTrue(
             all(source.applied_connection_grants == "unknown" for source in result.sources)
         )
@@ -311,18 +371,18 @@ class DiagnosticTests(unittest.TestCase):
             return {name: "unknown" if name == "cm_data" else "read_only" for name in sources}
 
         self.runtime_mock.side_effect = nested
-        self.run_diagnostic()
+        self.run_runtime_diagnostic()
         self.runtime_mock.side_effect = lambda connection, sources, **kw: {
             name: "read_only" for name in sources
         }
-        result = self.run_diagnostic()
+        result = self.run_runtime_diagnostic()
         self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
         self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
         self.assertNotIn("cm_data", self.runtime_mock.call_args.args[1])
         with patch(
             "control_plane.odoo_import_diagnostics.time.monotonic", return_value=float("inf")
         ):
-            result = self.run_diagnostic()
+            result = self.run_runtime_diagnostic()
         self.assertTrue(
             all(source.applied_connection_grants == "read_only" for source in result.sources)
         )
@@ -420,7 +480,6 @@ class DiagnosticTests(unittest.TestCase):
             "container",
             "applied",
             "nonsecret_binding",
-            "delivered",
         ):
             with self.subTest(kind=kind):
                 fixture = DiagnosticFixture()
@@ -446,8 +505,6 @@ class DiagnosticTests(unittest.TestCase):
                                 }
                             )
                         )
-                    elif kind == "delivered":
-                        self.mocks[1].return_value = {"CHANGED": "fixture"}
                     elif kind == "applied":
                         fixture.applied["fishbowl.password"] = "changed-fixture-password"
                     else:
@@ -474,7 +531,7 @@ class DiagnosticTests(unittest.TestCase):
             return {name: "read_only" for name in sources}
 
         self.runtime_mock.side_effect = drift
-        result = self.run_diagnostic()
+        result = self.run_runtime_diagnostic()
         self.assertEqual(result.runtime, "unknown")
         self.assertTrue(
             all(
@@ -807,6 +864,12 @@ class GrantTests(unittest.TestCase):
 
 class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_testing_route_auth_and_no_overrides(self) -> None:
+        await self.exercise_read(runtime_only=False)
+
+    async def test_runtime_only_route_auth_and_no_overrides(self) -> None:
+        await self.exercise_read(runtime_only=True)
+
+    async def exercise_read(self, *, runtime_only: bool) -> None:
         fixture = DiagnosticFixture()
         allowed = MagicMock(return_value=True)
 
@@ -834,8 +897,11 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
         path = (
             f"/v1/products/{fixture.profile.product}/environments/testing/odoo-import-diagnostics"
         )
+        if runtime_only:
+            path = path.replace("odoo-import-diagnostics", "odoo-source-grants")
+        backend = "diagnose_runtime_source_grants" if runtime_only else "diagnose_imports"
         with patch(
-            "control_plane.http_routes.odoo_runtime.diagnose_imports",
+            "control_plane.http_routes.odoo_runtime." + backend,
             return_value=diagnostic.unknown_result(),
         ) as execute:
             response = await request(app, "GET", path)
@@ -843,11 +909,14 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
             self.assertNotIn(PRIVATE, response.text)
-            execute.side_effect = reads._diagnostic_unavailable()
-            unavailable = await request(app, "GET", path)
-            self.assertEqual(unavailable.status_code, 503, unavailable.text)
-            self.assertEqual(unavailable.json()["detail"]["code"], DIAGNOSTIC_IDENTITY_UNAVAILABLE)
-            self.assertNotIn(PRIVATE, unavailable.text)
+            if not runtime_only:
+                execute.side_effect = reads._diagnostic_unavailable()
+                unavailable = await request(app, "GET", path)
+                self.assertEqual(unavailable.status_code, 503, unavailable.text)
+                self.assertEqual(
+                    unavailable.json()["detail"]["code"], DIAGNOSTIC_IDENTITY_UNAVAILABLE
+                )
+                self.assertNotIn(PRIVATE, unavailable.text)
             execute.side_effect = None
             execute.reset_mock()
             for bad_path in (
