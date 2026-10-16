@@ -9,8 +9,12 @@ import logging
 import re
 from pathlib import Path
 from time import monotonic
+from threading import Event
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
+from control_plane.client_test_notes import _markdown_lines
+from control_plane.github_payload import github_app_authored
+from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.release_review import (
@@ -46,6 +50,56 @@ class ReleaseInvitationBackoff:
     delivered: dict[tuple[str, str], tuple[str, float]] = field(default_factory=dict)
     settled: dict[str, tuple[str, float]] = field(default_factory=dict)
     completions: dict[str, tuple[str, float]] = field(default_factory=dict)
+    diagnostics: dict[str, tuple[type[Exception], float]] = field(default_factory=dict)
+
+
+def advance_release_invitations(
+    *,
+    store: object,
+    control_plane_root: Path,
+    stop_event: Event | None = None,
+    backoff: ReleaseInvitationBackoff | None = None,
+) -> None:
+    """Cold notification reads never occupy the accepted-release worker."""
+    from control_plane.storage.postgres import PostgresRecordStore
+    from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
+
+    if not isinstance(store, PostgresRecordStore):
+        return
+    for profile in store.list_product_profile_records():
+        if stop_event is not None and stop_event.is_set():
+            break
+        try:
+            publish_release_invitation(
+                store=store, control_plane_root=control_plane_root, profile=profile, backoff=backoff
+            )
+        except Exception as error:
+            now = monotonic()
+            previous, next_log = (
+                backoff.diagnostics.get(profile.product, (None, 0))
+                if backoff is not None
+                else (None, 0)
+            )
+            if type(error) is previous and now < next_log:
+                continue
+            if backoff is not None:
+                backoff.diagnostics[profile.product] = (type(error), now + 300)
+            if isinstance(error, ReleaseInvitationNotesUnavailable):
+                _LOGGER.warning(
+                    "release invitation unavailable product=%s error_type=%s reason=%s",
+                    profile.product,
+                    type(error).__name__,
+                    error,
+                )
+            else:
+                _LOGGER.warning(
+                    "release invitation unavailable product=%s error_type=%s",
+                    profile.product,
+                    type(error).__name__,
+                )
+        else:
+            if backoff is not None:
+                backoff.diagnostics.pop(profile.product, None)
 
 
 def _now() -> datetime:
@@ -96,7 +150,7 @@ def _announced_changes(
 ) -> set[str]:
     if request is None:
         return set()
-    lines = _comment_lines(request)
+    lines = _receipt_lines(request)
     if candidate_marker in lines and not any(
         line.startswith("<!-- launchplane:release-request:") for line in lines
     ):
@@ -142,7 +196,7 @@ def _replace_older_invitations(
     if not isinstance(current_id, int) or current_id < 1:
         raise ValueError("Release invitation comment identity is unavailable.")
     for comment in comments:
-        lines = _comment_lines(comment)
+        lines = _receipt_lines(comment)
         if comment.get("id") == current_id or REPLACED_MARKER in lines:
             continue
         if not any(
@@ -178,7 +232,7 @@ def _replace_older_invitations(
                 "",
                 "<details><summary>Earlier invitation</summary>",
                 "",
-                "\n".join(line for line in lines if line not in receipts)
+                "\n".join(line for line in _comment_lines(comment) if line not in receipts)
                 .replace("@", "@\u200b")
                 .strip(),
                 "",
@@ -197,6 +251,14 @@ def _comment_lines(comment: dict[str, object]) -> list[str]:
     if not isinstance(body, str):
         raise ValueError("Release invitation comment body is unavailable.")
     return body.splitlines()
+
+
+def _receipt_lines(comment: dict[str, object]) -> list[str]:
+    return [
+        line
+        for line, _heading, fence in _markdown_lines("\n".join(_comment_lines(comment)))
+        if not fence
+    ]
 
 
 def _last_client_decision(
@@ -246,7 +308,7 @@ def _open_request(
     matching = [
         comment
         for comment in comments
-        if marker in _comment_lines(comment) and REPLACED_MARKER not in _comment_lines(comment)
+        if marker in _receipt_lines(comment) and REPLACED_MARKER not in _receipt_lines(comment)
     ]
     if matching:
         # A lost post/replacement response may leave two current receipts. The
@@ -256,7 +318,7 @@ def _open_request(
     # Candidate markers alone cannot distinguish an open request from a decided one.
     legacy = []
     for comment in comments:
-        lines = _comment_lines(comment)
+        lines = _receipt_lines(comment)
         if REPLACED_MARKER in lines:
             continue
         if any(line.startswith("<!-- launchplane:release-request:") for line in lines):
@@ -305,7 +367,7 @@ def _ready(review: ReleaseReviewStatus, profile: LaunchplaneProductProfileRecord
 
 
 def _pages(
-    path: str, token: str, *, marker: str = "", issues_only: bool = False
+    path: str, token: str, *, app_id: int, marker: str = "", issues_only: bool = False
 ) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
     separator = "&" if "?" in path else "?"
@@ -313,12 +375,33 @@ def _pages(
         result = github_api_request(path=f"{path}{separator}per_page=100&page={page}", token=token)
         if not isinstance(result, list) or any(not isinstance(item, dict) for item in result):
             raise ValueError("Release invitation lookup is incomplete.")
-        matching = [
+        marked = [
             item
             for item in result
             if (not issues_only or "pull_request" not in item)
-            and (not marker or marker in str(item.get("body", "")).splitlines())
+            and (not marker or marker in _receipt_lines(item))
         ]
+        matching = []
+        for item in marked:
+            if github_app_authored(
+                item,
+                app_id,
+                lookup_app=lambda slug: github_api_request(
+                    path=f"/apps/{quote(slug)}", token=token
+                ),
+            ):
+                matching.append(item)
+            elif issues_only:
+                number = item.get("number")
+                if isinstance(number, int) and number > 0:
+                    receipts = _pages(
+                        f"{path.split('?')[0]}/{number}/comments",
+                        token,
+                        app_id=app_id,
+                        marker=marker,
+                    )
+                    if receipts:
+                        matching.append(item)
         records.extend(matching)
         if marker and matching:
             return records
@@ -393,6 +476,7 @@ def _settle_completed_invitation(
             issues = _pages(
                 f"{path}?state=all&sort=updated&direction=desc",
                 token,
+                app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
                 marker=release_request_issue_marker(profile.product),
                 issues_only=True,
             )
@@ -405,7 +489,11 @@ def _settle_completed_invitation(
             number = issues[0].get("number")
             if not isinstance(number, int) or number < 1:
                 raise ValueError("Release invitation issue number is unavailable.")
-            comments = _pages(f"{path}/{number}/comments", token)
+            comments = _pages(
+                f"{path}/{number}/comments",
+                token,
+                app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
+            )
             marker = release_invitation_marker(profile.product, production)
             completion = (
                 COMPLETED_PREFIX + hashlib.sha256(decision.record_id.encode()).hexdigest() + " -->"
@@ -418,7 +506,7 @@ def _settle_completed_invitation(
                 # A changed decision or release retry can use the same checklist
                 # without another invitation. Settle only its newest open receipt.
                 for comment in reversed(comments):
-                    lines = _comment_lines(comment)
+                    lines = _receipt_lines(comment)
                     if marker not in lines or REPLACED_MARKER in lines:
                         continue
                     if any(line.startswith(COMPLETED_PREFIX) for line in lines):
@@ -431,7 +519,7 @@ def _settle_completed_invitation(
             matched = False
             pending = False
             for comment in comments:
-                lines = _comment_lines(comment)
+                lines = _receipt_lines(comment)
                 if REPLACED_MARKER in lines:
                     continue
                 if completion in lines:
@@ -650,6 +738,7 @@ def publish_release_invitation(
             issues = _pages(
                 f"{path}?state=all&sort=updated&direction=desc",
                 token,
+                app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
                 marker=issue_marker,
                 issues_only=True,
             )
@@ -675,9 +764,13 @@ def publish_release_invitation(
             # or reminders for a later candidate under the same saved decision.
             comments = [
                 comment
-                for comment in _pages(comments_path, token)
-                if REPLACED_MARKER not in _comment_lines(comment)
-                and not any(line.startswith(COMPLETED_PREFIX) for line in _comment_lines(comment))
+                for comment in _pages(
+                    comments_path,
+                    token,
+                    app_id=resolve_delivery_github_app_id(control_plane_root=control_plane_root),
+                )
+                if REPLACED_MARKER not in _receipt_lines(comment)
+                and not any(line.startswith(COMPLETED_PREFIX) for line in _receipt_lines(comment))
             ]
             request = _open_request(comments, request_marker, last_decision)
             # Engineering-only changes never open a release review on their own;
@@ -685,7 +778,7 @@ def publish_release_invitation(
             if request is None and not client_changes and not urgent_reason:
                 return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
-            reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
+            reminded = any(reminder_marker in _receipt_lines(comment) for comment in comments)
             # Recompile after destination lookup: a concurrent acceptance or testing
             # deploy must not receive an invitation for the obsolete snapshot.
             if store.read_product_profile_record(profile.product) != profile:
@@ -735,7 +828,7 @@ def publish_release_invitation(
                 and any(line.startswith("Updated at: ") for line in _comment_lines(request))
                 and any(line.startswith("**Release review**") for line in _comment_lines(request))
             )
-            if request and marker in _comment_lines(request) and formatted and not added:
+            if request and marker in _receipt_lines(request) and formatted and not added:
                 _replace_older_invitations(
                     comments=comments,
                     current=request,
@@ -841,6 +934,114 @@ def publish_release_invitation(
             _remember_delivery(backoff, receipt, due, reminded)
             return True
     # The lock's context-manager type allows it to suppress an error.
+    return False
+
+
+def adopt_release_invitation(
+    *,
+    store: ReleaseReviewStore,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    checklist_digest: str,
+    issue_number: int,
+    comment_id: int,
+    dry_run: bool,
+) -> bool:
+    """Attest an admin-selected existing request with no mention or original edit."""
+    with store.release_review_publication_lock(record_id=f"invitation:{profile.product}"):
+        review = current_release_review(
+            control_plane_root=control_plane_root, record_store=store, profile=profile
+        )
+        if (
+            not _ready(review, profile)
+            or review.checklist is None
+            or review.checklist_digest != checklist_digest
+            or store.read_product_profile_record(profile.product) != profile
+        ):
+            return False
+        last_decision = _last_client_decision(store, profile)
+        candidate_marker = release_invitation_marker(profile.product, review.checklist.candidate)
+        request_marker = _request_marker(profile, last_decision)
+        issue_marker = release_request_issue_marker(profile.product)
+        identity = (profile.product, checklist_digest, issue_number, comment_id, request_marker)
+        adoption_marker = (
+            "<!-- launchplane:release-adoption:"
+            + hashlib.sha256(json.dumps(identity, separators=(",", ":")).encode()).hexdigest()
+            + " -->"
+        )
+        changes = client_invitation_changes(store, profile, review.checklist)
+        lane = next(lane for lane in profile.lanes if lane.instance == "testing")
+        with launchplane_github_token(
+            token_resolver=resolve_launchplane_github_token,
+            api_request=github_api_request,
+            control_plane_root=control_plane_root,
+            context_name=lane.context,
+            repository=profile.repository,
+            purpose="release_record",
+        ) as token:
+            if not token:
+                raise ValueError("Release invitation source-control access is unavailable.")
+            app_id = resolve_delivery_github_app_id(control_plane_root=control_plane_root)
+            path = f"/repos/{quote(profile.repository)}/issues"
+            issue = github_api_request(path=f"{path}/{issue_number}", token=token)
+            original = github_api_request(path=f"{path}/comments/{comment_id}", token=token)
+            if (
+                not isinstance(issue, dict)
+                or "pull_request" in issue
+                or issue.get("number") != issue_number
+                or not isinstance(original, dict)
+                or original.get("id") != comment_id
+                or original.get("issue_url") != f"https://api.github.com{path}/{issue_number}"
+                or issue_marker not in _receipt_lines(issue)
+                or candidate_marker not in _receipt_lines(original)
+                or REPLACED_MARKER in _receipt_lines(original)
+                or any(line.startswith(COMPLETED_PREFIX) for line in _receipt_lines(original))
+                or (
+                    last_decision is not None
+                    and _timestamp(original.get("created_at"))
+                    <= _timestamp(last_decision.decided_at)
+                )
+            ):
+                return False
+            comments_path = f"{path}/{issue_number}/comments"
+            existing = _pages(comments_path, token, app_id=app_id, marker=adoption_marker)
+            if existing:
+                return len(existing) == 1
+            latest = current_release_review(
+                control_plane_root=control_plane_root, record_store=store, profile=profile
+            )
+            if (
+                not _ready(latest, profile)
+                or latest.checklist_digest != checklist_digest
+                or store.read_product_profile_record(profile.product) != profile
+                or _last_client_decision(store, profile) != last_decision
+            ):
+                return False
+            if dry_run:
+                return True
+            body = "\n".join(
+                (
+                    adoption_marker,
+                    issue_marker,
+                    candidate_marker,
+                    request_marker,
+                    *(
+                        f"<!-- launchplane:release-client-change:{key} -->"
+                        for key in sorted(changes)
+                    ),
+                    "",
+                    "Existing release request adopted; no new Client action or decision.",
+                    f"https://github.com/{profile.repository}/issues/{issue_number}#issuecomment-{comment_id}",
+                )
+            )
+            result = github_api_request(
+                path=comments_path, token=token, method="POST", body={"body": body}
+            )
+            return bool(
+                isinstance(result, dict)
+                and isinstance(result.get("id"), int)
+                and github_app_authored(result, app_id)
+            )
     return False
 
 

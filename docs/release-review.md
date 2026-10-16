@@ -185,6 +185,24 @@ from the candidate's artifact, commit and shared-input identity. The worker
 serializes publication across replicas using the existing release-publication
 lock and checks for that receipt before posting. A retry after a lost response
 adopts the existing comment; edits to checklist notes do not notify again.
+Only provider-attested records from the configured Delivery App count as
+destinations or receipts. That includes request, candidate, reminder,
+announced-change, replacement and completed-review markers. Markers inside
+fenced examples are data. Release-decision issue recovery checks the same App
+provenance; a copied marker cannot acknowledge another author's issue.
+
+For an already-sent manual request or a request from a former App, a signed-in
+admin uses `POST /v1/release-review/urgent-openings` with the current
+`product`, `checklist_digest`, `reason`, `adopt_issue_number`,
+`adopt_comment_id` and `dry_run: true`. After reviewing that result, the same
+request with `dry_run: false` posts only an App receipt to the selected issue.
+The original comment must belong to that issue and contain the current exact
+candidate marker, with no replacement/completion or intervening Client decision.
+The existing admin permission and browser CSRF checks apply. No Client decision,
+mention, original edit or new invitation is created. Retries discover the same
+adoption marker; the ordinary publisher can then update its own receipt silently.
+An App attestation on a manual destination supplies trust without trusting its
+human author or borrowing another App's credential.
 The invitation greets the Client, shows the Client test notes for changes they
 reviewed or were asked to review on preview, and asks them to open the release
 page, check the testing site, and press Accept or Request changes. It explains
@@ -228,6 +246,17 @@ batch provenance record still refuses invitation publication without making the
 release checklist unavailable through this diagnostic read. The worker logs the
 same bounded reason at its existing five-minute retry cadence for unchanged
 profile/lane versions; it never logs the PR body or arbitrary exception text.
+Missing lane versions use the same per-product, exception-type diagnostic bound.
+Version reads continue every pass, and a successful pass clears the diagnostic
+backoff so a new failure is visible.
+
+Invitation sweeps run on one separate thread per worker replica. A cold or slow
+GitHub lookup cannot occupy the accepted-release thread or stop the next
+scheduled accepted-release pass. An event-controlled regression holds invitation
+lookup blocked while the next release pass runs within the configured worker
+cadence. Shutdown joins both threads; this is scheduling isolation, not a
+provider latency guarantee. All existing checklist, candidate and release gates
+still apply.
 Durable `release-client-change` receipts record which PRs have been announced in
 this open review. Engineering-only candidates update an already open invitation
 silently, with no new comment or mention. Notes edits and already-announced changes

@@ -380,7 +380,7 @@ from control_plane.release_review import (
     current_release_review,
 )
 from control_plane.release_review_record import publish_release_decision
-from control_plane.release_invitation import publish_release_invitation
+from control_plane.release_invitation import publish_release_invitation, adopt_release_invitation
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
 from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
 from control_plane.provider_operations import (
@@ -28160,6 +28160,17 @@ def create_launchplane_fastapi_app(
                 profile=profile,
                 urgent_reason=reason,
                 urgent_checklist_digest=digest,
+            ),
+            adopt_invitation=lambda store, profile, digest, issue, comment, dry_run: (
+                adopt_release_invitation(
+                    store=store,
+                    control_plane_root=resolved_control_plane_root,
+                    profile=profile,
+                    checklist_digest=digest,
+                    issue_number=issue,
+                    comment_id=comment,
+                    dry_run=dry_run,
+                )
             ),
         ),
     )

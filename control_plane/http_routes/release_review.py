@@ -67,6 +67,10 @@ class ReleaseReviewRouteDependencies:
         [ReleaseReviewStore, LaunchplaneProductProfileRecord, str, str], bool
     ]
     control_plane_root: Path | None = None
+    adopt_invitation: (
+        Callable[[ReleaseReviewStore, LaunchplaneProductProfileRecord, str, int, int, bool], bool]
+        | None
+    ) = None
 
 
 class ReleaseReviewResponse(BaseModel):
@@ -126,12 +130,19 @@ class UrgentReleaseReviewEnvelope(BaseModel):
     product: str = Field(min_length=1, max_length=256)
     checklist_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     reason: str = Field(min_length=1, max_length=1000)
+    adopt_issue_number: int | None = Field(default=None, ge=1)
+    adopt_comment_id: int | None = Field(default=None, ge=1)
+    dry_run: bool = False
 
     @model_validator(mode="after")
     def validate_reason(self) -> "UrgentReleaseReviewEnvelope":
         self.reason = self.reason.strip()
         if not self.reason:
             raise ValueError("Opening an urgent release review requires a reason.")
+        if (self.adopt_issue_number is None) != (self.adopt_comment_id is None):
+            raise ValueError("Receipt adoption requires both the issue and original comment.")
+        if self.dry_run and self.adopt_issue_number is None:
+            raise ValueError("Dry run is supported for receipt adoption only.")
         return self
 
 
@@ -554,11 +565,26 @@ def register_release_review_routes(
                 message="The release checklist changed or is unavailable. Reload it before deciding.",
             )
         try:
-            opened = dependencies.open_urgent_review(
-                cast(ReleaseReviewStore, record_store),
-                profile,
-                envelope.reason,
-                envelope.checklist_digest,
+            opened = (
+                dependencies.adopt_invitation(
+                    cast(ReleaseReviewStore, record_store),
+                    profile,
+                    envelope.checklist_digest,
+                    envelope.adopt_issue_number,
+                    envelope.adopt_comment_id,
+                    envelope.dry_run,
+                )
+                if envelope.adopt_issue_number is not None
+                and envelope.adopt_comment_id is not None
+                and dependencies.adopt_invitation is not None
+                else False
+                if envelope.adopt_issue_number is not None
+                else dependencies.open_urgent_review(
+                    cast(ReleaseReviewStore, record_store),
+                    profile,
+                    envelope.reason,
+                    envelope.checklist_digest,
+                )
             )
         except (FileNotFoundError, StopIteration, ValueError, click.ClickException):
             opened = False

@@ -4,6 +4,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 import re
 from urllib.parse import quote
+from control_plane.github_payload import github_app_authored
+from control_plane.launchplane_github_delivery import resolve_delivery_github_app_id
 
 from control_plane.service_human_auth import launchplane_public_origin_from_env
 
@@ -227,6 +229,7 @@ def _publish_release_decision_issue(
     ) as token:
         if not token:
             raise ValueError("Release record source-control access is unavailable.")
+        app_id = resolve_delivery_github_app_id(control_plane_root=control_plane_root)
         path = f"/repos/{quote(profile.repository)}/issues"
         decision_time = (
             datetime.fromisoformat(decision.decided_at).astimezone(UTC).replace(microsecond=0)
@@ -256,6 +259,13 @@ def _publish_release_decision_issue(
                     "pull_request" in issue
                     or not isinstance(issue_body, str)
                     or issue_body.splitlines()[:1] != [marker]
+                    or not github_app_authored(
+                        issue,
+                        app_id,
+                        lookup_app=lambda slug: github_api_request(
+                            path=f"/apps/{quote(slug)}", token=token
+                        ),
+                    )
                 ):
                     continue
                 number = issue.get("number")
