@@ -738,6 +738,34 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             "/repos/example/merge-train-repo/commits/parent-after-child",
         )
 
+    def test_find_stack_child_merge_commit_rejects_forged_merge_tree(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="forged-merge"),
+                {
+                    "sha": "forged-merge",
+                    "commit": {
+                        "message": (
+                            "Launchplane stack collapse collapse-123: merge PR #11 into PR #10"
+                        ),
+                        "tree": {"sha": "unreviewed-tree"},
+                    },
+                    "parents": [{"sha": "parent-head"}, {"sha": "child-head"}],
+                },
+            )
+        )
+
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            GitHubMergeTrainClient(transport=transport).find_stack_child_merge_commit(
+                repository="example/merge-train-repo",
+                child_head_sha="child-head",
+                expected_parent_head_sha="parent-head",
+                parent_head_ref="feature/root",
+                collapse_id="collapse-123",
+                child_pull_request_number=11,
+                parent_pull_request_number=10,
+            )
+
     def test_find_stack_child_merge_commit_rejects_unrelated_branch_advance(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
