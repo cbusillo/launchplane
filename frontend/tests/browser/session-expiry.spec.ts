@@ -63,6 +63,9 @@ for (const view of ["products", "workspace", "environment"] as const) {
       await signIn.click();
       await expect(page.locator(".control-shell")).toBeVisible();
       await expect(page.locator(".rail-products")).toContainText(fixture.product.display_name);
+      const renderedView = view === "products" ? ".product-directory-row"
+        : view === "workspace" ? ".product-workspace" : ".environment-workspace";
+      await expect(page.locator(renderedView).first()).toBeVisible();
       expect(sessionReads).toBeGreaterThan(1);
       const beforeExpirySessionReads = sessionReads;
       expired = true;

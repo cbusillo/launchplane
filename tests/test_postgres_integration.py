@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
@@ -1258,6 +1259,13 @@ class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldR
 
 class RealPostgresHistoricalEffectRepositoryFenceTests(
     historical_storage_tests.HistoricalEffectRepositoryFenceTests
+):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
+class RealPostgresPortableHistoricalEffectPreflightTests(
+    historical_storage_tests.PortableHistoricalEffectPreflightTests
 ):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
@@ -10799,6 +10807,60 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
 
+    def test_down_lane_usage_and_locked_successor_on_postgres(self) -> None:
+        from tests.test_down_lane_collection import DownLaneCollectionTests
+        from tests.test_lane_usage import LaneUsageTests
+        from tests.test_odoo_testing_drill import TestingDrillTests
+
+        for scenario in (
+            "test_locked_successor_adapter_consumes_the_service_downtime_rule",
+            "test_current_staff_hold_always_blocks_down_lane",
+            "test_private_serving_or_unresolved_endpoint_protects_a_publicly_down_lane",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                fixture = LaneUsageTests(scenario)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, scenario)()
+                finally:
+                    fixture.doCleanups()
+        for usage in ("unknown", "in_use"):
+            with self.subTest(usage=usage), _head_postgres_database() as url:
+                drill = TestingDrillTests()
+                try:
+                    drill.seed(
+                        make_url(url)
+                        .update_query_dict({"options": "-c statement_timeout=1000"})
+                        .render_as_string(hide_password=False)
+                    )
+                    database_errors: list[str] = []
+                    event.listen(
+                        drill.store._engine,
+                        "handle_error",
+                        lambda error: database_errors.append(
+                            type(error.original_exception).__name__
+                        ),
+                    )
+                    drill.assert_down_lane_drill_admitted(usage)
+                    self.assertFalse(database_errors, database_errors)
+                finally:
+                    drill.doCleanups()
+        for scenario in (
+            "test_collect_produces_real_resource_facts_then_admits_down_runtime_repair",
+            "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",
+            "test_needed_copy_and_failed_physical_inspection_still_refuse",
+            "test_resource_denial_and_binding_drift_do_not_publish",
+            "test_recorded_shared_resources_survive_passing_inspection",
+            "test_positive_usage_reads_are_distinct_but_retained_history_stays_stable",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                collected = DownLaneCollectionTests(scenario)
+                collected.database_url = url
+                result = unittest.TestResult()
+                collected.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 
@@ -11671,6 +11733,245 @@ class RealPostgresProductionRecipientTests(unittest.TestCase):
         fixture.assert_old_preserved()
 
 
+class RealPostgresRecipientPublicationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.test_production_recipient_publication import RecipientPublicationTests
+
+        self.fixture = RecipientPublicationTests()
+        self.fixture.database_url = self.enterContext(_head_postgres_database())
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_atomic_forward_and_scoped_inverse_on_postgres(self) -> None:
+        self.fixture.test_atomic_publication_and_scoped_inverse_retain_history_and_unrelated_rows()
+
+    def test_forward_publication_hides_partial_rows_and_serializes_monitor_writer(self) -> None:
+        from control_plane.production_recipient import authority_snapshot
+        from control_plane.production_recipient_publication import rollback_publication
+
+        fixture = self.fixture
+        store = fixture.store
+        url = make_url(fixture.database_url)
+        second = PostgresRecordStore(
+            database_url=url.set(
+                query={**url.query, "application_name": "lp3710-monitor-writer"}
+            ).render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+        before = authority_snapshot(store, fixture.record.product, fixture.record.context)
+        entered, release = threading.Event(), threading.Event()
+        extra = fixture.monitor.model_copy(update={"endpoint_key": "unrelated-concurrent-monitor"})
+
+        def checkpoint(step: str) -> None:
+            if step == "publish_production_recipient":
+                entered.set()
+                if not release.wait(10):
+                    raise RuntimeError("publication barrier timed out")
+
+        with (
+            ThreadPoolExecutor(max_workers=2) as executor,
+            patch.object(store, "_after_product_authority_bundle_step", side_effect=checkpoint),
+        ):
+            first = executor.submit(fixture.publish)
+            self.assertTrue(entered.wait(5))
+            self.assertEqual(
+                authority_snapshot(second, fixture.record.product, fixture.record.context), before
+            )
+            writer = executor.submit(second.write_private_health_endpoint_record, extra)
+            try:
+                deadline = time.monotonic() + 5
+                waiting = 0
+                with store._engine.connect().execution_options(
+                    isolation_level="AUTOCOMMIT"
+                ) as connection:
+                    while time.monotonic() < deadline:
+                        waiting = int(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_stat_activity WHERE application_name='lp3710-monitor-writer' AND wait_event_type='Lock'"
+                                )
+                            )
+                            or 0
+                        )
+                        if waiting:
+                            break
+                        time.sleep(0.01)
+                self.assertGreater(
+                    waiting, 0, "Monitor writer must reach a real PostgreSQL lock wait"
+                )
+                self.assertFalse(writer.done())
+            finally:
+                release.set()
+            published = first.result(timeout=10)
+            writer.result(timeout=10)
+        rolled = rollback_publication(store, published, stop_replacement=lambda: None)
+        self.assertEqual(rolled.phase, "inverse_published")
+        self.assertEqual(second.read_private_health_endpoint_record(extra.endpoint_key), extra)
+
+    def test_failed_commit_restores_all_authority_rows(self) -> None:
+        from control_plane.production_recipient import authority_snapshot, custody
+
+        fixture = self.fixture
+        before = authority_snapshot(fixture.store, fixture.record.product, fixture.record.context)
+
+        def fail(step: str) -> None:
+            if step == "publish_production_recipient":
+                raise ValueError("simulated failed transaction")
+
+        with (
+            patch.object(fixture.store, "_after_product_authority_bundle_step", side_effect=fail),
+            self.assertRaises(ValueError),
+        ):
+            fixture.publish()
+        self.assertEqual(
+            authority_snapshot(fixture.store, fixture.record.product, fixture.record.context),
+            before,
+        )
+        self.assertEqual(
+            custody(fixture.store, fixture.record.product, fixture.record.context), fixture.record
+        )
+
+
+class RealPostgresRecipientCutoverTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests.test_production_recipient_cutover import RecipientCutoverTests
+
+        self.fixture = RecipientCutoverTests()
+        self.fixture.database_url = self.enterContext(_head_postgres_database())
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_accepted_cutover_uses_real_database_custody_and_backup(self) -> None:
+        self.fixture.test_accepted_release_bootstraps_then_publishes_one_atomic_set()
+
+    def test_original_key_unknown_deploy_is_reconciled_without_redeploy(self) -> None:
+        self.fixture.test_unknown_deploy_keeps_original_fence_and_never_restarts_old()
+
+    def test_first_release_drill_preserves_both_databases(self) -> None:
+        self.fixture.test_drill_restores_retained_data_then_repromotes_without_reinitialization()
+
+    def test_reserved_peer_cannot_cross_effect_checkpoint(self) -> None:
+        self.fixture.test_reserved_peer_cannot_cross_effect_checkpoint_during_bootstrap()
+
+    def test_refresh_unused_intent_retains_old_review(self) -> None:
+        self.fixture.test_unused_intent_can_refresh_destination_capture_and_retains_its_review()
+
+    def test_unknown_pause_requires_terminal_host_witness(self) -> None:
+        self.fixture.test_unknown_host_pause_requires_a_terminal_witness_before_retry()
+
+    def test_settled_failure_supersedes_and_fences_both_hosts(self) -> None:
+        self.fixture.test_settled_failed_bootstrap_can_supersede_with_both_writer_hosts_fenced()
+
+    def test_unrelated_product_checkpoint_survives_missing_peer_target(self) -> None:
+        self.fixture.test_missing_peer_target_does_not_block_an_unrelated_products_effect()
+
+    def test_lost_rollback_journal_can_complete_with_terminal_host_receipts(self) -> None:
+        self.fixture.test_terminal_host_rollback_can_finish_its_journal_after_a_lost_write()
+
+    def test_inverse_peer_preflight_refusal_keeps_original_key_retryable(self) -> None:
+        self.fixture.test_inverse_preflight_peer_refusal_can_retry_under_the_same_key()
+
+    def test_reviewed_native_inverse_uses_exact_retained_publication(self) -> None:
+        self.fixture.test_reviewed_native_inverse_works_without_minting_a_client_release_step()
+
+    def test_effect_checkpoint_and_budget_admission_serialize_on_two_connections(self) -> None:
+        from control_plane.production_recipient_budget import require_budget_checkpoint
+        from control_plane.workflows.generic_web_deploy_provider import (
+            generic_web_provider_target_key,
+        )
+
+        f = self.fixture
+        record = f.record
+        key = generic_web_provider_target_key(
+            provider_id="dokploy",
+            context=record.context,
+            instance="prod",
+            target_type="compose",
+            target_id=record.retained_target_id.target_id,
+        )
+        peer = f.store.reserve_mutation(
+            scope="peer",
+            route_path="/fixture/restart",
+            idempotency_key="original",
+            request_fingerprint="f" * 64,
+            lease_owner="peer",
+            provider_target_key=key,
+            reconciliation_key="restart",
+        ).record
+        assert peer is not None
+        url = make_url(f.database_url)
+        second = PostgresRecordStore(
+            database_url=url.set(
+                query={**url.query, "application_name": "lp3710-budget-admission"}
+            ).render_as_string(hide_password=False)
+        )
+        self.addCleanup(second.close)
+        entered, release = threading.Event(), threading.Event()
+
+        def checkpoint(*args: Any) -> None:
+            require_budget_checkpoint(*args)
+            entered.set()
+            if not release.wait(10):
+                raise RuntimeError("budget barrier timed out")
+
+        with (
+            ThreadPoolExecutor(max_workers=2) as executor,
+            patch(
+                "control_plane.production_recipient_budget.require_budget_checkpoint",
+                side_effect=checkpoint,
+            ),
+        ):
+            first = executor.submit(
+                f.store.checkpoint_mutation_provider_effect,
+                reservation=peer,
+                effect_phase="restart",
+            )
+            self.assertTrue(entered.wait(5))
+            admission = executor.submit(
+                second.write_production_recipient,
+                expected=record.model_dump(mode="json"),
+                replacement=record.model_copy(update={"phase": "bootstrapping"}).model_dump(
+                    mode="json"
+                ),
+            )
+            try:
+                waiting = 0
+                deadline = time.monotonic() + 5
+                with f.store._engine.connect().execution_options(
+                    isolation_level="AUTOCOMMIT"
+                ) as connection:
+                    while time.monotonic() < deadline:
+                        waiting = int(
+                            connection.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_stat_activity WHERE application_name='lp3710-budget-admission' AND wait_event_type='Lock'"
+                                )
+                            )
+                            or 0
+                        )
+                        if waiting:
+                            break
+                        time.sleep(0.01)
+                self.assertGreater(waiting, 0, "Budget admission must reach a PostgreSQL lock wait")
+            finally:
+                release.set()
+            self.assertEqual(first.result(timeout=10).status, "updated")
+            with self.assertRaises(ValueError):
+                admission.result(timeout=10)
+        self.assertEqual(f.actions, [])
+
+
+class RealPostgresRecipientWriterTests(unittest.TestCase):
+    def test_repeatable_writer_cycles_use_real_custody(self) -> None:
+        from tests.test_production_recipient_writer_control import RecipientWriterControlTests
+
+        fixture = RecipientWriterControlTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_two_pause_resume_cycles_bind_each_resume_to_its_original_pause()
+
+
 class RealPostgresOdooTestingDrillTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests.test_odoo_testing_drill import TestingDrillScenario
@@ -12091,11 +12392,34 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             )
         previous_engine.dispose()
         cleaned: list[str] = []
+        import io
+        import sys
+        from contextlib import redirect_stdout
+
+        filestore = Path(self.enterContext(TemporaryDirectory())).resolve()
+        (filestore / previous).mkdir()
+        concrete_path = type(filestore)
+
+        def child_path(value: str) -> Path:
+            return filestore if value == "/volumes/data/filestore" else concrete_path(value)
+
+        filestore_failure = False
+        refuse_connected = False
 
         def docker(*arguments: str, stdin: bytes | None = None) -> bytes:
             if stdin is None:
-                cleaned.append(arguments[-1])
-                return b""
+                if filestore_failure:
+                    raise OSError("fixture filestore removal failure")
+                output = io.StringIO()
+                with (
+                    patch("pathlib.Path", side_effect=child_path),
+                    patch.object(sys, "argv", ["child", arguments[-1]]),
+                    redirect_stdout(output),
+                ):
+                    exec(arguments[-2], {})
+                if not (filestore / previous).exists():
+                    cleaned.append(arguments[-1])
+                return output.getvalue().encode()
             command = shlex.split(arguments[arguments.index("-c") + 1])
             database = command[command.index("-d") + 1]
             database = arguments[-1] if database == "$1" else database
@@ -12109,7 +12433,8 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                         .replace(':"database_name"', sql.Identifier(arguments[-1]).as_string(raw))
                         .replace(":'database_name'", sql.Literal(arguments[-1]).as_string(raw))
                     )
-                    connection.exec_driver_sql("SET statement_timeout = '250ms'")
+                    if refuse_connected:
+                        connection.exec_driver_sql("SET statement_timeout = '250ms'")
                     result = connection.exec_driver_sql(program)
                     value = result.scalar_one_or_none() if result.returns_rows else None
                     return ("" if value is None else str(value)).encode()
@@ -12122,7 +12447,14 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "discard_previous_drill"
         )
-        namespace: dict[str, Any] = {"re": re, "docker": docker}
+        receipt_root = Path(self.enterContext(TemporaryDirectory())).resolve()
+        namespace: dict[str, Any] = {
+            "re": re,
+            "docker": docker,
+            "Path": Path,
+            "json": json,
+            "os": os,
+        }
         exec(
             compile(ast.Module(body=[function], type_ignores=[]), "<drill-disposal>", "exec"),
             namespace,
@@ -12130,18 +12462,34 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         discard = namespace["discard_previous_drill"]
         generation = {"discard_drill_database": previous, "discard_copy_binding": witness}
         with self.assertRaises(RuntimeError):
-            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
         with previous_engine.connect() as connection:
             connection.execute(
                 text("UPDATE ir_config_parameter SET value = :witness"), {"witness": witness}
             )
         previous_engine.dispose()
         with previous_engine.connect():
+            refuse_connected = True
             with self.assertRaises(Exception):
-                discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+                discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
+        refuse_connected = False
         previous_engine.dispose()
         self.assertFalse(cleaned)
-        discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+        filestore_failure = True
+        with self.assertRaises(OSError):
+            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
+        filestore_failure = False
+        discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
+        self.assertEqual(cleaned, [previous])
+        # A legacy partial drop has no host receipt. Preserve its remaining
+        # filestore as visible attention, without blocking current resources.
+        (filestore / previous).mkdir()
+        legacy_state = Path(self.enterContext(TemporaryDirectory())).resolve()
+        self.assertEqual(
+            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, legacy_state),
+            "retained",
+        )
+        self.assertTrue((filestore / previous).is_dir())
         self.assertEqual(cleaned, [previous])
         with root_engine.connect() as connection:
             self.assertFalse(
@@ -12150,6 +12498,111 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                     {"name": previous},
                 ).scalar_one()
             )
+
+    def test_storage_cleanup_excludes_first_authority_insert_and_other_drill_admission(
+        self,
+    ) -> None:
+        from control_plane.odoo_testing_storage import prepare_drill_storage
+        from control_plane.odoo_testing_drill import lane_key
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="storage-worker",
+            claimed_at=datetime.fromtimestamp(scenario.now, timezone.utc).isoformat(),
+            lease_expires_at=datetime.fromtimestamp(scenario.now + 300, timezone.utc).isoformat(),
+        )
+        assert operation is not None
+        second = PostgresRecordStore(database_url=scenario.store.database_url)
+        self.addCleanup(second.close)
+        entered = threading.Event()
+        release = threading.Event()
+        waiting_remotely = threading.Event()
+        finish_remote = threading.Event()
+
+        def execute(*arguments: Any) -> dict[str, object]:
+            def send() -> None:
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("fixture cleanup dispatch")
+
+            arguments[3](send)
+            waiting_remotely.set()
+            if not finish_remote.wait(10):
+                raise TimeoutError("fixture remote completion")
+            return {"capacity": True, "disposals": []}
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            maintenance = pool.submit(
+                prepare_drill_storage,
+                scenario.store,
+                operation,
+                Path("."),
+                execute=execute,
+                now=scenario.now,
+                checkpoint=lambda: None,
+            )
+            self.assertTrue(entered.wait(5))
+            writer = pool.submit(
+                second.write_runtime_environment_record,
+                RuntimeEnvironmentRecord(
+                    scope="global",
+                    env={"EXAMPLE_INSERT": "changed"},
+                    updated_at=scenario.profile.updated_at,
+                ),
+            )
+            admission = pool.submit(
+                second.enqueue_odoo_testing_drill,
+                scenario.profile.product,
+                scenario.context,
+                lane_key(scenario.profile.product, scenario.context) + ":competing",
+                scenario.now,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                waiting = 0
+                while time.monotonic() < deadline:
+                    with scenario.store._engine.connect() as observer:
+                        waiting = int(
+                            observer.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'"
+                                )
+                            )
+                            or 0
+                        )
+                    if waiting >= 2:
+                        break
+                    time.sleep(0.01)
+                self.assertGreaterEqual(waiting, 2)
+                self.assertFalse(writer.done())
+                self.assertFalse(admission.done())
+            finally:
+                release.set()
+            self.assertTrue(waiting_remotely.wait(5))
+            try:
+                writer.result(timeout=5)
+                admission.result(timeout=5)
+                second.write_runtime_environment_record(
+                    scenario.runtime.model_copy(
+                        update={
+                            "env": {**scenario.runtime.env, "EXAMPLE_INSTANCE_SETTING": "changed"}
+                        }
+                    )
+                )
+            finally:
+                finish_remote.set()
+            from control_plane.odoo_testing_drill import DrillPrerequisite
+
+            with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_authority_changed"):
+                maintenance.result(timeout=10)
+        # The competing authority insert invalidates the completed capacity
+        # snapshot, so its old result cannot activate the worker's new database.
+        from control_plane.odoo_testing_drill import DrillPrerequisite
+
+        with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_capacity_unverified"):
+            scenario.store.activate_odoo_testing_drill(operation, scenario.now)
 
     def test_scheduler_receipt_merge_keeps_worker_admission_under_real_row_lock(self) -> None:
         from control_plane.odoo_testing_drill import (
@@ -12435,6 +12888,20 @@ class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
 
 
 class RealPostgresNeverServedTests(unittest.TestCase):
+    def test_usage_revocation_preserves_independent_protection_on_postgres(self) -> None:
+        from tests.test_testing_never_served import NeverServedHttpTests
+
+        for protection in NeverServedHttpTests.revocation_protections:
+            with self.subTest(protection=protection), _head_postgres_database() as url:
+                fixture = NeverServedHttpTests(
+                    "test_usage_revocation_preserves_independent_copy_and_resource_protection"
+                )
+                fixture.database_url = url
+                fixture.revocation_protections = (protection,)
+                result = unittest.TestResult()
+                fixture.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_lifetime_non_use_and_revocation_on_postgres(self) -> None:
         from tests.test_testing_never_served import NeverServedTestingTests
 
@@ -12525,3 +12992,8 @@ class RealPostgresNeverServedTests(unittest.TestCase):
             self.assertEqual(fixture.read().usage, "unknown")
             # The reverse order must refuse the stale negative, too.
             self.assertFalse(fixture.store.publish_collected_disposable_lane_safety(evidence))
+
+
+class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTransportTests):
+    def make_store(self) -> PostgresRecordStore:
+        return self.enterContext(_store_for_fresh_head_database())
