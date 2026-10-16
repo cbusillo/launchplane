@@ -139,6 +139,7 @@ class TestingHoldApplyRequest(BaseModel):
     instance: str
     mode: TestingHoldMode = "dry-run"
     hold: bool
+    rehearsal: bool = Field(default=False, exclude_if=lambda value: not value)
     purpose: Literal["staff_testing", "isolation_staging"] = "staff_testing"
     # The hold's reason when setting it; the audit reason when lifting it.
     reason: str
@@ -148,6 +149,8 @@ class TestingHoldApplyRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_request(self) -> TestingHoldApplyRequest:
         normalize_reviewed_lane_request(self, label="Testing hold")
+        if self.rehearsal and (self.purpose != "staff_testing" or self.activation_plan_sha256):
+            raise ValueError("A rehearsal request cannot use a staging or activation interlock.")
         return self
 
 
@@ -203,8 +206,16 @@ def _read_target_record(
         ) from error
 
 
-def _hold_terms(hold: DokployTargetStaffTestingHold | None) -> tuple[str, str] | None:
-    return None if hold is None else (hold.reason, hold.purpose)
+def _hold_terms(hold: DokployTargetStaffTestingHold | None) -> tuple[str, str, str] | None:
+    return (
+        None
+        if hold is None
+        else (
+            hold.reason,
+            hold.purpose,
+            hold.rehearsal.model_dump_json() if hold.rehearsal else "",
+        )
+    )
 
 
 def _desired_hold(
@@ -306,11 +317,7 @@ def build_testing_hold_plan(
                 "instance": request.instance,
                 "record_sha256_before": record_sha256_before,
                 "desired": _hold_terms(desired),
-                **(
-                    {"rehearsal": desired.rehearsal.model_dump()}
-                    if desired and desired.rehearsal
-                    else {}
-                ),
+                **({"rehearsal": True} if request.rehearsal else {}),
                 **(
                     {"activation_plan_sha256": request.activation_plan_sha256}
                     if request.activation_plan_sha256
@@ -336,7 +343,6 @@ def apply_testing_hold_plan(
     required_product_config_target: tuple[str, str, str] | None = None,
     activation_verified: bool = False,
     rehearsal: TestingHoldRehearsal | None = None,
-    require_exact_review: bool = False,
 ) -> TestingHoldPlan:
     """Re-plan against the current record, require the reviewed digest, write, read back.
 
@@ -350,10 +356,6 @@ def apply_testing_hold_plan(
     requested_terms = _hold_terms(replacement.policies.staff_testing_hold)
     applied = False
     if request.reviewed_plan_sha256 != plan.plan_sha256:
-        if require_exact_review:
-            raise TestingHoldStale(
-                "Reviewed testing hold plan no longer matches the lane's record."
-            )
         current = _read_target_record(
             record_store=record_store, context=request.context, instance=request.instance
         )

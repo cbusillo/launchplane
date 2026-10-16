@@ -8945,6 +8945,7 @@ def create_launchplane_fastapi_app(
             ) from error
         director_staff_hold = (
             director_agent_identity(identity)
+            and hold_request.rehearsal
             and hold_request.purpose == "staff_testing"
             and not hold_request.activation_plan_sha256
         )
@@ -9032,7 +9033,10 @@ def create_launchplane_fastapi_app(
         )
         typed_store = cast(control_plane_testing_lane_hold.TestingHoldStore, record_store)
         actor = launchplane_identity_actor(identity)
-        from control_plane.testing_hold_rehearsal import qualify_testing_hold_rehearsal
+        from control_plane.testing_hold_rehearsal import (
+            qualify_testing_hold_rehearsal,
+            prepare_testing_hold_rehearsal_apply,
+        )
 
         def rehearsal_provenance(*, planning: bool = False) -> TestingHoldRehearsal | None:
             if not director_staff_hold:
@@ -9114,9 +9118,7 @@ def create_launchplane_fastapi_app(
             return replay_response
         await verify_activation_interlock()
         rehearsal = rehearsal_provenance()
-        qualified_staff_hold = director_staff_hold and (
-            not hold_request.hold or rehearsal is not None
-        )
+        qualified_staff_hold = director_staff_hold and rehearsal is not None
         try:
             with (
                 record_store.serialize_disposable_testing_resources()
@@ -9131,6 +9133,51 @@ def create_launchplane_fastapi_app(
                         actor,
                         resolved_control_plane_root,
                         inspect_provider=False,
+                    )
+                if qualified_staff_hold:
+                    assert isinstance(record_store, PostgresRecordStore)
+                    rehearsal = rehearsal_provenance()
+                    assert rehearsal is not None
+                    applied_plan, expected, replacement = prepare_testing_hold_rehearsal_apply(
+                        record_store,
+                        hold_request,
+                        actor,
+                        rehearsal,
+                    )
+                    response = accepted_evidence_response(
+                        trace_id=trace_id,
+                        records=records,
+                        result=applied_plan.model_dump(mode="json"),
+                    )
+                    write_status, receipt = record_store.commit_testing_hold_rehearsal(
+                        product=hold_request.product,
+                        expected_record=expected,
+                        replacement_record=replacement,
+                        mutation=DbOnlyMutationRequest(
+                            scope=idempotency_scope(identity),
+                            route_path=route_path,
+                            idempotency_key=normalized_idempotency_key,
+                            request_fingerprint=payload_fingerprint,
+                            lease_owner=trace_id,
+                            response_status_code=202,
+                            response_trace_id=trace_id,
+                            response_payload=response.model_dump(mode="json", exclude_none=True),
+                        ),
+                    )
+                    if write_status == "written":
+                        return response
+                    if write_status == "replayed":
+                        return replay_idempotent_response(
+                            trace_id=trace_id, stored_record=receipt, route_path=route_path
+                        )
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code={
+                            "idempotency_conflict": "idempotency_key_reused",
+                            "reconciliation_required": "mutation_reconciliation_required",
+                        }.get(write_status, "mutation_in_progress"),
+                        message="The original testing hold mutation must be retained and reconciled.",
                     )
                 applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
                     record_store=typed_store,
@@ -9147,9 +9194,14 @@ def create_launchplane_fastapi_app(
                         hold_request.instance,
                     ),
                     activation_verified=activated_interlock,
-                    rehearsal=rehearsal_provenance() if qualified_staff_hold else None,
-                    require_exact_review=qualified_staff_hold,
                 )
+        except DokployTargetRecordChanged as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Testing hold changed before its atomic write.",
+            ) from error
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,

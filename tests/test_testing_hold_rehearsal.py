@@ -9,14 +9,24 @@ from fastapi import FastAPI
 from httpx2 import Response
 
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
+from control_plane.http_routes.mutation_support import idempotency_scope
+from control_plane.service_auth import (
+    BearerIdentityConfig,
+    LaunchplaneAuthzPolicy,
+    LocalOperatorIdentity,
+)
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.testing_lane_hold import TESTING_HOLD_APPLY_ROUTE
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
 from tests.support.disposable_lanes import record_safety, prepare_held_rebuild
 from tests.support.http import request
 from tests.support.auth import scoped_agent_transport
+from tests.support.stores import sqlite_database_url
+from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 from tests.http_app_test_support import _RejectingVerifier
 from tests import test_testing_lane_hold as hold_fixtures
 from tests.test_testing_lane_hold import (
@@ -29,17 +39,28 @@ from tests.test_testing_lane_hold import (
 
 
 class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
+    def database_url(self) -> str:
+        return sqlite_database_url(self.root / "state.db")
+
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        self.store = hold_fixtures.TestingHoldRouteTests._store(self, self.root)  # type: ignore[arg-type]
-        # SQLite proves HTTP behavior only, not PostgreSQL cross-connection exclusion.
-        guard = patch.object(
-            self.store, "serialize_disposable_testing_resources", side_effect=nullcontext
+        self.store = PostgresRecordStore(database_url=self.database_url())
+        self.store.ensure_schema()
+        self.addCleanup(self.store.close)
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(_odoo_profile_payload_with_prod_lane())
         )
-        guard.start()
-        self.addCleanup(guard.stop)
+        hold_fixtures._seed_target(self.store)
+        hold_fixtures._seed_target(self.store, instance="prod")
+        # SQLite proves HTTP behavior only, not PostgreSQL cross-connection exclusion.
+        if self.store.database_dialect_name != "postgresql":
+            guard = patch.object(
+                self.store, "serialize_disposable_testing_resources", side_effect=nullcontext
+            )
+            guard.start()
+            self.addCleanup(guard.stop)
         self.store.write_dokploy_target_id_record(
             DokployTargetIdRecord(
                 context=_CONTEXT,
@@ -85,7 +106,7 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
             self.app,
             "POST",
             TESTING_HOLD_APPLY_ROUTE,
-            payload=payload,
+            payload={"rehearsal": True, **payload},
             headers={
                 "Authorization": "Bearer fixture-token",
                 "Idempotency-Key": key,
@@ -366,3 +387,129 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 409, result.text)
         self.assertIsNotNone(_read_hold(self.store))
         self.assertEqual(self.store.list_product_reconcile_requests(), ())
+
+    async def test_no_original_hold_cannot_request_a_new_reconcile(self) -> None:
+        denied = await self.reviewed(hold=False, key="no-original-hold")
+        self.assertEqual(denied.status_code, 409, denied.text)
+        self.assertIsNone(_read_hold(self.store))
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+
+    async def test_default_hold_stays_ordinary_even_on_qualified_unused_testing(self) -> None:
+        self.app = self.make_app(explicit_grant=True)
+        plan = await self.post(_payload() | {"rehearsal": False})
+        ordinary = await self.post(
+            _payload(mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"])
+            | {"rehearsal": False},
+            "ordinary-staff",
+        )
+        self.assertEqual(ordinary.status_code, 202, ordinary.text)
+        hold = _read_hold(self.store)
+        assert hold is not None
+        self.assertIsNone(hold.rehearsal)
+        denied = await self.reviewed(hold=False, key="ordinary-cannot-lift")
+        self.assertEqual(denied.status_code, 409, denied.text)
+        self.assertEqual(_read_hold(self.store), hold)
+
+    async def test_ordinary_reassertion_with_identical_reason_removes_rehearsal(self) -> None:
+        await self.set_hold()
+        hold_fixtures._apply(self.store, actor="staff-administrator")
+        hold = _read_hold(self.store)
+        assert hold is not None
+        self.assertEqual(hold.recorded_by, "staff-administrator")
+        self.assertIsNone(hold.rehearsal)
+        denied = await self.reviewed(hold=False, key="actual-use")
+        self.assertEqual(denied.status_code, 409, denied.text)
+        self.assertEqual(_read_hold(self.store), hold)
+
+    async def test_provider_only_alias_and_current_provider_mismatch_refuse(self) -> None:
+        await self.set_hold()
+        for instance, target_id in (("prod", "rehearsal-target"), ("testing", "different-target")):
+            with self.subTest(instance=instance):
+                if instance == "testing":
+                    prior = self.store.read_provider_target_record(
+                        context_name=_CONTEXT, instance_name="prod"
+                    )
+                    self.store.write_provider_target_record(
+                        prior.model_copy(update={"target_id": "unrelated-production-target"})
+                    )
+                self.store.write_provider_target_record(
+                    ProviderTargetRecord(
+                        context=_CONTEXT,
+                        instance=instance,
+                        provider_id="dokploy",
+                        target_category="compose",
+                        provider_target_type="compose",
+                        target_id=target_id,
+                        display_name="Fixture recipient",
+                        updated_at=_TIMESTAMP,
+                    )
+                )
+                denied = await self.reviewed(hold=False, key=instance)
+                self.assertEqual(denied.status_code, 409, denied.text)
+                self.assertIsNotNone(_read_hold(self.store))
+                self.assertEqual(self.store.list_product_reconcile_requests(), ())
+
+    async def test_failure_before_atomic_commit_preserves_hold_and_retries_original_key(
+        self,
+    ) -> None:
+        await self.set_hold()
+        before = _read_hold(self.store)
+        plan = await self.post(_payload(hold=False))
+        payload = _payload(
+            hold=False, mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+        )
+        with patch.object(
+            self.store,
+            "_fold_product_reconcile_request",
+            side_effect=RuntimeError("fixture DB failure"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "fixture DB failure"):
+                await self.post(payload, "atomic-lift")
+        self.assertEqual(_read_hold(self.store), before)
+        self.assertEqual(self.store.list_product_reconcile_requests(), ())
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope=idempotency_scope(
+                    LocalOperatorIdentity(subject="director-fixture", token_label="fixture")
+                ),
+                route_path=TESTING_HOLD_APPLY_ROUTE,
+                idempotency_key="atomic-lift",
+            )
+        )
+        retried = await self.post(payload, "atomic-lift")
+        self.assertEqual(retried.status_code, 202, retried.text)
+        self.assertTrue(retried.json()["result"]["reconcile_requested"])
+
+    async def test_lost_response_after_atomic_commit_replays_after_safety_expiry(self) -> None:
+        await self.set_hold()
+        plan = await self.post(_payload(hold=False))
+        payload = _payload(
+            hold=False, mode="apply", reviewed_plan_sha256=plan.json()["result"]["plan_sha256"]
+        )
+        original = self.store.commit_testing_hold_rehearsal
+
+        def lost_response(**kwargs: object) -> object:
+            original(**kwargs)  # type: ignore[arg-type]
+            raise RuntimeError("fixture lost response")
+
+        with patch.object(self.store, "commit_testing_hold_rehearsal", side_effect=lost_response):
+            with self.assertRaisesRegex(RuntimeError, "fixture lost response"):
+                await self.post(payload, "lost-receipt")
+        self.assertIsNone(_read_hold(self.store))
+        queued = self.store.list_product_reconcile_requests()
+        self.assertTrue(queued)
+        evidence = self.store.read_disposable_lane_safety(_PRODUCT, _CONTEXT, "testing")
+        assert evidence is not None
+        self.store.write_disposable_lane_safety(
+            evidence.model_copy(
+                update={
+                    "observed_at": evidence.observed_at - timedelta(hours=1),
+                    "expires_at": evidence.expires_at - timedelta(hours=1),
+                }
+            )
+        )
+        replayed = await self.post(payload, "lost-receipt")
+        self.assertEqual(replayed.status_code, 202, replayed.text)
+        self.assertTrue(replayed.json()["replayed"])
+        self.assertTrue(replayed.json()["result"]["reconcile_requested"])
+        self.assertEqual(self.store.list_product_reconcile_requests(), queued)

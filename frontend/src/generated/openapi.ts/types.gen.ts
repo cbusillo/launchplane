@@ -498,7 +498,7 @@ export type DokployTargetStaffTestingHold = {
     reason: string;
     recorded_at: string;
     recorded_by: string;
-    rehearsal: TestingHoldRehearsal | null;
+    rehearsal?: TestingHoldRehearsal | null;
 };
 
 export type DriverActionDescriptor = {

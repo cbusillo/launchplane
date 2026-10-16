@@ -5630,7 +5630,8 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -78760,6 +78761,11 @@
                   "reason": {
                     "title": "Reason",
                     "type": "string"
+                  },
+                  "rehearsal": {
+                    "default": false,
+                    "title": "Rehearsal",
+                    "type": "boolean"
                   },
                   "reviewed_plan_sha256": {
                     "default": "",

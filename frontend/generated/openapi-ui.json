@@ -11408,14 +11408,14 @@
               {
                 "type": "null"
               }
-            ]
+            ],
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
           "reason",
           "recorded_at",
-          "recorded_by",
-          "rehearsal"
+          "recorded_by"
         ],
         "title": "DokployTargetStaffTestingHold",
         "type": "object"

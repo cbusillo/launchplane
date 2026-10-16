@@ -96,7 +96,9 @@ class DokployTargetStaffTestingHold(BaseModel):
     recorded_by: str = ""
     recorded_at: str = ""
     rehearsal: TestingHoldRehearsal | None = Field(
-        default=None, exclude_if=lambda value: value is None
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
     )
 
     @model_validator(mode="after")

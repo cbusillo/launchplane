@@ -271,7 +271,12 @@ class TestingSeparationClientTests(unittest.TestCase):
     ) -> None:
         self._exercise_lift("staff_testing")
 
-    def _exercise_lift(self, purpose: str) -> None:
+    def test_require_rehearsal_refuses_an_ordinary_hold_before_apply(self) -> None:
+        self._exercise_lift("staff_testing", rehearsal=False, setting=True)
+
+    def _exercise_lift(
+        self, purpose: str, *, rehearsal: bool = True, setting: bool = False
+    ) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
         )
@@ -280,6 +285,16 @@ class TestingSeparationClientTests(unittest.TestCase):
             helper = root / "launchplane-write-action.py"
             helper.touch()
             evidence = root / "lift.json"
+            held_record = {
+                "reason": "private-fixture",
+                "rehearsal": {
+                    "binding_sha256": "b" * 64,
+                    "target_updated_at": "private-stamp",
+                    "target_source_label": "private-source",
+                }
+                if rehearsal
+                else None,
+            }
             call = Mock(
                 side_effect=[
                     {
@@ -288,14 +303,7 @@ class TestingSeparationClientTests(unittest.TestCase):
                         "result": {
                             "plan_sha256": "a" * 64,
                             "reconcile_requested": False,
-                            "before": {
-                                "reason": "private-fixture",
-                                "rehearsal": {
-                                    "binding_sha256": "b" * 64,
-                                    "target_updated_at": "private-stamp",
-                                    "target_source_label": "private-source",
-                                },
-                            },
+                            "after" if setting else "before": held_record,
                         },
                     },
                     {
@@ -304,6 +312,7 @@ class TestingSeparationClientTests(unittest.TestCase):
                         "result": {
                             "read_back_matches": True,
                             "reconcile_requested": purpose == "staff_testing",
+                            "after" if setting else "before": held_record,
                         },
                     },
                 ]
@@ -331,13 +340,23 @@ class TestingSeparationClientTests(unittest.TestCase):
                 "--hold-purpose",
                 purpose,
             ]
+            if purpose == "staff_testing":
+                common.append("--require-rehearsal")
             output = io.StringIO()
             with (
                 patch("runpy.run_path", return_value=transport),
-                patch("sys.argv", ["client", "lift-dry-run", *common]),
+                patch(
+                    "sys.argv", ["client", "hold-dry-run" if setting else "lift-dry-run", *common]
+                ),
                 redirect_stdout(output),
             ):
-                self.assertEqual(client["main"](), 0)
+                status = client["main"]()
+            if not rehearsal:
+                self.assertEqual(status, 1)
+                self.assertEqual(call.call_count, 1)
+                self.assertFalse(evidence.exists())
+                return
+            self.assertEqual(status, 0, output.getvalue())
             self.assertNotIn("private-fixture", output.getvalue())
             self.assertEqual(
                 json.loads(evidence.read_text())["result"]["before"]["rehearsal"]["binding_sha256"],

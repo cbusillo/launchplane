@@ -54,6 +54,7 @@ def main() -> int:
     )
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
+    parser.add_argument("--require-rehearsal", action="store_true")
     parser.add_argument("--idempotency-key", default="")
     parser.add_argument("--config")
     parser.add_argument("--env-config")
@@ -96,6 +97,7 @@ def main() -> int:
             instance="testing",
             mode="dry-run",
             hold=not lifting,
+            rehearsal=args.require_rehearsal,
             purpose=args.hold_purpose,
             activation_plan_sha256=args.activation_plan_sha256,
             reason=args.reason or "Inspect testing interlock.",
@@ -133,6 +135,7 @@ def main() -> int:
                         "status": "verified",
                         "held": held.hold is not None,
                         "purpose": held.hold.purpose if held.hold else None,
+                        "rehearsal": bool(held.hold and held.hold.rehearsal),
                         "trace_id": transport["public_trace_id"](response["trace_id"]),
                     }
                 )
@@ -170,6 +173,10 @@ def main() -> int:
         if response["status"] != "accepted":
             raise ValueError("Operation was not accepted.")
         result = response["result"]
+        rehearsal_hold = result.get("before" if lifting else "after") if holding else None
+        has_rehearsal = isinstance(rehearsal_hold, dict) and bool(rehearsal_hold.get("rehearsal"))
+        if holding and args.require_rehearsal and not has_rehearsal:
+            raise ValueError("This request did not qualify as a disposable rehearsal hold.")
         if holding and (
             result.get("reconcile_requested")
             is not (
@@ -229,7 +236,14 @@ def main() -> int:
                     "mode": args.mode,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
                     "deployment_requested": False,
-                    **({"reconcile_requested": result["reconcile_requested"]} if holding else {}),
+                    **(
+                        {
+                            "reconcile_requested": result["reconcile_requested"],
+                            "rehearsal": has_rehearsal,
+                        }
+                        if holding
+                        else {}
+                    ),
                 }
             )
         )
