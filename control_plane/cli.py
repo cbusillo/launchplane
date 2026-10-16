@@ -49,6 +49,7 @@ from control_plane.cli_dokploy_targets import (
     target_id_map,
 )
 from control_plane.cli_ci import register_ci_commands
+from control_plane.cli_local_consumer import register_local_consumer_commands
 from control_plane.cli_action_pins import register_action_pin_commands
 from control_plane.cli_dependency_health import register_dependency_health_commands
 from control_plane.cli_shared import DATABASE_URL_ENV_KEYS as _DATABASE_URL_ENV_KEYS
@@ -3532,6 +3533,7 @@ register_runner_lane_commands(cast(click.Group, work_graph))  # type: ignore[red
 register_preview_workflow_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_work_graph_core_commands(cast(click.Group, work_graph))  # type: ignore[redundant-cast]
 register_ci_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
+register_local_consumer_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_action_pin_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_dependency_health_commands(cast(click.Group, main))  # type: ignore[redundant-cast]
 register_every_code_commands(cast(click.Group, main), store_factory=_store)  # type: ignore[redundant-cast]

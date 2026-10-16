@@ -55,6 +55,7 @@
     "laneServiceRestart": "docs/lane-service-restart.md",
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
+    "testingLocalConsumer": "docs/testing-local-consumer.md",
     "odooTestingWalkthrough": "docs/odoo-testing-walkthrough.md",
     "githubActionsSecurity": "docs/github-actions-security.md",
     "dependencyHealthContract": "docs/dependency-health-contract.md",
