@@ -21,6 +21,7 @@ from tests import test_product_retirement_previews as integrated_retirement_test
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
+from tests import test_testing_hold_rehearsal as testing_hold_rehearsal
 from tests import test_merge_train_historical_completion_storage as historical_storage_tests
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -1113,6 +1114,14 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
 class RealPostgresIntegratedProductRetirementTests(
     integrated_retirement_tests.IntegratedProductRetirementTests
 ):
+    def database_url(self) -> str:
+        return self.enterContext(_head_postgres_database())
+
+
+@unittest.skipUnless(
+    os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
+)
+class RealPostgresTestingHoldRehearsalTests(testing_hold_rehearsal.DirectorHoldRehearsalTests):
     def database_url(self) -> str:
         return self.enterContext(_head_postgres_database())
 
