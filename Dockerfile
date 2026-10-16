@@ -41,7 +41,7 @@ RUN github_cli_x_mod_version=v0.41.0 \
     && go version -m /go/bin/gh | grep -F "golang.org/x/text" | grep -F "${GITHUB_CLI_X_TEXT_VERSION}" \
     && go version -m /go/bin/gh | grep -F "golang.org/x/net" | grep -F "${GITHUB_CLI_X_NET_VERSION}"
 
-FROM ghcr.io/aquasecurity/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e AS artifact-scanner
+FROM ghcr.io/aquasecurity/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222 AS artifact-scanner
 
 FROM mirror.gcr.io/library/python:3.14-slim AS runtime
 
