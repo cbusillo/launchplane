@@ -344,7 +344,11 @@ class TestingDrillTests(TestingDrillScenario):
 
     def test_walkthrough_keeps_known_use_protected_on_a_down_lane(self) -> None:
         from types import SimpleNamespace
-        from control_plane.odoo_walkthrough import plan_walkthrough
+        from control_plane.odoo_walkthrough import (
+            WalkthroughPrerequisite,
+            WalkthroughPrerequisiteError,
+            plan_walkthrough,
+        )
         from control_plane.contracts.odoo_walkthrough import OdooWalkthroughRequest
         from tests.support.down_lanes import record_lane_health
 
@@ -363,7 +367,7 @@ class TestingDrillTests(TestingDrillScenario):
             patch("control_plane.odoo_walkthrough.read_drill_recent_signins", return_value=False),
             patch("control_plane.odoo_walkthrough.connect_runtime") as connection,
         ):
-            with self.assertRaises(DrillSkipped):
+            with self.assertRaises(WalkthroughPrerequisiteError) as caught:
                 plan_walkthrough(
                     self.store,
                     Path("."),
@@ -375,6 +379,7 @@ class TestingDrillTests(TestingDrillScenario):
                     ),
                     "fixture-agent",
                 )
+            self.assertEqual(caught.exception.code, WalkthroughPrerequisite.USE)
             connection.assert_not_called()
 
     def assert_down_lane_drill_admitted(self, usage: str) -> None:

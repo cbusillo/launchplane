@@ -2651,6 +2651,82 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 status_code=409,
             )
 
+    def plan_stack_child_merge_tree(
+        self,
+        *,
+        repository: str,
+        child_head_sha: str,
+        expected_parent_head_sha: str,
+        protected_base_ref: str,
+        collapse_id: str,
+        child_pull_request_number: int,
+    ) -> str:
+        """Construct the immutable merge inputs before any feature-branch effect."""
+        repository_path = _repository_path(repository)
+        identity = sha256(
+            json.dumps(
+                [collapse_id, expected_parent_head_sha, child_head_sha], separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        reference = merge_train_construction_ref(f"stack-collapse:{identity}")
+        lineage = MergeTrainEffectLineage(
+            repository=repository,
+            base_branch=protected_base_ref,
+            collapse_id=collapse_id,
+        )
+        executor = self.semantic_effect_executor
+        executor.prepare_candidate_ref(
+            CandidateRefPrepareEffect(
+                lineage=lineage,
+                candidate_ref=reference,
+                base_sha=expected_parent_head_sha,
+            )
+        )
+        try:
+            outcome = executor.merge_candidate_head(
+                CandidateHeadMergeEffect(
+                    lineage=lineage,
+                    candidate_ref=reference,
+                    rolling_parent_sha=expected_parent_head_sha,
+                    pull_request_number=child_pull_request_number,
+                    head_sha=child_head_sha,
+                )
+            )
+            if outcome.result_sha is None:
+                observed_sha, tree_sha = _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=_base_branch_sha(
+                        transport=self.transport,
+                        repository_path=repository_path,
+                        base_branch=_branch_name_from_ref(reference),
+                    ),
+                )
+                if observed_sha != expected_parent_head_sha or not self.branch_contains_commit(
+                    repository=repository,
+                    branch_ref=observed_sha,
+                    commit_sha=child_head_sha,
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "Stack construction no-op does not prove the planned inputs.",
+                        status_code=409,
+                    )
+                return tree_sha
+            return _validated_merge_commit_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                commit_sha=outcome.result_sha,
+                expected_parent_sha=expected_parent_head_sha,
+                expected_head_sha=child_head_sha,
+            )[1]
+        finally:
+            executor.delete_candidate_ref(
+                CandidateRefDeleteEffect(
+                    lineage=lineage,
+                    candidate_ref=reference,
+                )
+            )
+
     def merge_stack_child_into_parent(
         self,
         *,
@@ -2659,6 +2735,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         expected_parent_head_sha: str,
         parent_head_ref: str,
         protected_base_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -2684,6 +2761,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 "Stack collapse parent branch moved outside the stored plan.",
                 status_code=409,
             )
+        if expected_merge_tree_sha:
+            self._require_stack_child_head(
+                repository_path, child_pull_request_number, child_head_sha
+            )
         # A fresh plan may include a merge carried by retired execution or a
         # lost checkpoint. Prove inclusion at the immutable, currently expected head;
         # an older collapse marker is not authority for this plan.
@@ -2692,6 +2773,18 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             branch_ref=current_parent_sha,
             commit_sha=child_head_sha,
         ):
+            if (
+                expected_merge_tree_sha
+                and _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=current_parent_sha,
+                )[1]
+                != expected_merge_tree_sha
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Stack merge tree differs from the saved plan.", status_code=409
+                )
             return current_parent_sha
         payload = self.transport.request(
             method="POST",
@@ -2710,7 +2803,20 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError("GitHub stack merge response must be a JSON object.")
-        return _required_text(payload.get("sha"), "GitHub stack merge response requires sha.")
+        result_sha = _required_text(payload.get("sha"), "GitHub stack merge response requires sha.")
+        if expected_merge_tree_sha:
+            _, tree_sha = _validated_merge_commit_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                commit_sha=result_sha,
+                expected_parent_sha=expected_sha,
+                expected_head_sha=child_head_sha,
+            )
+            if tree_sha != expected_merge_tree_sha:
+                raise MergeTrainGitHubStaleHeadError(
+                    "Stack merge tree differs from the saved plan.", status_code=409
+                )
+        return result_sha
 
     def find_stack_child_merge_commit(
         self,
@@ -2719,6 +2825,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -2749,24 +2856,44 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         message = str(commit.get("message") or "").strip()
         parents = payload.get("parents")
         parent_shas = (
-            {str(parent.get("sha") or "").strip() for parent in parents if isinstance(parent, dict)}
+            [parent.get("sha") if isinstance(parent, dict) else None for parent in parents]
             if isinstance(parents, list)
-            else set()
+            else []
         )
+        tree = commit.get("tree")
+        tree_sha = tree.get("sha") if isinstance(tree, dict) else None
         expected_message = _stack_collapse_commit_message(
             collapse_id=collapse_id,
             child_pull_request_number=child_pull_request_number,
             parent_pull_request_number=parent_pull_request_number,
         )
-        if message == expected_message and parent_shas == {
-            expected_parent_sha,
-            _required_value(child_head_sha, "Stack collapse child head SHA is required."),
-        }:
+        if (
+            expected_merge_tree_sha
+            and payload.get("sha") == current_parent_sha
+            and message == expected_message
+            and parent_shas == [expected_parent_sha, child_head_sha]
+            and tree_sha == expected_merge_tree_sha
+        ):
+            self._require_stack_child_head(
+                repository_path, child_pull_request_number, child_head_sha
+            )
             return current_parent_sha
         raise MergeTrainGitHubStaleHeadError(
             "Stack collapse parent branch moved outside the stored plan.",
             status_code=409,
         )
+
+    def _require_stack_child_head(
+        self, repository_path: str, number: int, expected_sha: str
+    ) -> None:
+        observed = self._pull_request_head_sha(
+            pull_request_path=f"/repos/{repository_path}/pulls/{number}"
+        )
+        if observed != expected_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Stack child moved outside the saved merge plan.",
+                status_code=409,
+            )
 
     def _create_or_reset_reference(self, *, repository_path: str, reference: str, sha: str) -> None:
         normalized_sha = _required_value(sha, "GitHub reference SHA is required.")
@@ -2873,6 +3000,7 @@ class LegacyMergeTrainEffectExecutor:
     def merge_stack_child(self, effect: StackChildMergeEffect) -> str:
         return self.client.merge_stack_child_into_parent(
             repository=effect.lineage.repository,
+            expected_merge_tree_sha=effect.expected_merge_tree_sha,
             child_head_sha=effect.child_head_sha,
             expected_parent_head_sha=effect.expected_parent_head_sha,
             parent_head_ref=effect.parent_head_ref,
@@ -3501,7 +3629,12 @@ class GitHubMergeTrainSnapshotReader:
                     return False
                 current = record.expected_head_sha
             else:
-                parent, child = stack_edges[current]
+                parent, child, expected_tree = stack_edges[current]
+                tree = commit.get("tree")
+                if expected_tree and (
+                    not isinstance(tree, dict) or tree.get("sha") != expected_tree
+                ):
+                    return False
                 parents = commit.get("parents")
                 if not isinstance(parents, list) or [
                     p.get("sha") if isinstance(p, dict) else None for p in parents
@@ -3551,7 +3684,9 @@ class GitHubMergeTrainSnapshotReader:
             and editor.get("databaseId") in policy.enqueue.trusted_automation_github_user_ids
         )
 
-    def _handoff_stack_edges(self, repository_path: str, number: int) -> dict[str, tuple[str, str]]:
+    def _handoff_stack_edges(
+        self, repository_path: str, number: int
+    ) -> dict[str, tuple[str, str, str]]:
         from control_plane.contracts.merge_train_stack_collapse import (
             MergeTrainStackCollapsePlanRecord,
         )
@@ -3587,7 +3722,7 @@ class GitHubMergeTrainSnapshotReader:
         groups: dict[str, list[MergeTrainStackCollapsePlanRecord]] = {}
         for record in records:
             groups.setdefault(record.plan.collapse_id, []).append(record)
-        edges: dict[str, tuple[str, str]] = {}
+        edges: dict[str, tuple[str, str, str]] = {}
         for group in groups.values():
             latest = latest_merge_train_stack_collapse_progress_record(tuple(group))
             if (
@@ -3612,16 +3747,35 @@ class GitHubMergeTrainSnapshotReader:
             ):
                 continue
             for mutation in plan.mutations:
-                if (
-                    mutation.status != "mutated"
-                    or not mutation.merge_commit_sha
-                    or mutation.parent_pull_request_number != number
-                ):
+                if mutation.parent_pull_request_number != number:
                     continue
-                edge = (mutation.expected_parent_head_sha, mutation.child_head_sha)
-                if mutation.merge_commit_sha in edges and edges[mutation.merge_commit_sha] != edge:
+                merge_sha = mutation.merge_commit_sha if mutation.status == "mutated" else ""
+                if mutation.status == "planned" and mutation.expected_merge_tree_sha:
+                    try:
+                        merge_sha = GitHubMergeTrainClient(
+                            transport=self.transport
+                        ).find_stack_child_merge_commit(
+                            repository=repository_path,
+                            child_head_sha=mutation.child_head_sha,
+                            expected_parent_head_sha=mutation.expected_parent_head_sha,
+                            parent_head_ref=mutation.parent_head_ref,
+                            expected_merge_tree_sha=mutation.expected_merge_tree_sha,
+                            collapse_id=plan.collapse_id,
+                            child_pull_request_number=mutation.child_pull_request_number,
+                            parent_pull_request_number=mutation.parent_pull_request_number,
+                        )
+                    except MergeTrainGitHubStaleHeadError:
+                        continue
+                if not merge_sha:
+                    continue
+                edge = (
+                    mutation.expected_parent_head_sha,
+                    mutation.child_head_sha,
+                    mutation.expected_merge_tree_sha,
+                )
+                if merge_sha in edges and edges[merge_sha] != edge:
                     return {}
-                edges[mutation.merge_commit_sha] = edge
+                edges[merge_sha] = edge
         return edges
 
     def _safe_dependency_update_class(

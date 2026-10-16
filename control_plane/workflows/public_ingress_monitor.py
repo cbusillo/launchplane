@@ -267,6 +267,7 @@ class PublicIngressMonitorTarget:
     private_endpoint_key: str = ""
     private_endpoint_sha256: str = ""
     private_endpoint_material_sha256: str = ""
+    private_tls_ca_pem: str = ""
     route_binding_sha256: str = ""
     recovery_observation_threshold: int = 1
     resolution_failure_code: PublicIngressFailureCode | None = None
@@ -587,6 +588,7 @@ def _health_check_monitor_target(
     resolution_failure_summary = ""
     private_endpoint_sha256 = ""
     private_endpoint_material_sha256 = ""
+    private_tls_ca_pem = ""
     if check.kind == "public_http":
         base_url = lane.base_url.strip().rstrip("/")
         health_url = check.url.strip() or _monitor_health_url(
@@ -611,6 +613,7 @@ def _health_check_monitor_target(
             resolution_failure_summary = resolution.summary
             private_endpoint_sha256 = resolution.authority_sha256
             private_endpoint_material_sha256 = resolution.material_authority_sha256
+            private_tls_ca_pem = resolution.tls_ca_pem
         if not health_url and not resolution_failure_code:
             return None
     else:
@@ -645,6 +648,7 @@ def _health_check_monitor_target(
         private_endpoint_key=check.private_endpoint_key,
         private_endpoint_sha256=private_endpoint_sha256,
         private_endpoint_material_sha256=private_endpoint_material_sha256,
+        private_tls_ca_pem=private_tls_ca_pem,
         resolution_failure_code=resolution_failure_code,
         resolution_failure_summary=resolution_failure_summary,
     )
@@ -657,6 +661,7 @@ class PrivateHealthEndpointResolution:
     summary: str = ""
     authority_sha256: str = ""
     material_authority_sha256: str = ""
+    tls_ca_pem: str = ""
 
 
 def _resolved_private_health_url(
@@ -709,6 +714,7 @@ def _resolved_private_health_url(
         url=endpoint.url,
         authority_sha256=authority_sha256,
         material_authority_sha256=material_authority_sha256,
+        tls_ca_pem=endpoint.tls_ca_pem,
     )
 
 
@@ -722,6 +728,7 @@ def _private_health_endpoint_material_sha256(endpoint: PrivateHealthEndpointReco
                 "instance": endpoint.instance,
                 "url": endpoint.url,
                 "status": endpoint.status,
+                **({"tls_ca_pem": endpoint.tls_ca_pem} if endpoint.tls_ca_pem else {}),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -779,11 +786,22 @@ def run_public_ingress_monitor_once(
 
     def probe(target: PublicIngressMonitorTarget) -> PublicIngressObservationRecord:
         _check_monitor_cancelled(should_stop)
+        target_http_get = private_get if target.check_kind == "private_http" else public_get
+        if (
+            target.check_kind == "private_http"
+            and target.private_tls_ca_pem
+            and private_http_get is None
+        ):
+
+            def scoped_private_get(url: str, timeout: int) -> HttpObservation:
+                return fetch_private_health_url(url, timeout, tls_ca_pem=target.private_tls_ca_pem)
+
+            target_http_get = scoped_private_get
         return check_public_ingress_target(
             target=target,
             checked_at=observed_at,
             timeout_seconds=timeout_seconds,
-            http_get=(private_get if target.check_kind == "private_http" else public_get),
+            http_get=target_http_get,
             tls_get=tls_probe,
             dns_get=dns_get,
         )
@@ -2444,12 +2462,19 @@ def fetch_public_ingress_url(url: str, timeout_seconds: int) -> HttpObservation:
     )
 
 
-def fetch_private_health_url(url: str, timeout_seconds: int) -> HttpObservation:
+def fetch_private_health_url(
+    url: str, timeout_seconds: int, *, tls_ca_pem: str = ""
+) -> HttpObservation:
+    tls_context = None
+    if tls_ca_pem:
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        tls_context.load_verify_locations(cadata=tls_ca_pem)
     response = request_private_http(
         url,
         headers={"User-Agent": USER_AGENT},
         timeout_seconds=timeout_seconds,
-        max_redirects=MAX_REDIRECTS,
+        max_redirects=0 if tls_ca_pem else MAX_REDIRECTS,
+        ssl_context=tls_context,
     )
     payload: object = None
     if response.body and "json" in response.header("content-type").lower():

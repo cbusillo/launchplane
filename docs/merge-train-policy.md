@@ -480,14 +480,36 @@ Checks on the refreshed current head must still pass before admission.
 
 The same carry applies to active stack collapses, including intermediate parents:
 the current policy binding, latest persisted progress and exact merge parents
-must prove each edge back to the handed-off head. The admission reader never
-promotes a planned mutation from a provider commit alone. If a merge succeeded before its mutated progress was persisted, its
-unproven new head needs a fresh checked `gh-pr.py ready` handoff; matching commit
-messages and parents alone cannot renew readiness. Standalone execution saves
-each progress checkpoint. Blocked, retired or policy-stale plans cannot carry
-readiness. Retired ordinary-agent job records are excluded. Current source
-checks and Client gates still apply. Edited-comment diagnostics name the fresh
-checked handoff needed to resume.
+must prove each edge back to the handed-off head. Before a feature-branch merge,
+the executor constructs the merge from its immutable parent and child SHAs using
+the existing candidate-construction effects, then saves its expected tree in the
+`planned` mutation of the collapse progress record. Construction refs are removed
+after construction; a restart before the plan write can reconstruct them. A hard
+crash followed by retirement with different inputs can leave its construction ref
+behind; that ref supplies no readiness or recovery authority. A failed
+plan write prevents the feature-branch merge. Progress selection preserves a
+saved tree plan ahead of an otherwise equal unprepared checkpoint.
+
+If GitHub succeeds before the `mutated` checkpoint is saved, recovery accepts only
+the current branch tip with the saved tree, exact ordered parents and collapse
+message, and an unchanged child head. It checks current child readiness before
+checkpointing that recovered edge, without repeating the feature-branch merge or
+reconstructing the expected tree. A missing plan, different tree, changed head or
+hold refuses recovery. Unproven merge construction or provider effects return a controlled blocked result
+and retire the plan while retaining its history. Fresh current-policy discovery
+then needs current source authority: a retired plan cannot carry its old handoff.
+Review the current heads and post fresh checked handoffs to continue through the
+existing path, instead of repeating controller errors. The original trusted handoff can follow a matching saved
+tree plan through the admission reader's read-only proof; the executor still owns
+the mutated checkpoint. Legacy progress without a saved tree cannot recover an
+uncheckpointed changed branch tip and needs a fresh checked `gh-pr.py ready`
+handoff and current-policy discovery. Messages and parents alone never renew
+readiness.
+
+Standalone execution saves each progress checkpoint. Blocked, retired or
+policy-stale plans cannot carry readiness. Retired ordinary-agent job records are
+excluded. Current source checks and Client gates still apply. Edited-comment
+diagnostics name the fresh checked handoff needed to resume.
 
 The handoff author must satisfy the existing enqueue policy: an allowed
 `repo_owner` or `repo_admin` role, or a numeric trusted-automation id. An App using a person's token
@@ -916,8 +938,9 @@ or an allowed dependency update, from an allowed author). A child that is not
 ready refuses the whole collapse; the controller reports `stack_unsupported` with a `blocking_reason`
 naming each child and reason. Execution reads each child again from GitHub
 just before merging it, so a child held while a recorded plan runs is not
-merged; a child GitHub already shows as merged by this collapse is recovered,
-not re-read. Launchplane records a stack collapse plan
+merged. Recovery first proves the saved tree and exact parents, then re-reads
+the child for current holds, head, source checks and intent. A child closed by
+that proved merge may recover without satisfying open-PR mergeability. Launchplane records a stack collapse plan
 before mutating branches so the root PR, child order, expected SHAs, mutation
 sequence, policy digest, and idempotency evidence remain auditable. Ambiguous,
 forked, cyclic, or unsupported branch-protection cases must fail closed with

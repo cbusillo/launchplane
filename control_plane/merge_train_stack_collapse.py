@@ -147,6 +147,14 @@ def execute_merge_train_stack_collapse_run_once(
                     repository=request.repository, base_branch=request.base_branch
                 ),
             ),
+            recovered_child_readiness_reasons=merge_train_stack_child_readiness_check(
+                reader=github_client,
+                repository=request.repository,
+                repository_policy=policy.find_repository_policy(
+                    repository=request.repository, base_branch=request.base_branch
+                ),
+                recovered_merge=True,
+            ),
             updated_at=recorded_at,
             checkpoint=checkpoint_progress,
         )

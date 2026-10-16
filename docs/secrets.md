@@ -212,6 +212,14 @@ do not attempt a release or post-deploy on that lane first.
 
 ## Current Contract
 
+[Private testing TLS](private-testing-transport.md) uses purpose-separated
+Chris-owned certificate/key files, mounted read-only by the isolated proxy.
+Agents handle only public CA/leaf metadata and custody references. The optional
+testing endpoint `tls_ca_pem` stores public CA certificates with that exact
+endpoint; its probe uses a separate verified TLS context trusting only that public bundle. It is not a managed
+secret, private-key input or process-wide trust change. The receiver's CA bundle
+and real issuer/key provisioning remain the custodian's reviewed steps.
+
 The [testing local-consumer path](testing-local-consumer.md) delivers one exact
 testing bridge binding through a human-reviewed recipient-encrypted envelope.
 It exposes no plaintext read and creates no client service credential or grant.
