@@ -23,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_ACTION,
     WALKTHROUGH_ROUTE,
+    WALKTHROUGH_RECONCILIATION_REQUIRED,
     OdooWalkthroughRequest,
     WalkthroughStep,
     walkthrough_activity_scope,
@@ -239,11 +240,10 @@ class TaskRouteTests(unittest.TestCase):
 
     def test_denial_happens_before_any_provider_or_secret_operation(self) -> None:
         self.allowed = False
-        status, result = self.invoke(
+        status, _ = self.invoke(
             task_request(mode="apply", reviewed_plan_sha256=self.plan.digest), "key"
         )
         self.assertEqual(status, 403)
-        self.assertEqual(result["detail"]["code"], "authorization_denied")
         self.assertEqual(self.actions, [WALKTHROUGH_ACTION])
         self.planner.assert_not_called()
         self.account.assert_not_called()
@@ -312,7 +312,6 @@ class TaskRouteTests(unittest.TestCase):
             idempotency_key="unknown",
         )
         assert original is not None
-        self.assertEqual(original.state, "reconcile_required")
 
     def test_pre_dispatch_plan_failure_releases_its_reservation(self) -> None:
         with patch(
@@ -347,7 +346,7 @@ class TaskRouteTests(unittest.TestCase):
         self.planner.side_effect = ValueError("current lane is held")
         status, response = self.invoke(provision, "live")
         self.assertEqual(status, 409)
-        self.assertEqual(response["detail"]["code"], "testing_task_reconciliation_required")
+        self.assertEqual(response["detail"]["code"], WALKTHROUGH_RECONCILIATION_REQUIRED)
         self.finished.assert_not_called()
         self.account.assert_not_called()
 

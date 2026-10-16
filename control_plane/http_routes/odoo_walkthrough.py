@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_ROUTE,
+    WALKTHROUGH_RECONCILIATION_REQUIRED,
     OdooWalkthroughRequest,
     OdooWalkthroughResponse,
     OdooWalkthroughResult,
@@ -142,7 +143,7 @@ def register_walkthrough_route(
                     if recovery.status in {"completed", "replayed", "adopted"}:
                         return OdooWalkthroughResponse.model_validate(recovery.response_payload)
                     refuse(
-                        "testing_task_reconciliation_required",
+                        WALKTHROUGH_RECONCILIATION_REQUIRED,
                         "The original dispatch is still active or unobservable; preserve its key and task account.",
                     )
             with record_store.odoo_synchronous_lane_reservation(
@@ -211,7 +212,7 @@ def register_walkthrough_route(
                         response.result.screenshots = adapter.transient_screenshots
                     return response
                 refuse(
-                    "testing_task_reconciliation_required",
+                    WALKTHROUGH_RECONCILIATION_REQUIRED,
                     "Retry only this original key; then clean up its task account.",
                 )
                 raise AssertionError

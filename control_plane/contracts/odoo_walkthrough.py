@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 WALKTHROUGH_ROUTE = "/v1/drivers/odoo/testing-walkthrough"
 WALKTHROUGH_ACTION = "odoo_testing_walkthrough.execute"
 WALKTHROUGH_PLAN_ACTION = "odoo_testing_walkthrough.plan"
+WALKTHROUGH_RECONCILIATION_REQUIRED = "testing_task_reconciliation_required"
 WALKTHROUGH_LOGIN_PREFIX = "lp_walk_"
 WALKTHROUGH_MARKER_PREFIX = "launchplane.walkthrough."
 WALKTHROUGH_LOCK_PREFIX = "launchplane.walkthrough:"

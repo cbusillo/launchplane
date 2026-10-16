@@ -53,8 +53,11 @@ An existing staff login can never be adopted or reset.
 
 Account groups are explicit native group XML IDs. The default is
 `base.group_user`; supply only the business roles required by the checklist.
-Odoo administration, export and HTML-sanitization bypass groups, including
-application groups that imply those privileges, are refused. Technical Features
+The native groups `base.group_system`, `base.group_erp_manager`,
+`base.group_allow_export` and `base.group_sanitize_override`, including
+application groups that imply them, are refused. This is a privilege denylist,
+not a general audit of application ACLs; choose groups for the actual checklist.
+Technical Features
 cannot be requested explicitly; Odoo may imply it for an ordinary internal user.
 This API cannot change the groups of an existing task account.
 Run and cleanup use the account's stored groups; the caller need not repeat
@@ -112,8 +115,7 @@ the returned user ID before opening the web client. Supply bounded `steps`:
 
 Use the product's actual checklist selectors; these are illustrative. The
 driver accepts no evaluated script, arbitrary URL, query string, dot-segment or
-encoded-path escape, staff
-credentials or non-TEST input. It blocks external network requests, login and
+encoded-path escape, staff credentials or non-TEST input. It blocks external network requests, login and
 password-reset pages, service workers, websockets, downloads and sensitive
 controls. Screenshots are available only on the signed-in web client, with
 inputs and occurrences of the task password masked. At most five screenshots
@@ -121,6 +123,11 @@ of two MiB each are returned per run. Contexts close on success and failure;
 PNG bytes are returned only on the first successful HTTP response and are not
 persisted in Launchplane. Durable receipts retain their SHA-256 digests; exact
 replays omit the PNGs. The harness keeps needed screenshots in its task evidence.
+Masks protect credential surfaces; screenshots may still show restored business
+data or personal information. Keep them in the task's approved evidence location.
+Each step rechecks runtime identity and staff usage, so a long checklist can
+take several minutes. Use short checklist segments; an HTTP timeout does not
+cancel the worker, and a same-key retry reports a live lease until it finishes.
 If that HTTP response is lost, preserve the original transaction receipt and
 use a new run containing only `open`, `visible` and `screenshot` to inspect the
 current state. This does not reconstruct the lost historical screenshot, and
