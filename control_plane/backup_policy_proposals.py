@@ -27,6 +27,7 @@ from control_plane.privileged_operation_registry import plan_backup_policy_propo
 from control_plane.privileged_operation_service import (
     PrivilegedOperationWriteResult,
     create_typed_privileged_operation_plan,
+    require_privileged_operation_store,
     approve_privileged_operation,
     cancel_privileged_operation,
 )
@@ -136,6 +137,20 @@ def decide_backup_policy(
             reason="Director declined the proposed backup policy.",
             now=now,
         )
+    if (
+        record.status in {"approved", "executing", "executed", "execution_failed"}
+        and record.approval is not None
+    ):
+        store = require_privileged_operation_store(record_store)
+        for event in store.list_privileged_operation_event_records(
+            operation_id=record.operation_id
+        ):
+            if (
+                event.action == "approved"
+                and event.source_event_id == source_event_id
+                and event.actor == actor
+            ):
+                return PrivilegedOperationWriteResult("replayed", record, event)
     if record.status == "planned":
         fresh = plan_backup_policy_proposal(record_store, record.request)
         if fresh != record.evidence:

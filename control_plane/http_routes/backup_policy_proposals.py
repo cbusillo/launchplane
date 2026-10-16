@@ -109,21 +109,33 @@ def register_backup_policy_proposal_routes(
                 code="authorization_denied",
                 message="Identity cannot read this lane's backup proposals.",
             )
-        store = require_privileged_operation_store(record_store)
-        records = store.list_privileged_operation_records(descriptor_id="production-backup-policy")
-        return BackupPolicyProposalListResponse(
-            trace_id=trace_id,
-            proposals=tuple(
-                review(
-                    read_privileged_operation(record_store=store, operation_id=record.operation_id),
-                    identity,
-                )
-                for record in records
-                if isinstance(record.evidence, BackupPolicyHumanEvidence)
-                and (record.evidence.product, record.evidence.context, record.evidence.instance)
-                == (product, context, instance)
-            ),
-        )
+        try:
+            store = require_privileged_operation_store(record_store)
+            records = store.list_privileged_operation_records(
+                descriptor_id="production-backup-policy"
+            )
+            return BackupPolicyProposalListResponse(
+                trace_id=trace_id,
+                proposals=tuple(
+                    review(
+                        read_privileged_operation(
+                            record_store=store, operation_id=record.operation_id
+                        ),
+                        identity,
+                    )
+                    for record in records
+                    if isinstance(record.evidence, BackupPolicyHumanEvidence)
+                    and (record.evidence.product, record.evidence.context, record.evidence.instance)
+                    == (product, context, instance)
+                ),
+            )
+        except (TypeError, LookupError) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="backup_proposal_unavailable",
+                message="Backup proposal storage is unavailable.",
+            ) from error
 
     def decide_backup_policy_proposal(
         envelope: BackupPolicyDecision,
@@ -160,6 +172,13 @@ def register_backup_policy_proposal_routes(
                 trace_id=trace_id,
                 code="backup_proposal_missing",
                 message="Backup proposal was not found.",
+            ) from error
+        except (TypeError, LookupError) as error:
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="backup_proposal_unavailable",
+                message="Backup proposal authority or storage is unavailable.",
             ) from error
         except (ValueError, PrivilegedOperationPlannerError) as error:
             raise dependencies.http_error(

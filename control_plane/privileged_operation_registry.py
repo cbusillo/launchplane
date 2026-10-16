@@ -65,6 +65,7 @@ from control_plane.service_auth import AgentConsumerActionSafety, action_safety
 from control_plane.contracts.backup_policy_proposal import (
     BackupPolicyProposalInput,
     BackupPolicyHumanEvidence,
+    BackupPolicyTargetChange,
 )
 
 
@@ -107,7 +108,6 @@ class PrivilegedOperationDescriptor(BaseModel):
                 "production_backup_authority.write",
                 "production_backup_authority.write",
                 "production_backup_authority.write",
-                "production_backup_authority.read",
             ):
                 raise ValueError("Backup policy descriptor must reuse scoped backup authority.")
             return self
@@ -579,6 +579,7 @@ def plan_backup_policy_proposal(
     from control_plane.production_backup_authority import (
         plan_production_backup_authority_write,
         require_production_backup_authority_store,
+        lane_bound_target_revision_refusal,
     )
 
     if not isinstance(request, BackupPolicyProposalInput):
@@ -605,8 +606,15 @@ def plan_backup_policy_proposal(
             for action in actions
         ):
             raise ValueError("Backup proposal does not protect the current production promotion.")
+        authority_store = require_production_backup_authority_store(record_store)
+        refusal = lane_bound_target_revision_refusal(
+            policy_records=authority_store.list_production_backup_policy_records(),
+            envelope=request.authority,
+        )
+        if refusal:
+            raise ValueError("Backup target revision affects another product.")
         plan = plan_production_backup_authority_write(
-            record_store=require_production_backup_authority_store(record_store),
+            record_store=authority_store,
             envelope=request.authority,
         )
         from datetime import datetime, timezone
@@ -631,6 +639,22 @@ def plan_backup_policy_proposal(
             "Backup proposal cannot be planned against current authority."
         ) from error
     policy = request.authority.policy
+    writes = {
+        target.target_id: target_plan
+        for target, target_plan in zip(request.authority.targets, plan.target_plans, strict=True)
+    }
+    changes = tuple(
+        BackupPolicyTargetChange(
+            destination_kind=target.destination_kind,
+            target_revision=target.target_revision,
+            change="unchanged"
+            if target.target_id not in writes or writes[target.target_id].status == "replayed"
+            else "new"
+            if writes[target.target_id].current_record is None
+            else "revised",
+        )
+        for target in plan.result.targets
+    )
     return BackupPolicyHumanEvidence(
         plan_digest=plan.result.authority_digest,
         product=policy.product,
@@ -639,6 +663,7 @@ def plan_backup_policy_proposal(
         promotion_action=policy.promotion_action,
         policy_revision=policy.policy_revision,
         retention_count=policy.fast_snapshot.retention_count,
+        targets=changes,
         snapshot_max_age_seconds=policy.fast_snapshot.max_evidence_age_seconds,
         backup_max_age_seconds=policy.independent_backup.max_evidence_age_seconds,
         effective_at=policy.effective_at,
@@ -657,7 +682,6 @@ _REGISTRY: dict[PrivilegedOperationDescriptorId, RegisteredPrivilegedOperationDe
             cancel_action="production_backup_authority.write",
             approve_action="production_backup_authority.write",
             revoke_action="production_backup_authority.write",
-            agent_summary_read_action="production_backup_authority.read",
         ),
         planner=plan_backup_policy_proposal,
     ),

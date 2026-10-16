@@ -28,6 +28,13 @@ class BackupPolicyProposalInput(BaseModel):
         return self
 
 
+class BackupPolicyTargetChange(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    destination_kind: Literal["proxmox_guest", "proxmox_storage"]
+    target_revision: int
+    change: Literal["new", "revised", "unchanged"]
+
+
 class BackupPolicyHumanEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     plan_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -37,6 +44,7 @@ class BackupPolicyHumanEvidence(BaseModel):
     promotion_action: str
     policy_revision: int
     retention_count: int
+    targets: tuple[BackupPolicyTargetChange, ...]
     snapshot_max_age_seconds: int
     backup_max_age_seconds: int
     effective_at: str

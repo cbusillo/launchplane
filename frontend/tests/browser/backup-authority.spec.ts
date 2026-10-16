@@ -1,5 +1,5 @@
 import { waitForState, expect, test } from "./state";
-for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain", "stale", "read-only", "other-lane"]) {
+for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain", "uncertain-stale", "stale", "read-only", "other-lane"]) {
   test(`server-held backup policy handles ${outcome}`, { tag: "@layout" }, async ({ page }, testInfo) => {
     await page.goto("/ui/products?fixture=empty");
     const fixtures = await page.evaluate(async () => {
@@ -8,7 +8,7 @@ for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain"
     });
     const operationId = `privileged-operation-${"a".repeat(32)}`;
     const protection = { product: fixtures.environment.product, context: fixtures.environment.context, instance: "prod", promotion_action: "generic_web_prod_promotion.execute",
-      policy_revision: 1, retention_count: 3, snapshot_max_age_seconds: 7200, backup_max_age_seconds: 7200,
+      policy_revision: 1, targets: [{ destination_kind: "proxmox_guest", target_revision: 1, change: "new" }, { destination_kind: "proxmox_storage", target_revision: 1, change: "new" }], retention_count: 3, snapshot_max_age_seconds: 7200, backup_max_age_seconds: 7200,
       effective_at: "2026-10-01T00:00:00Z", review_after: "2027-01-01T00:00:00Z", plan_digest: "c".repeat(64), result_status: "ok" };
     let status = "planned";
     const requests: Array<{ body: unknown }> = [];
@@ -25,8 +25,8 @@ for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain"
       expect(r.request().headers()["x-csrf-token"]).toBe("fixture-csrf");
       const body = r.request().postDataJSON(); requests.push({ body });
       expect(Object.keys(body).sort()).toEqual(["decision", "source_event_id"]);
-      if (outcome === "stale") return r.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "backup_proposal_conflict", message: "The authority changed; request a new proposal." } } });
-      if (outcome === "uncertain" && requests.length === 1) return r.abort();
+      if (outcome === "stale" || (outcome === "uncertain-stale" && body.decision === "approve" && requests.length > 1)) return r.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "backup_proposal_conflict", message: "The authority changed; request a new proposal." } } });
+      if (["uncertain", "uncertain-stale"].includes(outcome) && requests.length === 1) return r.abort();
       status = body.decision === "approve" ? "executed" : "cancelled";
       return r.fulfill({ json: { status: "ok", trace_id: "decision", proposal: proposal() } });
     });
@@ -37,7 +37,7 @@ for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain"
     if (outcome === "second-tab") { activePage = await context.newPage(); await activePage.goto(url); }
     let panel = activePage.getByRole("region", { name: "Production backup authority", exact: true });
     if (outcome === "other-lane") { await expect(panel.getByRole("alert")).toBeVisible(); expect(requests).toHaveLength(0); return; }
-    await expect(panel.getByText("3 snapshots", { exact: true })).toBeVisible();
+    await expect(panel.getByText(`${protection.retention_count} snapshots`, { exact: true })).toBeVisible();
     expect(await panel.locator('input[type="file"]').count()).toBe(0);
     await expect(panel.getByText(protection.plan_digest, { exact: true })).toHaveCount(0);
     const approve = panel.getByRole("button", { name: "Approve", exact: true });
@@ -51,13 +51,20 @@ for (const outcome of ["approve", "decline", "reload", "second-tab", "uncertain"
     }
     await panel.getByRole("button", { name: outcome === "decline" ? "Decline" : "Approve", exact: true }).click();
     if (outcome === "stale") { await expect(panel.getByText("The authority changed; request a new proposal.")).toBeVisible(); expect(requests).toHaveLength(1); return; }
-    if (outcome === "uncertain") {
+    if (["uncertain", "uncertain-stale"].includes(outcome)) {
       await expect(panel.getByRole("button", { name: "Retry original decision" })).toBeEnabled();
       await activePage.reload(); panel = activePage.getByRole("region", { name: "Production backup authority", exact: true });
       await panel.getByRole("button", { name: "Retry original decision" }).click();
       await waitForState(() => requests.length).toBe(2); expect(requests[0]).toEqual(requests[1]);
     }
-    await expect(panel.getByRole("status", { name: "Backup authority result", exact: true })).toHaveText(outcome === "decline" ? "Backup policy proposal declined." : "Backup policy approved. No capture or release was started.");
-    expect(requests).toHaveLength(outcome === "uncertain" ? 2 : 1);
+    if (outcome === "uncertain-stale") {
+      await expect(panel.getByRole("button", { name: "Retry original decision" })).toHaveCount(0);
+      await expect(panel.getByRole("button", { name: "Decline", exact: true })).toBeEnabled();
+      await panel.getByRole("button", { name: "Decline", exact: true }).click();
+    }
+    await expect(panel.getByRole("status", { name: "Backup authority result", exact: true })).toBeVisible();
+    await waitForState(() => status).toBe(["decline", "uncertain-stale"].includes(outcome) ? "cancelled" : "executed");
+    await expect(panel.getByRole("button", { name: "Approve", exact: true })).toHaveCount(0);
+    expect(requests).toHaveLength(outcome === "uncertain-stale" ? 3 : outcome === "uncertain" ? 2 : 1);
   });
 }

@@ -11,6 +11,9 @@ from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetProposalInput,
     ManagedMergeTrainPolicyImportProposalInput,
     ManagedSecretReencryptionPlanInput,
+    ManagedSecretReencryptionHumanEvidence,
+    ManagedAuthzPolicySetHumanEvidence,
+    ManagedMergeTrainPolicyImportHumanEvidence,
     PrivilegedOperationApproval,
     PrivilegedOperationActor,
     PrivilegedOperationAgentActor,
@@ -33,6 +36,7 @@ from control_plane.contracts.privileged_operation import (
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRevokeRequest,
     OrdinaryAgentDeliveryActivationSetupRequest,
+    OrdinaryAgentDeliveryActivationHumanEvidence,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.authz_candidate_preparation import (
@@ -303,13 +307,37 @@ class PrivilegedOperationRevocationEnvelope(PrivilegedOperationApprovalEnvelope)
     pass
 
 
+class PrivilegedOperationHumanRecord(PrivilegedOperationRecord):
+    """The generic browser record excludes private product-card adapters."""
+
+    descriptor_id: Literal[
+        "managed-secret-reencryption",
+        "managed-authz-policy-set",
+        "managed-merge-train-policy-import",
+        "ordinary-agent-delivery-activation",
+    ]
+    request: (
+        ManagedSecretReencryptionPlanInput
+        | ManagedAuthzPolicySetProposalInput
+        | ManagedMergeTrainPolicyImportProposalInput
+        | OrdinaryAgentDeliveryActivationSetupRequest
+        | OrdinaryAgentDeliveryActivationRevokeRequest
+    )
+    evidence: (
+        ManagedSecretReencryptionHumanEvidence
+        | ManagedAuthzPolicySetHumanEvidence
+        | ManagedMergeTrainPolicyImportHumanEvidence
+        | OrdinaryAgentDeliveryActivationHumanEvidence
+    )
+
+
 class PrivilegedOperationHumanResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"] = "ok"
     trace_id: str
     write_status: Literal["written", "replayed", "not_applicable"] = "not_applicable"
-    record: PrivilegedOperationRecord
+    record: PrivilegedOperationHumanRecord
     events: tuple[PrivilegedOperationEventRecord, ...]
 
 
@@ -729,7 +757,9 @@ def register_privileged_operation_routes(
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
-            record=result.record,
+            record=PrivilegedOperationHumanRecord.model_validate(
+                result.record.model_dump(mode="json")
+            ),
             events=events,
         )
 
@@ -820,7 +850,7 @@ def register_privileged_operation_routes(
             ) from error
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
-            record=record,
+            record=PrivilegedOperationHumanRecord.model_validate(record.model_dump(mode="json")),
             events=events,
         )
 
@@ -973,7 +1003,9 @@ def register_privileged_operation_routes(
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
-            record=result.record,
+            record=PrivilegedOperationHumanRecord.model_validate(
+                result.record.model_dump(mode="json")
+            ),
             events=events,
         )
 
@@ -1028,7 +1060,9 @@ def register_privileged_operation_routes(
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
-            record=result.record,
+            record=PrivilegedOperationHumanRecord.model_validate(
+                result.record.model_dump(mode="json")
+            ),
             events=events,
         )
 
@@ -1098,7 +1132,9 @@ def register_privileged_operation_routes(
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
-            record=result.record,
+            record=PrivilegedOperationHumanRecord.model_validate(
+                result.record.model_dump(mode="json")
+            ),
             events=events,
         )
 

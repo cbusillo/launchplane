@@ -1,9 +1,12 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
+import json
 from tempfile import TemporaryDirectory
 import unittest
 from typing import Any
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.production_backup_authority import ProductionBackupAuthorityWriteEnvelope
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import HumanSessionManager, InMemoryHumanSessionStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -78,11 +81,20 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.agent_headers = {"Authorization": "Bearer test-planner"}
+        draft = _dry_run_envelope().model_dump(mode="json")
+        now = datetime.now(timezone.utc)
+        for item in (draft["policy"], *draft["targets"]):
+            item["effective_at"] = (now - timedelta(days=1)).isoformat()
+            item["review_after"] = (now + timedelta(days=90)).isoformat()
+            item["record_id"] = ""
+            item.pop("policy_digest", None)
+            item.pop("target_digest", None)
+        self.draft = ProductionBackupAuthorityWriteEnvelope.model_validate(draft)
         self.payload: dict[str, Any] = {
             "descriptor_id": "production-backup-policy",
             "source_event_id": "backup-proposal-1",
             "request": {
-                "authority": _dry_run_envelope().model_dump(mode="json"),
+                "authority": self.draft.model_dump(mode="json"),
                 "reason": "Review protection.",
             },
         }
@@ -123,21 +135,31 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             )
             self.assertEqual(response.status_code, 200, response.text)
             self.assertEqual(response.json()["proposals"][0]["operation_id"], operation_id)
-            for private in (
-                "proxmox.example.invalid",
-                "backup-operator",
-                "pbs-production",
+            for target in self.draft.targets:
+                destination = target.destination.model_dump(mode="json")
+                for key in ("host", "username", "guest_id", "storage_id"):
+                    if key in destination:
+                        self.assertNotIn(json.dumps(destination[key]), response.text)
+            for key in (
+                "host",
+                "username",
                 "guest_id",
-                "destination",
+                "storage_id",
                 "reason",
+                "request",
+                "authority",
             ):
-                self.assertNotIn(private, response.text)
+                self.assertNotIn(json.dumps(key) + ":", response.text)
+
         approved = await self.decide(operation_id)
         self.assertEqual(approved.status_code, 200, approved.text)
         self.assertEqual(approved.json()["proposal"]["status"], "approved")
         result = execute_approved_privileged_operations_once(record_store=self.store)
         self.assertEqual(result[0].status, "executed", result)
-        self.assertEqual(self.store.list_production_backup_policy_records()[0].policy_revision, 1)
+        self.assertEqual(
+            self.store.list_production_backup_policy_records()[0].policy_revision,
+            self.draft.policy.policy_revision,
+        )
         self.assertEqual(execute_approved_privileged_operations_once(record_store=self.store), ())
 
     async def test_proposer_cannot_decide_or_directly_apply_even_with_write_grant(self) -> None:
@@ -164,7 +186,7 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
             "POST",
             "/v1/production-backup-authority/apply",
             headers=self.agent_headers | {"Idempotency-Key": "agent-direct-apply"},
-            payload=_dry_run_envelope().model_dump(mode="json")
+            payload=self.draft.model_dump(mode="json")
             | {"mode": "apply", "reviewed_authority_digest": record.evidence.plan_digest},
         )
         self.assertEqual(direct.status_code, 403, direct.text)
@@ -181,7 +203,7 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stale_authority_refuses_before_approval(self) -> None:
         operation_id = await self.propose()
-        self.store.write_production_backup_target_record(_dry_run_envelope().targets[0])
+        self.store.write_production_backup_target_record(self.draft.targets[0])
         response = await self.decide(operation_id)
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(
@@ -191,7 +213,7 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
     async def test_worker_rechecks_authority_after_human_approval(self) -> None:
         operation_id = await self.propose()
         self.assertEqual((await self.decide(operation_id)).status_code, 200)
-        self.store.write_production_backup_target_record(_dry_run_envelope().targets[0])
+        self.store.write_production_backup_target_record(self.draft.targets[0])
         result = execute_approved_privileged_operations_once(record_store=self.store)
         self.assertEqual(result[0].status, "execution_failed")
         self.assertEqual(self.store.list_production_backup_policy_records(), ())
@@ -271,9 +293,17 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_production_backup_policy_records(), ())
 
     async def test_existing_shared_targets_can_be_referenced_without_revision(self) -> None:
-        draft = _dry_run_envelope()
+        draft = self.draft
         for target in draft.targets:
             self.store.write_production_backup_target_record(target)
+        foreign = draft.policy.model_dump(mode="json") | {
+            "product": "other-product",
+            "context": "other-product",
+            "policy_id": "",
+            "record_id": "",
+            "policy_digest": "",
+        }
+        self.store.write_production_backup_policy_record(type(draft.policy).model_validate(foreign))
         self.payload["request"]["authority"]["targets"] = []
         operation_id = await self.propose()
         self.assertEqual((await self.decide(operation_id)).status_code, 200)
@@ -282,7 +312,10 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
         self.assertCountEqual(self.store.list_production_backup_target_records(), draft.targets)
 
     async def test_committed_backup_write_has_one_recoverable_receipt(self) -> None:
-        from control_plane.privileged_operation_worker import _execute_backup_policy
+        from control_plane.contracts.privileged_operation_identity import (
+            PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+            privileged_operation_execution_fingerprint,
+        )
         from unittest.mock import patch
 
         operation_id = await self.propose()
@@ -302,9 +335,89 @@ class BackupPolicyProposalTests(unittest.IsolatedAsyncioTestCase):
                 execute_approved_privileged_operations_once(record_store=self.store)
         interrupted = self.store.read_privileged_operation_record(operation_id)
         self.assertEqual(interrupted.status, "executing")
-        recovered = _execute_backup_policy(store=self.store, record=interrupted)
-        self.assertEqual(recovered.result_status, "ok")
+        reservation = self.store.lookup_existing_mutation_reservation(
+            route_path=PRIVILEGED_OPERATION_EXECUTION_ROUTE,
+            idempotency_key=operation_id,
+            request_fingerprint=privileged_operation_execution_fingerprint(interrupted),
+        )
+        assert reservation.record is not None
+        self.store.mark_mutation_reconcile_required(
+            reservation=reservation.record, reconciliation_key=operation_id
+        )
+        recovered = execute_approved_privileged_operations_once(record_store=self.store)
+        self.assertEqual(recovered[0].status, "executed", recovered)
         self.assertEqual(len(self.store.list_production_backup_policy_records()), 1)
         self.assertCountEqual(
-            self.store.list_production_backup_target_records(), _dry_run_envelope().targets
+            self.store.list_production_backup_target_records(), self.draft.targets
         )
+
+    async def test_replay_after_worker_execution_returns_the_recorded_decision(self) -> None:
+        operation_id = await self.propose()
+        self.assertEqual((await self.decide(operation_id)).status_code, 200)
+        execute_approved_privileged_operations_once(record_store=self.store)
+        replay = await self.decide(operation_id)
+        self.assertEqual(replay.status_code, 200, replay.text)
+        self.assertEqual(replay.json()["proposal"]["status"], "executed")
+
+    async def test_shared_target_revision_is_refused_during_proposal(self) -> None:
+        draft = self.draft
+        for target in draft.targets:
+            self.store.write_production_backup_target_record(target)
+        other = draft.policy.model_dump(mode="json") | {
+            "product": "other-product",
+            "context": "other-product",
+            "policy_id": "",
+            "record_id": "",
+            "policy_digest": "",
+        }
+        self.store.write_production_backup_policy_record(type(draft.policy).model_validate(other))
+        source = draft.targets[0]
+        changed = source.model_dump(mode="json") | {
+            "target_revision": source.target_revision + 1,
+            "record_id": "",
+            "target_digest": "",
+            "supersedes_record_id": source.record_id,
+        }
+        changed["destination"]["host"] = "other-proxmox.example.invalid"
+        self.payload["request"]["authority"]["targets"] = [changed]
+        self.payload["request"]["authority"]["expected_current_target_record_ids"] = {
+            source.target_id: source.record_id
+        }
+        response = await http_request(
+            self.app,
+            "POST",
+            "/v1/agent/privileged-operations/plans",
+            headers=self.agent_headers,
+            payload=self.payload,
+        )
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(self.store.list_privileged_operation_records(), ())
+
+    async def test_changed_target_is_visible_without_its_coordinates(self) -> None:
+        operation_id = await self.propose()
+        response = await http_get(
+            self.app,
+            "/v1/production-backup-authority/proposals?product=example-product&context=example-product&instance=prod",
+            headers=_browser_mutation_headers(self.sessions, self.session),
+        )
+        proposal = response.json()["proposals"][0]
+        self.assertEqual(proposal["operation_id"], operation_id)
+        self.assertEqual(
+            {target["change"] for target in proposal["protection"]["targets"]}, {"new"}
+        )
+        self.assertEqual(
+            {target["destination_kind"] for target in proposal["protection"]["targets"]},
+            {target.destination_kind for target in self.draft.targets},
+        )
+
+    async def test_missing_approval_authority_is_a_bounded_service_refusal(self) -> None:
+        from unittest.mock import patch
+
+        operation_id = await self.propose()
+        with patch(
+            "control_plane.backup_policy_proposals.read_active_authz_policy_record",
+            side_effect=LookupError("private policy diagnostics"),
+        ):
+            response = await self.decide(operation_id)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertNotIn("private policy diagnostics", response.text)

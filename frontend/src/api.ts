@@ -61,7 +61,7 @@ import type {
   ProductPromotionWorkflowDeliveryStatusResponse,
   PrivilegedOperationHumanResponse,
   PrivilegedOperationListResponse,
-  PrivilegedOperationRecord,
+  PrivilegedOperationHumanRecord as PrivilegedOperationRecord,
   PrivilegedOperationSemanticReview,
   PrivilegedOperationSemanticReviewResponse,
   ReadHumanPrivilegedOperationData,

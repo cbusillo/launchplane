@@ -327,3 +327,8 @@ Approval starts no capture, restore or release and changes no credential or host
 configuration. Existing capture qualification and accepted-release gates still
 apply. The separate testing-client delivery file supplies a recipient public key
 and binds an encrypted delivery destination; it is not a backup-policy proposal.
+
+Agents read proposal status through the same exact-lane proposal list, or replay
+the identical submission when its response was interrupted. The generic
+privileged-operation agent-summary route is reserved for its generic descriptors;
+the proposal helper does not poll it for backup proposals.

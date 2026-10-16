@@ -3828,6 +3828,13 @@
           "snapshot_max_age_seconds": {
             "title": "Snapshot Max Age Seconds",
             "type": "integer"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/BackupPolicyTargetChange"
+            },
+            "title": "Targets",
+            "type": "array"
           }
         },
         "required": [
@@ -3838,6 +3845,7 @@
           "promotion_action",
           "policy_revision",
           "retention_count",
+          "targets",
           "snapshot_max_age_seconds",
           "backup_max_age_seconds",
           "effective_at",
@@ -3990,6 +3998,39 @@
           "review_path"
         ],
         "title": "BackupPolicyProposalSummary",
+        "type": "object"
+      },
+      "BackupPolicyTargetChange": {
+        "additionalProperties": false,
+        "properties": {
+          "change": {
+            "enum": [
+              "new",
+              "revised",
+              "unchanged"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "destination_kind": {
+            "enum": [
+              "proxmox_guest",
+              "proxmox_storage"
+            ],
+            "title": "Destination Kind",
+            "type": "string"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "destination_kind",
+          "target_revision",
+          "change"
+        ],
+        "title": "BackupPolicyTargetChange",
         "type": "object"
       },
       "BootstrapEvidence": {
@@ -30143,6 +30184,212 @@
         "title": "PrivilegedOperationExecutionEvidence",
         "type": "object"
       },
+      "PrivilegedOperationHumanRecord": {
+        "additionalProperties": false,
+        "description": "The generic browser record excludes private product-card adapters.",
+        "properties": {
+          "approval": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationApproval"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "descriptor_id": {
+            "enum": [
+              "managed-secret-reencryption",
+              "managed-authz-policy-set",
+              "managed-merge-train-policy-import",
+              "ordinary-agent-delivery-activation"
+            ],
+            "title": "Descriptor Id",
+            "type": "string"
+          },
+          "descriptor_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Descriptor Version",
+            "type": "integer"
+          },
+          "evidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedSecretReencryptionHumanEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetHumanEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportHumanEvidence"
+              },
+              {
+                "discriminator": {
+                  "mapping": {
+                    "revoke_activation": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeHumanEvidence",
+                    "setup": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupHumanEvidence"
+                  },
+                  "propertyName": "action"
+                },
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupHumanEvidence"
+                  },
+                  {
+                    "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeHumanEvidence"
+                  }
+                ]
+              }
+            ],
+            "title": "Evidence"
+          },
+          "evidence_digest": {
+            "title": "Evidence Digest",
+            "type": "string"
+          },
+          "execution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicyExecutionEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationExecutionEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetExecutionEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportExecutionEvidence"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationExecutionEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Execution"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "string"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "request": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Output"
+              },
+              {
+                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Output"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupRequest"
+              },
+              {
+                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeRequest"
+              }
+            ],
+            "title": "Request"
+          },
+          "request_digest": {
+            "title": "Request Digest",
+            "type": "string"
+          },
+          "requested_by": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationActor"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationAgentActor"
+              },
+              {
+                "$ref": "#/components/schemas/PrivilegedOperationLocalOperatorActor"
+              }
+            ],
+            "title": "Requested By"
+          },
+          "safety_class": {
+            "enum": [
+              "secret_backed",
+              "policy_admin"
+            ],
+            "title": "Safety Class",
+            "type": "string"
+          },
+          "schema_version": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Source Event Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "terminal_at": {
+            "default": "",
+            "title": "Terminal At",
+            "type": "string"
+          },
+          "terminal_reason": {
+            "default": "",
+            "maxLength": 4000,
+            "title": "Terminal Reason",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "operation_id",
+          "descriptor_id",
+          "safety_class",
+          "status",
+          "source_event_id",
+          "requested_by",
+          "request",
+          "request_digest",
+          "evidence",
+          "evidence_digest",
+          "created_at",
+          "updated_at",
+          "expires_at"
+        ],
+        "title": "PrivilegedOperationHumanRecord",
+        "type": "object"
+      },
       "PrivilegedOperationHumanResponse": {
         "additionalProperties": false,
         "properties": {
@@ -30154,7 +30401,7 @@
             "type": "array"
           },
           "record": {
-            "$ref": "#/components/schemas/PrivilegedOperationRecord"
+            "$ref": "#/components/schemas/PrivilegedOperationHumanRecord"
           },
           "status": {
             "const": "ok",
@@ -30308,218 +30555,6 @@
           "request"
         ],
         "title": "PrivilegedOperationPlanEnvelope",
-        "type": "object"
-      },
-      "PrivilegedOperationRecord": {
-        "additionalProperties": false,
-        "properties": {
-          "approval": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PrivilegedOperationApproval"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "created_at": {
-            "title": "Created At",
-            "type": "string"
-          },
-          "descriptor_id": {
-            "enum": [
-              "production-backup-policy",
-              "managed-secret-reencryption",
-              "managed-authz-policy-set",
-              "managed-merge-train-policy-import",
-              "ordinary-agent-delivery-activation"
-            ],
-            "title": "Descriptor Id",
-            "type": "string"
-          },
-          "descriptor_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Descriptor Version",
-            "type": "integer"
-          },
-          "evidence": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BackupPolicyHumanEvidence"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedSecretReencryptionHumanEvidence"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedAuthzPolicySetHumanEvidence"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportHumanEvidence"
-              },
-              {
-                "discriminator": {
-                  "mapping": {
-                    "revoke_activation": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeHumanEvidence",
-                    "setup": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupHumanEvidence"
-                  },
-                  "propertyName": "action"
-                },
-                "oneOf": [
-                  {
-                    "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupHumanEvidence"
-                  },
-                  {
-                    "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeHumanEvidence"
-                  }
-                ]
-              }
-            ],
-            "title": "Evidence"
-          },
-          "evidence_digest": {
-            "title": "Evidence Digest",
-            "type": "string"
-          },
-          "execution": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BackupPolicyExecutionEvidence"
-              },
-              {
-                "$ref": "#/components/schemas/PrivilegedOperationExecutionEvidence"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedAuthzPolicySetExecutionEvidence"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportExecutionEvidence"
-              },
-              {
-                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationExecutionEvidence"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Execution"
-          },
-          "expires_at": {
-            "title": "Expires At",
-            "type": "string"
-          },
-          "operation_id": {
-            "title": "Operation Id",
-            "type": "string"
-          },
-          "request": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/BackupPolicyProposalInput"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedAuthzPolicySetProposalInput-Output"
-              },
-              {
-                "$ref": "#/components/schemas/ManagedMergeTrainPolicyImportProposalInput-Output"
-              },
-              {
-                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationSetupRequest"
-              },
-              {
-                "$ref": "#/components/schemas/OrdinaryAgentDeliveryActivationRevokeRequest"
-              }
-            ],
-            "title": "Request"
-          },
-          "request_digest": {
-            "title": "Request Digest",
-            "type": "string"
-          },
-          "requested_by": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/PrivilegedOperationActor"
-              },
-              {
-                "$ref": "#/components/schemas/PrivilegedOperationAgentActor"
-              },
-              {
-                "$ref": "#/components/schemas/PrivilegedOperationLocalOperatorActor"
-              }
-            ],
-            "title": "Requested By"
-          },
-          "safety_class": {
-            "enum": [
-              "secret_backed",
-              "policy_admin"
-            ],
-            "title": "Safety Class",
-            "type": "string"
-          },
-          "schema_version": {
-            "default": 1,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
-          "source_event_id": {
-            "maxLength": 128,
-            "minLength": 1,
-            "title": "Source Event Id",
-            "type": "string"
-          },
-          "status": {
-            "enum": [
-              "planned",
-              "approved",
-              "revoked",
-              "executing",
-              "executed",
-              "execution_failed",
-              "expired",
-              "cancelled"
-            ],
-            "title": "Status",
-            "type": "string"
-          },
-          "terminal_at": {
-            "default": "",
-            "title": "Terminal At",
-            "type": "string"
-          },
-          "terminal_reason": {
-            "default": "",
-            "maxLength": 4000,
-            "title": "Terminal Reason",
-            "type": "string"
-          },
-          "updated_at": {
-            "title": "Updated At",
-            "type": "string"
-          }
-        },
-        "required": [
-          "operation_id",
-          "descriptor_id",
-          "safety_class",
-          "status",
-          "source_event_id",
-          "requested_by",
-          "request",
-          "request_digest",
-          "evidence",
-          "evidence_digest",
-          "created_at",
-          "updated_at",
-          "expires_at"
-        ],
-        "title": "PrivilegedOperationRecord",
         "type": "object"
       },
       "PrivilegedOperationRevocationEnvelope": {

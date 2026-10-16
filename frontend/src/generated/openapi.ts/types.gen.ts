@@ -334,12 +334,7 @@ export type BackupPolicyHumanEvidence = {
     retention_count: number;
     review_after: string;
     snapshot_max_age_seconds: number;
-};
-
-export type BackupPolicyProposalInput = {
-    authority: ProductionBackupAuthorityWriteEnvelope;
-    reason: string;
-    related_issue: string;
+    targets: Array<BackupPolicyTargetChange>;
 };
 
 export type BackupPolicyProposalListResponse = {
@@ -354,6 +349,12 @@ export type BackupPolicyProposalReview = {
     operation_id: string;
     protection: BackupPolicyHumanEvidence;
     status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
+};
+
+export type BackupPolicyTargetChange = {
+    change: 'new' | 'revised' | 'unchanged';
+    destination_kind: 'proxmox_guest' | 'proxmox_storage';
+    target_revision: number;
 };
 
 export type BootstrapEvidence = {
@@ -2754,9 +2755,35 @@ export type PrivilegedOperationExecutionEvidence = {
     unreadable_secret_count: number;
 };
 
+export type PrivilegedOperationHumanRecord = {
+    approval: PrivilegedOperationApproval | null;
+    created_at: string;
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+    descriptor_version: number;
+    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence | ({
+        action: 'setup';
+    } & OrdinaryAgentDeliveryActivationSetupHumanEvidence) | ({
+        action: 'revoke_activation';
+    } & OrdinaryAgentDeliveryActivationRevokeHumanEvidence);
+    evidence_digest: string;
+    execution: BackupPolicyExecutionEvidence | PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | OrdinaryAgentDeliveryActivationExecutionEvidence | null;
+    expires_at: string;
+    operation_id: string;
+    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
+    request_digest: string;
+    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
+    safety_class: 'secret_backed' | 'policy_admin';
+    schema_version: number;
+    source_event_id: string;
+    status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
+    terminal_at: string;
+    terminal_reason: string;
+    updated_at: string;
+};
+
 export type PrivilegedOperationHumanResponse = {
     events: Array<PrivilegedOperationEventRecord>;
-    record: PrivilegedOperationRecord;
+    record: PrivilegedOperationHumanRecord;
     status: 'ok';
     trace_id: string;
     write_status: 'written' | 'replayed' | 'not_applicable';
@@ -2773,32 +2800,6 @@ export type PrivilegedOperationLocalOperatorActor = {
     identity_type: 'local_operator';
     login: 'local-operator';
     principal_sha256: string;
-};
-
-export type PrivilegedOperationRecord = {
-    approval: PrivilegedOperationApproval | null;
-    created_at: string;
-    descriptor_id: 'production-backup-policy' | 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
-    descriptor_version: number;
-    evidence: BackupPolicyHumanEvidence | ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence | ({
-        action: 'setup';
-    } & OrdinaryAgentDeliveryActivationSetupHumanEvidence) | ({
-        action: 'revoke_activation';
-    } & OrdinaryAgentDeliveryActivationRevokeHumanEvidence);
-    evidence_digest: string;
-    execution: BackupPolicyExecutionEvidence | PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | OrdinaryAgentDeliveryActivationExecutionEvidence | null;
-    expires_at: string;
-    operation_id: string;
-    request: BackupPolicyProposalInput | ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
-    request_digest: string;
-    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
-    safety_class: 'secret_backed' | 'policy_admin';
-    schema_version: number;
-    source_event_id: string;
-    status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
-    terminal_at: string;
-    terminal_reason: string;
-    updated_at: string;
 };
 
 export type PrivilegedOperationRevocationEnvelope = {
@@ -4288,15 +4289,15 @@ export type ProductionBackupAuthorityStatus = {
 };
 
 export type ProductionBackupAuthorityWriteEnvelope = {
-    expected_current_policy_record_id: string;
-    expected_current_target_record_ids: {
+    expected_current_policy_record_id?: string;
+    expected_current_target_record_ids?: {
         [key: string]: string;
     };
     mode: 'dry_run' | 'apply';
     policy: ProductionBackupPolicyRecord;
-    reviewed_authority_digest: string;
-    schema_version: number;
-    targets: Array<ProductionBackupTargetRecord>;
+    reviewed_authority_digest?: string;
+    schema_version?: number;
+    targets?: Array<ProductionBackupTargetRecord>;
 };
 
 export type ProductionBackupAuthorityWriteResponse = {
@@ -4345,18 +4346,18 @@ export type ProductionBackupPolicyRecord = {
     fast_snapshot: ProductionFastSnapshotPolicy;
     independent_backup: ProductionIndependentBackupPolicy;
     instance: string;
-    policy_digest: string;
-    policy_id: string;
+    policy_digest?: string;
+    policy_id?: string;
     policy_revision: number;
     product: string;
     promotion_action: string;
     reason: string;
-    record_id: string;
+    record_id?: string;
     review_after: string;
-    schema_version: number;
+    schema_version?: number;
     source: string;
-    status: 'active' | 'superseded' | 'retired';
-    supersedes_record_id: string | null;
+    status?: 'active' | 'superseded' | 'retired';
+    supersedes_record_id?: string | null;
 };
 
 export type ProductionBackupPolicySummary = {
@@ -4379,13 +4380,13 @@ export type ProductionBackupTargetRecord = {
     } & ProxmoxStorageBackupDestinationReference);
     effective_at: string;
     reason: string;
-    record_id: string;
+    record_id?: string;
     review_after: string;
-    schema_version: number;
+    schema_version?: number;
     source: string;
-    status: 'active' | 'superseded' | 'retired';
-    supersedes_record_id: string | null;
-    target_digest: string;
+    status?: 'active' | 'superseded' | 'retired';
+    supersedes_record_id?: string | null;
+    target_digest?: string;
     target_id: string;
     target_revision: number;
 };
@@ -4403,7 +4404,7 @@ export type ProductionBackupTargetSummary = {
 
 export type ProductionFastSnapshotPolicy = {
     max_evidence_age_seconds: number;
-    operation: 'fast_snapshot';
+    operation?: 'fast_snapshot';
     retention_count: number;
     snapshot_prefix: string;
     source_target_id: string;
@@ -4412,7 +4413,7 @@ export type ProductionFastSnapshotPolicy = {
 export type ProductionIndependentBackupPolicy = {
     destination_target_id: string;
     max_evidence_age_seconds: number;
-    operation: 'independent_backup';
+    operation?: 'independent_backup';
     source_target_id: string;
 };
 
@@ -4479,18 +4480,18 @@ export type ProviderTargetRecord = {
 };
 
 export type ProxmoxGuestBackupDestinationReference = {
-    destination_kind: 'proxmox_guest';
+    destination_kind?: 'proxmox_guest';
     guest_id: string;
     guest_kind: 'lxc' | 'qemu';
     host: string;
-    provider_type: 'proxmox';
+    provider_type?: 'proxmox';
     username: string;
 };
 
 export type ProxmoxStorageBackupDestinationReference = {
-    destination_kind: 'proxmox_storage';
+    destination_kind?: 'proxmox_storage';
     host: string;
-    provider_type: 'proxmox';
+    provider_type?: 'proxmox';
     storage_id: string;
     username: string;
 };

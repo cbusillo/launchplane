@@ -10655,6 +10655,13 @@
           "snapshot_max_age_seconds": {
             "title": "Snapshot Max Age Seconds",
             "type": "integer"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/BackupPolicyTargetChange"
+            },
+            "title": "Targets",
+            "type": "array"
           }
         },
         "required": [
@@ -10669,35 +10676,10 @@
           "result_status",
           "retention_count",
           "review_after",
-          "snapshot_max_age_seconds"
+          "snapshot_max_age_seconds",
+          "targets"
         ],
         "title": "BackupPolicyHumanEvidence",
-        "type": "object"
-      },
-      "BackupPolicyProposalInput": {
-        "additionalProperties": false,
-        "properties": {
-          "authority": {
-            "$ref": "#/components/schemas/ProductionBackupAuthorityWriteEnvelope"
-          },
-          "reason": {
-            "maxLength": 4000,
-            "minLength": 1,
-            "title": "Reason",
-            "type": "string"
-          },
-          "related_issue": {
-            "default": "",
-            "title": "Related Issue",
-            "type": "string"
-          }
-        },
-        "required": [
-          "authority",
-          "reason",
-          "related_issue"
-        ],
-        "title": "BackupPolicyProposalInput",
         "type": "object"
       },
       "BackupPolicyProposalListResponse": {
@@ -10769,6 +10751,39 @@
           "status"
         ],
         "title": "BackupPolicyProposalReview",
+        "type": "object"
+      },
+      "BackupPolicyTargetChange": {
+        "additionalProperties": false,
+        "properties": {
+          "change": {
+            "enum": [
+              "new",
+              "revised",
+              "unchanged"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "destination_kind": {
+            "enum": [
+              "proxmox_guest",
+              "proxmox_storage"
+            ],
+            "title": "Destination Kind",
+            "type": "string"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "change",
+          "destination_kind",
+          "target_revision"
+        ],
+        "title": "BackupPolicyTargetChange",
         "type": "object"
       },
       "BootstrapEvidence": {
@@ -25058,115 +25073,9 @@
         "title": "PrivilegedOperationExecutionEvidence",
         "type": "object"
       },
-      "PrivilegedOperationHumanResponse": {
+      "PrivilegedOperationHumanRecord": {
         "additionalProperties": false,
-        "properties": {
-          "events": {
-            "items": {
-              "$ref": "#/components/schemas/PrivilegedOperationEventRecord"
-            },
-            "title": "Events",
-            "type": "array"
-          },
-          "record": {
-            "$ref": "#/components/schemas/PrivilegedOperationRecord"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          },
-          "write_status": {
-            "default": "not_applicable",
-            "enum": [
-              "written",
-              "replayed",
-              "not_applicable"
-            ],
-            "title": "Write Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "events",
-          "record",
-          "status",
-          "trace_id",
-          "write_status"
-        ],
-        "title": "PrivilegedOperationHumanResponse",
-        "type": "object"
-      },
-      "PrivilegedOperationListResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "reviews": {
-            "items": {
-              "$ref": "#/components/schemas/PrivilegedOperationSemanticReview"
-            },
-            "title": "Reviews",
-            "type": "array"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "total": {
-            "minimum": 0,
-            "title": "Total",
-            "type": "integer"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "reviews",
-          "status",
-          "total",
-          "trace_id"
-        ],
-        "title": "PrivilegedOperationListResponse",
-        "type": "object"
-      },
-      "PrivilegedOperationLocalOperatorActor": {
-        "additionalProperties": false,
-        "properties": {
-          "identity_type": {
-            "const": "local_operator",
-            "default": "local_operator",
-            "title": "Identity Type",
-            "type": "string"
-          },
-          "login": {
-            "const": "local-operator",
-            "default": "local-operator",
-            "title": "Login",
-            "type": "string"
-          },
-          "principal_sha256": {
-            "title": "Principal Sha256",
-            "type": "string"
-          }
-        },
-        "required": [
-          "identity_type",
-          "login",
-          "principal_sha256"
-        ],
-        "title": "PrivilegedOperationLocalOperatorActor",
-        "type": "object"
-      },
-      "PrivilegedOperationRecord": {
-        "additionalProperties": false,
+        "description": "The generic browser record excludes private product-card adapters.",
         "properties": {
           "approval": {
             "anyOf": [
@@ -25184,7 +25093,6 @@
           },
           "descriptor_id": {
             "enum": [
-              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -25201,9 +25109,6 @@
           },
           "evidence": {
             "anyOf": [
-              {
-                "$ref": "#/components/schemas/BackupPolicyHumanEvidence"
-              },
               {
                 "$ref": "#/components/schemas/ManagedSecretReencryptionHumanEvidence"
               },
@@ -25270,9 +25175,6 @@
           },
           "request": {
             "anyOf": [
-              {
-                "$ref": "#/components/schemas/BackupPolicyProposalInput"
-              },
               {
                 "$ref": "#/components/schemas/ManagedSecretReencryptionPlanInput"
               },
@@ -25380,7 +25282,114 @@
           "terminal_reason",
           "updated_at"
         ],
-        "title": "PrivilegedOperationRecord",
+        "title": "PrivilegedOperationHumanRecord",
+        "type": "object"
+      },
+      "PrivilegedOperationHumanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationEventRecord"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "record": {
+            "$ref": "#/components/schemas/PrivilegedOperationHumanRecord"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "write_status": {
+            "default": "not_applicable",
+            "enum": [
+              "written",
+              "replayed",
+              "not_applicable"
+            ],
+            "title": "Write Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "events",
+          "record",
+          "status",
+          "trace_id",
+          "write_status"
+        ],
+        "title": "PrivilegedOperationHumanResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "reviews": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationSemanticReview"
+            },
+            "title": "Reviews",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "total": {
+            "minimum": 0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reviews",
+          "status",
+          "total",
+          "trace_id"
+        ],
+        "title": "PrivilegedOperationListResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationLocalOperatorActor": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_type": {
+            "const": "local_operator",
+            "default": "local_operator",
+            "title": "Identity Type",
+            "type": "string"
+          },
+          "login": {
+            "const": "local-operator",
+            "default": "local-operator",
+            "title": "Login",
+            "type": "string"
+          },
+          "principal_sha256": {
+            "title": "Principal Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity_type",
+          "login",
+          "principal_sha256"
+        ],
+        "title": "PrivilegedOperationLocalOperatorActor",
         "type": "object"
       },
       "PrivilegedOperationRevocationEnvelope": {
@@ -34549,13 +34558,8 @@
           }
         },
         "required": [
-          "expected_current_policy_record_id",
-          "expected_current_target_record_ids",
           "mode",
-          "policy",
-          "reviewed_authority_digest",
-          "schema_version",
-          "targets"
+          "policy"
         ],
         "title": "ProductionBackupAuthorityWriteEnvelope",
         "type": "object"
@@ -34863,23 +34867,17 @@
           }
         },
         "required": [
+          "product",
           "context",
-          "effective_at",
+          "instance",
+          "promotion_action",
+          "policy_revision",
           "fast_snapshot",
           "independent_backup",
-          "instance",
-          "policy_digest",
-          "policy_id",
-          "policy_revision",
-          "product",
-          "promotion_action",
-          "reason",
-          "record_id",
+          "effective_at",
           "review_after",
-          "schema_version",
           "source",
-          "status",
-          "supersedes_record_id"
+          "reason"
         ],
         "title": "ProductionBackupPolicyRecord",
         "type": "object"
@@ -35029,18 +35027,13 @@
           }
         },
         "required": [
+          "target_id",
+          "target_revision",
           "destination",
           "effective_at",
-          "reason",
-          "record_id",
           "review_after",
-          "schema_version",
           "source",
-          "status",
-          "supersedes_record_id",
-          "target_digest",
-          "target_id",
-          "target_revision"
+          "reason"
         ],
         "title": "ProductionBackupTargetRecord",
         "type": "object"
@@ -35136,11 +35129,10 @@
           }
         },
         "required": [
-          "max_evidence_age_seconds",
-          "operation",
-          "retention_count",
+          "source_target_id",
           "snapshot_prefix",
-          "source_target_id"
+          "retention_count",
+          "max_evidence_age_seconds"
         ],
         "title": "ProductionFastSnapshotPolicy",
         "type": "object"
@@ -35170,10 +35162,9 @@
           }
         },
         "required": [
+          "source_target_id",
           "destination_target_id",
-          "max_evidence_age_seconds",
-          "operation",
-          "source_target_id"
+          "max_evidence_age_seconds"
         ],
         "title": "ProductionIndependentBackupPolicy",
         "type": "object"
@@ -35543,12 +35534,10 @@
           }
         },
         "required": [
-          "destination_kind",
-          "guest_id",
-          "guest_kind",
           "host",
-          "provider_type",
-          "username"
+          "username",
+          "guest_kind",
+          "guest_id"
         ],
         "title": "ProxmoxGuestBackupDestinationReference",
         "type": "object"
@@ -35582,11 +35571,9 @@
           }
         },
         "required": [
-          "destination_kind",
           "host",
-          "provider_type",
-          "storage_id",
-          "username"
+          "username",
+          "storage_id"
         ],
         "title": "ProxmoxStorageBackupDestinationReference",
         "type": "object"

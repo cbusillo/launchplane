@@ -893,6 +893,10 @@ def _execute_backup_policy(
         # Recheck approver authority as part of the same locked write. Shared
         # targets are not revised through a single product's approval card.
         _authorize_approved_operation(record=record, record_store=store)
+        from control_plane.privileged_operation_registry import plan_backup_policy_proposal
+
+        if plan_backup_policy_proposal(store, record.request) != record.evidence:
+            raise ValueError("approved_plan_drift")
         return lane_bound_target_revision_refusal(policy_records=policy_records, envelope=envelope)
 
     result = store.compare_and_apply_production_backup_authority(
