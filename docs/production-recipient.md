@@ -203,3 +203,124 @@ provider, lane, mount and custody references. A testing reference protects the r
 Shared backups and testing custody are retained. Product retirement and detached
 application retirement are not substitutes for this operation. Neither a
 successful preparation nor a source PR starts the observation window.
+
+## Accepted-release cutover and exact inverse
+
+`POST /v1/products/{product}/production-recipient/cutover` reviews and arms an
+exact preparation. It does not deploy or publish. Supply the preparation digest,
+every existing private monitor's replacement URL, a private readiness URL,
+every active backup policy's replacement source target, the existing managed
+application API writer binding, and a completed service-owned destination backup
+operation. Use `--cutover` with the terminal consumer, separate private request
+and evidence files, dry-run, then reviewed apply under a stable key. The saved
+intent binds all current authority, consumer bindings and managed versions. Before
+execution, a fresh reviewed intent can replace an expired destination capture;
+every earlier intent stays in custody history. Once execution begins its admitted
+intent stays fixed, and recovery does not expire the already-admitted destination
+capture while resolving that admitted release, including its drill's resume of
+the same already-bootstrapped recipient. The fresh source-backup gate and live
+identity, readiness, resource and upstream checks still apply.
+Source backup and destination capture must be current; the isolated recipient
+recovery proof is also required. Capture alone does not qualify recovery.
+
+The bounded custody result includes `publication_sha256` after publication.
+`--inverse` uses that digest, the preparation digest and context to review and apply
+`POST /v1/products/{product}/production-recipient/inverse` through existing production
+rollback authority. It works independently of whether this release has a drill.
+Apply requires its saved exact review and original inverse key; terminal agents
+cannot apply. It never grants authority or starts a new release. An admin
+inverse ends this generation's automatic forward continuation; a later move needs
+a freshly reviewed generation and the Client accepted-release path.
+
+Only the existing Client accepted-release worker starts bootstrap. It checks the
+exact accepted artifact/commit, live release grant and production backup gate
+before effects and at publication. This also supports the first-release rollback
+drill: restore the retained recipient and its original data, capture again, then
+resume the replacement without redeploying or initializing either database.
+Arming an intent or merging this source does not authorize a live cutover.
+
+The worker temporarily excludes effects by other service operations sharing the
+API writer budget, including already-reserved operations at their next provider
+effect checkpoint. It verifies all recorded testing peers are parked, pauses
+only the old application writer, starts the prepared replacement and verifies
+health, bootstrap readiness and exact runtime identity. Actual Docker metadata
+must agree with both immutable images, database command memory bounds, enforced
+CPU/RAM, independent named volumes and reviewed listeners. It then publishes
+the target and provider records, inventory/deployment evidence, private monitor
+endpoints and append-only backup source revisions in one PostgreSQL transaction.
+The commit repeats custody, authority, release and execution-lease checks.
+
+A shared testing writer can be coordinated through
+`POST /v1/products/{product}/production-recipient/testing-writer`, using
+`--writer-control`. This uses existing testing deploy authority, requires positive
+disposable-lane evidence and names the exact armed preparation and testing secret
+binding. Review separate pause/resume requests and retain each original key. Each pause
+receipt returns `pause_operation_id`; pass that exact ID on its resume request.
+A later pause uses a new operation key and witness, so cycles remain repeatable
+without reopening an earlier released pause. Testing authorization uses the
+product profile's actual testing context, including when it differs from prod.
+Only the recorded application container is stopped or restored; the database and
+unrelated containers remain untouched. A resume restores the witnessed original
+running state. A stopped writer stays stopped. Host terminal witnesses support
+receipt/readback after a lost reply. Bounded custody lists the original writer
+operation and binding references, including carried pauses after supersession.
+Historical receipts read the retained host witness even if the provider target
+was removed; they prove the original completion only. Cutover separately checks
+that every current and retained testing peer is parked. Missing completion
+evidence remains unknown.
+
+Rollback stops only the exact replacement application writer and conditionally
+inverts task-owned authority rows, then resumes the retained writer only after
+its binding is restored. Extra monitors, other lanes and unrelated settings
+survive. Any changed owned row refuses the whole inverse; no shared guest is
+restored and no data volume is deleted. Backup history receives a new inverse
+revision rather than being rewritten. The release worker and reviewed recovery
+path retain both recipients when a deploy or writer outcome remains uncertain.
+`--release-recovery` reviews and resumes an existing Client release step with its
+original decision, kind and attempt. Planning returns the existing original
+idempotency key; apply takes it from the saved review rather than minting a key. It cannot invent a
+step or bypass acceptance, backup gates, leases or terminal provider evidence.
+
+## Retained original-key continuation
+
+After an unknown create or authority drift, authorized product readers can read
+`custody` without borrowing the original preparer's identity. Continuation writes
+retain the original preparer, caller scope and preparation key. This read intentionally reports the
+retained record even when fresh qualification fails; it grants no bootstrap
+eligibility. Use `--continuation` to review that custody digest, the original key,
+a replacement preparation request and a reason. Apply requires the exact saved
+review. Every observed or uncertain project, environment, target, volume, port,
+reservation and peer-writer reference stays in prior-attempt history. The
+replacement receives a distinct inert namespace and a derived execution key
+under the same public original preparation key. It needs fresh preparation,
+upstream checks, recovery, destination capture and cutover review.
+
+Expired worker leases alone never prove absent host effects. New preparations
+wrap every fixed host job in a per-generation execution lock. Supersession first
+writes a permanent tombstone under that lock; an active job blocks it and a queued
+late job refuses the tombstone. An unknown create before any possible host job
+can be retained and superseded without claiming provider absence. Legacy
+unwitnessed host effects remain fenced until positive terminal evidence exists.
+An active or uncertain cutover cannot use preparation supersession as recovery.
+A settled inverse or a refusal before writer dispatch can be reviewed for a new
+generation, retaining its original execution records and fencing every recorded
+recipient or peer host before supersession. Unknown testing-writer operations require a positive retained terminal receipt
+before adoption, and that receipt stays in continuation history. Missing writer completion evidence
+never proves that a queued pause cannot still run. The original release recovery
+keeps that fence until positive terminal evidence exists.
+
+Host custody lives under `/var/lib/launchplane/recipient-execution/<namespace>/`
+and `/var/lib/launchplane/recipient-writers/<binding>/`. Execution tombstones and
+writer witnesses are fsynced and retained. A permanent writer-release marker
+rejects delayed pauses after restoration. A completed resume never starts a
+container again. An interrupted start can retry only while its original pause
+still owns the writer; an older resume cannot undo a later pause. Preserve these directories and recovery
+archives through host maintenance and rollback; removing them would remove the
+late-worker fence. There is no automatic host-custody or old-volume cleanup.
+Retirement remains a separate scoped operation after the successful-cutover
+observation period above, with fresh reference checks.
+
+A writer dispatch with no terminal host witness stays unknown, including a
+pre-witness host refusal after schedule dispatch. Its reserved target cannot be
+reused or abandoned by guessing that the queued job will never run. The narrower
+per-operation host-fence recovery is tracked in [#3811](https://github.com/cbusillo/launchplane/issues/3811).

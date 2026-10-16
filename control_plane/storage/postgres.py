@@ -67,6 +67,7 @@ from sqlalchemy.engine import Engine, ExceptionContext, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
 from sqlalchemy.pool import NullPool
+from sqlalchemy.types import TypeDecorator
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
@@ -583,6 +584,7 @@ from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
+    odoo_instance_override_records_match,
 )
 from control_plane.storage.schema_invariants import (
     RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
@@ -617,6 +619,20 @@ class OrdinaryAgentDeliveryActivationConflictError(ValueError):
 ConnectionFactory = Callable[[], Any]
 PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
+
+
+class _OdooOverridePayloadJson(TypeDecorator[PayloadDict]):
+    """Do not suppress a boolean/number-only override update during ORM flush."""
+
+    impl = PayloadJsonType
+    cache_ok = True
+
+    def compare_values(self, x: Any, y: Any) -> bool:
+        if not isinstance(x, dict) or not isinstance(y, dict):
+            return x is y
+        return json.dumps(x, sort_keys=True) == json.dumps(y, sort_keys=True)
+
+
 OrdinaryAgentDeliveryActivationWriteStatus = Literal["written", "replayed"]
 
 
@@ -4348,7 +4364,7 @@ class LaunchplaneOdooInstanceOverrideRow(Base):
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(_OdooOverridePayloadJson(), nullable=False)
 
 
 class LaunchplaneEveryCodeWorkRequestRow(Base):
@@ -6080,7 +6096,8 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneDisposableTestingResourceAllocationRow
                 | LaunchplaneFreshOdooTestingGenerationRow
                 | LaunchplaneInventoryRow
-                | LaunchplanePrivateHealthEndpointRow,
+                | LaunchplanePrivateHealthEndpointRow
+                | LaunchplaneReleaseReviewDecisionRow,
             )
             authority_row = authority_row or (
                 isinstance(row, LaunchplaneDeploymentRow) and row.instance == "testing"
@@ -6675,10 +6692,9 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                     .with_for_update()
                 )
-                if (
-                    current is None
-                    or OdooInstanceOverrideRecord.model_validate(current.payload)
-                    != write.expected_record
+                if current is None or not odoo_instance_override_records_match(
+                    OdooInstanceOverrideRecord.model_validate(current.payload),
+                    write.expected_record,
                 ):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
                 self._merge_authority_row(
@@ -9011,6 +9027,10 @@ class PostgresRecordStore(HumanSessionStore):
             raise ValueError("Provider effect checkpoints require a reconciliation key.")
         with self._session_factory() as session:
             self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            from control_plane.production_recipient_budget import require_budget_checkpoint
+
+            require_budget_checkpoint(self, session, reservation)
             row = session.scalar(
                 self._idempotency_statement(
                     scope=reservation.scope,
@@ -10910,7 +10930,11 @@ class PostgresRecordStore(HumanSessionStore):
             return dict(row.payload) if row else None
 
     def write_production_recipient(
-        self, *, expected: dict[str, Any] | None, replacement: dict[str, Any]
+        self,
+        *,
+        expected: dict[str, Any] | None,
+        replacement: dict[str, Any],
+        reservation: LaunchplaneIdempotencyRecord | None = None,
     ) -> None:
         """Append-only identities and compare-and-write custody, without lane publication."""
         from control_plane.contracts.production_recipient import ProductionRecipientRecord
@@ -10919,12 +10943,29 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
-            from control_plane.production_recipient import authority_snapshot
+            if reservation is not None:
+                from control_plane.production_recipient_publication import require_publication_lease
+
+                require_publication_lease(self, session, reservation)
+            from control_plane.production_recipient import (
+                authority_snapshot,
+                same_recipient_authority,
+            )
 
             superseding = expected is not None and expected.get("plan_sha256") != record.plan_sha256
-            if (expected is None or superseding or record.qualified_at) and (
-                authority_snapshot(self, record.product, record.context)
-                != record.authority_snapshot
+            if (
+                expected is None
+                or superseding
+                or (
+                    record.qualified_at
+                    and not record.publication
+                    and record.phase not in {"rolled_back", "preflight_refused"}
+                )
+            ) and (
+                not same_recipient_authority(
+                    authority_snapshot(self, record.product, record.context),
+                    record.authority_snapshot,
+                )
             ):
                 raise ValueError("Production authority changed before custody committed.")
             row = session.get(
@@ -10989,16 +11030,52 @@ class PostgresRecordStore(HumanSessionStore):
                     "qualified_at",
                     "upstream_proof",
                     "recovery_proof",
+                    "activation",
+                    "activation_history",
+                    "execution",
+                    "writer_custody",
                 }
                 if not superseding and previous.model_dump(exclude=mutable) != record.model_dump(
                     exclude=mutable
                 ):
                     raise ValueError("Production recipient intent and old custody are immutable.")
-                for key in (mutable - {"phase"}) if not superseding else ():
+                if not superseding and any(
+                    record.execution.get(key) != value for key, value in previous.execution.items()
+                ):
+                    raise ValueError("Production execution witnesses are append-only.")
+                if (
+                    not superseding
+                    and record.writer_custody[: len(previous.writer_custody)]
+                    != previous.writer_custody
+                ):
+                    raise ValueError("Peer writer custody is append-only.")
+                if not superseding and record.activation_history != previous.activation_history + (
+                    [previous.activation]
+                    if previous.activation
+                    and previous.activation != record.activation
+                    and not previous.execution
+                    else []
+                ):
+                    raise ValueError("Armed intent history must retain each reviewed revision.")
+                for key in (
+                    (
+                        mutable
+                        - {"phase", "execution", "writer_custody", "activation_history"}
+                        - ({"activation"} if not previous.execution else set())
+                    )
+                    if not superseding
+                    else ()
+                ):
                     if getattr(previous, key) and getattr(previous, key) != getattr(record, key):
                         raise ValueError(
                             "Production recipient identities and receipts are immutable."
                         )
+            if record.phase in {"bootstrapping", "reverting"} and (
+                previous is None or previous.phase != record.phase
+            ):
+                from control_plane.production_recipient_budget import require_budget_admission
+
+                require_budget_admission(self, session, record)
             session.merge(
                 LaunchplaneProductionRecipientRow(
                     product=record.product,
@@ -11095,8 +11172,306 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(LaunchplaneIdempotencyRow.created_at.asc(),),
         )
 
+    def list_odoo_testing_disposal_receipts(
+        self, product: str, context: str, *, include_retained: bool = False
+    ) -> tuple[LaunchplaneIdempotencyRecord, ...]:
+        with self._session_factory() as session:
+            rows = session.scalars(
+                self._odoo_testing_disposal_statement(
+                    product, context, include_retained=include_retained
+                )
+            ).all()
+            return tuple(LaunchplaneIdempotencyRecord.model_validate(row.payload) for row in rows)
+
+    def reconcile_odoo_testing_storage(
+        self,
+        operation: OdooStableTargetReplacementOperationRecord,
+        binding: str,
+        intent: dict[str, Any],
+        perform: Callable[[Callable[[Callable[[], None]], None]], dict[str, object]],
+        *,
+        clock: Callable[[], float],
+        checkpoint: Callable[[], None],
+    ) -> dict[str, object]:
+        """Fence the dispatch under authority locks, never the remote wait.
+
+        The separate committed storage intent owns cleanup custody. It cannot
+        share the replacement journal, whose generation changes at activation.
+        """
+        from control_plane.odoo_testing_drill import (
+            DRILL_SCOPE,
+            DRILL_ROUTE,
+            DrillPrerequisite,
+            DrillSkipped,
+            drill_receipt,
+        )
+        from control_plane.odoo_testing_restore import (
+            fresh_testing_authority_sha256,
+            read_current_testing_generation,
+        )
+        from control_plane.odoo_testing_storage import capacity_admission_binding, storage_key
+        from control_plane.disposable_lanes import DisposableLaneStore, require_disposable_lane
+        from control_plane.testing_lane_hold import read_staff_testing_hold
+
+        @contextmanager
+        def locked() -> Iterator[Session]:
+            with self._session_factory() as session:
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=operation.product,
+                    context=operation.context,
+                    instance="testing",
+                )
+                self._lock_product_authority_bundle_write(session)
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    yield session
+                finally:
+                    self._disposable_authority_context.session = outer
+
+        def validate(session: Session) -> FreshOdooTestingGeneration:
+            if read_staff_testing_hold(record_store=self, context=operation.context) is not None:
+                raise DrillSkipped("staff_testing_hold")
+            current = read_current_testing_generation(
+                self, product=operation.product, context=operation.context, instance="testing"
+            )
+            if (
+                current is None
+                or not current.completed_at
+                or fresh_testing_authority_sha256(self, current) != binding
+            ):
+                raise DrillPrerequisite("testing_storage_authority_changed")
+            for key, copy in zip(intent["receipts"], intent["copies"], strict=True):
+                record = self.read_idempotency_record(
+                    scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=key
+                )
+                if record is None:
+                    raise DrillPrerequisite("testing_disposal_receipt_missing")
+                planned = FreshOdooTestingGeneration.model_validate(
+                    record.response_payload["planned_generation"]
+                )
+                if (
+                    {
+                        "discard_drill_database": planned.discard_drill_database,
+                        "discard_copy_binding": planned.discard_copy_binding,
+                    }
+                    != copy
+                    or planned.discard_drill_database
+                    in {current.drill_database, current.retained_drill_database}
+                    or (planned.namespace, planned.target_id, planned.resources_binding_sha256)
+                    != (current.namespace, current.target_id, current.resources_binding_sha256)
+                ):
+                    raise DrillPrerequisite("testing_disposal_identity_changed")
+            if intent["copies"]:
+                require_disposable_lane(
+                    cast(DisposableLaneStore, self),
+                    product=operation.product,
+                    context=operation.context,
+                    instance="testing",
+                    now=datetime.fromtimestamp(clock(), timezone.utc),
+                )
+            else:
+                # Capacity reads grant no custody permission. Recorded protection
+                # still wins, including an expired report, and receiver inspection
+                # independently proves the exact resource isolation and witness.
+                safety = self.read_disposable_lane_safety(
+                    operation.product, operation.context, "testing"
+                )
+                if safety is not None and (
+                    safety.usage == "in_use"
+                    or safety.data == "only_copy"
+                    or safety.production_resources in {"shared", "separation_ready"}
+                ):
+                    raise DrillSkipped("lane_use_or_only_copy_protected")
+            worker = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow, operation.operation_id
+            )
+            if (
+                worker is None
+                or worker.status != "running"
+                or worker.attempt != operation.attempt
+                or worker.lease_owner != operation.lease_owner
+                or parse_launchplane_mutation_timestamp(
+                    worker.lease_expires_at, field_name="lease_expires_at"
+                ).timestamp()
+                <= clock()
+            ):
+                raise DrillPrerequisite("drill_worker_lease_changed")
+            return current
+
+        dispatched = False
+
+        def dispatch(send: Callable[[], None]) -> None:
+            nonlocal dispatched
+            with locked() as session:
+                validate(session)
+                checkpoint()
+                send()
+                dispatched = True
+
+        result = perform(dispatch)
+        results = result.get("disposals")
+        if (
+            not dispatched
+            or not isinstance(result.get("capacity"), bool)
+            or not isinstance(results, list)
+            or len(results) != len(intent["copies"])
+            or any(value not in {"disposed", "deferred", "retained"} for value in results)
+        ):
+            raise DrillPrerequisite("testing_storage_readback_unavailable")
+        with locked() as session:
+            current = None
+            skip_code = ""
+            try:
+                current = validate(session)
+            except DrillSkipped as error:
+                skip_code = str(error)
+            except (ValueError, FileNotFoundError):
+                # Preserve exact completed cleanup evidence even if new authority
+                # prevents using its capacity snapshot for activation.
+                safety = self.read_disposable_lane_safety(
+                    operation.product, operation.context, "testing"
+                )
+                if safety is not None and (safety.usage == "in_use" or safety.data == "only_copy"):
+                    skip_code = "lane_use_or_only_copy_protected"
+            for key, copy, status in zip(
+                intent["receipts"], intent["copies"], results, strict=True
+            ):
+                row = session.scalar(
+                    self._idempotency_statement(
+                        scope=DRILL_SCOPE,
+                        route_path=DRILL_ROUTE,
+                        idempotency_key=key,
+                        for_update=True,
+                    )
+                )
+                if row is None:
+                    raise DrillPrerequisite("testing_disposal_receipt_missing")
+                record = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                planned = FreshOdooTestingGeneration.model_validate(
+                    record.response_payload["planned_generation"]
+                )
+                if {
+                    "discard_drill_database": planned.discard_drill_database,
+                    "discard_copy_binding": planned.discard_copy_binding,
+                } != copy:
+                    raise DrillPrerequisite("testing_disposal_identity_changed")
+                record.response_payload["disposal_status"] = status
+                if (
+                    status != "deferred"
+                    and record.response_payload.get("failure_step") == "testing_disposal_deferred"
+                ):
+                    record.response_payload["alert_superseded_by"] = operation.idempotency_key
+                self._sync_idempotency_row(row, record)
+            for key, planned in intent.get("retained_receipts", {}).items():
+                row = session.scalar(
+                    self._idempotency_statement(
+                        scope=DRILL_SCOPE,
+                        route_path=DRILL_ROUTE,
+                        idempotency_key=key,
+                        for_update=True,
+                    )
+                )
+                if row is None:
+                    raise DrillPrerequisite("testing_disposal_receipt_missing")
+                record = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+                if record.response_payload["planned_generation"] != planned:
+                    raise DrillPrerequisite("testing_disposal_identity_changed")
+                record.response_payload["disposal_status"] = "retained"
+                self._sync_idempotency_row(row, record)
+            session.flush()
+            # Read the transaction's own results, excluding retained attention.
+            pending = session.scalars(
+                self._odoo_testing_disposal_statement(operation.product, operation.context)
+            ).all()
+            receipt_row = session.scalar(
+                self._idempotency_statement(
+                    scope=DRILL_SCOPE,
+                    route_path=DRILL_ROUTE,
+                    idempotency_key=operation.idempotency_key,
+                    for_update=True,
+                )
+            )
+            if receipt_row is None:
+                raise DrillPrerequisite("drill_receipt_missing")
+            receipt = LaunchplaneIdempotencyRecord.model_validate(receipt_row.payload)
+            receipt.response_payload.update(
+                storage_status="pass" if result["capacity"] else "insufficient",
+                storage_admission=capacity_admission_binding(current, operation)
+                if current is not None and result["capacity"] and not pending
+                else "",
+                storage_authority=binding,
+                disposal_pending=len(pending),
+            )
+            if "deferred" in results or "retained" in results or intent.get("retained_receipts"):
+                receipt.response_payload.update(
+                    failure_step="testing_disposal_deferred"
+                    if "deferred" in results
+                    else "testing_disposal_retained",
+                    failure_trace=operation.operation_id,
+                    alert_delivered=False,
+                    next_alert_at=0,
+                    delivered_destinations=[],
+                )
+            self._sync_idempotency_row(receipt_row, receipt)
+            evidence = dict(intent)
+            evidence.update(phase="complete", capacity=result["capacity"], disposals=results)
+            from control_plane.odoo_testing_storage import completed_storage_key
+
+            archive_key = completed_storage_key(operation.operation_id, evidence)
+            if (
+                session.scalar(
+                    self._idempotency_statement(
+                        scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=archive_key
+                    )
+                )
+                is None
+            ):
+                session.add(self._idempotency_row(drill_receipt(archive_key, clock(), evidence)))
+            session.merge(
+                self._idempotency_row(
+                    drill_receipt(storage_key(operation.operation_id), clock(), evidence)
+                )
+            )
+            session.commit()
+        return {**result, "authority_current": current is not None, "skip_code": skip_code}
+
+    @staticmethod
+    def _odoo_testing_disposal_statement(
+        product: str, context: str, *, include_retained: bool = False
+    ) -> Any:
+        from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE, lane_key
+
+        payload = LaunchplaneIdempotencyRow.payload["response_payload"]
+        return (
+            select(LaunchplaneIdempotencyRow)
+            .where(
+                LaunchplaneIdempotencyRow.scope == DRILL_SCOPE,
+                LaunchplaneIdempotencyRow.route_path == DRILL_ROUTE,
+                LaunchplaneIdempotencyRow.idempotency_key.like(lane_key(product, context) + ":%"),
+                payload["planned_generation"]["discard_drill_database"].as_string() != "",
+                or_(
+                    payload["status"].as_string() == "pass",
+                    payload["activation_attempt"].as_integer().is_not(None),
+                ),
+                or_(
+                    payload["disposal_status"].as_string().is_(None),
+                    payload["disposal_status"]
+                    .as_string()
+                    .not_in(("disposed",) if include_retained else ("disposed", "retained")),
+                ),
+            )
+            .order_by(LaunchplaneIdempotencyRow.created_at.asc())
+        )
+
     def update_odoo_testing_drill_receipt(
-        self, key: str, now: float, payload: dict[str, Any]
+        self,
+        key: str,
+        now: float,
+        payload: dict[str, Any],
+        *,
+        expected_failure: tuple[Any, Any] | None = None,
     ) -> None:
         """Merge only scheduler-owned projection/delivery fields, preserving worker admission."""
         from control_plane.odoo_testing_drill import DRILL_SCOPE, DRILL_ROUTE, timestamp
@@ -11113,6 +11488,9 @@ class PostgresRecordStore(HumanSessionStore):
             "delivered_destinations",
             "next_alert_at",
             "alert_superseded_by",
+            "storage_status",
+            "disposal_pending",
+            "disposal_status",
         }
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -11124,6 +11502,15 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise FileNotFoundError(key)
             current = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            if expected_failure is not None and expected_failure != (
+                current.response_payload.get("failure_step", current.response_payload.get("step")),
+                current.response_payload.get(
+                    "failure_trace", current.response_payload.get("trace")
+                ),
+            ):
+                return
+            if current.response_payload.get("disposal_status") in {"disposed", "retained"}:
+                payload = {key: value for key, value in payload.items() if key != "disposal_status"}
             current.response_payload.update(
                 {name: value for name, value in payload.items() if name in fields}
             )
@@ -11455,6 +11842,15 @@ class PostgresRecordStore(HumanSessionStore):
                 return
             if current.model_dump(mode="json") != receipt.response_payload["previous_generation"]:
                 raise DrillPrerequisite("drill_generation_changed")
+            from control_plane.odoo_testing_storage import capacity_admission_binding
+            from control_plane.odoo_testing_restore import fresh_testing_authority_sha256
+
+            if receipt.response_payload.get("storage_admission") != capacity_admission_binding(
+                current, operation
+            ) or receipt.response_payload.get(
+                "storage_authority"
+            ) != fresh_testing_authority_sha256(self, current):
+                raise DrillPrerequisite("testing_storage_capacity_unverified")
             session.get(
                 LaunchplaneDisposableLaneSafetyRow,
                 (operation.product, operation.context, "testing"),
@@ -11464,7 +11860,15 @@ class PostgresRecordStore(HumanSessionStore):
             if prepared is None:
                 raise DrillPrerequisite("drill_admission_snapshot_changed")
             if generation_binding(prepared.generation) != generation_binding(planned):
-                raise DrillPrerequisite("drill_source_changed")
+                if prepared.generation.model_dump(
+                    exclude={"drill_storage_budget"}
+                ) != planned.model_dump(exclude={"drill_storage_budget"}):
+                    raise DrillPrerequisite("drill_source_changed")
+                # Only a not-yet-selected copy may take freshly qualified budget
+                # metadata. Its database/source identity and prior copy stay exact.
+                planned = prepared.generation
+                receipt.response_payload["planned_generation"] = planned.model_dump(mode="json")
+                receipt.response_payload["generation_binding"] = generation_binding(planned)
             previous_runtime = self.list_runtime_environment_records(
                 scope="instance", context_name=operation.context, instance_name="testing"
             )[0]
@@ -21259,7 +21663,11 @@ class PostgresRecordStore(HumanSessionStore):
             effect = session.scalar(
                 select(LaunchplaneOrdinaryAgentEffectRow.effect_id)
                 .where(
-                    LaunchplaneOrdinaryAgentEffectRow.payload["target"]["repository"].as_string()
+                    func.lower(
+                        LaunchplaneOrdinaryAgentEffectRow.payload["target"][
+                            "repository"
+                        ].as_string()
+                    )
                     == normalized_repository,
                     LaunchplaneOrdinaryAgentEffectRow.payload["target"]["base_branch"].as_string()
                     == normalized_base_branch,
@@ -22176,6 +22584,8 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> ReleaseReviewDecisionRecord:
         """Insert once; a competing replica receives the stored decision unchanged."""
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             row = LaunchplaneReleaseReviewDecisionRow(
                 record_id=record.record_id,
                 product=record.product,
@@ -22240,6 +22650,7 @@ class PostgresRecordStore(HumanSessionStore):
             else self._session_factory() as session
         ):
             self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             statement = select(LaunchplaneReleaseReviewDecisionRow).where(
                 LaunchplaneReleaseReviewDecisionRow.record_id == record_id
             )
@@ -28194,7 +28605,7 @@ class PostgresRecordStore(HumanSessionStore):
                     if current is not None
                     else None
                 )
-                if current_record != expected_record:
+                if not odoo_instance_override_records_match(current_record, expected_record):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             require_bundle_context_owner(
                 ProductAuthorityBundle(
@@ -28208,6 +28619,35 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.merge(row)
             session.commit()
+
+    def write_odoo_secret_transport_migration(
+        self,
+        bundle: ProductAuthorityBundle,
+        *,
+        expected_records: tuple[OdooInstanceOverrideRecord, ...],
+    ) -> None:
+        """Guard every legacy consumer before retiring a binding in the bundle."""
+
+        def guard(session: Any) -> None:
+            current = tuple(
+                OdooInstanceOverrideRecord.model_validate(row.payload)
+                for row in session.scalars(
+                    select(LaunchplaneOdooInstanceOverrideRow).with_for_update()
+                ).all()
+            )
+
+            def route(record: OdooInstanceOverrideRecord) -> tuple[str, str]:
+                return record.context, record.instance
+
+            if len(current) != len(expected_records) or any(
+                not odoo_instance_override_records_match(actual, expected)
+                for actual, expected in zip(
+                    sorted(current, key=route), sorted(expected_records, key=route), strict=True
+                )
+            ):
+                raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
+
+        self._write_product_authority_bundle(bundle, guard_provider=guard)
 
     def update_odoo_instance_override_apply_result(
         self,
