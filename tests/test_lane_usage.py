@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+from sqlalchemy.exc import OperationalError
 
 from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
@@ -116,6 +118,19 @@ class LaneUsageTests(unittest.TestCase):
             )
         )
         self.assertTrue(self.decision().protected)
+
+    def test_unavailable_monitor_evidence_refuses_without_raising(self) -> None:
+        for failure in (
+            KeyError("private-detail"),
+            OperationalError("private-query", {}, Exception()),
+        ):
+            with (
+                self.subTest(failure=type(failure).__name__),
+                patch.object(
+                    self.store, "list_public_ingress_observation_records", side_effect=failure
+                ),
+            ):
+                self.assertTrue(self.decision().protected)
 
     def test_serving_unknown_and_production_remain_protected(self) -> None:
         self.health(status=200)

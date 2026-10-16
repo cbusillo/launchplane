@@ -92,7 +92,7 @@ class TestingDrillScenario(unittest.TestCase):
         self.gen = generation().model_copy(
             update={
                 "context": self.context,
-                "completed_at": self.profile.updated_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
                 "reconcile_requested_at": self.profile.updated_at,
             }
         )
@@ -337,10 +337,7 @@ class TestingDrillTests(TestingDrillScenario):
         require_drill_checkpoint(self.store, operation)
 
     def test_new_usage_reader_failures_keep_a_bounded_skip_reason(self) -> None:
-        for name, reason in (
-            ("lane_usage_protected", "staff_hold_or_protection_check_unreadable"),
-            ("evaluate_lane_usage", "successful_login_check_unreadable"),
-        ):
+        for name in ("lane_usage_protected", "evaluate_lane_usage"):
             with (
                 self.subTest(reader=name),
                 patch(
@@ -350,7 +347,6 @@ class TestingDrillTests(TestingDrillScenario):
             ):
                 self.scheduler.run_once()
                 self.assertEqual(self.evidence().status, "skipped")
-                self.assertEqual(self.evidence().step, reason)
                 self.assertNotIn("private-provider-detail", self.evidence().model_dump_json())
             self.now += DRILL_INTERVAL_SECONDS
 

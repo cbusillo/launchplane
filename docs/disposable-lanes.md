@@ -47,7 +47,11 @@ network, credential and copy-witness inspections, including protection of an
 already-opened replacement copy; it omits only the login-history requirement.
 UNKNOWN is preserved in that scoped receipt, which remains usable only by
 the same continuously leased attempt. Reclaim needs new admission.
-Connection-isolation and staging guards also use the shared usage decision.
+Connection-isolation and environment-staging guards also use the shared usage
+decision. Acknowledged activation/interlock lifting keeps its original explicit
+hold and known-use checks; it has no UNKNOWN usage requirement. Preview operations
+use the common guard, but previews without stable-lane monitor authority remain
+unverified and retain their existing admission paths.
 Existing preview refresh, never-live retirement and non-destructive isolation
 paths continue to protect known use without demanding a universal negative
 occupancy observation. This change adds no UNKNOWN restriction to those paths.
@@ -60,7 +64,9 @@ operations, keys and retained resources when replacing a stranded generation.
 
 For an update, deploy the compatible API and Odoo worker together through the
 normal service path; no migration, grant, new runtime flag or per-product rule
-is required. Use the existing monitor history and collect immediately before
+is required. Use the bounded collection client from that compatible source
+revision; older coverage/enum validation refuses the newly qualified resource
+facts. Use the existing monitor history and collect immediately before
 apply; a hold or changed recipient still refuses. Source tests do not qualify
 a real lane. Before a queued drill uses a downtime receipt, retain this image
 or a compatible successor and forward-fix: older workers require a negative
@@ -527,7 +533,23 @@ its supplied facts and references cannot affect the result. The existing stored
 actor kind and observation schema remain compatible with the previous image.
 
 For Odoo testing, the read-only login/session probe described above can also
-publish `unused`. Custody and physical isolation remain unknown. Missing holds,
+publish `unused`. On a verified-down lane with a resettable data policy and a
+current completed service-created testing generation, collection can independently
+reinspect its original physical containers, storage, networks and copy binding
+through the fixed receiver, without requiring login history. Only a passing
+inspection supplies reproducible-data and isolated-resource facts. Unsupported
+or failed inspection leaves those facts unknown; it never substitutes downtime
+for a resource proof. A provider refusal returns authorization_denied with its
+trace, without another identity or transport.
+
+Collection retains known use and only-copy protection. It also retains independent
+fresh custody/isolation facts on the same binding, capped at their original expiry;
+collection cannot renew an old proof. A new physical inspection can publish a fresh
+proof; a failed attempted inspection replaces those independent facts with UNKNOWN
+instead of reusing the previous proof. The response reports the stored facts, including retained historical use,
+while the login/session diagnostic remains UNKNOWN. An unheld down lane can use
+that historical positive usage for repair eligibility without erasing it.
+Missing holds,
 distinct target IDs and old preview-generation
 states do not establish occupancy, custody, physical isolation or executor
 exclusion. The response and bounded client name these coverage limits. Collection
@@ -1123,6 +1145,10 @@ copied production login rows in the new database cannot stand in for testing use
 An unavailable original login database normally skips rather than assuming
 non-use. The verified-down repair rule above can instead qualify usage while
 preserving UNKNOWN; the independent resource/copy inspection must still pass.
+This also applies when Launchplane's own stop or stalled operation caused the
+downtime: excluding that cause would recreate a repair deadlock. The original
+database is retained and the already-opened new-copy gate below still protects
+testers; an explicit staff-testing hold always refuses the operation.
 If the selected new copy already has its web-start gate, reclaim
 skips and preserves it: people may have used it before final completion was
 recorded. A stopped web process alone does not erase that gate's protection.

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 import logging
 from typing import Protocol, cast
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -198,7 +199,14 @@ def evaluate_lane_usage(
             records = _down_observations(
                 store, profile, target, target_id, now or datetime.now(timezone.utc)
             )
-        except (ValueError, TypeError, AttributeError, FileNotFoundError):
+        except (
+            ValueError,
+            TypeError,
+            AttributeError,
+            FileNotFoundError,
+            KeyError,
+            SQLAlchemyError,
+        ):
             records = ()
         if records:
             ordered = sorted(records, key=lambda record: _timestamp(record.observed_at))

@@ -10800,6 +10800,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     fixture.doCleanups()
 
     def test_down_lane_usage_and_locked_successor_on_postgres(self) -> None:
+        from tests.test_down_lane_collection import DownLaneCollectionTests
         from tests.test_lane_usage import LaneUsageTests
         from tests.test_odoo_testing_drill import TestingDrillTests
 
@@ -10825,6 +10826,18 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 drill.test_down_lane_queues_without_login_history_and_keeps_resource_qualification()
             finally:
                 drill.doCleanups()
+        for scenario in (
+            "test_collect_produces_real_resource_facts_then_admits_down_runtime_repair",
+            "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",
+            "test_needed_copy_and_failed_physical_inspection_still_refuse",
+            "test_resource_denial_and_binding_drift_do_not_publish",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                collected = DownLaneCollectionTests(scenario)
+                collected.database_url = url
+                result = unittest.TestResult()
+                collected.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
 
     def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests

@@ -10508,7 +10508,13 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
-    def publish_collected_disposable_lane_safety(self, record: DisposableLaneSafety) -> bool:
+    def publish_collected_disposable_lane_safety(
+        self,
+        record: DisposableLaneSafety,
+        *,
+        collect_facts: bool = False,
+        replace_resource_facts: bool = False,
+    ) -> bool:
         """A delayed collector cannot erase a newer protective observation."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -10548,8 +10554,26 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if row is not None:
                 previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
-                if previous.usage == "in_use" and record.usage == "unknown":
+                if not collect_facts and (
+                    (previous.usage == "in_use" and record.usage == "unknown")
+                    or (previous.data == "only_copy" and record.data != "only_copy")
+                    or (
+                        previous.production_resources == "shared"
+                        and record.production_resources == "unknown"
+                    )
+                ):
                     return False
+                if collect_facts:
+                    from control_plane.disposable_lane_collection import merge_collected_safety
+
+                    was_unknown = record.usage == "unknown"
+                    record = merge_collected_safety(
+                        previous, record, replace_resource_facts=replace_resource_facts
+                    )
+                    if was_unknown and record.usage == "in_use":
+                        self._invalidate_testing_non_use_in_session(
+                            session, product=record.product, context=record.context
+                        )
                 if previous.observed_at > record.observed_at or (
                     previous.observed_at == record.observed_at
                     and previous.usage == "in_use"
