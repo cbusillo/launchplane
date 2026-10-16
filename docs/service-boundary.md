@@ -2067,6 +2067,8 @@ unbinds or deletes. Dry-run returns the same redacted summary without writing. A
 not simply every currently configured key. Declaring a required key that is
 missing from the lane can block a later delivery until it is configured or
 the declaration is corrected. Inspect config status when reviewing the plan.
+Declared keys are also protected from provider-key retirement. An incorrect
+Live-product requirement needs an admin to remove it.
 Runtime delivery is a separate
 operation through the supported runtime-sync path and its own authorization;
 declaring requirements does not start it. The route does not accept secret

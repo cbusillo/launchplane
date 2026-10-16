@@ -10,7 +10,7 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
-from tests.support.auth import scoped_agent_transport
+from tests.support.auth import local_operator_policy, scoped_agent_transport
 from tests.support.http import request
 from tests.support.profiles import product_profile_payload
 
@@ -143,6 +143,38 @@ class DirectorExpectedConfigTests(unittest.IsolatedAsyncioTestCase):
             "client-request",
         )
         self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
+    async def test_explicit_grant_does_not_bypass_live_removal_or_client_request_guard(
+        self,
+    ) -> None:
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=local_operator_policy(
+                actions=("product_profile.expected_config.apply",),
+                products=(self.profile.product,),
+                contexts=("launchplane",),
+                token_label="local-owner-read",
+            ),
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: self.store,
+        )
+        for restricted in (
+            {"remove_runtime_environment_keys": [{"key": "OTHER_KEY"}]},
+            {
+                "managed_secret_bindings": [
+                    {
+                        "binding_key": "API_TOKEN",
+                        "context": "example-site",
+                        "owner_input": {"label": "Service credential"},
+                    }
+                ]
+            },
+        ):
+            with self.subTest(restricted=restricted):
+                response = await self.post({**self.payload, **restricted}, "restricted")
+                self.assertEqual(response.status_code, 403, response.text)
+                self.assertEqual(response.json()["error"]["code"], "live_product_requires_operator")
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
     async def test_runtime_values_and_identity_assertions_are_not_declarations(self) -> None:
