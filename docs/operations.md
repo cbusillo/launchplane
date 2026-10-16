@@ -962,6 +962,8 @@ Current implementation scope:
 - `POST /v1/product-onboarding/apply`
 - `POST /v1/product-profiles/stable-lane-repair/apply`
 - `POST /v1/products/public-ingress-monitor/run-once`
+- `GET /v1/health-alert-drills` and `POST /v1/health-alert-drills` —
+  [current routing and isolated Discord test alerts](health-alert-drills.md)
 - `POST /v1/every-code/notification-policies/apply`
 - `POST /v1/public-ingress/notification-policies/apply`
 - `POST /v1/previews/lifecycle-plan`
@@ -4076,15 +4078,21 @@ Launchplane drivers: product repos send PR/image intent, Launchplane derives the
 live preview URL from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that
 returned URL with generation status and cleanup outcome.
 
-Launchplane now owns the preview lifecycle planning boundary. The scheduled
-Launchplane `Preview Lifecycle` workflow calls `POST /v1/previews/lifecycle-sweep`;
-it runs on the admin-configured `LAUNCHPLANE_RUNNER_LABEL` self-hosted lane
-instead of depending on hosted-runner capacity.
+Launchplane now owns the preview lifecycle planning boundary. The service runs
+the daily sweep itself: one replica holds the sweep lease, each daily slot
+(rolling over at 05:17 UTC) runs once across restarts and replicas, and the
+slot receipt records the overall and per-product status. Scheduled sweeps are
+always report-only; there is no setting that makes them apply. A sweep that
+raises is logged and recorded as `error`, and the next slot runs normally.
+Stopping the service ends a running sweep between products without a
+receipt, so that slot runs again after restart.
 The service derives the participating products from product profiles where
 `preview.enabled=true`, refreshes provider inventory, discovers desired preview
 anchors from GitHub PR label state, writes lifecycle plans, and records cleanup
-results. Cleanup defaults to report-only and destructive provider cleanup still
-requires explicit `apply=true` from an authorized GitHub Actions workflow.
+results, which Product Ops shows per product. Destructive provider cleanup
+still requires an explicit `apply=true` request to
+`POST /v1/previews/lifecycle-sweep` from a separately authorized caller; the
+manual `Preview Lifecycle` workflow dispatch remains that route.
 Preview-disabled products are excluded from the sweep. PR feedback goes through
 `POST /v1/previews/pr-feedback`; Launchplane renders and upserts the anchored PR
 comment when runtime GitHub credentials are available, then records delivery

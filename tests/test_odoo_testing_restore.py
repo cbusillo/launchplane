@@ -426,6 +426,111 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             )
         )
 
+    def test_drill_usage_reads_successful_logins_without_starting_or_restoring(self) -> None:
+        from datetime import datetime, timezone
+
+        self.spec.update(
+            inspection_only=True,
+            usage_only=True,
+            usage_since=datetime.now(timezone.utc).isoformat(),
+        )
+        self.existing_database = True
+        command = self.command
+        for used in (True, False):
+            with self.subTest(used=used):
+                self.calls.clear()
+
+                def database_read(arguments: list[str], **kwargs: Any) -> Any:
+                    query = kwargs.get("input") or b""
+                    if b"ir_config_parameter" in query:
+                        result = self.spec["copy_binding_sha256"].encode()
+                    elif b"res_users_log" in query:
+                        result = b"t" if used else b"f"
+                    else:
+                        return command(arguments, **kwargs)
+                    self.calls.append(arguments)
+                    return subprocess.CompletedProcess(arguments, 0, stdout=result, stderr=b"")
+
+                with patch.object(self, "command", side_effect=database_read):
+                    status, output = self.run_program()
+                self.assertEqual(status, 0, output)
+                frames = [
+                    json.loads(line.removeprefix("fixture:"))
+                    for line in output.splitlines()
+                    if line.startswith("fixture:")
+                ]
+                self.assertEqual(frames, [{"type": "complete", "recent_signins": used}])
+                self.assertFalse(
+                    any(
+                        call[:2] in (["docker", "stop"], ["docker", "start"], ["docker", "cp"])
+                        or "rm" in call
+                        or call[0] in {"ssh", "rsync"}
+                        for call in self.calls
+                    )
+                )
+
+    def test_drill_usage_without_database_is_unreadable(self) -> None:
+        from datetime import datetime, timezone
+
+        self.spec.update(
+            inspection_only=True,
+            usage_only=True,
+            usage_since=datetime.now(timezone.utc).isoformat(),
+        )
+        status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+
+    def test_reclaim_preserves_a_new_copy_that_has_started_serving(self) -> None:
+        from datetime import datetime, timezone
+
+        new_database = "lp_drill_" + "d" * 32
+        self.spec.update(
+            inspection_only=True,
+            usage_only=True,
+            usage_reclaim=True,
+            usage_new_database=new_database,
+            usage_database_names=[self.database, new_database],
+            usage_since=datetime.now(timezone.utc).isoformat(),
+        )
+        self.existing_database = True
+        command = self.command
+        for running, opened in ((True, False), (False, True), (False, False)):
+            with self.subTest(running=running, opened=opened):
+                self.containers["web"]["State"] = {"Running": running}
+                for service in ("web", "script-runner"):
+                    self.containers[service]["Config"]["Env"] = [
+                        item
+                        if not item.startswith("ODOO_DB_NAME=")
+                        else "ODOO_DB_NAME=" + new_database
+                        for item in self.containers[service]["Config"]["Env"]
+                    ]
+
+                def read(arguments: list[str], **kwargs: Any) -> Any:
+                    query = kwargs.get("input") or b""
+                    if b"ir_config_parameter" in query:
+                        result = self.spec["copy_binding_sha256"].encode()
+                    elif b"res_users_log" in query:
+                        result = b"f"
+                    elif arguments[-1] == self.spec["web_gate_path"]:
+                        result = str(opened).encode()
+                    else:
+                        return command(arguments, **kwargs)
+                    return subprocess.CompletedProcess(arguments, 0, stdout=result, stderr=b"")
+
+                with patch.object(self, "command", side_effect=read):
+                    status, output = self.run_program()
+                self.assertEqual(status, 0, output)
+                frame = json.loads(output.strip().removeprefix("fixture:"))
+                self.assertEqual(
+                    frame,
+                    {"type": "complete", "new_copy_serving": True}
+                    if opened
+                    else {"type": "complete", "recent_signins": False},
+                )
+        self.assertFalse(
+            any(call[:2] in (["docker", "stop"], ["docker", "start"]) for call in self.calls)
+        )
+
     def test_provider_converted_testing_networks_pass_the_receiver_guard(self) -> None:
         """Execute the guard on the renderer's graph plus Dokploy's domain injection."""
         composition = yaml.safe_load(

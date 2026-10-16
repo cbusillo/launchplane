@@ -7855,6 +7855,25 @@ class PostgresRecordStore(HumanSessionStore):
             )
         self._write_row(self._idempotency_row(record))
 
+    def write_idempotency_record_once(self, record: LaunchplaneIdempotencyRecord) -> bool:
+        """Commit an evidence-only reservation once; never reclaim it after a crash."""
+        if record.state != "completed":
+            raise ValueError("Evidence reservations require a completed record.")
+        try:
+            with self._session_factory() as session:
+                session.add(self._idempotency_row(record))
+                session.commit()
+            return True
+        except IntegrityError:
+            existing = self.read_idempotency_record(
+                scope=record.scope,
+                route_path=record.route_path,
+                idempotency_key=record.idempotency_key,
+            )
+            if existing is None:
+                raise
+            return False
+
     def write_outbox_delivery_record(self, record: OutboxDeliveryRecord) -> None:
         self._write_row(self._outbox_delivery_row(record))
 
@@ -10716,7 +10735,8 @@ class PostgresRecordStore(HumanSessionStore):
     def enqueue_odoo_testing_drill(self, product: str, context: str, key: str, now: float) -> None:
         """Atomically archive the completed copy, select a fresh database and queue its restore.
 
-        No provider I/O or production write. A held/unknown lane gets a receipt only.
+        Provider reads precede the short locked commit; no production write.
+        A held/unknown lane gets a receipt only.
         The previous generation stays in the immutable slot receipt for recovery.
         """
         from control_plane.odoo_testing_drill import (
@@ -10728,8 +10748,29 @@ class PostgresRecordStore(HumanSessionStore):
             lane_key,
             prepare_drill,
             drill_admission_revision,
+            require_drill_use_unprotected,
         )
         from control_plane.odoo_testing_restore import generation_binding
+
+        observed_revision = drill_admission_revision(self, product, context)
+        existing = self.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=key
+        )
+        if existing is not None and (
+            existing.response_payload.get("operation_id")
+            or existing.response_payload.get("admission_revision") == observed_revision
+        ):
+            return
+        candidate = None
+        collection_error: ValueError | RuntimeError | None = None
+        try:
+            candidate = prepare_drill(self, product, context, key, now)
+        except (ValueError, FileNotFoundError, RuntimeError) as error:
+            collection_error = (
+                error
+                if isinstance(error, (ValueError, RuntimeError))
+                else DrillPrerequisite("drill_prerequisite_unverified")
+            )
 
         with self._session_factory() as session:
             self._lock_odoo_stable_lane(
@@ -10773,7 +10814,26 @@ class PostgresRecordStore(HumanSessionStore):
                     (product, context, "testing"),
                     with_for_update=True,
                 )
-                prepared = prepare_drill(self, product, context, key, now)
+                require_drill_use_unprotected(self, product, context)
+                if revision != observed_revision:
+                    raise DrillSkipped("drill_admission_snapshot_changed")
+                if collection_error is not None:
+                    raise collection_error
+                if candidate is not None:
+                    from control_plane.odoo_testing_restore import read_current_testing_generation
+
+                    if (
+                        read_current_testing_generation(
+                            self, product=product, context=context, instance="testing"
+                        )
+                        != candidate.previous
+                    ):
+                        raise DrillSkipped("drill_admission_snapshot_changed")
+                    if candidate.safety.expires_at.timestamp() <= max(
+                        now, datetime.now(timezone.utc).timestamp()
+                    ):
+                        raise DrillSkipped("successful_login_check_expired")
+                prepared = candidate
             except DrillSkipped as error:
                 payload.update(status="skipped", step=str(error))
             except DrillPrerequisite as error:
@@ -10796,6 +10856,7 @@ class PostgresRecordStore(HumanSessionStore):
                     operation_id=prepared.operation.operation_id,
                     generation_binding=generation_binding(prepared.generation),
                     previous_generation=prepared.previous.model_dump(mode="json"),
+                    previous_database=prepared.previous_database,
                     planned_generation=prepared.generation.model_dump(mode="json"),
                 )
                 operation = prepared.operation
@@ -10849,17 +10910,85 @@ class PostgresRecordStore(HumanSessionStore):
             DRILL_SCOPE,
             DRILL_ROUTE,
             DrillPrerequisite,
+            DrillSkipped,
             prepare_drill,
+            collect_drill_admission,
+            drill_admission_revision,
+            require_drill_use_unprotected,
         )
         from control_plane.odoo_testing_restore import generation_binding
 
         if operation.idempotency_scope != DRILL_SCOPE:
             return
+        observed_revision = drill_admission_revision(self, operation.product, operation.context)
+        observed_receipt = self.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+        )
+        if (
+            observed_receipt is None
+            or observed_receipt.response_payload.get("operation_id") != operation.operation_id
+        ):
+            raise DrillPrerequisite("drill_receipt_missing")
+        observed_payload = observed_receipt.response_payload
+        planned = FreshOdooTestingGeneration.model_validate(observed_payload["planned_generation"])
+        observed_generation = self.read_fresh_odoo_testing_generation(
+            operation.product, operation.context
+        )
+        candidate = None
+        current_safety = None
+        if observed_generation is not None and generation_binding(
+            observed_generation
+        ) == generation_binding(planned):
+            if observed_payload.get("activation_attempt") != operation.attempt:
+                previous = FreshOdooTestingGeneration.model_validate(
+                    observed_payload["previous_generation"]
+                )
+                previous_runtime = RuntimeEnvironmentRecord.model_validate(
+                    observed_payload["previous_runtime"]
+                )
+                history_database = str(
+                    observed_payload.get("previous_database")
+                    or previous_runtime.env.get("ODOO_DB_NAME", "")
+                )
+                if not history_database:
+                    raise DrillSkipped("original_testing_database_unreadable")
+                current_safety = collect_drill_admission(
+                    self,
+                    observed_generation,
+                    now,
+                    history_generation=previous,
+                    history_database=history_database,
+                )
+        else:
+            candidate = prepare_drill(
+                self,
+                operation.product,
+                operation.context,
+                operation.idempotency_key,
+                now,
+                database=planned.drill_database,
+                prepared_at=planned.prepared_at,
+            )
         with self._session_factory() as session:
             self._lock_odoo_stable_lane(
                 session, product=operation.product, context=operation.context, instance="testing"
             )
             self._lock_product_authority_bundle_write(session)
+            require_drill_use_unprotected(self, operation.product, operation.context)
+            if (
+                drill_admission_revision(self, operation.product, operation.context)
+                != observed_revision
+            ):
+                raise DrillSkipped("drill_admission_snapshot_changed")
+            from control_plane.odoo_testing_restore import read_current_testing_generation
+
+            if (
+                read_current_testing_generation(
+                    self, product=operation.product, context=operation.context, instance="testing"
+                )
+                != observed_generation
+            ):
+                raise DrillSkipped("drill_admission_snapshot_changed")
             worker_row = session.get(
                 LaunchplaneOdooStableTargetReplacementOperationRow,
                 operation.operation_id,
@@ -10874,7 +11003,7 @@ class PostgresRecordStore(HumanSessionStore):
                 or parse_launchplane_mutation_timestamp(
                     worker_row.lease_expires_at, field_name="lease_expires_at"
                 ).timestamp()
-                <= now
+                <= max(now, datetime.now(timezone.utc).timestamp())
             ):
                 raise DrillPrerequisite("drill_worker_lease_changed")
             receipt_row = session.scalar(
@@ -10901,24 +11030,19 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise DrillPrerequisite("drill_generation_missing")
             current = FreshOdooTestingGeneration.model_validate(row.payload)
+            observation = candidate.safety if candidate is not None else current_safety
+            if observation is not None and observation.expires_at.timestamp() <= max(
+                now, datetime.now(timezone.utc).timestamp()
+            ):
+                raise DrillSkipped("successful_login_check_expired")
             if generation_binding(current) == generation_binding(planned):
-                from control_plane.disposable_lanes import (
-                    require_disposable_lane,
-                    DisposableLaneStore,
+                from control_plane.odoo_testing_drill import (
+                    require_drill_checkpoint,
                 )
-                from control_plane.odoo_testing_drill import require_drill_checkpoint
 
                 if receipt.response_payload.get("activation_attempt") != operation.attempt:
-                    require_disposable_lane(
-                        cast(DisposableLaneStore, self),
-                        product=operation.product,
-                        context=operation.context,
-                        instance="testing",
-                    )
-                    current_safety = self.read_disposable_lane_safety(
-                        operation.product, operation.context, "testing"
-                    )
-                    assert current_safety is not None
+                    if current_safety is None:
+                        raise DrillPrerequisite("drill_admission_snapshot_changed")
                     receipt.response_payload["activation_safety"] = current_safety.model_dump(
                         mode="json"
                     )
@@ -10935,15 +11059,9 @@ class PostgresRecordStore(HumanSessionStore):
                 (operation.product, operation.context, "testing"),
                 with_for_update=True,
             )
-            prepared = prepare_drill(
-                self,
-                operation.product,
-                operation.context,
-                operation.idempotency_key,
-                now,
-                database=planned.drill_database,
-                prepared_at=planned.prepared_at,
-            )
+            prepared = candidate
+            if prepared is None:
+                raise DrillPrerequisite("drill_admission_snapshot_changed")
             if generation_binding(prepared.generation) != generation_binding(planned):
                 raise DrillPrerequisite("drill_source_changed")
             previous_runtime = self.list_runtime_environment_records(

@@ -1,6 +1,8 @@
 ---
 name: Preview Lifecycle
 
+# The Launchplane service runs the daily report-only sweep itself. This manual
+# entrypoint remains the explicit, separately authorized cleanup apply route.
 "on":
   workflow_dispatch:
     inputs:
@@ -9,8 +11,6 @@ name: Preview Lifecycle
         required: true
         default: false
         type: boolean
-  schedule:
-    - cron: "17 5 * * *"
 
 permissions:
   contents: read
