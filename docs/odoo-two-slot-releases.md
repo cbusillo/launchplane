@@ -105,6 +105,16 @@ data or overwriting later business writes.
 
 ## Records, retries and activation
 
+Stable logs and outgoing-email diagnostics select the slot in current serving
+inventory from the lane's recorded Compose coordinates. They inspect that
+slot's container/image/runtime identity and reject missing slot authority or an
+unfinished cutover. Switch-back events prove the retained runtime identity
+through their explicit deployment link. Mail diagnostics use the recorded
+public route host and independently verify its current runtime identity before
+authentication; private slots do not acquire public Dokploy domains. Selection
+is checked again after the read, so a concurrent switch cannot return stale
+diagnostics as current evidence.
+
 `DeploymentCutoverStore` stores typed checkpoints, slot/route identities,
 classification, maintenance/readiness/backup observations and the full
 `PublicPauseRecord` in the existing DB-backed deployment payload. There is no
