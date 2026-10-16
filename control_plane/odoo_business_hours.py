@@ -20,6 +20,8 @@ from control_plane.odoo_runtime_reads import (
     _rpc,
     assert_selection_current,
     connect_runtime,
+    diagnostic_authentication,
+    require_diagnostic_user,
     require_runtime_identity,
     select_stable_runtime,
 )
@@ -86,9 +88,7 @@ def read_company_calendar(
         domain_host=url.hostname,
     ):
         raise ValueError("Calendar origin does not match the runtime.")
-    credentials = connection.credentials
-    if not credentials["ODOO_DB_NAME"] or not credentials["ODOO_ADMIN_PASSWORD"]:
-        raise ValueError("Configured Odoo read credentials are unavailable.")
+    authentication = diagnostic_authentication(connection)
     opener = build_opener(_NoRedirects(), HTTPCookieProcessor(CookieJar()))
 
     def health() -> None:
@@ -122,19 +122,10 @@ def read_company_calendar(
         opener,
         origin,
         "/web/session/authenticate",
-        {
-            "db": credentials["ODOO_DB_NAME"],
-            "login": credentials["ODOO_ADMIN_LOGIN"] or "admin",
-            "password": credentials["ODOO_ADMIN_PASSWORD"],
-        },
+        authentication,
     )
-    if (
-        not isinstance(authenticated, dict)
-        or type(authenticated.get("uid")) is not int
-        or authenticated["uid"] <= 0
-    ):
-        raise ValueError("Odoo refused the calendar read.")
     try:
+        require_diagnostic_user(connection, authenticated)
         companies = search("res.company", [["id", "=", company_id]], ["resource_calendar_id"])
         if len(companies) != 1:
             raise ValueError("The selected company is unavailable.")
@@ -321,6 +312,7 @@ def read_business_hours_window(
             selection=selection,
             control_plane_root=control_plane_root,
             database_url=store.database_url,
+            diagnostics=True,
         )
         now = observed_at or datetime.now(UTC)
         calendar, rows, leaves = read_company_calendar(

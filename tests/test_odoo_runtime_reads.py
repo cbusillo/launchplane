@@ -1,5 +1,6 @@
 import json
 import io
+import os
 import unittest
 from collections.abc import Mapping
 from email.message import Message
@@ -13,6 +14,7 @@ from urllib.request import BaseHandler, OpenerDirector, Request, build_opener
 from urllib.response import addinfourl
 
 from fastapi import FastAPI
+from cryptography.fernet import Fernet
 from httpx2 import Response
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -24,6 +26,11 @@ from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_runtime_reads import _NoRedirects
+from control_plane.odoo_diagnostic_identity import (
+    DIAGNOSTIC_SECRET_INTEGRATION,
+    DIAGNOSTIC_IDENTITY_KEY,
+)
+from control_plane.secrets import SecretWriteStore, write_secret_value
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.http_app_test_support import (
@@ -41,6 +48,11 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.store = FilesystemRecordStore(state_dir=self.root / "state")
+        encryption = patch.dict(
+            os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": Fernet.generate_key().decode()}
+        )
+        encryption.start()
+        self.addCleanup(encryption.stop)
         self.preview = _preview_read_record()
         generation = _preview_generation_read_record()
         self.preview_identity = RuntimeIdentity(
@@ -91,6 +103,27 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.store.write_product_profile_record(self.profile)
+        for identity in (self.preview_identity, self.stable_identity):
+            write_secret_value(
+                record_store=cast(SecretWriteStore, self.store),
+                scope="context_instance",
+                integration=DIAGNOSTIC_SECRET_INTEGRATION,
+                name="diagnostic-reader",
+                binding_key=DIAGNOSTIC_IDENTITY_KEY,
+                context_name=identity.context,
+                instance_name=identity.instance,
+                plaintext_value=json.dumps(
+                    {
+                        "product": identity.product,
+                        "context": identity.context,
+                        "instance": identity.instance,
+                        "database": "actual_deployed_database",
+                        "login": "lane-diagnostic-reader",
+                        "password": "diagnostic-secret",
+                        "user_id": 7,
+                    }
+                ),
+            )
         self.store.write_preview_record(self.preview)
         self.store.write_preview_generation_record(self.generation)
         self.store.write_environment_inventory(
@@ -495,6 +528,39 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.discover.assert_not_called()
         self.assertEqual(response.json()["runtime"]["target_id"], "stable-target")
         self.assertEqual(self.rpc_calls[0]["params"]["db"], "actual_deployed_database")
+        self.assertEqual(self.rpc_calls[0]["params"]["login"], "lane-diagnostic-reader")
+        self.assertEqual(self.rpc_calls[0]["params"]["password"], "diagnostic-secret")
+
+    async def test_missing_diagnostic_identity_never_falls_back_to_bootstrap_admin(self) -> None:
+        for binding in self.store.list_secret_bindings(integration=DIAGNOSTIC_SECRET_INTEGRATION):
+            self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
+        response = await self.get(self.base + "/outgoing-email", self.filters)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(response.json()["error"]["code"], "odoo_diagnostic_identity_unavailable")
+        self.assertFalse(self.rpc_calls)
+        logs = await self.get(self.base + "/logs")
+        self.assertEqual(logs.status_code, 200, logs.text)
+
+    async def test_mail_redacts_diagnostic_password_and_rejects_another_authenticated_user(
+        self,
+    ) -> None:
+        self.mail_rows[0]["failure_reason"] = "diagnostic-secret admin-secret"
+        response = await self.get(self.base + "/outgoing-email", self.filters)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertNotIn("diagnostic-secret", response.text)
+        self.assertNotIn("admin-secret", response.text)
+        original = self.http_json
+
+        def wrong_user(opener: OpenerDirector, req: Request) -> object:
+            if req.full_url.endswith("/web/session/authenticate"):
+                return {"jsonrpc": "2.0", "id": 1, "result": {"uid": 99}}
+            return original(opener, req)
+
+        self.rpc_calls.clear()
+        with patch("control_plane.odoo_runtime_reads._http_json", side_effect=wrong_user):
+            response = await self.get(self.base + "/outgoing-email", self.filters)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertFalse(any(call["params"].get("model") for call in self.rpc_calls))
 
     async def test_unbound_stable_origin_cannot_receive_credentials_even_if_health_matches(
         self,

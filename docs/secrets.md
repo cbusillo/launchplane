@@ -55,6 +55,60 @@ the value or the displayed receipt time. Superseded requests remain encrypted
 history and are not runtime-bound; automatic removal of retained secret history is
 not part of this input flow.
 
+## Odoo diagnostic identities
+
+Non-production Odoo mail-status, company-calendar and import-status reads use
+one dedicated service identity from the `odoo_diagnostics` managed-secret
+integration. They never authenticate using `ODOO_ADMIN_PASSWORD`, a restored
+person's login, or a walkthrough task account. Anonymous runtime health and
+runtime-log reads do not require this identity. Production (`prod` stable
+runtime) retains its existing bootstrap-admin authentication until a separate
+production migration is authorized.
+
+Store exactly one configured `ODOO_DIAGNOSTIC_IDENTITY` binding in that
+integration, with both the binding and secret record scoped to the exact
+`context_instance`. Its encrypted value is a JSON object with `product`,
+`context`, `instance`, `database`, `login`, `password`, and numeric `user_id`.
+The first four fields must match the selected runtime and its actual running
+database. `login` must name the separate service account; `admin`, the built-in
+system/administrator user IDs, and empty credentials are refused. The returned
+Odoo session UID must equal `user_id` before any diagnostic model is read.
+No account or password is created, reset or copied by a diagnostic read.
+
+This reuses existing encrypted secret records and the supported product-config
+dry-run/apply API (`POST /v1/product-config/apply`). An activation session supplies
+the exact owned product/context/instance, a reason, and a secret entry with
+`scope="context_instance"`, `integration="odoo_diagnostics"`, an admin-chosen
+`name`, `binding_key="ODOO_DIAGNOSTIC_IDENTITY"`, and the JSON string as `value`.
+Use the existing matching dry-run, apply confirmation and idempotency contract;
+keep the request body private. This is a service-purpose secret, separate from
+`runtime_environment`: do not sync it to the application, put it in host env,
+export it, or copy a production credential. The readers consume it internally
+under their existing read authorization; no new action or grant is installed.
+This source contract does not provision an account or expand the walkthrough
+execution rule. Real account provisioning and activation remain the existing
+operational work, which must establish the service account's read permissions
+for mail status, company calendars and the bounded import parameters.
+
+Global/context inheritance, another lane's records, disabled or ambiguous
+bindings, mismatched versions/payloads, and undecryptable values are unavailable;
+none selects an admin fallback. Mail and import APIs return HTTP 503 with
+`odoo_diagnostic_identity_unavailable` when the selected identity is unavailable
+or Odoo returns another UID. Calendar reads refuse and the release-window reader
+continues to hold a release when its calendar is unavailable. Responses and
+exceptions contain no secret payload, and mail text redacts both diagnostic and
+legacy bootstrap passwords. Existing HTTPS/domain, container image and runtime
+identity checks remain required before authentication, with session destruction
+after model reads or an unexpected authenticated UID.
+
+Rotate or disable this binding through the same governed secret path; a missing
+or disabled identity leaves diagnostics unavailable. After a testing restore,
+the operational session must verify or reactivate its separate service account
+and exact database binding. Preserve restored people's passwords. For rollback,
+retain the encrypted record until its operational session no longer needs it;
+older reader code uses the bootstrap binding and may be unable to authenticate
+against a preserved restored login. Do not solve that by changing the login.
+
 ## Current Contract
 
 The [testing local-consumer path](testing-local-consumer.md) delivers one exact
