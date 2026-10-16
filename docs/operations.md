@@ -3401,6 +3401,17 @@ alone is not proof that an existing testing copy has been repaired.
 mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   changes. `migrate-secret-transport` dry-run, `odoo-overrides list`, and
   `odoo-overrides show` stay read-only inspection paths.
+- Secret-transport migration commits each override's references, binding metadata,
+  and audit events in one transaction. Concurrent override or binding edits refuse
+  that transaction; review the fresh dry-run and rerun instead of replaying stale
+  intent. Already committed lanes remain valid if a later lane fails. A legacy
+  binding remains enabled while another override still references it, including
+  lanes excluded by `--context` or `--instance`; migrating the last consumer
+  disables it. Rerunning also repairs an old partial relabel whose destination is
+  already configured, restoring safety metadata the former relabel helper omitted
+  in the same transaction, and preserves pending website intent and apply snapshots.
+  A conflicting destination's scope, status, or safety metadata requires explicit
+  local/bootstrap repair before retry. No secret values or versions are copied.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
   persisted to the Dokploy compose target environment before the web container
