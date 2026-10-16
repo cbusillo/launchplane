@@ -8,6 +8,59 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Repair usage rule
+
+`control_plane/lane_usage.py` owns the usage decision for disposable repair.
+A current staff-testing hold always protects the lane. Without a hold,
+automated UNKNOWN or historical positive usage cannot block repair of a
+verified-down non-production lane. The usage observation stays UNKNOWN; this
+is repair eligibility, not an assertion that nobody ever used the copy.
+Serving or unverified lanes retain their existing usage protections.
+Production admission and release gates are unchanged.
+
+Verified down means every effective application HTTP check has failed across
+at least one whole monitor cadence inside the preceding two cadences, with
+the latest result less than one cadence old. The failure intervals must overlap
+for a whole cadence. The cadence comes from the monitor's existing source rule.
+All observations must follow the current profile, tracked target and target-ID
+updates and match the monitor's current URLs and expected runtime identity.
+Every probed URL must fail: network/DNS/TLS failure or server error qualifies;
+successful HTTP responses, access refusals, identity mismatch, missing checks,
+skipped checks, unresolved endpoints, future timestamps and stale observations
+do not. Public and declared private checks both count. Provider-only or
+unmonitored states remain unverified. No probe or live action is initiated by
+this decision. The guard logs the durable monitor record IDs and interval;
+the drill also preserves those references in its private admission receipt.
+
+The common disposable guard covers runtime repair/deploy, preview operations,
+replacement target setup, held-operation supersession and rehearsal admission.
+The Odoo daily drill uses the same usage decision before queueing and worker
+activation. Its down-lane read still runs the original container, storage,
+network, credential and copy-witness inspections, including protection of an
+already-opened replacement copy; it omits only the login-history requirement.
+UNKNOWN is preserved in that scoped receipt, which remains usable only by
+the same continuously leased attempt. Reclaim needs new admission.
+Connection-isolation and staging guards also use the shared usage decision.
+Existing preview refresh, never-live retirement and non-destructive isolation
+paths continue to protect known use without demanding a universal negative
+occupancy observation. This change adds no UNKNOWN restriction to those paths.
+
+Downtime does not qualify needed-copy custody, physical isolation, secret
+separation, backup, authorization, deployment fences or unknown provider
+effects. Their existing checks still run. In particular, no missing usage
+record becomes a reproducible-data or production-isolation fact. Preserve old
+operations, keys and retained resources when replacing a stranded generation.
+
+For an update, deploy the compatible API and Odoo worker together through the
+normal service path; no migration, grant, new runtime flag or per-product rule
+is required. Use the existing monitor history and collect immediately before
+apply; a hold or changed recipient still refuses. Source tests do not qualify
+a real lane. Before a queued drill uses a downtime receipt, retain this image
+or a compatible successor and forward-fix: older workers require a negative
+usage result and cannot continue the new UNKNOWN admission. Do not rewrite
+receipts or clear fences to roll back. No live lane action is part of source
+delivery.
+
 The source accepts exact-scope `disposable_lane_safety` observations on the
 dedicated DB-backed lane record (and a separate collection for filesystem
 rehearsals). Each observation binds the profile and current
@@ -17,7 +70,8 @@ usage (`unused`/`in_use`/`unknown`), data custody
 (`isolated`/`shared`/`separation_ready`/`unknown`), with each known fact's source
 reference and a timezone-aware observation/expiry window of at most fifteen
 minutes. A changed binding, expired observation, positive
-staff-testing hold or any required unknown fact refuses the new permission.
+staff-testing hold or any required unknown custody/isolation fact refuses the new
+permission. UNKNOWN usage alone has the verified-down repair exception above.
 A target ID also bound to another lane refuses it independently of the observation.
 The existing Odoo preview-refresh exception below uses direct resource inspection
 and protected-use reports instead of positive occupancy/custody observations.
@@ -76,9 +130,10 @@ For a stranded runtime, deliver the diagnostics image through the normal service
 deploy and collect again through the same client, without starting, restarting or
 repairing that lane to obtain evidence. Record its code and service trace. If it
 cannot read the original served configuration/database/session store, that exact
-prerequisite remains unsupported: a stopped process, missing database or absent
-staff hold is not a substitute. Preserve the original lane and custody and leave
-its rebuild blocked. No alternative credential, direct database qualification or
+prerequisite remains unsupported for a negative usage assertion: a stopped process,
+missing database or absent staff hold is not a substitute. The verified-down
+repair rule can independently qualify usage eligibility while preserving the
+original lane's custody and every other rebuild gate. No alternative credential, direct database qualification or
 new grant is needed for diagnosis. The service read is the proof of the concrete
 failed checkpoint; a fixture qualification or an old generic UNKNOWN is not.
 

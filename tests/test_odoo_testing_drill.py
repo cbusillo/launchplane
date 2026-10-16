@@ -309,6 +309,31 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertNotIn("private-provider-value", self.evidence().model_dump_json())
         self.assertEqual(self.evidence().operation_id, "")
 
+    def test_down_lane_queues_without_login_history_and_keeps_resource_qualification(self) -> None:
+        from tests.support.down_lanes import record_lane_health
+
+        record_lane_health(
+            self.store,
+            self.profile.product,
+            self.context,
+            datetime.fromtimestamp(self.now, timezone.utc),
+        )
+        self.signins.return_value = None
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().status, "queued")
+        self.assertFalse(self.signins.call_args.kwargs["usage_required"])
+        self.activate()
+        operation = self.operation()
+        receipt = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+        )
+        assert receipt is not None
+        safety = receipt.response_payload["activation_safety"]
+        assert isinstance(safety, dict)
+        self.assertEqual(safety["usage"], "unknown")
+        self.assertTrue(str(safety["usage_evidence"]).startswith("service:verified-down:"))
+        require_drill_checkpoint(self.store, operation)
+
     def test_idle_lane_runs_without_renewing_general_safety_facts(self) -> None:
         self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")
         self.scheduler.run_once()
@@ -750,7 +775,7 @@ class TestingDrillTests(TestingDrillScenario):
             self.store.list_pending_odoo_testing_drill_alerts(self.profile.product, self.context)
         )
 
-    def test_late_success_refreshes_lane_evidence_and_keeps_deadline_alert(self) -> None:
+    def test_late_success_refreshes_original_evidence_and_keeps_deadline_alert(self) -> None:
         self.scheduler.run_once()
         self.activate()
         self.now += DRILL_TIMEOUT_SECONDS + 1
@@ -783,8 +808,13 @@ class TestingDrillTests(TestingDrillScenario):
             )
         )
         self.scheduler.run_once()
-        self.assertEqual(self.evidence().status, "pass")
-        self.assertTrue(self.evidence().alert_delivered)
+        # A new daily slot may now be queued; inspect this attempt's receipt.
+        completed = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+        )
+        assert completed is not None
+        self.assertEqual(completed.response_payload["status"], "pass")
+        self.assertTrue(completed.response_payload["alert_delivered"])
 
     def test_partial_discord_delivery_does_not_resend_successful_destination(self) -> None:
         destinations = tuple(

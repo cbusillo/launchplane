@@ -10799,6 +10799,33 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
 
+    def test_down_lane_usage_and_locked_successor_on_postgres(self) -> None:
+        from tests.test_lane_usage import LaneUsageTests
+        from tests.test_odoo_testing_drill import TestingDrillTests
+
+        for scenario in (
+            "test_locked_successor_adapter_consumes_the_service_downtime_rule",
+            "test_current_staff_hold_always_blocks_down_lane",
+            "test_private_serving_or_unresolved_endpoint_protects_a_publicly_down_lane",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                fixture = LaneUsageTests(scenario)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, scenario)()
+                finally:
+                    fixture.doCleanups()
+        with _head_postgres_database() as url:
+            drill = TestingDrillTests(
+                "test_down_lane_queues_without_login_history_and_keeps_resource_qualification"
+            )
+            try:
+                drill.seed(url)
+                drill.test_down_lane_queues_without_login_history_and_keeps_resource_qualification()
+            finally:
+                drill.doCleanups()
+
     def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 

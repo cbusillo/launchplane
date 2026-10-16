@@ -14,6 +14,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
+from control_plane.lane_usage import evaluate_lane_usage
 
 LaneConfigurationRecord = (
     RuntimeEnvironmentRecord
@@ -145,6 +146,7 @@ def require_disposable_lane(
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
     testing_hold_actor: str = "",
+    usage_store: object | None = None,
 ) -> str:
     profile = store.read_product_profile_record(product)
     if instance == "prod" or any(
@@ -222,6 +224,16 @@ def require_disposable_lane(
             }
         )
     evidence = store.read_disposable_lane_safety(product, context, instance)
+    usage = evaluate_lane_usage(
+        usage_store if usage_store is not None else store,
+        profile=profile,
+        target=target,
+        target_id=target_id,
+        instance=instance,
+        usage=evidence.usage if evidence else "unknown",
+        require_unused=not (preview_refresh or retirement),
+        now=now,
+    )
     if preview_refresh:
         # Overall direction makes previews disposable unless there is an actual
         # protected use or needed copy. No source produces a universal positive
@@ -234,7 +246,7 @@ def require_disposable_lane(
         if preview is not None and preview.state != "active":
             raise DisposableLaneSafetyUnknown("Only an active existing preview can be refreshed.")
         if evidence is not None and (
-            evidence.usage == "in_use"
+            usage.protected
             or evidence.data == "only_copy"
             or evidence.production_resources in {"shared", "separation_ready"}
         ):
@@ -257,7 +269,7 @@ def require_disposable_lane(
         # needs a recipe for reproducing disposable output. Known exceptions
         # remain holds, including old observations: expiry cannot erase them.
         if evidence is not None and (
-            evidence.usage == "in_use"
+            usage.protected
             or evidence.data == "only_copy"
             or evidence.production_resources in {"shared", "separation_ready"}
         ):
@@ -303,7 +315,7 @@ def require_disposable_lane(
         raise DisposableLaneSafetyUnknown("The rehearsal's original lane binding changed.")
     allowed_resources = {"isolated", "separation_ready"} if separation_only else {"isolated"}
     if (
-        evidence.usage != "unused"
+        usage.protected
         or evidence.data != "reproducible"
         or evidence.production_resources not in allowed_resources
     ):

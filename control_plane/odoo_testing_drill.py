@@ -53,6 +53,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_lane_hold import read_staff_testing_hold
 from control_plane.provider_operations import _ReservationHeartbeat
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillEvidence
+from control_plane.lane_usage import evaluate_lane_usage, lane_usage_protected
 
 DRILL_INTERVAL_SECONDS = 24 * 60 * 60
 DRILL_TIMEOUT_SECONDS = 2 * 60 * 60
@@ -155,7 +156,17 @@ def require_drill_use_unprotected(store: PostgresRecordStore, product: str, cont
         raise DrillSkipped("staff_hold_or_protection_check_unreadable") from error
     if hold is not None:
         raise DrillSkipped("staff_testing_hold")
-    if recorded is not None and (recorded.usage == "in_use" or recorded.data == "only_copy"):
+    if recorded is not None and (
+        lane_usage_protected(
+            store,
+            product=product,
+            context=context,
+            instance="testing",
+            usage=recorded.usage,
+            require_unused=False,
+        )
+        or recorded.data == "only_copy"
+    ):
         raise DrillSkipped("lane_use_or_only_copy_protected")
     if recorded is not None and recorded.production_resources in {"shared", "separation_ready"}:
         raise DrillSkipped("testing_resources_protected")
@@ -178,6 +189,23 @@ def collect_drill_admission(
         != generation
     ):
         raise DrillSkipped("drill_admission_snapshot_changed")
+    profile = store.read_product_profile_record(generation.product)
+    target = store.read_dokploy_target_record(
+        context_name=generation.context, instance_name="testing"
+    )
+    target_id = store.read_dokploy_target_id_record(
+        context_name=generation.context, instance_name="testing"
+    )
+    moment = datetime.fromtimestamp(now, timezone.utc)
+    downtime = evaluate_lane_usage(
+        store,
+        profile=profile,
+        target=target,
+        target_id=target_id,
+        instance="testing",
+        usage="unknown",
+        now=moment,
+    )
     try:
         used = read_drill_recent_signins(
             store,
@@ -185,12 +213,22 @@ def collect_drill_admission(
             now,
             history_generation=history_generation,
             history_database=history_database,
+            **({"usage_required": False} if downtime.reason == "verified_down" else {}),
         )
     except DrillCopyAlreadyServing as error:
         raise DrillSkipped("new_testing_copy_already_serving") from error
     except Exception as error:
         raise DrillSkipped("successful_login_check_unreadable") from error
-    if used:
+    decision = evaluate_lane_usage(
+        store,
+        profile=profile,
+        target=target,
+        target_id=target_id,
+        instance="testing",
+        usage="in_use" if used else "unknown" if used is None else "unused",
+        now=moment,
+    )
+    if decision.protected:
         raise DrillSkipped("recent_successful_signin")
     require_drill_use_unprotected(store, generation.product, generation.context)
     profile = store.read_product_profile_record(generation.product)
@@ -215,10 +253,14 @@ def collect_drill_admission(
         observed_by="service:odoo-testing-drill",
         observer_kind="director_agent",
         binding_sha256=binding,
-        usage="unused",
+        usage="unknown" if decision.reason == "verified_down" else "unused",
         data="reproducible",
         production_resources="isolated",
-        usage_evidence=reference,
+        usage_evidence=(
+            "service:verified-down:" + ",".join(decision.observation_ids)
+            if decision.reason == "verified_down"
+            else reference
+        ),
         data_evidence=reference,
         isolation_evidence=reference,
         observed_at=observed,
@@ -365,7 +407,13 @@ def require_drill_checkpoint(
     if (
         (admitted.product, admitted.context, admitted.instance)
         != (operation.product, operation.context, "testing")
-        or admitted.usage != "unused"
+        or (
+            admitted.usage != "unused"
+            and not (
+                admitted.usage == "unknown"
+                and admitted.usage_evidence.startswith("service:verified-down:")
+            )
+        )
         or admitted.data != "reproducible"
         or admitted.production_resources != "isolated"
         or receipt.response_payload.get("activation_attempt") != operation.attempt

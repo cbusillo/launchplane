@@ -43,7 +43,8 @@ def read_drill_recent_signins(
     *,
     history_generation: FreshOdooTestingGeneration | None = None,
     history_database: str = "",
-) -> bool:
+    usage_required: bool = True,
+) -> bool | None:
     profile = store.read_product_profile_record(generation.product)
     selection = select_stable_runtime(store, profile, "testing")
     if selection.identity.context != generation.context:
@@ -93,6 +94,7 @@ def read_drill_recent_signins(
             "copy_binding_sha256": generation_binding(history),
             "workflow_environment": {},
             "usage_only": True,
+            "usage_required": usage_required,
             "usage_reclaim": history_generation is not None,
             "usage_new_database": generation.drill_database,
             "web_gate_path": INTEGRATION_READBACK_PASSED_PATH,
@@ -111,6 +113,8 @@ def read_drill_recent_signins(
         and frames[0].get("new_copy_serving") is True
     ):
         raise DrillCopyAlreadyServing("The new testing copy has already been opened.")
+    if not usage_required and frames == [{"type": "complete", "resources_qualified": True}]:
+        return None
     if (
         len(frames) != 1
         or frames[0].get("type") != "complete"

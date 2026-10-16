@@ -11735,10 +11735,19 @@ class PostgresRecordStore(HumanSessionStore):
                     safety,
                     preparation,
                 )
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
                 try:
-                    replacement = disposable_testing_supersession(current, bindings)
+                    # Configuration stays on the locked adapter. Downtime reads
+                    # use the service monitor store, which the adapter does not
+                    # expose; no provider read or usage assertion is substituted.
+                    replacement = disposable_testing_supersession(
+                        current, bindings, usage_store=self
+                    )
                 except (DisposableLaneSafetyUnknown, ValueError, FileNotFoundError):
                     return False
+                finally:
+                    self._disposable_authority_context.session = outer
                 check_lock()
                 self._sync_odoo_stable_target_replacement_operation_row(row, replacement)
                 session.commit()
