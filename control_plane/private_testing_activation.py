@@ -328,6 +328,10 @@ class PrivateTestingActivationAdapter:
                 cast(dict[str, Any], overlay["secrets"])[overlay_namespace + "-" + name]["file"] = (
                     certificate_directory + "/" + filename
                 )
+            proxy = cast(dict[str, Any], overlay["services"])[overlay_namespace]
+            proxy["labels"]["org.launchplane.private-tls-custody"] = canonical_json_sha256(
+                {"files": overlay["secrets"], "review": normalized}
+            )
             desired: dict[str, Any] = deepcopy(template)
             for section, additions in overlay.items():
                 if set(_object(additions)) & set(_object(desired.get(section, {}))):

@@ -185,6 +185,16 @@ class PrivateTestingTransportTests(unittest.TestCase):
             ),
         )
 
+    def test_proxy_material_tampering_cannot_be_adopted_as_provider_metadata(self) -> None:
+        planned = self.plan()
+        for section, additions in planned["overlay"].items():
+            self.compose.setdefault(section, {}).update(deepcopy(additions))
+        service_name = next(iter(planned["overlay"]["services"]))
+        labels = self.compose["services"][service_name]["labels"]
+        labels[next(iter(labels))] = "tampered"
+        with self.assertRaises(ValueError):
+            self.plan(mode="readback", expected_plan_sha256=planned["plan_sha256"])
+
     def test_private_no_website_plan_and_exact_readback_without_mutations(self) -> None:
         before = self.store.read_dokploy_target_record(
             context_name="example-site", instance_name="prod"

@@ -144,6 +144,14 @@ def transport_overlay(
                 "image": request.nginx_image,
                 "user": "65534:65534",
                 "restart": "unless-stopped",
+                "labels": {
+                    "org.launchplane.private-tls-material": canonical_json_sha256(
+                        {
+                            "certificate": request.certificate_sha256,
+                            "ca": request.ca_bundle_sha256,
+                        }
+                    )
+                },
                 "entrypoint": nginx_entrypoint(
                     nginx_configuration(service=request.runtime_service, runtime_port=runtime_port)
                 ),
@@ -202,6 +210,7 @@ def _without_provider_metadata(
     *,
     target_id: str,
     app_name: str,
+    overlay: dict[str, object],
 ) -> dict[str, object]:
     current = deepcopy(current)
     name = current.pop("name", app_name)
@@ -216,6 +225,15 @@ def _without_provider_metadata(
                 raise PrivateTestingTransportRefused("Provider labels are unqualified.")
             labels = dict(label.split("=", 1) for label in labels)
         labels = _object(labels)
+        expected = _object(_object(overlay["services"]).get(service_name, {}))
+        expected_labels = _object(expected.get("labels", {}))
+        owned_labels = {
+            key: labels.pop(key)
+            for key, value in expected_labels.items()
+            if labels.get(key) == value
+        }
+        if owned_labels:
+            service["labels"] = owned_labels
         if labels and (
             set(labels) - compose.DOKPLOY_COMPOSE_METADATA_LABELS
             or labels.get("dokploy.application.id") != target_id
@@ -335,7 +353,10 @@ def plan_private_testing_transport(
     except yaml.YAMLError as error:
         raise PrivateTestingTransportRefused("Provider Compose evidence is invalid.") from error
     current = _without_provider_metadata(
-        current, target_id=target_id.target_id, app_name=str(placement["appName"])
+        current,
+        target_id=target_id.target_id,
+        app_name=str(placement["appName"]),
+        overlay=overlay,
     )
     baseline = _baseline(current, overlay, readback=request.mode == "readback")
     _validate_compose(baseline, request.runtime_service)

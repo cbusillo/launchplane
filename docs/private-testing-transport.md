@@ -193,7 +193,12 @@ qualifies these facts independently. Source installation does not prove them:
 
 Renew before expiry through the same custodian and directory, preserve the
 old certificate/key until rollback is no longer needed, re-review public hashes
-and source intent, then use supported testing redeploy and live qualification.
+and source intent with `operation=refresh`, then use supported testing redeploy
+and live qualification. Proxy labels bind the reviewed public material and
+custody paths so a certificate-only renewal changes its Compose service hash
+and recreates the proxy through the existing deploy driver. Merely replacing
+files at the same path does not reload Nginx or rebind an atomically replaced
+file. Verify the actually served public leaf/chain after deployment.
 No service operation issues a CA or silently installs trust. A new trust/custody
 choice goes to Chris as one concrete question with a recommendation.
 

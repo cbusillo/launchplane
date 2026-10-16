@@ -218,6 +218,44 @@ def qualify(binary: Path, compose_binary: Path) -> None:
                     != overlay["services"]["fixture-tls"]["entrypoint"]
                 ):
                     raise AssertionError("Compose altered the generated proxy invocation.")
+                proxy_hashes = []
+                for reviewed in (
+                    intent,
+                    intent.model_copy(update={"certificate_sha256": "d" * 64}),
+                ):
+                    reviewed_overlay = cast(
+                        dict[str, Any],
+                        transport_overlay(
+                            reviewed,
+                            namespace="fixture-tls",
+                            runtime_port=backend.socket.getsockname()[1],
+                        ),
+                    )
+                    reviewed_overlay["services"]["bridge"] = {"image": reviewed.nginx_image}
+                    compose_file.write_text(json.dumps(reviewed_overlay))
+                    hashed = subprocess.run(
+                        [
+                            str(compose_binary),
+                            "--project-name",
+                            "lp-private-tls-fixture",
+                            "-f",
+                            str(compose_file),
+                            "config",
+                            "--hash",
+                            "fixture-tls",
+                        ],
+                        env={
+                            "PATH": os.environ["PATH"],
+                            "DOCKER_CONFIG": str(root / "docker-config"),
+                            "COMPOSE_DISABLE_ENV_FILE": "true",
+                        },
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    proxy_hashes.append(hashed.stdout)
+                if proxy_hashes[0] == proxy_hashes[1]:
+                    raise AssertionError("Reviewed certificate rotation cannot recreate the proxy.")
                 (root / "logs").mkdir()
                 command = nginx_entrypoint(
                     config,
@@ -339,7 +377,7 @@ def qualify(binary: Path, compose_binary: Path) -> None:
                 backend.shutdown()
                 thread.join(timeout=5)
         print(
-            "PASS: Compose overlay; generated entrypoint/Nginx; monitor HTTPS; receiver WSS; issuer/hostname/auth/lane/path negatives; no messages"
+            "PASS: Compose overlay/renewal; generated entrypoint/Nginx; monitor HTTPS; receiver WSS; issuer/hostname/auth/lane/path negatives; no messages"
         )
 
 
