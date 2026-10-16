@@ -5486,12 +5486,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
             store = _verireel_route_test_store(state_dir)
+            profile = store.read_product_profile_record("verireel")
             store.write_preview_inventory_scan_record(
                 PreviewInventoryScanRecord(
                     scan_id="preview-inventory-scan-verireel-testing-20260420T100500Z",
                     context="verireel-testing",
                     scanned_at="2026-04-20T10:05:00Z",
                     source="verireel-preview-inventory",
+                    product=profile.product,
+                    repository=profile.repository,
                     status="pass",
                     preview_count=0,
                     preview_slugs=(),
@@ -8077,6 +8080,26 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     preview_slugs=("pr-41", "pr-42"),
                 )
             )
+            # A later background-only scan must not replace explicit lifecycle input.
+            from control_plane.contracts.preview_inventory_scan_record import (
+                PREVIEW_INVENTORY_COLLECTION_SOURCE,
+            )
+
+            from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_SCAN_READ_LIMIT
+
+            for index in range(PREVIEW_INVENTORY_SCAN_READ_LIMIT + 1):
+                store.write_preview_inventory_scan_record(
+                    PreviewInventoryScanRecord(
+                        scan_id=f"later-background-failure-{index}",
+                        context="verireel-testing",
+                        product="other-site",
+                        repository="example/other-site",
+                        scanned_at="2026-04-29T19:23:16Z",
+                        source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
+                        status="fail",
+                        preview_count=0,
+                    )
+                )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [

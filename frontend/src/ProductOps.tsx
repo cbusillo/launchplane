@@ -71,7 +71,7 @@ export function ProductIndexRoute({
   onRetry: () => void;
 }) {
   const products = (resource.data ?? []).map(product => expireProductEvidence(product));
-  useEvidenceExpiry(products.flatMap(product => product.environments));
+  useEvidenceExpiry(products.flatMap(product => product.environments), products.map(product => product.preview.provenance.stale_after));
   const loading = resource.status === "idle" || resource.status === "loading";
   const viewState =
     loading && !products.length
@@ -173,7 +173,7 @@ export function ProductWorkspaceRoute({
     emptyResource(),
   );
   const loadedProductKey = useRef("");
-  useEvidenceExpiry(resource.data?.environments ?? []);
+  useEvidenceExpiry(resource.data?.environments ?? [], [resource.data?.preview.provenance.stale_after ?? ""]);
   useEvidenceRefresh(productKey, !fixtureMode, resource, () => setRetryToken(value => value + 1));
 
   useEffect(() => {
@@ -288,9 +288,9 @@ export function ProductWorkspaceRoute({
   );
 }
 
-export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">[]) {
+export function useEvidenceExpiry(environments: Pick<ProductEnvironmentSummary, "provenance" | "health_monitoring" | "topology">[], extraDeadlines: string[] = []) {
   const [tick, setTick] = useState(0);
-  const nextExpiry = Math.min(...environments.flatMap(environmentEvidenceDeadlines).map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
+  const nextExpiry = Math.min(...[...environments.flatMap(environmentEvidenceDeadlines), ...extraDeadlines].map(value => Date.parse(value)).filter(value => Number.isFinite(value) && value >= Date.now()));
   useEffect(() => {
     const update = () => setTick(value => value + 1);
     const timer = Number.isFinite(nextExpiry)
