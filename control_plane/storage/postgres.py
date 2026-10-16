@@ -11473,7 +11473,7 @@ class PostgresRecordStore(HumanSessionStore):
                 if candidate is None and current_safety is None:
                     from control_plane.odoo_testing_drill import require_drill_checkpoint
 
-                    require_drill_checkpoint(self, operation)
+                    require_drill_checkpoint(self, operation, now=now)
                 else:
                     require_drill_use_unprotected(
                         self, operation.product, operation.context, now=now
@@ -11561,7 +11561,7 @@ class PostgresRecordStore(HumanSessionStore):
                     outer = getattr(self._disposable_authority_context, "session", None)
                     self._disposable_authority_context.session = session
                     try:
-                        require_drill_checkpoint(self, operation)
+                        require_drill_checkpoint(self, operation, now=now)
                     finally:
                         self._disposable_authority_context.session = outer
                 return

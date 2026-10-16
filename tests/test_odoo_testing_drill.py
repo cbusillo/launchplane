@@ -351,6 +351,20 @@ class TestingDrillTests(TestingDrillScenario):
         with patch.object(self.store, "list_public_ingress_observation_records", return_value=()):
             require_drill_checkpoint(self.store, operation)
             self.activate()
+            historical = self.store.read_disposable_lane_safety(
+                self.profile.product, self.context, "testing"
+            )
+            assert historical is not None
+            self.store.write_disposable_lane_safety(
+                historical.model_copy(
+                    update={
+                        "observed_at": historical.observed_at + timedelta(seconds=1),
+                        "expires_at": historical.expires_at + timedelta(seconds=1),
+                    }
+                )
+            )
+            require_drill_checkpoint(self.store, operation)
+            self.activate()
             record_safety(
                 self.store,
                 self.profile.product,

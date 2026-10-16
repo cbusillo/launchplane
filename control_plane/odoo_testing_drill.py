@@ -152,7 +152,17 @@ class PreparedDrill:
 
 
 def _usage_revision(recorded: DisposableLaneSafety | None) -> str:
-    return canonical_json_sha256(recorded.model_dump(mode="json") if recorded else None)
+    return canonical_json_sha256(
+        [
+            recorded.product,
+            recorded.context,
+            recorded.instance,
+            recorded.usage,
+            recorded.usage_evidence,
+        ]
+        if recorded
+        else None
+    )
 
 
 def drill_usage_revision(store: PostgresRecordStore, product: str, context: str) -> str:
@@ -403,7 +413,10 @@ def prepare_drill(
 
 
 def require_drill_checkpoint(
-    store: object, operation: OdooStableTargetReplacementOperationRecord
+    store: object,
+    operation: OdooStableTargetReplacementOperationRecord,
+    *,
+    now: float | None = None,
 ) -> None:
     if operation.idempotency_scope != DRILL_SCOPE:
         return
@@ -436,6 +449,7 @@ def require_drill_checkpoint(
         store,
         operation.product,
         operation.context,
+        now=now,
         accepted_usage_revision=(
             str(receipt.response_payload.get("activation_usage_revision", ""))
             if admitted.usage == "unknown"

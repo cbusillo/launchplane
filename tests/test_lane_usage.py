@@ -212,6 +212,8 @@ class LaneUsageTests(unittest.TestCase):
     def test_unavailable_monitor_evidence_refuses_without_raising(self) -> None:
         for failure in (
             KeyError("private-detail"),
+            OSError("private-detail"),
+            RuntimeError("private-detail"),
             OperationalError("private-query", {}, Exception()),
         ):
             with (

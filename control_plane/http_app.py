@@ -24023,6 +24023,13 @@ def create_launchplane_fastapi_app(
                         "observed_at": observed_at,
                         "expires_at": observed_at + timedelta(seconds=observation.lifetime_seconds),
                         **facts.payload(),
+                        # Each fresh positive read is distinct from retained
+                        # historical use when only the row's resource TTL changes.
+                        "usage_evidence": (
+                            facts.usage_evidence + ":" + observed_at.isoformat()
+                            if facts.usage == "in_use"
+                            else facts.usage_evidence
+                        ),
                         **(resource_facts or {}),
                     }
                 )

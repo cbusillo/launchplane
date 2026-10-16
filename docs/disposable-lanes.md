@@ -546,10 +546,12 @@ or failed inspection leaves those facts unknown; it never substitutes downtime
 for a resource proof. A provider refusal returns authorization_denied with its
 trace, without another identity or transport.
 
-Collection retains known use, only-copy and shared-resource protection. After
-correcting and verifying resource sharing, use the existing `clear` then fresh
-`collect` path; collection alone never erases that protection. It also retains
-independent
+Collection retains known use, only-copy, shared-resource and separation-staging
+protection. Use the existing acknowledged activation path for staged separation.
+The existing `clear` then fresh `collect` path removes the whole observation, so
+use it only after verifying that every protection on that row is resolved,
+including any needed copy or current use; otherwise retain the row and its
+protections. Collection alone never erases resource protection. It also retains independent
 fresh custody/isolation facts on the same binding, capped at their original expiry;
 collection cannot renew an old proof. A new physical inspection can publish a fresh
 proof; a failed attempted inspection replaces those independent facts with UNKNOWN

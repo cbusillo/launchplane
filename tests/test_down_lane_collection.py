@@ -283,13 +283,35 @@ class DownLaneCollectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.collect()).status_code, 202)
         previous = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
         assert previous is not None
-        self.store.write_disposable_lane_safety(
-            previous.model_copy(update={"production_resources": "shared"})
+        for protection in ("shared", "separation_ready"):
+            with self.subTest(protection=protection):
+                self.store.write_disposable_lane_safety(
+                    previous.model_copy(update={"production_resources": protection})
+                )
+                current = await self.collect()
+                self.assertEqual(current.status_code, 202, current.text)
+                self.assertEqual(current.json()["result"]["production_resources"], protection)
+                with self.assertRaises(DisposableLaneSafetyUnknown):
+                    require_disposable_lane(
+                        self.store, product=self.product, context=self.context, instance="testing"
+                    )
+
+    async def test_positive_usage_reads_are_distinct_but_retained_history_stays_stable(
+        self,
+    ) -> None:
+        self.usage_reader.return_value = OdooTestingUsage("in_use", True, True, "complete")
+        first = await self.collect()
+        second = await self.collect()
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(second.status_code, 202, second.text)
+        self.assertNotEqual(
+            first.json()["result"]["usage_evidence"], second.json()["result"]["usage_evidence"]
         )
-        current = await self.collect()
-        self.assertEqual(current.status_code, 202, current.text)
-        self.assertEqual(current.json()["result"]["production_resources"], "shared")
-        with self.assertRaises(DisposableLaneSafetyUnknown):
-            require_disposable_lane(
-                self.store, product=self.product, context=self.context, instance="testing"
-            )
+        self.usage_reader.return_value = OdooTestingUsage(
+            reason_code="web_configuration_unavailable"
+        )
+        retained = await self.collect()
+        self.assertEqual(retained.status_code, 202, retained.text)
+        self.assertEqual(
+            retained.json()["result"]["usage_evidence"], second.json()["result"]["usage_evidence"]
+        )

@@ -165,9 +165,10 @@ def merge_collected_safety(
         changes.update(usage="in_use", usage_evidence=previous.usage_evidence)
     if previous.data == "only_copy":
         changes.update(data="only_copy", data_evidence=previous.data_evidence)
-    if previous.production_resources == "shared":
+    if previous.production_resources in {"shared", "separation_ready"}:
         changes.update(
-            production_resources="shared", isolation_evidence=previous.isolation_evidence
+            production_resources=previous.production_resources,
+            isolation_evidence=previous.isolation_evidence,
         )
     if (
         not replace_resource_facts
