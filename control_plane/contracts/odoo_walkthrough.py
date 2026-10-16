@@ -12,8 +12,18 @@ WALKTHROUGH_LOGIN_PREFIX = "lp_walk_"
 WALKTHROUGH_MARKER_PREFIX = "launchplane.walkthrough."
 WALKTHROUGH_LOCK_PREFIX = "launchplane.walkthrough:"
 WALKTHROUGH_ACTIVE_STATE = "active"
+WALKTHROUGH_CLOSED_STATE = "closed"
+WALKTHROUGH_FORBIDDEN_GROUPS = (
+    "base.group_system",
+    "base.group_erp_manager",
+    "base.group_sanitize_override",
+    "base.group_allow_export",
+)
 WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS = 4 * 60 * 60
-WALKTHROUGH_DISPATCH_SECONDS = 120
+# Persisted before effects so a missing journal can be reconciled safely.
+# Includes the bounded eligibility re-reads; native execution has its own
+# shorter timeouts, and browser work does not extend this admission window.
+WALKTHROUGH_DISPATCH_SECONDS = 10 * 60
 
 
 def walkthrough_activity_scope(product: str) -> str:
@@ -37,6 +47,8 @@ class WalkthroughStep(BaseModel):
                 or parsed.scheme
                 or parsed.netloc
                 or parsed.query
+                or "%" in parsed.path
+                or any(segment in {".", ".."} for segment in parsed.path.split("/"))
                 or "\\" in self.value
                 or any(ord(c) < 32 for c in self.value)
                 or not (parsed.path in {"/web", "/odoo"} or parsed.path.startswith("/odoo/"))
@@ -76,7 +88,7 @@ class OdooWalkthroughRequest(BaseModel):
             raise ValueError("Only run accepts browser steps.")
         if not self.groups or any(
             not re.fullmatch(r"[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*", group)
-            or group in {"base.group_system", "base.group_erp_manager"}
+            or group in (*WALKTHROUGH_FORBIDDEN_GROUPS, "base.group_no_one")
             for group in self.groups
         ):
             raise ValueError("Use explicit business groups, excluding Odoo administration.")

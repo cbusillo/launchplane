@@ -109,12 +109,11 @@ def plan_walkthrough(
         raise ValueError("A completed isolated testing generation is required.")
     if request.operation != "cleanup":
         require_drill_use_unprotected(store, request.product, request.context)
-    # This performs the existing real host storage/network/image/copy-witness
-    # inspection. Its recent-use boolean is deliberately NOT a walkthrough
-    # permission: the account program checks other users independently.
-    recent_signins = False
+    # Preserve the existing real host storage/network/image/copy inspection.
+    # Its aggregate usage boolean includes our own historical task accounts;
+    # the native witnessed-account read below distinguishes those from staff.
     if request.operation != "cleanup":
-        recent_signins = read_drill_recent_signins(store, generation, time.time())
+        read_drill_recent_signins(store, generation, time.time())
     connection = connect_runtime(
         store=store, selection=selection, control_plane_root=root, database_url=store.database_url
     )
@@ -155,6 +154,22 @@ def plan_walkthrough(
     binding = canonical_json_sha256(
         [request.product, request.context, request.task_id, copy_binding]
     )
+    if request.operation != "cleanup" and not testing_task_unused(
+        host=connection.host,
+        token=connection.token,
+        server_id=connection.server_id,
+        require_task=False,
+        intent={
+            "project": connection.app_name,
+            "identity": selection.identity.model_dump(mode="json"),
+            "identity_key": RUNTIME_IDENTITY_ENV_KEY,
+            "image": selection.identity.image_reference,
+            "database": database,
+            "copy_binding": copy_binding,
+            "usage_since": generation.prepared_at,
+        },
+    ):
+        raise ValueError("Testing has recent staff sign-ins or unreadable usage.")
     secret_name = "task-" + binding
     secret = store.find_secret_record(
         scope="context_instance",
@@ -163,8 +178,6 @@ def plan_walkthrough(
         context=request.context,
         instance="testing",
     )
-    if request.operation == "provision" and secret is None and recent_signins:
-        raise ValueError("Testing has recent sign-ins before this task account exists.")
     if request.operation == "run" and secret is None:
         raise ValueError("There is no task account for this testing copy.")
     if secret is not None and secret.status != "configured" and request.operation != "cleanup":

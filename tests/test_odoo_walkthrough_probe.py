@@ -55,13 +55,15 @@ class ProbeConnection:
         pass
 
     def execute(self, statement: str, parameters: tuple[object, ...] = ()) -> None:
-        if not self.readonly or not statement.strip().upper().startswith(("SELECT", "SET")):
+        if not self.readonly or not statement.strip().upper().startswith(("SELECT", "SET", "WITH")):
             raise AssertionError("Probe attempted a write")
         self.statement, self.parameters = statement, parameters
 
     def fetchone(self) -> tuple[object, ...]:
         if "pg_try_advisory_xact_lock" in self.statement:
             return (self.free,)
+        if "res_users_log" in self.statement:
+            return (self.used,)
         if "ir_config_parameter" in self.statement:
             if self.parameters[0] == TESTING_COPY_COMPLETION_PARAMETER:
                 return (self.copy,)
@@ -74,8 +76,6 @@ class ProbeConnection:
                     }
                 ),
             )
-        if "res_users_log" in self.statement:
-            return (self.used,)
         if "res_users" in self.statement:
             return (WALKTHROUGH_LOGIN_PREFIX + self.spec["task_id"], self.active)
         raise AssertionError("Unexpected database read")

@@ -7,9 +7,34 @@ from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_MARKER_PREFIX,
     WALKTHROUGH_LOCK_PREFIX,
     WALKTHROUGH_ACTIVE_STATE,
+    WALKTHROUGH_CLOSED_STATE,
+    WALKTHROUGH_FORBIDDEN_GROUPS,
 )
 
 WALKTHROUGH_JOURNAL_DIRECTORY = "/tmp/launchplane-walkthrough"
+WALKTHROUGH_LOGIN_PATTERN = "^" + WALKTHROUGH_LOGIN_PREFIX + "([a-f0-9]{32})$"
+
+# Only a matching native task marker on this exact copy can exempt a sign-in.
+# A reserved-looking login without that witness remains protected staff usage.
+OTHER_TESTING_SIGNINS_SQL = """
+WITH task_markers AS MATERIALIZED (
+    SELECT key, value::jsonb AS data FROM ir_config_parameter WHERE starts_with(key,%s)
+)
+SELECT EXISTS (
+    SELECT 1 FROM res_users_log history
+    WHERE history.create_date >= %s::timestamptz AT TIME ZONE 'UTC'
+    AND NOT EXISTS (
+        SELECT 1 FROM res_users account JOIN task_markers marker
+        ON marker.key = %s || substring(account.login FROM %s)
+        WHERE account.id = history.create_uid AND account.id > 2
+        AND account.login ~ %s
+        AND marker.data->>'account_id' = account.id::text
+        AND marker.data->>'copy_binding' = %s
+        AND ((marker.data->>'state' = %s AND account.active)
+          OR (marker.data->>'state' = %s AND NOT account.active))
+    )
+)
+"""
 
 
 def testing_account_command(
@@ -57,7 +82,7 @@ def testing_account_dispatch_finished(
 
 
 def testing_task_unused(
-    *, host: str, token: str, server_id: str, intent: dict[str, object]
+    *, host: str, token: str, server_id: str, intent: dict[str, object], require_task: bool = True
 ) -> bool:
     frames: list[dict[str, object]] = []
     _read_remote(
@@ -65,7 +90,11 @@ def testing_task_unused(
         token=token,
         server_id=server_id,
         program=ACCOUNT_JOURNAL_READ_PROGRAM,
-        payload={**intent, "mode": "usage", "probe": ACCOUNT_DATABASE_PROBE},
+        payload={
+            **intent,
+            "mode": "usage" if require_task else "lane_usage",
+            "probe": ACCOUNT_DATABASE_PROBE,
+        },
         receive=frames.append,
         timeout_seconds=30,
     )
@@ -88,16 +117,17 @@ try:
         if spec['mode']=='quiescence':
             cursor.execute('SELECT pg_try_advisory_xact_lock(hashtextextended(%s,0))',(__TASK_LOCK_PREFIX__+spec['binding'],))
             clear=cursor.fetchone()[0] is True
-        elif spec['mode']=='usage':
-            cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',(__TASK_MARKER_PREFIX__+spec['task_id'],))
-            row=cursor.fetchone()
-            marker=json.loads(row[0]) if row else {}
-            uid=marker.get('account_id')
-            if marker.get('binding')!=spec['binding'] or marker.get('state')!=__TASK_ACTIVE_STATE__ or type(uid)is not int or uid<=2:
-                raise RuntimeError('Task account changed')
-            cursor.execute('SELECT login,active FROM res_users WHERE id=%s',(uid,))
-            if cursor.fetchone()!=(__TASK_LOGIN_PREFIX__+spec['task_id'],True): raise RuntimeError('Task account changed')
-            cursor.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= %s::timestamptz AT TIME ZONE 'UTC' AND create_uid != %s)",(spec['usage_since'],uid))
+        elif spec['mode'] in ('usage','lane_usage'):
+            if spec['mode']=='usage':
+                cursor.execute('SELECT value FROM ir_config_parameter WHERE key=%s',(__TASK_MARKER_PREFIX__+spec['task_id'],))
+                row=cursor.fetchone()
+                marker=json.loads(row[0]) if row else {}
+                uid=marker.get('account_id')
+                if marker.get('binding')!=spec['binding'] or marker.get('state')!=__TASK_ACTIVE_STATE__ or type(uid)is not int or uid<=2:
+                    raise RuntimeError('Task account changed')
+                cursor.execute('SELECT login,active FROM res_users WHERE id=%s',(uid,))
+                if cursor.fetchone()!=(__TASK_LOGIN_PREFIX__+spec['task_id'],True): raise RuntimeError('Task account changed')
+            cursor.execute(__USAGE_QUERY__,(__TASK_MARKER_PREFIX__,spec['usage_since'],__TASK_MARKER_PREFIX__,__LOGIN_PATTERN__,__LOGIN_PATTERN__,spec['copy_binding'],__TASK_ACTIVE_STATE__,__TASK_CLOSED_STATE__))
             clear=cursor.fetchone()[0] is False
         else: raise RuntimeError('Unsupported read')
     connection.rollback()
@@ -109,6 +139,9 @@ finally:
     .replace("__TASK_MARKER_PREFIX__", repr(WALKTHROUGH_MARKER_PREFIX))
     .replace("__TASK_LOGIN_PREFIX__", repr(WALKTHROUGH_LOGIN_PREFIX))
     .replace("__TASK_ACTIVE_STATE__", repr(WALKTHROUGH_ACTIVE_STATE))
+    .replace("__TASK_CLOSED_STATE__", repr(WALKTHROUGH_CLOSED_STATE))
+    .replace("__LOGIN_PATTERN__", repr(WALKTHROUGH_LOGIN_PATTERN))
+    .replace("__USAGE_QUERY__", repr(OTHER_TESTING_SIGNINS_SQL))
 )
 
 
@@ -130,7 +163,7 @@ try:
             clear=value.get('finished') is True and value.get('needs_quiescence') is not True
         except (OSError,ValueError):
             pass
-    if not clear and (spec.get('mode')=='usage' or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline'])):
+    if not clear and (spec.get('mode') in ('usage','lane_usage') or ('dispatch_deadline' in spec and time.time()>spec['dispatch_deadline'])):
         def docker(*args,data=None):
             result=subprocess.run(['docker',*args],input=data,capture_output=True,timeout=15)
             if result.returncode: raise RuntimeError('Testing read unavailable')
@@ -212,8 +245,8 @@ with tempfile.TemporaryDirectory(prefix='launchplane-walkthrough-') as directory
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         settings=startup._load_settings(argparse.Namespace(config_path=os.path.join(directory,'odoo.conf')))
         startup._write_runtime_config(settings)
-    failure="env.cr.rollback()\\nimport json,os\\nwith os.fdopen(os.open(request['result_file'],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:\\n    json.dump({'account_id':0,'status':'fail'},stream)"
-    script='request='+repr(request)+'\\ntry:\\n'+textwrap.indent(program,'    ')+'\\nexcept Exception:\\n'+textwrap.indent(failure,'    ')
+    failure="env.cr.rollback()\\nimport json,os\\nwith os.fdopen(os.open(request['result_file'],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:\\n    json.dump({'account_id':0,'status':'unknown' if commit_started else 'fail'},stream)"
+    script='request='+repr(request)+'\\ncommit_started=False\\ntry:\\n'+textwrap.indent(program,'    ')+'\\nexcept Exception:\\n'+textwrap.indent(failure,'    ')
     try:
         child=subprocess.run(startup._build_odoo_shell_command(settings),
             input=script.encode(),
@@ -262,7 +295,7 @@ if marker and request['operation']=='provision' and marker['groups']!=sorted(req
 if not marker and users.search_count([('login','=',login)]):
     raise RuntimeError('Existing login cannot be adopted')
 if request['operation']!='cleanup':
-    env.cr.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= %s::timestamptz AT TIME ZONE 'UTC' AND create_uid != %s)",(request['usage_since'],user.id if user else -1,))
+    env.cr.execute(__USAGE_QUERY__,(__TASK_MARKER_PREFIX__,request['usage_since'],__TASK_MARKER_PREFIX__,__LOGIN_PATTERN__,__LOGIN_PATTERN__,request['copy_binding'],__TASK_ACTIVE_STATE__,__TASK_CLOSED_STATE__))
     if env.cr.fetchone()[0]:
         raise RuntimeError('Testing lane has other recent successful sign-ins')
 if request['operation']=='provision':
@@ -274,22 +307,23 @@ if request['operation']=='provision':
         field='group_ids' if 'group_ids' in users._fields else 'groups_id'
         user=users.create({'name':'TEST Launchplane walkthrough','login':login,
             'password':request['password'],'active':True,field:[(6,0,[group.id for group in groups])]})
-        if user.has_group('base.group_system') or user.has_group('base.group_erp_manager'):
-            raise RuntimeError('Testing task may not administer Odoo')
-        marker={'account_id':user.id,'binding':request['binding'],'state':__TASK_ACTIVE_STATE__,'groups':sorted(request['groups'])}
+        if any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
+            raise RuntimeError('Testing task privileges are forbidden')
+        marker={'account_id':user.id,'binding':request['binding'],'copy_binding':request['copy_binding'],'state':__TASK_ACTIVE_STATE__,'groups':sorted(request['groups'])}
         parameters.set_param(key,json.dumps(marker,sort_keys=True))
 elif request['operation']=='cleanup':
     if marker and marker['state']==__TASK_ACTIVE_STATE__:
         user.write({'active':False,'password':secrets.token_urlsafe(48)})
         if 'res.users.apikeys' in env.registry:
             env['res.users.apikeys'].sudo().search([('user_id','=',user.id)]).unlink()
-        marker['state']='closed'
+        marker['state']=__TASK_CLOSED_STATE__
         parameters.set_param(key,json.dumps(marker,sort_keys=True))
 else:
     if not marker or marker['state']!=__TASK_ACTIVE_STATE__ or not user.active:
         raise RuntimeError('Task is not active')
-    if user.has_group('base.group_system') or user.has_group('base.group_erp_manager'):
+    if any(env.ref(name,raise_if_not_found=False) and user.has_group(name) for name in __FORBIDDEN_GROUPS__):
         raise RuntimeError('Task privileges changed')
+commit_started=True
 env.cr.commit()
 if request['operation']=='cleanup' and marker:
     user.invalidate_recordset(['active'])
@@ -301,4 +335,8 @@ with os.fdopen(os.open(request['result_file'],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0
     .replace("__TASK_MARKER_PREFIX__", repr(WALKTHROUGH_MARKER_PREFIX))
     .replace("__TASK_LOCK_PREFIX__", repr(WALKTHROUGH_LOCK_PREFIX))
     .replace("__TASK_ACTIVE_STATE__", repr(WALKTHROUGH_ACTIVE_STATE))
+    .replace("__TASK_CLOSED_STATE__", repr(WALKTHROUGH_CLOSED_STATE))
+    .replace("__LOGIN_PATTERN__", repr(WALKTHROUGH_LOGIN_PATTERN))
+    .replace("__USAGE_QUERY__", repr(OTHER_TESTING_SIGNINS_SQL))
+    .replace("__FORBIDDEN_GROUPS__", repr(WALKTHROUGH_FORBIDDEN_GROUPS))
 )

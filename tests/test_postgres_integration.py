@@ -970,6 +970,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
 
         from control_plane.contracts.odoo_walkthrough import (
             WALKTHROUGH_ACTIVE_STATE,
+            WALKTHROUGH_CLOSED_STATE,
             WALKTHROUGH_LOCK_PREFIX,
             WALKTHROUGH_LOGIN_PREFIX,
             WALKTHROUGH_MARKER_PREFIX,
@@ -991,6 +992,10 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                 owner.execute("CREATE TABLE res_users (id int, login text, active bool)")
                 owner.execute("CREATE TABLE res_users_log (create_uid int, create_date timestamp)")
                 owner.execute(
+                    "INSERT INTO ir_config_parameter VALUES (%s,%s)",
+                    ("web.base.url", "https://fixture.invalid"),
+                )
+                owner.execute(
                     "INSERT INTO ir_config_parameter VALUES (%s,%s),(%s,%s)",
                     (
                         TESTING_COPY_COMPLETION_PARAMETER,
@@ -999,6 +1004,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                         json.dumps(
                             {
                                 "binding": spec["binding"],
+                                "copy_binding": spec["copy_binding"],
                                 "account_id": 17,
                                 "state": WALKTHROUGH_ACTIVE_STATE,
                             }
@@ -1058,6 +1064,42 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                 )
                 owner.commit()
                 self.assertTrue(probe())
+                # A completed task's history does not masquerade as staff use
+                # when a new task is admitted on this same isolated copy.
+                owner.execute("UPDATE res_users SET active=false WHERE id=17")
+                owner.execute(
+                    "UPDATE ir_config_parameter SET value=%s WHERE key=%s",
+                    (
+                        json.dumps(
+                            {
+                                "binding": spec["binding"],
+                                "copy_binding": spec["copy_binding"],
+                                "account_id": 17,
+                                "state": WALKTHROUGH_CLOSED_STATE,
+                            }
+                        ),
+                        WALKTHROUGH_MARKER_PREFIX + spec["task_id"],
+                    ),
+                )
+                owner.commit()
+                spec.update(mode="lane_usage", task_id="2" * 32)
+                self.assertTrue(probe())
+                owner.execute(
+                    "UPDATE ir_config_parameter SET value=%s WHERE key=%s",
+                    (
+                        json.dumps(
+                            {
+                                "copy_binding": "a-different-copy",
+                                "account_id": 17,
+                                "state": WALKTHROUGH_CLOSED_STATE,
+                            }
+                        ),
+                        WALKTHROUGH_MARKER_PREFIX + "1" * 32,
+                    ),
+                )
+                owner.commit()
+                self.assertFalse(probe())
+                owner.execute("DELETE FROM res_users_log")
                 owner.execute(
                     "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (23,)
                 )

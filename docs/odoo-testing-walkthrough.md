@@ -42,17 +42,21 @@ independent credentials, storage and networks. The service checks current
 product ownership, target aliases, HTTPS origin, exact runtime/image, copy
 witness, real host isolation, staff hold and protected usage/custody. No other
 stable lane may use the testing origin. Recent successful sign-ins by anyone
-except this exact witnessed task account refuse provisioning and browser work;
+except natively witnessed task accounts on this exact copy refuse provisioning
+and browser work. A closed task's history does not prevent the next task;
+reserved-looking logins without a matching account/copy marker remain protected.
 copied login history before preparation is excluded. An unreadable check
 refuses. Launchplane consumes a task credential for at most four hours;
 this does not expire the native Odoo account. Cleanup is required to revoke it,
 and remains available after the service consumption deadline.
 An existing staff login can never be adopted or reset.
 
-Account groups are explicit native business group XML IDs. The default is
+Account groups are explicit native group XML IDs. The default is
 `base.group_user`; supply only the business roles required by the checklist.
-Odoo administration groups and business groups that imply administration are
-refused. This API cannot change the groups of an existing task account.
+Odoo administration, export and HTML-sanitization bypass groups, including
+application groups that imply those privileges, are refused. Technical Features
+cannot be requested explicitly; Odoo may imply it for an ordinary internal user.
+This API cannot change the groups of an existing task account.
 Run and cleanup use the account's stored groups; the caller need not repeat
 the provisioned group selection.
 
@@ -67,6 +71,7 @@ private header config and the configured service origin:
 curl --fail-with-body --silent --show-error \
   --config "$LP_PRIVATE_HEADER_CONFIG" \
   --header 'Content-Type: application/json' \
+  --header 'Idempotency-Key: <task>-provision' \
   --data-binary @task-request.json \
   "$LAUNCHPLANE_OPERATOR_URL/v1/drivers/odoo/testing-walkthrough" \
   --output task-receipt.json
@@ -87,7 +92,7 @@ The first request contains only nonsecret intent:
 ```
 
 Read the receipt, then repeat with `mode=apply`, the returned digest as
-`reviewed_plan_sha256`, and `--header 'Idempotency-Key: <task>-provision'`.
+`reviewed_plan_sha256`, keeping the shown provision idempotency key.
 The receipt contains no credential to copy. Inspect `result.status`, including
 when HTTP status is 200: `unknown` is never a passing operation.
 
@@ -106,7 +111,8 @@ the returned user ID before opening the web client. Supply bounded `steps`:
 ```
 
 Use the product's actual checklist selectors; these are illustrative. The
-driver accepts no evaluated script, arbitrary URL, query string, staff
+driver accepts no evaluated script, arbitrary URL, query string, dot-segment or
+encoded-path escape, staff
 credentials or non-TEST input. It blocks external network requests, login and
 password-reset pages, service workers, websockets, downloads and sensitive
 controls. Screenshots are available only on the signed-in web client, with
@@ -147,7 +153,10 @@ transactions. After a disconnect or crash, retry only the original request/key.
 A recovered interrupted dispatch returns `unknown` and releases that original
 reservation only after its value-free host completion journal proves the native
 consumer finished, or a read-only check proves it quiescent after the dispatch
-deadline. Definite consumer refusals roll back and return a terminal `fail`
+deadline. The persisted admission deadline allows ten minutes for eligibility
+reads and account dispatch; native execution has shorter timeouts. Expiry or
+clock disagreement refuses safely rather than extending the original intent.
+Definite pre-commit consumer refusals roll back and return a terminal `fail`
 receipt; they do not strand the target. The native consumer and the read-only
 probe share a task-specific PostgreSQL transaction advisory lock: after the
 deadline, a future consumer refuses before account writes, and an already
@@ -164,6 +173,11 @@ a passing walkthrough, and no account/browser dispatch is repeated. Tiny value-f
 dispatch journals live in the original host's private
 `/tmp/launchplane-walkthrough` directory. Preserve them until the original
 receipt is settled; host temporary-file disposal can remove old recovery proof.
+An ambiguous commit or failed post-commit readback stays `unknown`. Browser-step
+errors also stay `unknown`: earlier business writes may already have completed.
+Retrying the original key settles evidence without repeating those steps, then
+cleanup remains available. Browser work holds the existing heartbeat lease and
+Odoo lane reservation; recovery never replays browser commands.
 
 Deploy compatible API and browser-service code together through normal
 Launchplane delivery. No schema migration, product build setting, GitHub secret

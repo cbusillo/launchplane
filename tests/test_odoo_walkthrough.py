@@ -76,6 +76,10 @@ class TaskContractTests(unittest.TestCase):
             "/web?password=x",
             "/web/login",
             "/web\\evil",
+            "/odoo/../web/database/manager",
+            "/odoo/./contacts",
+            "/odoo/%2e%2e/web/session/logout",
+            "/odoo/%252e%252e/web/session/logout",
         ):
             with self.subTest(value=value), self.assertRaises(ValidationError):
                 WalkthroughStep(action="open", value=value)
@@ -83,8 +87,14 @@ class TaskContractTests(unittest.TestCase):
             with self.assertRaises(ValidationError):
                 WalkthroughStep(action="fill", selector="input", value=value)
         self.assertEqual(WalkthroughStep(action="open", value="/web#action=example").action, "open")
-        with self.assertRaises(ValidationError):
-            task_request(groups=("base.group_system",))
+        for group in (
+            "base.group_system",
+            "base.group_allow_export",
+            "base.group_sanitize_override",
+            "base.group_no_one",
+        ):
+            with self.assertRaises(ValidationError):
+                task_request(groups=(group,))
 
 
 class TaskRouteTests(unittest.TestCase):
@@ -492,7 +502,7 @@ class AccountProgramTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.execute()
         self.users.create.assert_not_called()
-        self.users.write.assert_not_called()
+        self.user.write.assert_not_called()
         self.parameters[TESTING_COPY_COMPLETION_PARAMETER] = "another-copy"
         with self.assertRaises(RuntimeError):
             self.execute()
@@ -531,7 +541,7 @@ class AccountProgramTests(unittest.TestCase):
         self.execute()
         self.user.write.assert_not_called()
 
-    def test_foreign_task_or_admin_group_is_never_adopted(self) -> None:
+    def test_foreign_task_is_never_adopted(self) -> None:
         self.execute()
         self.user.login = "staff"
         with self.assertRaises(RuntimeError):
@@ -577,6 +587,14 @@ class AccountProgramTests(unittest.TestCase):
             self.execute()
         self.env.cr.commit.assert_not_called()
 
+    def test_application_groups_cannot_imply_export_or_unsanitized_html(self) -> None:
+        self.request["groups"] = ["example.group_business"]
+        for forbidden in ("base.group_allow_export", "base.group_sanitize_override"):
+            self.user.has_group.side_effect = lambda name: name == forbidden
+            with self.assertRaises(RuntimeError):
+                self.execute()
+        self.env.cr.commit.assert_not_called()
+
     def test_commit_failure_has_no_passing_consumer_receipt(self) -> None:
         self.env.cr.commit.side_effect = RuntimeError("commit failed")
         with self.assertRaises(RuntimeError):
@@ -594,7 +612,13 @@ class AccountProgramTests(unittest.TestCase):
         self.env.cr.rollback.assert_called_once()
         self.env.cr.commit.assert_not_called()
 
-    def _exercise_fixed_host_wrapper(self, *, consumer_refuses: bool = False) -> None:
+    def test_fixed_host_wrapper_preserves_unknown_when_commit_result_is_ambiguous(self) -> None:
+        self.env.cr.commit.side_effect = RuntimeError("private ambiguous commit")
+        self._exercise_fixed_host_wrapper(commit_unknown=True)
+
+    def _exercise_fixed_host_wrapper(
+        self, *, consumer_refuses: bool = False, commit_unknown: bool = False
+    ) -> None:
         identity = RuntimeIdentity(
             product="example-odoo",
             context="example",
@@ -681,9 +705,10 @@ class AccountProgramTests(unittest.TestCase):
         self.assertNotIn(self.request["password"], output.getvalue())
         self.assertNotIn("private startup noise", output.getvalue())
         self.assertNotIn("private consumer refusal", output.getvalue())
+        self.assertNotIn("private ambiguous commit", output.getvalue())
         self.assertEqual(
             json.loads(output.getvalue().removeprefix("FRAME:"))["status"],
-            "fail" if consumer_refuses else "pass",
+            "unknown" if commit_unknown else "fail" if consumer_refuses else "pass",
         )
         self.assertTrue(
             json.loads(
@@ -729,7 +754,7 @@ class AccountProgramTests(unittest.TestCase):
                 exec(compile(ACCOUNT_JOURNAL_READ_PROGRAM, "journal-reader", "exec"), {})
             return json.loads(receipt.getvalue().removeprefix("FRAME:"))["clear"] is True
 
-        self.assertTrue(read_journal())
+        self.assertEqual(read_journal(), not commit_unknown)
         journal = (
             original_path(self.directory.name) / "journal" / (payload["dispatch_id"] + ".json")
         )

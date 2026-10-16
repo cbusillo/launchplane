@@ -80,6 +80,9 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.usage = self.stack.enter_context(
             patch("control_plane.odoo_walkthrough.read_drill_recent_signins", return_value=False)
         )
+        self.unused = self.stack.enter_context(
+            patch("control_plane.odoo_walkthrough.testing_task_unused", return_value=True)
+        )
         self.hold = self.stack.enter_context(
             patch("control_plane.odoo_walkthrough.require_drill_use_unprotected")
         )
@@ -191,18 +194,27 @@ class WalkthroughPlanTests(unittest.TestCase):
                 self.plan("run")
 
     def test_initial_provision_plan_refuses_recent_signins_before_any_account_exists(self) -> None:
-        self.usage.return_value = True
+        self.unused.return_value = False
         with self.assertRaises(ValueError):
             self.plan()
+
+    def test_prior_task_signins_do_not_refuse_a_new_task_when_native_witnesses_qualify(
+        self,
+    ) -> None:
+        self.usage.return_value = True
+        self.plan()
+        self.assertFalse(self.unused.call_args.kwargs["require_task"])
 
     def test_cleanup_still_qualifies_physical_copy_but_does_not_require_unused_lane(self) -> None:
         self.store.find_secret_record.return_value = self.secret(
             age=timedelta(seconds=WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS + 1)
         )
         self.usage.side_effect = ValueError("login history unavailable")
+        self.unused.side_effect = ValueError("login history unavailable")
         self.hold.side_effect = ValueError("staff hold")
         self.plan("cleanup")
         self.usage.assert_not_called()
+        self.unused.assert_not_called()
         self.hold.assert_not_called()
         self.physical.assert_called_once()
         self.physical.side_effect = lambda **kwargs: kwargs["receive"](
