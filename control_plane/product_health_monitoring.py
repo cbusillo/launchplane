@@ -113,8 +113,14 @@ class ProductHealthMonitoringPlan(BaseModel):
     requested_check_kind: Literal["public_http", "private_http"]
     current_monitoring_intent: ProductLaneMonitoringIntent
     requested_monitoring_intent: ProductLaneMonitoringIntent
-    current_dependency_health: RuntimeDependencyHealthPolicy
-    requested_dependency_health: RuntimeDependencyHealthPolicy
+    current_dependency_health: RuntimeDependencyHealthPolicy = Field(
+        default_factory=RuntimeDependencyHealthPolicy,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    requested_dependency_health: RuntimeDependencyHealthPolicy = Field(
+        default_factory=RuntimeDependencyHealthPolicy,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     operation: ProductHealthMonitoringOperation
     current_enabled: bool | None = None
     requested_enabled: bool

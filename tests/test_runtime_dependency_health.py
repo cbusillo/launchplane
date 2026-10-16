@@ -3,12 +3,16 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import cast
 import unittest
+from unittest.mock import patch
 
 from pydantic import ValidationError
 
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.product_environment_read_model import _health_monitoring_summary
+from control_plane.contracts.product_environment_read_model import (
+    _health_monitoring_summary,
+    _public_ingress_summary,
+)
 from control_plane.contracts.runtime_dependency_health import (
     RuntimeDependencyExpectations,
     RuntimeDependencyHealthPolicy,
@@ -256,7 +260,10 @@ class RuntimeDependencyHealthTests(unittest.TestCase):
             record_store=self.store, profile=self.profile, lane=lane
         )
         self.assertEqual(summary.checks[0].status, "missing")
-        self.assertIn("not covered", summary.checks[0].summary)
+        self.assertEqual(summary.checks[0].trust_state, "missing")
+        public = _public_ingress_summary(record_store=self.store, profile=self.profile, lane=lane)
+        self.assertEqual(public.status, "missing")
+        self.assertEqual(public.trust_state, "missing")
         self.assertEqual(
             summary.dependency_expectations.dependencies if summary.dependency_expectations else (),
             ("database",),
@@ -275,6 +282,49 @@ class RuntimeDependencyHealthTests(unittest.TestCase):
         )
         with self.assertRaises(ValidationError):
             build_product_health_monitoring_plan(profile=self.profile, request=request)
+
+    def test_metadata_error_is_unavailable_instead_of_stopping_all_monitoring(self) -> None:
+        with patch.object(
+            self.store,
+            "list_runtime_environment_records",
+            side_effect=RuntimeError("private backend error"),
+        ):
+            expected = self.derive()
+            self.assertEqual(expected.source, "unavailable")
+            evidence = runtime_dependency_health_evidence(
+                payload={}, expectations=expected, policy=RuntimeDependencyHealthPolicy()
+            )
+            self.assertEqual(evidence.status, "not_covered")
+            self.assertNotIn("private", evidence.model_dump_json())
+
+    def test_liveness_identity_behavior_is_preserved_for_same_base_and_health_url(self) -> None:
+        target = discover_public_ingress_monitor_targets(self.store, profiles=(self.profile,))[0]
+        result = check_public_ingress_target(
+            target=replace(target, health_url=target.base_url, require_runtime_identity=True),
+            checked_at=STAMP,
+            timeout_seconds=1,
+            http_get=lambda url, _: HttpObservation(200, url, 0, {}),
+            tls_get=lambda *_: self.fail("Unexpected TLS probe"),
+        )
+        self.assertEqual(result.status, "pass")
+
+    def test_identity_failure_retains_dependency_results(self) -> None:
+        self.runtime({"DATABASE_URL": "opaque"})
+        target = discover_public_ingress_monitor_targets(self.store, profiles=(self.profile,))[0]
+        result = check_public_ingress_target(
+            target=replace(target, require_runtime_identity=True),
+            checked_at=STAMP,
+            timeout_seconds=1,
+            http_get=lambda url, _: HttpObservation(
+                200, url, 0, {"dependencies": {"database": "fail"}}
+            ),
+            tls_get=lambda *_: self.fail("Unexpected TLS probe"),
+        )
+        self.assertEqual(result.failure_code, "wrong_runtime_identity")
+        evidence = result.targets[-1].dependency_health
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertEqual(evidence.results, {"database": "fail"})
 
     def test_reviewed_adoption_changes_plan_digest_and_preserves_policy_on_later_edits(
         self,

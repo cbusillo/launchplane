@@ -34,6 +34,7 @@ from control_plane.contracts.runtime_dependency_health import (
     RuntimeDependencyExpectations,
     RuntimeDependencyHealthEvidence,
     RuntimeDependencyHealthPolicy,
+    runtime_dependency_coverage_current,
 )
 from control_plane.runtime_dependency_health import derive_runtime_dependencies
 from control_plane.contracts.product_incident_read_model import (
@@ -2413,8 +2414,13 @@ def _health_monitoring_summary(
     )
     summaries_by_id = {summary.incident_id: summary for summary in open_incident_summaries}
     check_summaries: list[ProductHealthMonitoringCheckSummary] = []
-    dependency_expectations = derive_runtime_dependencies(
-        profile=profile, lane=lane, record_store=record_store
+    dependency_expectations = (
+        derive_runtime_dependencies(profile=profile, lane=lane, record_store=record_store)
+        if any(
+            check.enabled and check.kind in {"public_http", "private_http"}
+            for check in lane.health_monitoring.checks
+        )
+        else RuntimeDependencyExpectations(source="unavailable")
     )
     for check in lane.health_monitoring.checks:
         probe_effective = check.enabled and product_lane_monitoring_probe_effective(
@@ -2500,11 +2506,8 @@ def _health_monitoring_summary(
             and check.kind in {"public_http", "private_http"}
             and lane.health_monitoring.dependency_health.mode == "required"
             and status == "pass"
-            and (
-                dependency_health is None
-                or dependency_health.status not in {"pass", "none"}
-                or set(dependency_health.results) != set(dependency_expectations.dependencies)
-                or dependency_expectations.source == "unavailable"
+            and not runtime_dependency_coverage_current(
+                evidence=dependency_health, expectations=dependency_expectations
             )
         ):
             status = "missing"
@@ -2627,14 +2630,31 @@ def _public_ingress_summary(
         incident_id=open_incident.incident_id if open_incident is not None else "",
     )
     provenance = monitor_observation_provenance(latest)
+    dependency_gap = (
+        latest.status == "pass"
+        and lane.health_monitoring.dependency_health.mode == "required"
+        and not runtime_dependency_coverage_current(
+            evidence=next(
+                (target.dependency_health for target in latest.targets if target.dependency_health),
+                None,
+            ),
+            expectations=derive_runtime_dependencies(
+                profile=profile, lane=lane, record_store=record_store
+            ),
+        )
+    )
+    if dependency_gap:
+        provenance = provenance.model_copy(update={"freshness_status": "missing"})
     return ProductPublicIngressSummary(
         monitoring_intent=monitoring_intent,
         incident_eligible=incident_eligible,
-        status=latest.status,
+        status="missing" if dependency_gap else latest.status,
         failure_code=latest.failure_code or "",
         observed_at=latest.observed_at,
         record_id=latest.record_id,
-        summary=latest.summary,
+        summary="Dependency health: not covered; awaiting a current conforming probe."
+        if dependency_gap
+        else latest.summary,
         notification_sent=latest.notification_sent,
         incident_status=open_incident.status if open_incident is not None else "",
         incident_id=open_incident.incident_id if open_incident is not None else "",

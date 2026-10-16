@@ -3253,7 +3253,7 @@ export type ProductHealthMonitoringPlan = {
     check_name: string;
     context: string;
     current_check_kind: 'public_http' | 'private_http' | 'provider' | null;
-    current_dependency_health: RuntimeDependencyHealthPolicy;
+    current_dependency_health?: RuntimeDependencyHealthPolicy;
     current_enabled: boolean | null;
     current_expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     current_monitoring_intent: 'public' | 'private' | 'prelaunch';
@@ -3270,7 +3270,7 @@ export type ProductHealthMonitoringPlan = {
     profile_updated_at_before: string;
     reason: string;
     requested_check_kind: 'public_http' | 'private_http';
-    requested_dependency_health: RuntimeDependencyHealthPolicy;
+    requested_dependency_health?: RuntimeDependencyHealthPolicy;
     requested_enabled: boolean;
     requested_expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     requested_monitoring_intent: 'public' | 'private' | 'prelaunch';

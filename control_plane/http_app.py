@@ -13761,6 +13761,9 @@ def create_launchplane_fastapi_app(
             payload = response.model_dump(mode="json", exclude_none=True)
             if isinstance(payload.get("result"), dict):
                 payload["result"].pop("current_private_endpoint_key", None)
+                if "dependency_health" not in raw_payload:
+                    payload["result"].pop("current_dependency_health", None)
+                    payload["result"].pop("requested_dependency_health", None)
                 if "expected_dns_targets" not in raw_payload:
                     payload["result"].pop("current_expected_dns_targets", None)
                     payload["result"].pop("requested_expected_dns_targets", None)

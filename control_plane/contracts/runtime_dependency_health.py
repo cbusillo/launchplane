@@ -72,3 +72,15 @@ def runtime_dependency_health_evidence(
     return RuntimeDependencyHealthEvidence(
         status=status, results=results, source=expectations.source, mode=policy.mode
     )
+
+
+def runtime_dependency_coverage_current(
+    *, evidence: RuntimeDependencyHealthEvidence | None, expectations: RuntimeDependencyExpectations
+) -> bool:
+    return (
+        expectations.source != "unavailable"
+        and evidence is not None
+        and evidence.source != "unavailable"
+        and evidence.status in {"pass", "none"}
+        and set(evidence.results) == set(expectations.dependencies)
+    )

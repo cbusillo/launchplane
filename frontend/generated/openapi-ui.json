@@ -27872,7 +27872,8 @@
             "title": "Current Check Kind"
           },
           "current_dependency_health": {
-            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy"
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
           },
           "current_enabled": {
             "anyOf": [
@@ -27985,7 +27986,8 @@
             "type": "string"
           },
           "requested_dependency_health": {
-            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy"
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
           },
           "requested_enabled": {
             "title": "Requested Enabled",
@@ -28036,7 +28038,6 @@
           "check_name",
           "context",
           "current_check_kind",
-          "current_dependency_health",
           "current_enabled",
           "current_monitoring_intent",
           "current_private_endpoint_key",
@@ -28052,7 +28053,6 @@
           "profile_updated_at_before",
           "reason",
           "requested_check_kind",
-          "requested_dependency_health",
           "requested_enabled",
           "requested_monitoring_intent",
           "requested_require_runtime_identity",

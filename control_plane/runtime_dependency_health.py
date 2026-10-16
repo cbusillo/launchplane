@@ -15,7 +15,6 @@ from control_plane.contracts.runtime_dependency_health import (
     RuntimeDependencyExpectations,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.runtime_environments import (
     SiteSecretDeliveryStore,
     site_delivered_secret_bindings_from_store,
@@ -45,20 +44,34 @@ def derive_runtime_dependencies(
     override = lane.health_monitoring.dependency_health.override
     if override is not None:
         return RuntimeDependencyExpectations(dependencies=override.dependencies, source="override")
+    try:
+        return _derive_runtime_dependencies(profile=profile, lane=lane, record_store=record_store)
+    except Exception:
+        # One unavailable metadata source must not stop monitoring every product.
+        # Never carry the exception text or interpret an error as no dependencies.
+        return RuntimeDependencyExpectations(
+            dependencies=("database",) if profile.driver_id == "odoo" else (),
+            source="unavailable",
+        )
+
+
+def _derive_runtime_dependencies(
+    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, record_store: object
+) -> RuntimeDependencyExpectations:
     dependencies: set[RuntimeDependency] = set()
     # The Odoo driver always deploys PostgreSQL, including lanes not yet materialized.
     if profile.driver_id == "odoo":
         dependencies.add("database")
     read_runtime = getattr(record_store, "list_runtime_environment_records", None)
-    read_targets = getattr(record_store, "list_dokploy_target_records", None)
+    read_target = getattr(record_store, "read_dokploy_target_record", None)
     if (
         not callable(read_runtime)
-        or not callable(read_targets)
+        or not callable(read_target)
         or not all(
             callable(getattr(record_store, name, None))
             for name in (
                 "list_runtime_environment_records",
-                "list_dokploy_target_records",
+                "read_dokploy_target_record",
                 "list_secret_records",
                 "list_secret_bindings",
             )
@@ -79,10 +92,12 @@ def derive_runtime_dependencies(
         elif record.scope == "instance" and record.instance == lane.instance:
             values.update(record.env)
             retired_keys.update(record.retired_provider_keys)
-    targets: tuple[DokployTargetRecord, ...] = read_targets()
-    for target in targets:
-        if target.context == lane.context and target.instance == lane.instance:
-            values.update(target.env)
+    try:
+        target = read_target(context_name=lane.context, instance_name=lane.instance)
+    except FileNotFoundError:
+        target = None
+    if target is not None:
+        values.update(target.env)
     bindings = site_delivered_secret_bindings_from_store(
         record_store=cast(SiteSecretDeliveryStore, record_store),
         context_name=lane.context,

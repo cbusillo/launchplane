@@ -2647,7 +2647,7 @@ def _check_url(
     runtime_detail = ""
     observed_runtime_identity: RuntimeIdentity | None = None
     if (
-        is_health_response
+        target_kind in {"health_url", "private_health_url"}
         and target.require_runtime_identity
         and target.expected_runtime_identity is None
     ):
@@ -2664,8 +2664,12 @@ def _check_url(
                 "No expected runtime identity is recorded for this strict public health check."
             ),
             summary="Expected runtime identity is unavailable.",
+            dependency_health=dependency_health,
         )
-    if is_health_response and target.expected_runtime_identity is not None:
+    if (
+        target_kind in {"health_url", "private_health_url"}
+        and target.expected_runtime_identity is not None
+    ):
         runtime_status, runtime_detail, observed_runtime_identity = (
             health_payload_runtime_identity_status(
                 expected=target.expected_runtime_identity,
@@ -2689,6 +2693,7 @@ def _check_url(
                 runtime_identity_detail=runtime_detail,
                 observed_runtime_identity=observed_runtime_identity,
                 summary=runtime_detail or "Runtime identity did not match expected deployment.",
+                dependency_health=dependency_health,
             )
     dependency_failure: PublicIngressFailureCode | None = None
     summary = _successful_target_summary(target)
