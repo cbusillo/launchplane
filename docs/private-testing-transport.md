@@ -70,6 +70,11 @@ metadata labels, a matching provider project name and its unused root-only
 `dokploy-network` declaration. This follows the existing testing activation
 contract and shared metadata-label catalog. An actual network attachment,
 foreign project/target label or public routing label is still refused.
+The provider must explicitly report `composeType=docker-compose`, both
+`isolatedDeployment` and `randomize` false, and empty `serviceNetworks` and
+`mounts`; those exact options are bound into the reviewed digest. Swarm/stack,
+unknown mode/options, host mounts and provider-managed network overrides are
+unqualified. A Swarm routing mesh cannot supply this private host-IP binding.
 An empty target must first receive a supported immutable runtime Compose source;
 do not invent source or mark an empty target qualified to satisfy this planner.
 

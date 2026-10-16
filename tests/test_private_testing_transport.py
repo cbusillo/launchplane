@@ -99,6 +99,11 @@ class PrivateTestingTransportTests(unittest.TestCase):
             "serverId": "fixture-private-server",
             "appName": "fixture-testing-app",
             "domains": [],
+            "composeType": "docker-compose",
+            "isolatedDeployment": False,
+            "randomize": False,
+            "serviceNetworks": [],
+            "mounts": [],
         }
         self.enterContext(
             patch(
@@ -355,6 +360,41 @@ class PrivateTestingTransportTests(unittest.TestCase):
         with patch("control_plane.dokploy.api.dokploy_request", side_effect=provider):
             self.assertFalse(self.plan()["applied"])
         self.assertTrue(reads)
+
+    def test_swarm_unknown_mode_and_provider_isolation_overrides_are_refused(self) -> None:
+        placement = deepcopy(self.placement)
+        for change in (
+            {"composeType": "stack"},
+            {"composeType": None},
+            {"isolatedDeployment": True},
+            {"randomize": True},
+            {"serviceNetworks": [{"networkId": "production"}]},
+            {"mounts": [{"source": "/production"}]},
+            {"mounts": None},
+        ):
+            self.placement = {**placement, **change}
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.plan()
+
+    def test_foreign_provider_metadata_and_attached_shared_network_are_refused(self) -> None:
+        original = deepcopy(self.compose)
+        for change in (
+            {"labels": {"dokploy.application.id": "foreign", "dokploy.service": "bridge"}},
+            {"labels": {"dokploy.application.id": "fixture-testing", "dokploy.service": "foreign"}},
+            {"labels": ["malformed"]},
+            {"networks": ["dokploy-network"]},
+        ):
+            self.compose = deepcopy(original)
+            self.compose["services"]["bridge"].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.plan()
+        self.compose = deepcopy(original)
+        self.compose["networks"] = {
+            "dokploy-network": {"external": True},
+            "foreign": {"external": True},
+        }
+        with self.assertRaises(ValueError):
+            self.plan()
 
     def test_cli_validates_before_http_and_forwards_only_inert_mode(self) -> None:
         path = self.root / "plan.json"

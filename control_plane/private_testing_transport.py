@@ -288,6 +288,11 @@ def plan_private_testing_transport(
         or not placement.get("serverId")
         or not placement.get("appName")
         or placement.get("domains") != []
+        or placement.get("composeType") != "docker-compose"
+        or placement.get("isolatedDeployment") is not False
+        or placement.get("randomize") is not False
+        or placement.get("serviceNetworks") != []
+        or placement.get("mounts") != []
     ):
         raise PrivateTestingTransportRefused(
             "Fresh provider identity/private scope is unqualified."
@@ -317,7 +322,19 @@ def plan_private_testing_transport(
     binding = canonical_json_sha256(
         {
             "records": [record.model_dump(mode="json") for record in records],
-            "placement": {key: placement[key] for key in ("composeId", "serverId", "appName")},
+            "placement": {
+                key: placement[key]
+                for key in (
+                    "composeId",
+                    "serverId",
+                    "appName",
+                    "composeType",
+                    "isolatedDeployment",
+                    "randomize",
+                    "serviceNetworks",
+                    "mounts",
+                )
+            },
             "provider_host": host,
             "compose": baseline,
         }
