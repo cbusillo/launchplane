@@ -39398,6 +39398,14 @@
             "title": "Source Commit",
             "type": "string"
           },
+          "upstreams": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RecipientUpstream"
+            },
+            "title": "Upstreams",
+            "type": "array"
+          },
           "volume_keys": {
             "additionalProperties": {
               "type": "string"
@@ -40981,6 +40989,50 @@
         "title": "RecentOperationsResponse",
         "type": "object"
       },
+      "RecipientRecoveryRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback",
+              "receipt"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "preparation_plan_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Preparation Plan Sha256",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "preparation_plan_sha256",
+          "reason"
+        ],
+        "title": "RecipientRecoveryRequest",
+        "type": "object"
+      },
       "RecipientServiceLimits": {
         "additionalProperties": false,
         "properties": {
@@ -41010,6 +41062,57 @@
           "memory_bytes"
         ],
         "title": "RecipientServiceLimits",
+        "type": "object"
+      },
+      "RecipientUpstream": {
+        "additionalProperties": false,
+        "description": "Connection roles are application environment keys, never supplied values.",
+        "properties": {
+          "binding_id": {
+            "minLength": 1,
+            "title": "Binding Id",
+            "type": "string"
+          },
+          "keys": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "enum": [
+                "host",
+                "port",
+                "user",
+                "database",
+                "password"
+              ]
+            },
+            "title": "Keys",
+            "type": "object"
+          },
+          "purpose": {
+            "const": "read_only_source",
+            "default": "read_only_source",
+            "title": "Purpose",
+            "type": "string"
+          },
+          "service": {
+            "minLength": 1,
+            "title": "Service",
+            "type": "string"
+          },
+          "version_id": {
+            "minLength": 1,
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "service",
+          "keys",
+          "binding_id",
+          "version_id"
+        ],
+        "title": "RecipientUpstream",
         "type": "object"
       },
       "RecordFailure": {
@@ -88594,6 +88697,127 @@
           }
         },
         "summary": "Prepare a fresh private production recipient without changing the serving binding"
+      }
+    },
+    "/v1/products/{product}/production-recipient/recovery": {
+      "post": {
+        "operationId": "qualify_production_recipient_recovery",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9._-]+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecipientRecoveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Capture and prove isolated cold recipient recovery without live outbound connections"
       }
     },
     "/v1/products/{product}/secret-bindings": {

@@ -11258,6 +11258,30 @@ class RealPostgresTestingActivationTests(testing_activation.ActivationTests):
         )
 
 
+class RealPostgresRecipientRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        from tests import test_production_recipient_qualification as qualification
+
+        self.fixture = qualification.RecipientRecoveryTests()
+        database = _head_postgres_database()
+        self.fixture.database_url = database.__enter__()
+        self.addCleanup(database.__exit__, None, None, None)
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+
+    def test_recovery_receipt_replay_and_custody_on_postgres(self) -> None:
+        self.fixture.test_completed_recovery_replays_without_repeating_effect_and_keeps_production()
+
+    def test_two_connections_exclude_competing_recovery(self) -> None:
+        self.fixture.test_parallel_recovery_is_fenced_before_dispatch()
+
+    def test_changed_authority_or_destination_refuses_recovery(self) -> None:
+        self.fixture.test_wrong_artifact_recipient_destination_and_stale_authority_refuse()
+
+    def test_capture_only_or_uncertain_recovery_never_qualifies_on_postgres(self) -> None:
+        self.fixture.test_capture_only_wrong_binding_or_uncertain_recovery_never_qualifies()
+
+
 class RealPostgresProductionRecipientTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests import test_production_recipient as recipients

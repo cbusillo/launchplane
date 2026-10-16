@@ -190,6 +190,8 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "testing_resources_ok",
         "testing_activation_ports_ok",
         "production_recipient_resources_ok",
+        "recipient_upstreams_ok",
+        "recipient_recovery_ok",
         ODOO_PREVIEW_RESOURCES_OK_MARKER,
         TESTING_RESOURCES_INCOMPLETE_MARKER,
         "connection_isolation_resources_ok",
@@ -366,6 +368,9 @@ def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
     if key in {
         "testing_resources_binding_sha256",
         "production_recipient_resources_sha256",
+        "recipient_upstreams_binding",
+        "recipient_recovery_binding",
+        "recipient_recovery_capture",
         ODOO_PREVIEW_RESOURCES_BINDING_MARKER,
     }:
         return re.fullmatch(r"[a-f0-9]{64}", value) is not None
