@@ -12,6 +12,7 @@ class GenericWebMaintenanceCommand(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     command: str = Field(min_length=1, max_length=8000)
     timeout_seconds: int = Field(default=300, ge=1, le=3600)
+    on_reset: bool = False
 
     @model_validator(mode="after")
     def _validate_command(self) -> "GenericWebMaintenanceCommand":
@@ -28,6 +29,8 @@ class GenericWebApplicationSchedule(GenericWebMaintenanceCommand):
 
     @model_validator(mode="after")
     def _validate_cron(self) -> "GenericWebApplicationSchedule":
+        if self.on_reset:
+            raise ValueError("Recurring schedules cannot be reset-only commands.")
         self.cron_expression = self.cron_expression.strip()
         validate_cron_expression(self.cron_expression)
         return self

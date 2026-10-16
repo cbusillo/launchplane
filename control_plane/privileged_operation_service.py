@@ -146,7 +146,9 @@ _SEMANTIC_REVIEW_BLOCKER_CODES = frozenset(
 
 def validate_privileged_operation_semantic_review_coverage() -> None:
     registered_ids = frozenset(
-        descriptor.descriptor_id for descriptor in list_privileged_operation_descriptors()
+        descriptor.descriptor_id
+        for descriptor in list_privileged_operation_descriptors()
+        if not descriptor.dedicated_product_review
     )
     if registered_ids != _SEMANTIC_REVIEW_DESCRIPTOR_IDS:
         raise RuntimeError(

@@ -89,7 +89,12 @@ class GenericWebTransitionTests(unittest.TestCase):
             request.preview.transport_extension if request.preview else "",
         )
         preserved = after.model_copy(
-            update={"driver_id": before.driver_id, "lanes": before.lanes, "preview": before.preview}
+            update={
+                "schema_version": before.schema_version,
+                "driver_id": before.driver_id,
+                "lanes": before.lanes,
+                "preview": before.preview,
+            }
         )
         self.assertEqual(preserved, before)
         moved_plan, _ = build_generic_web_transition_plan(
@@ -159,6 +164,39 @@ class GenericWebTransitionTests(unittest.TestCase):
             build_generic_web_transition_plan(
                 before.model_copy(update={"driver_id": "odoo"}), valid
             )
+
+    def test_preview_commands_and_schedules_can_be_reviewed_without_touching_production(
+        self,
+    ) -> None:
+        before = profile()
+        request = ProductGenericWebTransitionRequest.model_validate(
+            {
+                **draft(before),
+                "preview": {
+                    "data_transport_mode": "none",
+                    "generic_web_extensions": {
+                        "maintenance": [{"name": "migrate", "command": "./migrate"}],
+                        "schedules": [
+                            {
+                                "name": "housekeeping",
+                                "command": "./housekeeping",
+                                "cron_expression": "*/15 * * * *",
+                            }
+                        ],
+                    },
+                },
+            }
+        )
+        plan, after = build_generic_web_transition_plan(before, request)
+        assert request.preview is not None
+        self.assertEqual(
+            [lane.generic_web_extensions for lane in after.lanes],
+            [item.extensions for item in request.lanes],
+        )
+        self.assertEqual(
+            after.preview.generic_web_extensions, request.preview.generic_web_extensions
+        )
+        self.assertEqual(plan.preview.generic_web_extensions, after.preview.generic_web_extensions)
 
     def test_partial_preview_preserves_unmentioned_resource_suffix(self) -> None:
         before = profile()

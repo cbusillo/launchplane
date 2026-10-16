@@ -2571,7 +2571,7 @@ def _run_compose_post_deploy_update(
         override_runtime_store = (
             PostgresRecordStore(database_url=database_url)
             if any(
-                item.value.source == "runtime_environment"
+                item.value.source in {"runtime_environment", "secret_binding"}
                 for item in odoo_override_record.config_parameters
             )
             else None

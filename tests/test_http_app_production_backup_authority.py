@@ -523,7 +523,9 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(store.list_production_backup_policy_records(), ())
             self.assertEqual(store.list_production_backup_target_records(), ())
 
-    async def test_director_plans_target_changes_but_applies_only_its_granted_lane(self) -> None:
+    async def test_director_agent_plans_target_changes_but_cannot_apply_backup_authority(
+        self,
+    ) -> None:
         policy = _authz_policy().model_dump(mode="json")
         policy["github_actions"][0]["products"] = ["example-product", "other-product"]
         policy["github_actions"][0]["contexts"] = ["example-product", "other-product"]
@@ -599,9 +601,7 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual(denied_apply.status_code, 403, denied_apply.text)
-            self.assertEqual(
-                denied_apply.json()["error"]["code"], "local_operator_lane_scope_required"
-            )
+            self.assertEqual(denied_apply.json()["error"]["code"], "authorization_denied")
 
             other = _dry_run_envelope().model_dump(mode="json")
             other["policy"].update(
@@ -654,9 +654,7 @@ class ProductionBackupAuthorityHttpTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
             self.assertEqual(denied_shared_apply.status_code, 403, denied_shared_apply.text)
-            self.assertEqual(
-                denied_shared_apply.json()["error"]["code"], "local_operator_lane_scope_required"
-            )
+            self.assertEqual(denied_shared_apply.json()["error"]["code"], "authorization_denied")
             store.close()
 
     async def test_openapi_exposes_bounded_authority_routes(self) -> None:
