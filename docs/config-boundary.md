@@ -362,6 +362,10 @@ URLs, private credential paths, product/provider/runtime coordinates, malformed
 routing values and unknown Launchplane fields remain findings. The workflow
 repository allowance applies only to its exact catalog field in this file.
 Omit unused optional fields rather than supplying null or empty routing values.
+Merge-train enrollment is an active service-policy fact. In particular,
+`launchplane.mergeTrain.enabled` is not public-safe routing: either boolean
+remains a finding. Remove the copied enrollment field and read Launchplane's
+merge policy; an unavailable policy read means enrollment is unknown.
 
 In `pyproject.toml`, Black's `tool.black.target-version` list accepts its
 supported lowercase Python target identifiers with

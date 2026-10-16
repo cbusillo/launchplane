@@ -66,7 +66,6 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
                         "requiresPrivateConfig": True,
                     },
                     "mergeTrain": {
-                        "enabled": True,
                         "controller": True,
                         "readyLabel": "ready-to-merge",
                         "baseBranch": "main",
@@ -96,6 +95,8 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
 
     def test_runtime_values_unknown_fields_and_invalid_routing_still_fail(self) -> None:
         cases = [
+            {"mergeTrain": {"enabled": True}},
+            {"mergeTrain": {"enabled": False}},
             {"service": {"url": "https://control.example.test"}},
             {"service": {"contextUrlEnv": "https://control.example.test"}},
             {"service": {"localConfigExample": "/private/credentials.json"}},

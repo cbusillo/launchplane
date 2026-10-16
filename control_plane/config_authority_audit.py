@@ -4170,7 +4170,6 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
         "launchplane.context.enabled",
         "launchplane.operator.enabled",
         "launchplane.operator.requiresPrivateConfig",
-        "launchplane.mergeTrain.enabled",
         "launchplane.mergeTrain.controller",
         "launchplane.mergeTrain.githubActionsRunner.mutateDefault",
     }:
