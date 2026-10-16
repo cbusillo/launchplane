@@ -113,7 +113,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [health-alert-drills.md](health-alert-drills.md) — isolated routing reads and
   explicitly marked, rate-limited Discord test alerts for existing lane checks.
 - [production-recipient.md](production-recipient.md) — inert generic-web production
-  recipient preparation, retained serving custody and remaining activation gates.
+  recipient preparation, purpose-bound read-only sources, isolated MariaDB recovery,
+  retained serving custody and remaining activation gates.
 - [testing-activation.md](testing-activation.md) — qualified generic-web testing
   allocation consumption, retained custody and supported hold/rebuild continuation.
 - [stored-record-preflight.md](stored-record-preflight.md) — scrubbed service export,

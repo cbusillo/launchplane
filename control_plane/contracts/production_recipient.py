@@ -25,6 +25,30 @@ class RecipientServiceLimits(BaseModel):
         return self
 
 
+class RecipientUpstream(BaseModel):
+    """Connection roles are application environment keys, never supplied values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    purpose: Literal["read_only_source"] = "read_only_source"
+    service: str = Field(min_length=1)
+    keys: dict[Literal["host", "port", "user", "database", "password"], str]
+    binding_id: str = Field(min_length=1)
+    version_id: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def validate_keys(self) -> Self:
+        import re
+
+        if (
+            set(self.keys) != {"host", "port", "user", "database", "password"}
+            or any(not re.fullmatch(r"[A-Z][A-Z0-9_]*", key) for key in self.keys.values())
+            or len(set(self.keys.values())) != len(self.keys)
+        ):
+            raise ValueError("An upstream requires distinct explicit connection roles.")
+        return self
+
+
 class ProductionRecipientRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -37,6 +61,7 @@ class ProductionRecipientRequest(BaseModel):
     application_service: str = Field(min_length=1)
     database_service: str = Field(min_length=1)
     service_limits: dict[str, RecipientServiceLimits]
+    upstreams: tuple[RecipientUpstream, ...] = ()
     mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
@@ -62,6 +87,11 @@ class ProductionRecipientRequest(BaseModel):
             raise ValueError("Application and database must be separate services.")
         if set(self.service_limits) != {self.application_service, self.database_service}:
             raise ValueError("Explicit resource limits are required for every recipient service.")
+        upstream_keys = [key for upstream in self.upstreams for key in upstream.keys.values()]
+        if len(set(upstream_keys)) != len(upstream_keys) or any(
+            upstream.service != self.application_service for upstream in self.upstreams
+        ):
+            raise ValueError("Upstream connection roles belong only to the application.")
         return self
 
 
@@ -92,6 +122,8 @@ class ProductionRecipientRecord(BaseModel):
     qualified_at: str = ""
     supersedes_plan_sha256: str = ""
     prior_attempts: list[dict[str, Any]] = Field(default_factory=list)
+    upstream_proof: dict[str, Any] = Field(default_factory=dict)
+    recovery_proof: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def volumes(self) -> dict[str, str]:
@@ -115,3 +147,29 @@ class ProductionRecipientPlan(BaseModel):
     deletion_requested: Literal[False] = False
     qualified: bool = False
     qualified_at: str = ""
+    upstream_qualified: bool = False
+    recovery_qualified: bool = False
+
+
+class RecipientRecoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    context: str = Field(min_length=1)
+    preparation_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
+    reason: str = Field(min_length=1)
+    reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
+
+
+class RecipientRecoveryPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    preparation_plan_sha256: str
+    plan_sha256: str
+    recovered: bool = False
+    capture_sha256: str = ""
+    recovered_at: str = ""
+    captured_database_empty: bool | None = None
+    bootstrap_eligible: Literal[False] = False
