@@ -12412,3 +12412,89 @@ class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
                 RuntimeRemovalPostgresScenarios.simultaneous_keys(fixture.store)
             finally:
                 fixture.doCleanups()
+
+
+class RealPostgresNeverServedTests(unittest.TestCase):
+    def test_lifetime_non_use_and_revocation_on_postgres(self) -> None:
+        from tests.test_testing_never_served import NeverServedTestingTests
+
+        for name in unittest.defaultTestLoader.getTestCaseNames(NeverServedTestingTests):
+            with self.subTest(scenario=name), _head_postgres_database() as url:
+                fixture = NeverServedTestingTests(name)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, name)()
+                finally:
+                    fixture.doCleanups()
+
+    def test_concurrent_dispatch_revocation_cannot_leave_a_published_negative(self) -> None:
+        from tests.test_testing_never_served import NeverServedTestingTests
+        from tests.support.disposable_lanes import record_safety
+        from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
+
+        with _head_postgres_database() as url:
+            fixture = NeverServedTestingTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            second = PostgresRecordStore(database_url=url)
+            self.addCleanup(second.close)
+            proof = fixture.read()
+            record_safety(
+                fixture.store,
+                fixture.product,
+                fixture.context,
+                "testing",
+                usage_evidence=NON_USE_EVIDENCE_PREFIX + proof.proof_sha256,
+            )
+            evidence = fixture.store.read_disposable_lane_safety(
+                fixture.product, fixture.context, "testing"
+            )
+            assert evidence is not None
+            reading = threading.Event()
+            writing = threading.Event()
+            release = threading.Event()
+            read_original = fixture.store.read_testing_non_use_records
+            lock_original = second._lock_product_authority_bundle_write
+
+            def pause_snapshot(*args: Any, **kwargs: Any) -> Any:
+                result = read_original(*args, **kwargs)
+                reading.set()
+                if not release.wait(10):
+                    raise RuntimeError("Fixture did not release snapshot")
+                return result
+
+            def observe_writer(session: Any) -> None:
+                writing.set()
+                lock_original(session)
+
+            with (
+                ThreadPoolExecutor(max_workers=2) as pool,
+                patch.object(
+                    fixture.store, "read_testing_non_use_records", side_effect=pause_snapshot
+                ),
+                patch.object(
+                    second, "_lock_product_authority_bundle_write", side_effect=observe_writer
+                ),
+            ):
+                publish = pool.submit(
+                    fixture.store.publish_collected_disposable_lane_safety, evidence
+                )
+                try:
+                    self.assertTrue(reading.wait(10))
+                    revoke = pool.submit(
+                        second.invalidate_testing_non_use, fixture.product, fixture.context
+                    )
+                    self.assertTrue(writing.wait(10))
+                    self.assertFalse(revoke.done())
+                finally:
+                    release.set()
+                self.assertTrue(publish.result(timeout=10))
+                revoke.result(timeout=10)
+            self.assertIsNone(
+                fixture.store.read_disposable_lane_safety(
+                    fixture.product, fixture.context, "testing"
+                )
+            )
+            self.assertEqual(fixture.read().usage, "unknown")

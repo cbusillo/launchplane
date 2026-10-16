@@ -43,8 +43,10 @@ complete single-web/database inventory and unchanged container/placement snapsho
 must agree. Missing databases or session directories, unreadable or malformed
 files, replicas, custom startup, oversized inventories and incomplete/provider
 failures leave usage unknown. A provider authorization denial returns its service
-trace and is never retried with another identity. Only complete negative login
-and session reads can produce `unused`; staff holds still protect the lane.
+trace and is never retried with another identity. Complete negative login
+and session reads can produce `unused`. The separate
+[never-served rule](#never-served-testing-generations) can also qualify non-use
+from complete durable generation records; staff holds protect both paths.
 Other drivers and previews retain their existing collection behavior.
 
 Collection returns the first failed checkpoint as an allowlisted code, never
@@ -52,7 +54,8 @@ exception text, command lines, session identifiers, account names or topology.
 The bounded client preserves that code and rejects malformed diagnostics.
 A code introduced by a newer service is mapped to `diagnostics_unrecognized`
 without echoing it, preserving validated facts and the trace. Such a code cannot
-qualify non-use: when diagnostics are present, `unused` requires `complete`. A
+qualify non-use: when diagnostics are present, `unused` requires `complete`
+for runtime reads or `never_served` for the durable generation proof. A
 service image predating diagnostics is reported as `diagnostics_unavailable`;
 that means deploy the compatible collector before diagnosing the lane, not that
 any particular runtime checkpoint failed. Inspecting only the binding does not
@@ -910,6 +913,49 @@ continue this route or enforce its guarantees; keep a compatible image or
 forward-fix. There is no production rollback or cleanup step in this testing-only
 procedure. Retained old targets, storage, partial-copy evidence and hostnames stay
 in custody until separately authorized disposition.
+
+## Never-served testing generations
+
+The service collector can qualify non-use without reading a serving configuration
+only for a generation with a complete lifetime witness, created by the supported
+fresh-resource bootstrap. It requires all of the following:
+
+- The exact current target has one current generation,
+  its original bootstrap operation and its matching fresh-resource allocation.
+- Lifetime tracking began when that generation was prepared. The bootstrap has
+  not completed, no drill database was selected, and the witness has never been
+  revoked. Legacy records have no witness and stay UNKNOWN; there is no backfill.
+- Complete public and private HTTP histories since preparation both contain
+  failed checks bound to that generation's hostname, with no successful or skipped check and no successful target
+  inside a failed aggregate check. Missing either history stays UNKNOWN.
+- No deployment record since preparation exists, even a failed deployment, and
+  no current inventory publication since preparation exists. This includes
+  uncertain serving attempts, not just successful final health checks.
+- No current hold or recorded use exists. Setting a hold permanently revokes
+  the generation's witness, even if the hold is later lifted. Known use also
+  revokes it. Retired custody is immutable and supplies no current-generation
+  proof. The replacement worker revokes it **before every provider dispatch**,
+  including a dispatch that times out. This deliberately excludes more states
+  than only an acknowledged web start; an incomplete restore is not assumed safe.
+
+Only their conjunction produces `usage=unused`, reason `never_served`. Session
+and login booleans remain null: this is a separate proof, not an empty-session
+claim. Source reads are complete DB queries, without a history limit. The proof
+is rechecked under the shared authority lock before publication and again when
+consumed. Dispatch/hold revocation removes an already-published never-served
+observation; a delayed collector cannot republish it. Data custody, physical
+isolation, backup gates and retained-operation fences remain independent.
+
+Use the existing evidence-only `scripts/collect-disposable-lane.py collect`
+procedure. When runtime occupancy is unavailable, the service tries this rule
+and returns a bounded `never_served_qualification` result. A missing source,
+legacy witness, uncertain dispatch, served-once record or incomplete history
+stays UNKNOWN. Never start or repair a lane to manufacture negative evidence.
+A newer client rejects an older service's different coverage; deliver compatible
+API and Odoo workers together before using this path. After tracked generations
+exist, retain a compatible image and forward-fix: older images cannot read the
+new generation fields or enforce lifetime revocation. No migration, grant or
+production change enables the rule.
 
 ## Scheduled Odoo testing rebuild drill
 

@@ -114,6 +114,7 @@ from control_plane.contracts.authz_policy_write_transition import (
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 
 if TYPE_CHECKING:
+    from control_plane.testing_never_served import NeverServedRecords
     from control_plane.stored_record_snapshot import SnapshotAuthorization
     from control_plane.testing_generation_retirement import (
         RetainedTestingGeneration,
@@ -6085,6 +6086,16 @@ class PostgresRecordStore(HumanSessionStore):
                     self._assert_unreserved_disposable_hosts(
                         session, DokployTargetRecord.model_validate(row.payload)
                     )
+                    self._protect_testing_hold_non_use(
+                        session, DokployTargetRecord.model_validate(row.payload)
+                    )
+                elif (
+                    isinstance(row, LaunchplaneDisposableLaneSafetyRow)
+                    and row.payload.get("usage") == "in_use"
+                ):
+                    self._invalidate_testing_non_use_in_session(
+                        session, context=row.context, product=row.product
+                    )
                 elif isinstance(row, LaunchplaneDokployTargetIdRow):
                     previous_target = session.get(
                         LaunchplaneDokployTargetRow, (row.context, row.instance)
@@ -6185,6 +6196,10 @@ class PostgresRecordStore(HumanSessionStore):
         return None
 
     def _merge_authority_row(self, session: Any, row: Base, *, step_name: str) -> None:
+        if isinstance(row, LaunchplaneDokployTargetRow):
+            self._protect_testing_hold_non_use(
+                session, DokployTargetRecord.model_validate(row.payload)
+            )
         session.merge(row)
         self._after_product_authority_bundle_step(step_name)
 
@@ -10488,6 +10503,32 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            if record.usage == "in_use":
+                self._invalidate_testing_non_use_in_session(
+                    session, product=record.product, context=record.context
+                )
+            from control_plane.testing_never_served import (
+                NON_USE_EVIDENCE_PREFIX,
+                qualify_never_served,
+            )
+
+            if record.usage_evidence.startswith(NON_USE_EVIDENCE_PREFIX):
+                identity = session.get(
+                    LaunchplaneDokployTargetIdRow, (record.context, record.instance)
+                )
+                snapshot = self.read_testing_non_use_records(
+                    record.product,
+                    record.context,
+                    identity.target_id if identity else "",
+                    shared_session=session,
+                )
+                qualified = qualify_never_served(snapshot) if snapshot else None
+                if (
+                    qualified is None
+                    or qualified.usage != "unused"
+                    or record.usage_evidence != NON_USE_EVIDENCE_PREFIX + qualified.proof_sha256
+                ):
+                    return False
             row = session.get(
                 LaunchplaneDisposableLaneSafetyRow,
                 (record.product, record.context, record.instance),
@@ -10562,6 +10603,118 @@ class PostgresRecordStore(HumanSessionStore):
             )
             return DisposableTestingResourcePreparation.model_validate(
                 {**custody.payload, **(allocation.payload if allocation is not None else {})}
+            )
+
+    def _invalidate_testing_non_use_in_session(
+        self, session: Any, *, context: str, product: str = ""
+    ) -> None:
+        """Lifetime revocation survives hold removal, retries and generation retirement."""
+        from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
+
+        generations = session.scalars(
+            select(LaunchplaneFreshOdooTestingGenerationRow)
+            .where(LaunchplaneFreshOdooTestingGenerationRow.context == context)
+            .with_for_update()
+        ).all()
+        for row in generations:
+            if (
+                (not product or row.product == product)
+                and row.payload.get("non_use_tracking_started_at")
+                and not row.payload.get("non_use_invalidated")
+            ):
+                row.payload = {**row.payload, "non_use_invalidated": True}
+        for evidence in session.scalars(
+            select(LaunchplaneDisposableLaneSafetyRow)
+            .where(LaunchplaneDisposableLaneSafetyRow.context == context)
+            .with_for_update()
+        ).all():
+            if (not product or evidence.product == product) and str(
+                evidence.payload.get("usage_evidence", "")
+            ).startswith(NON_USE_EVIDENCE_PREFIX):
+                session.delete(evidence)
+
+    def invalidate_testing_non_use(self, product: str, context: str) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._invalidate_testing_non_use_in_session(session, product=product, context=context)
+            session.commit()
+
+    def _protect_testing_hold_non_use(self, session: Any, record: DokployTargetRecord) -> None:
+        if record.instance == "testing" and record.policies.staff_testing_hold is not None:
+            self._invalidate_testing_non_use_in_session(session, context=record.context)
+
+    def read_testing_non_use_records(
+        self, product: str, context: str, target_id: str, *, shared_session: Any = None
+    ) -> NeverServedRecords | None:
+        from control_plane.testing_never_served import NeverServedRecords
+
+        existing = shared_session or getattr(self._disposable_authority_context, "session", None)
+        with nullcontext(existing) if existing is not None else self._session_factory() as session:
+            self._lock_product_authority_bundle_write(session)
+            current = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
+            if current is None:
+                return None
+            generation = FreshOdooTestingGeneration.model_validate(current.payload)
+            if generation.target_id != target_id:
+                return None
+            target = session.get(LaunchplaneDokployTargetRow, (context, "testing"))
+            identity = session.get(LaunchplaneDokployTargetIdRow, (context, "testing"))
+            custody = session.get(
+                LaunchplaneDisposableReplacementPreparationRow, generation.operation_id
+            )
+            allocation = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow, generation.operation_id
+            )
+            operation = session.get(
+                LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id
+            )
+            evidence = session.get(
+                LaunchplaneDisposableLaneSafetyRow, (product, context, "testing")
+            )
+            if (
+                target is None
+                or identity is None
+                or identity.target_id != target_id
+                or custody is None
+                or allocation is None
+                or operation is None
+            ):
+                return None
+            return NeverServedRecords(
+                generation=generation,
+                allocation=DisposableTestingResourcePreparation.model_validate(
+                    {**custody.payload, **allocation.payload}
+                ),
+                bootstrap_operation=OdooStableTargetReplacementOperationRecord.model_validate(
+                    operation.payload
+                ),
+                target=DokployTargetRecord.model_validate(target.payload),
+                protected_use=bool(evidence and evidence.payload.get("usage") == "in_use"),
+                inventory=(
+                    EnvironmentInventory.model_validate(inventory.payload)
+                    if (inventory := session.get(LaunchplaneInventoryRow, (context, "testing")))
+                    else None
+                ),
+                deployments=tuple(
+                    DeploymentRecord.model_validate(row.payload)
+                    for row in session.scalars(
+                        select(LaunchplaneDeploymentRow).where(
+                            LaunchplaneDeploymentRow.context == context,
+                            LaunchplaneDeploymentRow.instance == "testing",
+                        )
+                    ).all()
+                ),
+                checks=tuple(
+                    PublicIngressObservationRecord.model_validate(row.payload)
+                    for row in session.scalars(
+                        select(LaunchplanePublicIngressObservationRow).where(
+                            LaunchplanePublicIngressObservationRow.product == product,
+                            LaunchplanePublicIngressObservationRow.context == context,
+                            LaunchplanePublicIngressObservationRow.instance == "testing",
+                        )
+                    ).all()
+                ),
             )
 
     def read_fresh_odoo_testing_generation(
@@ -11310,9 +11463,17 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if row is not None:
                 previous = FreshOdooTestingGeneration.model_validate(row.payload)
+                record = record.model_copy(
+                    update={
+                        "non_use_invalidated": previous.non_use_invalidated
+                        or record.non_use_invalidated
+                    }
+                )
                 if previous.model_dump(
-                    exclude={"completed_at", "reconcile_requested_at"}
-                ) != record.model_dump(exclude={"completed_at", "reconcile_requested_at"}):
+                    exclude={"completed_at", "reconcile_requested_at", "non_use_invalidated"}
+                ) != record.model_dump(
+                    exclude={"completed_at", "reconcile_requested_at", "non_use_invalidated"}
+                ):
                     raise ValueError("Fresh testing generation identities are immutable.")
                 if previous.completed_at and previous.completed_at != record.completed_at:
                     raise ValueError("Fresh testing generation completion is immutable.")
@@ -26996,6 +27157,7 @@ class PostgresRecordStore(HumanSessionStore):
                 != expected_record
             ):
                 raise DokployTargetRecordChanged("Testing hold changed before its atomic commit.")
+            self._protect_testing_hold_non_use(session, replacement_record)
             row.updated_at = replacement_record.updated_at
             row.payload = self._payload_dict(replacement_record)
             if replacement_record.policies.staff_testing_hold is None:
@@ -27053,9 +27215,9 @@ class PostgresRecordStore(HumanSessionStore):
         if not self.database_url.startswith("sqlite"):
             statement = statement.with_for_update()
         with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
             if required_context_owner is not None or required_product_config_target is not None:
-                self._begin_serialized_write(session)
-                self._lock_product_authority_bundle_write(session)
                 require_bundle_context_owner(
                     ProductAuthorityBundle(
                         required_context_owner=required_context_owner,
@@ -27079,6 +27241,7 @@ class PostgresRecordStore(HumanSessionStore):
                 raise DokployTargetRecordChanged(
                     "Dokploy target record changed since it was reviewed."
                 )
+            self._protect_testing_hold_non_use(session, replacement_record)
             row.updated_at = replacement_record.updated_at
             row.payload = self._payload_dict(replacement_record)
             session.commit()
@@ -27172,6 +27335,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if current_provider_target_record != expected_provider_target_record:
                 raise ValueError("Provider-target record changed during domain authority repair.")
+            self._protect_testing_hold_non_use(session, replacement_record)
             row.updated_at = replacement_record.updated_at
             row.payload = self._payload_dict(replacement_record)
             provider_row.updated_at = replacement_provider_target_record.updated_at

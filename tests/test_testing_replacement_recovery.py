@@ -1203,6 +1203,36 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         ):
             yield
 
+    def test_non_use_is_revoked_before_provider_dispatch_even_if_the_reply_is_lost(self) -> None:
+        for store, _root in self.stores():
+            if not isinstance(store, PostgresRecordStore):
+                continue
+            operation = self.running(store)
+            order: list[str] = []
+
+            def dispatch(**_: object) -> api.JsonValue:
+                order.append("dispatch")
+                raise TimeoutError("fixture lost reply")
+
+            with (
+                patch.object(
+                    store,
+                    "invalidate_testing_non_use",
+                    side_effect=lambda *_: order.append("revoke"),
+                ),
+                patch.object(api, "_dokploy_request", side_effect=dispatch),
+                guard_testing_replacement(store, operation, "worker", lambda _: None),
+                self.assertRaises(TimeoutError),
+            ):
+                api.dokploy_request(
+                    host="https://provider.test",
+                    token="fixture-token",
+                    path="/api/compose.deploy",
+                    method="POST",
+                    payload={"composeId": "compose-123"},
+                )
+            self.assertEqual(order, ["revoke", "dispatch"])
+
     def test_recovery_excludes_surviving_worker_then_cancels_with_proof_and_wakes_reconcile(
         self,
     ) -> None:

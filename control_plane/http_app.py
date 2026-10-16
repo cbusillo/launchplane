@@ -828,6 +828,7 @@ from control_plane.disposable_lane_collection import (
     disposable_collection_coverage,
 )
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
+from control_plane.testing_never_served import read_never_served_testing_usage
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
@@ -23937,6 +23938,23 @@ def create_launchplane_fastapi_app(
                         ),
                     ):
                         raise ValueError("The lane changed during usage collection; collect again.")
+                never_served = OdooTestingUsage(reason_code="never_served_records_incomplete")
+                if (
+                    profile.driver_id == "odoo"
+                    and observation.instance == "testing"
+                    and target is not None
+                    and target_id is not None
+                    and odoo_usage.usage == "unknown"
+                    and odoo_usage.reason_code not in {"staff_testing_hold", "target_alias"}
+                ):
+                    never_served = read_never_served_testing_usage(
+                        store,
+                        product=profile.product,
+                        context=observation.context,
+                        target_id=target_id.target_id,
+                    )
+                    if never_served.usage == "unused":
+                        odoo_usage = never_served
                 facts = collect_disposable_lane_facts(
                     store,
                     context=observation.context,
@@ -23980,6 +23998,7 @@ def create_launchplane_fastapi_app(
                         **facts.payload(),
                         "observed_at": evidence.observed_at.isoformat(),
                         "odoo_usage": odoo_usage.payload(),
+                        "never_served_qualification": never_served.reason_code,
                         "expires_at": evidence.expires_at.isoformat(),
                         "provider_mutation": False,
                         "automatic_fact_collection": "limited_service_records",

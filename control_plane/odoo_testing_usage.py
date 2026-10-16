@@ -52,6 +52,9 @@ ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
         "diagnostics_unavailable",
         "diagnostics_unrecognized",
         "not_collected",
+        "never_served",
+        "never_served_records_incomplete",
+        "never_served_protection_seen",
         "provider_config_unavailable",
         "provider_target_changed",
         "provider_target_unavailable",
@@ -69,6 +72,8 @@ class OdooTestingUsage:
     recent_signins: bool | None = None
     authenticated_sessions: bool | None = None
     reason_code: str = "not_collected"
+
+    proof_sha256: str = ""
 
     def payload(self) -> dict[str, object]:
         return {

@@ -237,6 +237,11 @@ def guard_testing_replacement(
         ) -> api.JsonValue:
             nonlocal journal
             authorization_checkpoint(path)
+            # Revoke lifetime non-use before any dispatch, including lost replies.
+            invalidate = getattr(store, "invalidate_testing_non_use", None)
+            if callable(invalidate):
+                invalidate(operation.product, operation.context)
+            # Filesystem rehearsals have no generation-lifetime proof producer.
             journal = initialize()
             provider_fingerprint = recovery_binding_fingerprint([host.rstrip("/")])
             if (

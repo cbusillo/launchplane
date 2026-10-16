@@ -546,6 +546,10 @@ class TestingReplacementBootstrapAdapter:
                 omitted_runtime_keys=plan.omitted_runtime_keys,
                 prepared_at=utc_now_timestamp(),
             )
+            if existing_generation is None:
+                generation = generation.model_copy(
+                    update={"non_use_tracking_started_at": generation.prepared_at}
+                )
             self.store.write_fresh_odoo_testing_generation(generation)
             host, token = source.read_dokploy_config(control_plane_root=self.root)
             lane = next(
