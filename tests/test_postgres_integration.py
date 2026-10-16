@@ -10850,6 +10850,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",
             "test_needed_copy_and_failed_physical_inspection_still_refuse",
             "test_resource_denial_and_binding_drift_do_not_publish",
+            "test_recorded_shared_resources_survive_passing_inspection",
         ):
             with self.subTest(scenario=scenario), _head_postgres_database() as url:
                 collected = DownLaneCollectionTests(scenario)

@@ -165,7 +165,7 @@ def merge_collected_safety(
         changes.update(usage="in_use", usage_evidence=previous.usage_evidence)
     if previous.data == "only_copy":
         changes.update(data="only_copy", data_evidence=previous.data_evidence)
-    if previous.production_resources == "shared" and collected.production_resources == "unknown":
+    if previous.production_resources == "shared":
         changes.update(
             production_resources="shared", isolation_evidence=previous.isolation_evidence
         )

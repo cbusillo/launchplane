@@ -12,8 +12,8 @@ version is not proof of those facts.
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
 A current staff-testing hold always protects the lane. Without a hold,
-automated UNKNOWN or positive usage (including recent login/session reports) cannot block repair of a
-verified-down non-production lane. The usage observation stays UNKNOWN; this
+automated UNKNOWN or positive usage (including recent login/session reports)
+cannot block repair of a verified-down non-production lane. The usage observation stays UNKNOWN; this
 is repair eligibility, not an assertion that nobody ever used the copy.
 Serving or unverified lanes retain their existing usage protections.
 Production admission and release gates are unchanged.
@@ -46,7 +46,11 @@ activation. Its down-lane read still runs the original container, storage,
 network, credential and copy-witness inspections, including protection of an
 already-opened replacement copy; it skips login-history collection.
 UNKNOWN is preserved in that scoped receipt, which remains usable only by
-the same continuously leased attempt. Reclaim needs new admission.
+the same continuously leased attempt. Its captured usage revision covers the
+unchanged historical observation if monitoring expires or recovers during the
+attempt; a newer use observation is evaluated again, and holds, needed-copy and
+resource protections are always rechecked. Admission uses the scheduler's clock.
+Reclaim needs new admission and a new captured usage revision.
 Connection-isolation and environment-staging guards also use the shared usage
 decision. Acknowledged activation/interlock lifting keeps its original explicit
 hold and known-use checks; it has no UNKNOWN usage requirement. Preview operations
@@ -542,15 +546,17 @@ or failed inspection leaves those facts unknown; it never substitutes downtime
 for a resource proof. A provider refusal returns authorization_denied with its
 trace, without another identity or transport.
 
-Collection retains known use and only-copy protection. It also retains independent
+Collection retains known use, only-copy and shared-resource protection. After
+correcting and verifying resource sharing, use the existing `clear` then fresh
+`collect` path; collection alone never erases that protection. It also retains
+independent
 fresh custody/isolation facts on the same binding, capped at their original expiry;
 collection cannot renew an old proof. A new physical inspection can publish a fresh
 proof; a failed attempted inspection replaces those independent facts with UNKNOWN
 instead of reusing the previous proof. The response reports the stored facts, including retained historical use,
 while the login/session diagnostic remains UNKNOWN. An unheld down lane can use
 that historical positive usage for repair eligibility without erasing it.
-Missing holds,
-distinct target IDs and old preview-generation
+Missing holds, distinct target IDs and old preview-generation
 states do not establish occupancy, custody, physical isolation or executor
 exclusion. The response and bounded client name these coverage limits. Collection
 changes only lane evidence, performs no provider mutation and uses its existing

@@ -151,7 +151,22 @@ class PreparedDrill:
     previous_database: str
 
 
-def require_drill_use_unprotected(store: PostgresRecordStore, product: str, context: str) -> None:
+def _usage_revision(recorded: DisposableLaneSafety | None) -> str:
+    return canonical_json_sha256(recorded.model_dump(mode="json") if recorded else None)
+
+
+def drill_usage_revision(store: PostgresRecordStore, product: str, context: str) -> str:
+    return _usage_revision(store.read_disposable_lane_safety(product, context, "testing"))
+
+
+def require_drill_use_unprotected(
+    store: PostgresRecordStore,
+    product: str,
+    context: str,
+    *,
+    now: float | None = None,
+    accepted_usage_revision: str = "",
+) -> None:
     try:
         # Missing tracked authority is an unreadable hold check, never no hold.
         store.read_dokploy_target_record(context_name=context, instance_name="testing")
@@ -160,6 +175,7 @@ def require_drill_use_unprotected(store: PostgresRecordStore, product: str, cont
         protected = (
             recorded is not None
             and recorded.usage == "in_use"
+            and _usage_revision(recorded) != accepted_usage_revision
             and hold is None
             and lane_usage_protected(
                 store,
@@ -167,6 +183,7 @@ def require_drill_use_unprotected(store: PostgresRecordStore, product: str, cont
                 context=context,
                 instance="testing",
                 usage=recorded.usage,
+                now=datetime.fromtimestamp(now, timezone.utc) if now is not None else None,
             )
         )
     except Exception as error:
@@ -188,7 +205,7 @@ def collect_drill_admission(
     history_database: str = "",
 ) -> DisposableLaneSafety:
     """Q347 evidence belongs to this drill, never the universal observation API."""
-    require_drill_use_unprotected(store, generation.product, generation.context)
+    require_drill_use_unprotected(store, generation.product, generation.context, now=now)
     current = read_current_testing_generation(
         store, product=generation.product, context=generation.context, instance="testing"
     )
@@ -235,7 +252,7 @@ def collect_drill_admission(
         raise DrillSkipped("successful_login_check_unreadable") from error
     if decision.protected:
         raise DrillSkipped("recent_successful_signin")
-    require_drill_use_unprotected(store, generation.product, generation.context)
+    require_drill_use_unprotected(store, generation.product, generation.context, now=now)
     profile = store.read_product_profile_record(generation.product)
     target = store.read_dokploy_target_record(
         context_name=generation.context, instance_name="testing"
@@ -284,7 +301,7 @@ def prepare_drill(
     prepared_at: str = "",
 ) -> PreparedDrill:
     """Build a read-only candidate; the caller revalidates it under authority locks."""
-    require_drill_use_unprotected(store, product, context)
+    require_drill_use_unprotected(store, product, context, now=now)
     profile = store.read_product_profile_record(product)
     if profile.driver_id != "odoo" or not profile.is_active:
         raise DrillSkipped("not_active_odoo")
@@ -392,19 +409,10 @@ def require_drill_checkpoint(
         return
     if not isinstance(store, PostgresRecordStore) or operation.instance != "testing":
         raise DrillPrerequisite("testing_drill_storage_unavailable")
-    require_drill_use_unprotected(store, operation.product, operation.context)
     receipt = store.read_idempotency_record(
         scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
     )
-    generation = read_current_testing_generation(
-        store, product=operation.product, context=operation.context, instance="testing"
-    )
-    if (
-        receipt is None
-        or receipt.response_payload.get("operation_id") != operation.operation_id
-        or generation is None
-        or receipt.response_payload.get("generation_binding") != generation_binding(generation)
-    ):
+    if receipt is None or receipt.response_payload.get("operation_id") != operation.operation_id:
         raise DrillPrerequisite("testing_drill_binding_changed")
     admitted = DisposableLaneSafety.model_validate(
         receipt.response_payload.get("activation_safety")
@@ -424,6 +432,24 @@ def require_drill_checkpoint(
         or receipt.response_payload.get("activation_attempt") != operation.attempt
     ):
         raise DrillSkipped("testing_drill_use_evidence_changed")
+    require_drill_use_unprotected(
+        store,
+        operation.product,
+        operation.context,
+        accepted_usage_revision=(
+            str(receipt.response_payload.get("activation_usage_revision", ""))
+            if admitted.usage == "unknown"
+            and admitted.usage_evidence.startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
+            else ""
+        ),
+    )
+    generation = read_current_testing_generation(
+        store, product=operation.product, context=operation.context, instance="testing"
+    )
+    if generation is None or receipt.response_payload.get(
+        "generation_binding"
+    ) != generation_binding(generation):
+        raise DrillPrerequisite("testing_drill_binding_changed")
 
 
 class OdooTestingDrillScheduler:

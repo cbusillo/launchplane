@@ -315,6 +315,10 @@ class TestingDrillTests(TestingDrillScenario):
     def test_down_lane_overrides_historical_use_for_drill_repair(self) -> None:
         self.assert_down_lane_drill_admitted("in_use")
 
+    def test_down_lane_drill_uses_the_supplied_clock(self) -> None:
+        self.now += DRILL_INTERVAL_SECONDS
+        self.assert_down_lane_drill_admitted("in_use")
+
     def assert_down_lane_drill_admitted(self, usage: str) -> None:
         from tests.support.down_lanes import record_lane_health
         from control_plane.lane_usage import VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX
@@ -344,6 +348,19 @@ class TestingDrillTests(TestingDrillScenario):
             str(safety["usage_evidence"]).startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
         )
         require_drill_checkpoint(self.store, operation)
+        with patch.object(self.store, "list_public_ingress_observation_records", return_value=()):
+            require_drill_checkpoint(self.store, operation)
+            self.activate()
+            record_safety(
+                self.store,
+                self.profile.product,
+                self.context,
+                "testing",
+                usage="in_use",
+                usage_evidence="fixture:new-use-after-admission",
+            )
+            with self.assertRaises(DrillSkipped):
+                require_drill_checkpoint(self.store, operation)
 
     def test_new_usage_reader_failures_keep_a_bounded_skip_reason(self) -> None:
         for name in ("lane_usage_protected", "evaluate_lane_usage"):

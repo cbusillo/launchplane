@@ -11304,7 +11304,7 @@ class PostgresRecordStore(HumanSessionStore):
                 outer = getattr(self._disposable_authority_context, "session", None)
                 self._disposable_authority_context.session = session
                 try:
-                    require_drill_use_unprotected(self, product, context)
+                    require_drill_use_unprotected(self, product, context, now=now)
                 finally:
                     self._disposable_authority_context.session = outer
                 if revision != observed_revision:
@@ -11406,6 +11406,7 @@ class PostgresRecordStore(HumanSessionStore):
             prepare_drill,
             collect_drill_admission,
             drill_admission_revision,
+            drill_usage_revision,
             require_drill_use_unprotected,
         )
         from control_plane.odoo_testing_restore import generation_binding
@@ -11469,7 +11470,14 @@ class PostgresRecordStore(HumanSessionStore):
             outer = getattr(self._disposable_authority_context, "session", None)
             self._disposable_authority_context.session = session
             try:
-                require_drill_use_unprotected(self, operation.product, operation.context)
+                if candidate is None and current_safety is None:
+                    from control_plane.odoo_testing_drill import require_drill_checkpoint
+
+                    require_drill_checkpoint(self, operation)
+                else:
+                    require_drill_use_unprotected(
+                        self, operation.product, operation.context, now=now
+                    )
             finally:
                 self._disposable_authority_context.session = outer
             if (
@@ -11544,6 +11552,9 @@ class PostgresRecordStore(HumanSessionStore):
                         mode="json"
                     )
                     receipt.response_payload["activation_attempt"] = operation.attempt
+                    receipt.response_payload["activation_usage_revision"] = drill_usage_revision(
+                        self, operation.product, operation.context
+                    )
                     self._sync_idempotency_row(receipt_row, receipt)
                     session.commit()
                 else:
@@ -11575,6 +11586,9 @@ class PostgresRecordStore(HumanSessionStore):
             row.payload = self._payload_dict(planned)
             receipt.response_payload["activation_safety"] = prepared.safety.model_dump(mode="json")
             receipt.response_payload["activation_attempt"] = operation.attempt
+            receipt.response_payload["activation_usage_revision"] = drill_usage_revision(
+                self, operation.product, operation.context
+            )
             self._sync_idempotency_row(receipt_row, receipt)
             session.commit()
 

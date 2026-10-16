@@ -278,3 +278,18 @@ class DownLaneCollectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             self.store.read_disposable_lane_safety(self.product, self.context, "testing")
         )
+
+    async def test_recorded_shared_resources_survive_passing_inspection(self) -> None:
+        self.assertEqual((await self.collect()).status_code, 202)
+        previous = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        assert previous is not None
+        self.store.write_disposable_lane_safety(
+            previous.model_copy(update={"production_resources": "shared"})
+        )
+        current = await self.collect()
+        self.assertEqual(current.status_code, 202, current.text)
+        self.assertEqual(current.json()["result"]["production_resources"], "shared")
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store, product=self.product, context=self.context, instance="testing"
+            )
