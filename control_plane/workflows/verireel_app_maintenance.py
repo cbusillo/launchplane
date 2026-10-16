@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from pathlib import Path
 import json
 import re
-import time
 from typing import Literal, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
@@ -17,20 +16,15 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
-from control_plane.dokploy import post_deploy as dokploy_post_deploy
 from control_plane.dokploy.api import JsonObject
 
 
 VeriReelAppMaintenanceAction = Literal[
-    "migrate",
     "grant-sponsored",
     "promote-owner",
     "delete-user",
-    "reset-testing",
 ]
 VeriReelAppMaintenanceIntent = Literal[
-    "stable-testing-migration",
-    "stable-testing-reset",
     "stable-testing-remote-e2e-grant-sponsored",
     "remote-e2e-grant-sponsored",
     "remote-e2e-delete-user",
@@ -42,8 +36,6 @@ APP_MAINTENANCE_INTENT_REQUIREMENTS: dict[
     str,
     tuple[VeriReelAppMaintenanceAction, str],
 ] = {
-    "stable-testing-migration": ("migrate", "verireel"),
-    "stable-testing-reset": ("reset-testing", "verireel"),
     "stable-testing-remote-e2e-grant-sponsored": ("grant-sponsored", "verireel"),
     "remote-e2e-grant-sponsored": ("grant-sponsored", "verireel-testing"),
     "remote-e2e-delete-user": ("delete-user", "verireel-testing"),
@@ -108,16 +100,8 @@ class VeriReelAppMaintenanceRequest(BaseModel):
             )
         if self.context == "verireel" and self.preview_slug:
             raise ValueError("VeriReel stable app maintenance does not accept preview_slug.")
-        if self.action in {"migrate", "reset-testing"} and self.context != "verireel":
-            raise ValueError(
-                f"VeriReel app maintenance action '{self.action}' is only supported for the stable testing instance."
-            )
-        if self.action in {"migrate", "reset-testing"} and self.email:
-            raise ValueError(
-                f"VeriReel app maintenance action '{self.action}' does not accept email."
-            )
-        if self.action not in {"migrate", "reset-testing"} and not self.email:
-            raise ValueError(f"VeriReel app maintenance action '{self.action}' requires email.")
+        if not self.email:
+            raise ValueError("Testing fixture maintenance requires email.")
         required_action, required_context = APP_MAINTENANCE_INTENT_REQUIREMENTS[self.intent]
         if self.action != required_action or self.context != required_context:
             raise ValueError(
@@ -142,30 +126,6 @@ class VeriReelAppMaintenanceResult(BaseModel):
     started_at: str
     finished_at: str
     error_message: str = ""
-
-
-def _migration_command() -> str:
-    return "./node_modules/.bin/prisma migrate deploy --config prisma.config.ts"
-
-
-def _reset_testing_command() -> str:
-    return "node prisma/reset-testing-job.mjs && ./node_modules/.bin/prisma migrate deploy --schema prisma/schema.prisma && node prisma/seed.mjs"
-
-
-def _uses_internal_smoke_maintenance_api(request: VeriReelAppMaintenanceRequest) -> bool:
-    return request.action in SMOKE_MAINTENANCE_ACTIONS
-
-
-def _command_for_request(request: VeriReelAppMaintenanceRequest) -> tuple[str, str]:
-    if request.action == "migrate":
-        return "ver-apply-prisma-migrations", _migration_command()
-    if request.action == "reset-testing":
-        return "ver-testing-reset", _reset_testing_command()
-    if _uses_internal_smoke_maintenance_api(request):
-        raise click.ClickException(
-            f"VeriReel app maintenance action '{request.action}' uses the internal smoke maintenance API."
-        )
-    raise click.ClickException(f"Unsupported VeriReel app maintenance action '{request.action}'.")
 
 
 def _smoke_maintenance_operation_name(request: VeriReelAppMaintenanceRequest) -> str:
@@ -411,137 +371,6 @@ def _request_internal_smoke_maintenance_api(
         ) from error
 
 
-def _find_application_schedule(
-    *, host: str, token: str, application_id: str, schedule_name: str
-) -> JsonObject | None:
-    for schedule in dokploy_api.list_dokploy_schedules(
-        host=host,
-        token=token,
-        target_id=application_id,
-        schedule_type="application",
-    ):
-        if str(schedule.get("name") or "").strip() == schedule_name:
-            return schedule
-    return None
-
-
-def _upsert_application_schedule(
-    *,
-    host: str,
-    token: str,
-    application_id: str,
-    schedule_name: str,
-    command: str,
-) -> str:
-    existing_schedule = _find_application_schedule(
-        host=host,
-        token=token,
-        application_id=application_id,
-        schedule_name=schedule_name,
-    )
-    payload: JsonObject = {
-        "name": schedule_name,
-        "cronExpression": dokploy_post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
-        "scheduleType": "application",
-        "shellType": "sh",
-        "command": command,
-        "applicationId": application_id,
-        "enabled": False,
-        "timezone": "UTC",
-    }
-    if existing_schedule is None:
-        dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.create",
-            method="POST",
-            payload=payload,
-        )
-    else:
-        update_payload: JsonObject = {
-            "scheduleId": dokploy_api.schedule_key(existing_schedule),
-            **payload,
-        }
-        dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/schedule.update",
-            method="POST",
-            payload=update_payload,
-        )
-    resolved_schedule = _find_application_schedule(
-        host=host,
-        token=token,
-        application_id=application_id,
-        schedule_name=schedule_name,
-    )
-    if resolved_schedule is None:
-        raise click.ClickException(
-            f"Dokploy schedule {schedule_name!r} for application {application_id!r} could not be resolved."
-        )
-    schedule_id = dokploy_api.schedule_key(resolved_schedule)
-    if not schedule_id:
-        raise click.ClickException(
-            f"Dokploy schedule {schedule_name!r} for application {application_id!r} did not expose a schedule id."
-        )
-    return schedule_id
-
-
-def _run_application_command_with_retries(
-    *,
-    host: str,
-    token: str,
-    application_id: str,
-    schedule_name: str,
-    command: str,
-    timeout_seconds: int,
-) -> None:
-    for attempt in range(1, DEFAULT_ATTEMPTS + 1):
-        try:
-            schedule_id = _upsert_application_schedule(
-                host=host,
-                token=token,
-                application_id=application_id,
-                schedule_name=schedule_name,
-                command=command,
-            )
-            latest_before = dokploy_api.latest_deployment_for_schedule(
-                host=host,
-                token=token,
-                schedule_id=schedule_id,
-            )
-            dokploy_api.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/schedule.runManually",
-                method="POST",
-                payload={"scheduleId": schedule_id},
-                timeout_seconds=timeout_seconds,
-            )
-            dokploy_api.wait_for_dokploy_schedule_deployment(
-                host=host,
-                token=token,
-                schedule_id=schedule_id,
-                before_key=dokploy_api.deployment_key(latest_before),
-                timeout_seconds=timeout_seconds,
-            )
-            return
-        except click.ClickException:
-            if attempt >= DEFAULT_ATTEMPTS:
-                raise
-            time.sleep(DEFAULT_RETRY_DELAY_SECONDS)
-
-
-def _trigger_application_deploy(*, host: str, token: str, application_id: str) -> None:
-    dokploy_api.dokploy_request(
-        host=host,
-        token=token,
-        path="/api/application.deploy",
-        method="POST",
-        payload={"applicationId": application_id},
-    )
-
-
 @dataclass(frozen=True)
 class RecordedTestingMaintenanceTarget:
     """Internal exact target from a reserved deploy, never a caller-selected API field."""
@@ -578,13 +407,11 @@ def execute_verireel_app_maintenance(
     application_id = ""
     schedule_name = ""
     try:
-        if testing_target is not None and (
-            request.instance != "testing" or request.action == "reset-testing"
-        ):
+        if testing_target is not None and (request.instance != "testing"):
             raise click.ClickException(
                 "Reserved testing maintenance cannot reset data or act on previews."
             )
-        if _uses_internal_smoke_maintenance_api(request):
+        if request.action in SMOKE_MAINTENANCE_ACTIONS:
             schedule_name = _smoke_maintenance_operation_name(request)
             if testing_target is not None:
                 application_name, application_id = _bound_testing_application(
@@ -623,40 +450,6 @@ def execute_verireel_app_maintenance(
                 secret=secret,
                 request=request,
             )
-        else:
-            host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
-            application_name, application_id = (
-                _bound_testing_application(control_plane_root, testing_target)
-                if testing_target is not None
-                else _resolve_stable_testing_application(control_plane_root=control_plane_root)
-            )
-            schedule_name, command = _command_for_request(request)
-            _run_application_command_with_retries(
-                host=host,
-                token=token,
-                application_id=application_id,
-                schedule_name=schedule_name,
-                command=command,
-                timeout_seconds=request.timeout_seconds,
-            )
-            if request.action == "reset-testing":
-                _trigger_application_deploy(
-                    host=host,
-                    token=token,
-                    application_id=application_id,
-                )
-        return VeriReelAppMaintenanceResult(
-            maintenance_status="pass",
-            action=request.action,
-            intent=request.intent,
-            context=testing_target.context if testing_target else request.context,
-            instance=request.instance,
-            application_name=application_name,
-            application_id=application_id,
-            schedule_name=schedule_name,
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-        )
     except Exception as error:
         return VeriReelAppMaintenanceResult(
             maintenance_status="fail",
@@ -671,3 +464,15 @@ def execute_verireel_app_maintenance(
             finished_at=utc_now_timestamp(),
             error_message=str(error),
         )
+    return VeriReelAppMaintenanceResult(
+        maintenance_status="pass",
+        action=request.action,
+        intent=request.intent,
+        context=testing_target.context if testing_target else request.context,
+        instance=request.instance,
+        application_name=application_name,
+        application_id=application_id,
+        schedule_name=schedule_name,
+        started_at=started_at,
+        finished_at=utc_now_timestamp(),
+    )

@@ -245,10 +245,24 @@ class ProductionPromotionBackupTests(unittest.TestCase):
             store.create_odoo_prod_promotion_operation_record_if_no_active_lane(operation)
 
             def claim(*, reconcile: bool = False) -> OdooProdPromotionOperationRecord | None:
+                at = datetime.now(UTC)
+                if reconcile:
+                    from control_plane.contracts.odoo_prod_promotion_operation import (
+                        ODOO_CUTOVER_RECONCILIATION_DELAY,
+                    )
+
+                    current = store.read_odoo_prod_promotion_operation_record(
+                        operation.operation_id
+                    )
+                    at = max(
+                        at,
+                        datetime.fromisoformat(current.updated_at.replace("Z", "+00:00"))
+                        + ODOO_CUTOVER_RECONCILIATION_DELAY,
+                    )
                 arguments = dict(
                     lease_owner="cutover-worker",
-                    lease_expires_at=(datetime.now(UTC) + timedelta(minutes=5)).isoformat(),
-                    claimed_at=datetime.now(UTC).isoformat(),
+                    lease_expires_at=(at + timedelta(minutes=5)).isoformat(),
+                    claimed_at=at.isoformat(),
                 )
                 if reconcile:
                     return store.claim_odoo_cutover_reconciliation_record(

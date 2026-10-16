@@ -8,7 +8,7 @@ from http.client import IncompleteRead
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, Mock, patch
 from urllib.parse import urlencode, urlsplit
 from urllib.request import BaseHandler, OpenerDirector, Request, build_opener
 from urllib.response import addinfourl
@@ -19,13 +19,16 @@ from httpx2 import Response
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane, OdooSlotCoordinates
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_preview_runtime_plan import OdooPreviewRuntimeTargetEvidence
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.odoo_runtime_reads import _NoRedirects
+from control_plane.odoo_runtime_reads import _NoRedirects, OdooRuntimeReadError
+from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.odoo_diagnostic_identity import (
     DIAGNOSTIC_SECRET_INTEGRATION,
     DIAGNOSTIC_IDENTITY_KEY,
@@ -539,6 +542,138 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.rpc_calls[0]["params"]["db"], "actual_deployed_database")
         self.assertEqual(self.rpc_calls[0]["params"]["login"], "lane-diagnostic-reader")
         self.assertEqual(self.rpc_calls[0]["params"]["password"], "diagnostic-secret")
+
+    def use_slot(self, slot_id: str) -> None:
+        self.profile.lanes[0].odoo_cutover = OdooCutoverLane(
+            route_id="testing",
+            host="testing.example.invalid",
+            database="actual_deployed_database",
+            database_uuid="fixture-uuid",
+            prepared_origin="http://prepared:8080",
+            writers=(),
+            slots=(
+                OdooSlotCoordinates(
+                    slot_id="blue", compose_id="blue-target", private_url="http://blue:8069"
+                ),
+                OdooSlotCoordinates(
+                    slot_id="green", compose_id="green-target", private_url="http://green:8069"
+                ),
+            ),
+        )
+        self.store.write_product_profile_record(self.profile)
+        inventory = self.store.read_environment_inventory(
+            context_name="example-site", instance_name="testing"
+        )
+        self.stable_identity = self.stable_identity.model_copy(
+            update={"slot": slot_id, "database_uuid": "fixture-uuid"}
+        )
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"runtime_identity": self.stable_identity})
+        )
+        self.container_identity = self.health_identity = self.stable_identity
+        # Private slots intentionally own no public Dokploy domain.
+        self.domains = []
+
+    def slot_logs(self) -> dict[str, Any]:
+        return build_tracked_target_logs_payload(
+            record_store=self.store,
+            control_plane_root=self.root,
+            context_name="example-site",
+            instance_name="testing",
+            line_count=20,
+        )
+
+    async def test_cutover_logs_and_mail_follow_both_active_slots(self) -> None:
+        for slot in ("blue", "green"):
+            with self.subTest(slot=slot):
+                self.use_slot(slot)
+                self.provider_calls.clear()
+                logs = self.slot_logs()
+                mail = await self.get(
+                    "/v1/products/example-site/environments/testing/outgoing-email", self.filters
+                )
+                self.assertEqual(mail.status_code, 200, mail.text)
+                self.assertEqual(mail.json()["runtime"]["target_id"], slot + "-target")
+                self.assertEqual(logs["target"]["target_id"], slot + "-target")
+                targets = [
+                    cast(dict[str, str], call["query"])["composeId"]
+                    for call in self.provider_calls
+                    if call["path"] == "/api/compose.one"
+                ]
+                self.assertTrue(targets)
+                self.assertEqual(set(targets), {slot + "-target"})
+                self.assertFalse(
+                    any(call["path"] == "/api/domain.byComposeId" for call in self.provider_calls)
+                )
+
+    async def test_cutover_does_not_authenticate_with_stale_container_or_public_identity(
+        self,
+    ) -> None:
+        self.use_slot("blue")
+        old = self.stable_identity
+        self.use_slot("green")
+        for wrong_container in (True, False):
+            with self.subTest(wrong_container=wrong_container):
+                self.rpc_calls.clear()
+                self.container_identity = old if wrong_container else self.stable_identity
+                self.health_identity = self.stable_identity if wrong_container else old
+                response = await self.get(
+                    "/v1/products/example-site/environments/testing/outgoing-email", self.filters
+                )
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertFalse(self.rpc_calls)
+
+    async def test_recorded_slot_cannot_fall_back_when_lane_authority_is_missing(self) -> None:
+        self.use_slot("green")
+        self.profile.lanes[0].odoo_cutover = None
+        self.store.write_product_profile_record(self.profile)
+        with self.assertRaises(OdooRuntimeReadError):
+            self.slot_logs()
+        self.assertFalse(self.provider_calls)
+
+    async def test_unfinished_cutover_refuses_diagnostics_before_provider_access(self) -> None:
+        self.use_slot("green")
+        held = Mock(spec=DeploymentRecord, odoo_cutover=Mock(step="switching"))
+        with patch.object(self.store, "list_deployment_records", return_value=(held,)):
+            with self.assertRaises(OdooRuntimeReadError):
+                self.slot_logs()
+            response = await self.get(
+                "/v1/products/example-site/environments/testing/outgoing-email", self.filters
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertFalse(self.provider_calls)
+        self.assertFalse(self.rpc_calls)
+
+    async def test_switch_back_event_proves_retained_runtime_deployment(self) -> None:
+        self.use_slot("blue")
+        inventory = self.store.read_environment_inventory(
+            context_name="example-site", instance_name="testing"
+        )
+        event = DeploymentRecord(
+            record_id="switch-back",
+            context=inventory.context,
+            instance=inventory.instance,
+            source_git_ref=self.stable_identity.source_git_ref,
+            runtime_identity=self.stable_identity,
+            runtime_source={
+                "retained_deployment_record_id": self.stable_identity.deployment_record_id
+            },
+            deploy=DeploymentEvidence(
+                status="pass",
+                deploy_mode="atomic-switch-back",
+                target_type="compose",
+                target_name="blue",
+            ),
+        )
+        self.store.write_deployment_record(event)
+        self.store.write_environment_inventory(
+            inventory.model_copy(update={"deployment_record_id": event.record_id})
+        )
+        response = self.slot_logs()
+        self.assertEqual(response["target"]["target_id"], "blue-target")
+        self.store.write_deployment_record(event.model_copy(update={"runtime_source": {}}))
+        with self.assertRaises(OdooRuntimeReadError):
+            self.slot_logs()
 
     async def test_missing_diagnostic_identity_never_falls_back_to_bootstrap_admin(self) -> None:
         for binding in self.store.list_secret_bindings(integration=DIAGNOSTIC_SECRET_INTEGRATION):

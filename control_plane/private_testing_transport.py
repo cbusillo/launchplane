@@ -5,8 +5,10 @@ changes Compose, creates an endpoint record, or deploys a workload.
 """
 
 from copy import deepcopy
+import base64
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path, PurePosixPath
+import shlex
 from typing import Literal
 
 import yaml
@@ -21,12 +23,11 @@ ROUTE = "/v1/products/{product}/private-testing-transport/plan"
 PRODUCT_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
 
 
-class PrivateTestingTransportRequest(BaseModel):
+class PrivateTestingTransportIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     context: str = Field(min_length=1)
     instance: Literal["testing"] = "testing"
-    mode: Literal["dry-run", "readback"] = "dry-run"
     endpoint_key: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     private_ip: IPv4Address
     listener_port: int = Field(ge=1024, le=65535)
@@ -37,7 +38,6 @@ class PrivateTestingTransportRequest(BaseModel):
     monitor_ca_bundle_path: str
     receiver_ca_bundle_path: str
     trust_review: str = Field(min_length=1, max_length=1000)
-    expected_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
     @field_validator("private_ip")
     @classmethod
@@ -61,6 +61,11 @@ class PrivateTestingTransportRequest(BaseModel):
 
 class PrivateTestingTransportRefused(ValueError):
     """Evidence is incomplete or differs from the reviewed preparation."""
+
+
+class PrivateTestingTransportRequest(PrivateTestingTransportIntent):
+    mode: Literal["dry-run", "readback"] = "dry-run"
+    expected_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
 
 def nginx_configuration(
@@ -107,15 +112,49 @@ def _object(value: object) -> dict[str, object]:
     return value
 
 
+def nginx_entrypoint(
+    configuration: str,
+    *,
+    configuration_file: str = "/tmp/private-tls-nginx.conf",
+    nginx_binary: str = "nginx",
+    nginx_arguments: tuple[str, ...] = (),
+) -> list[str]:
+    """Materialize generated config on the proxy's own tmpfs, then replace the shell.
+
+    Inline Compose configs cannot be injected into a read-only service. Encoding
+    also keeps Nginx variables out of Compose and shell interpolation.
+    """
+    encoded = base64.b64encode(configuration.encode()).decode("ascii")
+    command = shlex.join(
+        [nginx_binary, *nginx_arguments, "-c", configuration_file, "-g", "daemon off;"]
+    )
+    return [
+        "/bin/sh",
+        "-ec",
+        f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(configuration_file)}\nexec {command}",
+    ]
+
+
 def transport_overlay(
-    request: PrivateTestingTransportRequest, *, namespace: str, runtime_port: int
+    request: PrivateTestingTransportIntent, *, namespace: str, runtime_port: int
 ) -> dict[str, object]:
     return {
         "services": {
             namespace: {
                 "image": request.nginx_image,
                 "user": "65534:65534",
-                "entrypoint": ["nginx", "-g", "daemon off;"],
+                "restart": "unless-stopped",
+                "labels": {
+                    "org.launchplane.private-tls-material": canonical_json_sha256(
+                        {
+                            "certificate": request.certificate_sha256,
+                            "ca": request.ca_bundle_sha256,
+                        }
+                    )
+                },
+                "entrypoint": nginx_entrypoint(
+                    nginx_configuration(service=request.runtime_service, runtime_port=runtime_port)
+                ),
                 "read_only": True,
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges:true"],
@@ -128,18 +167,10 @@ def transport_overlay(
                         "protocol": "tcp",
                     }
                 ],
-                "configs": [{"source": namespace, "target": "/etc/nginx/nginx.conf"}],
                 "secrets": [
                     {"source": namespace + "-certificate", "target": "private_tls_certificate"},
                     {"source": namespace + "-key", "target": "private_tls_key"},
                 ],
-            }
-        },
-        "configs": {
-            namespace: {
-                "content": nginx_configuration(
-                    service=request.runtime_service, runtime_port=runtime_port
-                )
             }
         },
         "secrets": {
@@ -179,6 +210,7 @@ def _without_provider_metadata(
     *,
     target_id: str,
     app_name: str,
+    overlay: dict[str, object],
 ) -> dict[str, object]:
     current = deepcopy(current)
     name = current.pop("name", app_name)
@@ -193,6 +225,15 @@ def _without_provider_metadata(
                 raise PrivateTestingTransportRefused("Provider labels are unqualified.")
             labels = dict(label.split("=", 1) for label in labels)
         labels = _object(labels)
+        expected = _object(_object(overlay["services"]).get(service_name, {}))
+        expected_labels = _object(expected.get("labels", {}))
+        owned_labels = {
+            key: labels.pop(key)
+            for key, value in expected_labels.items()
+            if labels.get(key) == value
+        }
+        if owned_labels:
+            service["labels"] = owned_labels
         if labels and (
             set(labels) - compose.DOKPLOY_COMPOSE_METADATA_LABELS
             or labels.get("dokploy.application.id") != target_id
@@ -312,7 +353,10 @@ def plan_private_testing_transport(
     except yaml.YAMLError as error:
         raise PrivateTestingTransportRefused("Provider Compose evidence is invalid.") from error
     current = _without_provider_metadata(
-        current, target_id=target_id.target_id, app_name=str(placement["appName"])
+        current,
+        target_id=target_id.target_id,
+        app_name=str(placement["appName"]),
+        overlay=overlay,
     )
     baseline = _baseline(current, overlay, readback=request.mode == "readback")
     _validate_compose(baseline, request.runtime_service)

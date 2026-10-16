@@ -43,6 +43,12 @@ from control_plane.contracts.product_incident_read_model import (
     preview_fence_incident_scope,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.artifact_retention import (
+    ArtifactRetentionPlan,
+    ArtifactRetentionProductMissingError,
+    product_retention_dry_run,
+)
+from control_plane.artifact_scan import ArtifactScanResult, qualify_product_artifact
 from control_plane.contracts.product_operational_readiness import ProductOperationalReadiness
 from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.product_profile_mutation_receipt import (
@@ -120,6 +126,22 @@ class ProductEnvironmentConfigStatusResponse(BaseModel):
     status: str = "ok"
     trace_id: str
     config_status: ProductEnvironmentConfigStatus
+
+
+class ArtifactRetentionResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    retention: ArtifactRetentionPlan
+
+
+class ArtifactScanResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    trace_id: str
+    scan: ArtifactScanResult
 
 
 class ProductPromotionStatusResponse(BaseModel):
@@ -740,6 +762,107 @@ def register_protected_artifact_read_routes(
     dependencies: ProductReadRouteDependencies,
 ) -> None:
     common = dependencies.common
+
+    def read_artifact_scan(
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        product: Annotated[str, Query(min_length=1)],
+    ) -> ArtifactScanResponse:
+        trace_id = common.next_trace_id()
+        if not common.authorization_allows(
+            identity=identity,
+            action="artifact_protection.read",
+            product=product,
+            context="*",
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot qualify this product's artifact scan.",
+            )
+        try:
+            result = qualify_product_artifact(record_store, product=product)
+        except ValueError as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="product_not_found",
+                message="An active product profile was not found.",
+            ) from error
+        return ArtifactScanResponse(trace_id=trace_id, scan=result)
+
+    app.add_api_route(
+        "/v1/artifacts/scan",
+        read_artifact_scan,
+        methods=["GET"],
+        response_model=ArtifactScanResponse,
+        operation_id="qualify_product_artifact_scan",
+        summary="Qualify a verified artifact scan without deploying or activating it",
+        responses={
+            403: {"model": common.error_response_model},
+            404: {"model": common.error_response_model},
+        },
+    )
+
+    def read_artifact_retention(
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        product: Annotated[str, Query(min_length=1)],
+    ) -> ArtifactRetentionResponse:
+        trace_id = common.next_trace_id()
+        product = product.strip()
+        if not product:
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_query",
+                message="Artifact retention requires a product.",
+            )
+        if not common.authorization_allows(
+            identity=identity,
+            action="artifact_protection.read",
+            product=product,
+            context="*",
+        ):
+            raise common.http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Caller cannot read this product's artifact retention plan.",
+            )
+        try:
+            store = require_protected_artifact_store(record_store)
+            plan = product_retention_dry_run(store, product=product)
+        except ArtifactRetentionProductMissingError as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="product_not_found",
+                message="An active product profile was not found.",
+            ) from error
+        except (TypeError, ValueError) as error:
+            raise common.http_error(
+                status_code=503,
+                trace_id=trace_id,
+                code="artifact_retention_unavailable",
+                message="Artifact retention inventory is unavailable.",
+            ) from error
+        return ArtifactRetentionResponse(trace_id=trace_id, retention=plan)
+
+    app.add_api_route(
+        "/v1/artifacts/retention",
+        read_artifact_retention,
+        methods=["GET"],
+        response_model=ArtifactRetentionResponse,
+        operation_id="read_artifact_retention",
+        summary="Read a dry-run image retention plan",
+        responses={
+            403: {"model": common.error_response_model},
+            404: {"model": common.error_response_model},
+            503: {"model": common.error_response_model},
+        },
+    )
 
     def read_protected_artifacts(
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],

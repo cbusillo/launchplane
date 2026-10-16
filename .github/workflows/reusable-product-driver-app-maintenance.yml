@@ -10,9 +10,8 @@ name: Reusable Product Driver App Maintenance
         default: ""
         type: string
       driver:
-        description: Product driver id. Defaults to verireel for backward compatibility.
-        required: false
-        default: verireel
+        description: Product driver id (odoo).
+        required: true
         type: string
       context:
         description: Runtime context. Defaults to the product key.
@@ -154,7 +153,6 @@ jobs:
             CONTEXT="$PRODUCT"
           fi
           case "$DRIVER" in
-            verireel) route_path="/v1/drivers/verireel/app-maintenance" ;;
             odoo) route_path="/v1/drivers/odoo/app-maintenance" ;;
             *) echo "Unsupported product driver for app maintenance: $DRIVER" >&2; exit 1 ;;
           esac

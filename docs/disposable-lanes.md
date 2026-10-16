@@ -8,6 +8,82 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Repair usage rule
+
+`control_plane/lane_usage.py` owns the usage decision for disposable repair.
+A current staff-testing hold always protects the lane. Without a hold,
+automated UNKNOWN or positive usage (including recent login/session reports)
+cannot block repair of a verified-down non-production lane. The usage observation stays UNKNOWN; this
+is repair eligibility, not an assertion that nobody ever used the copy.
+Serving or unverified lanes retain their existing usage protections.
+Production admission and release gates are unchanged.
+
+Verified down means every effective application HTTP check has failed in each
+of the same two consecutive monitor scheduler slots inside the preceding two
+cadences, with each latest result less than one cadence old. The scheduler's
+existing slot rule owns this timing; variation in the run's offset inside its
+slot does not disqualify a continuously failing lane.
+All observations must follow the current profile, tracked target and target-ID
+updates and match the monitor's current URLs and expected runtime identity.
+Every probed URL must fail: network/DNS/TLS failure or server error qualifies;
+successful HTTP responses, access refusals, identity mismatch, missing checks,
+skipped checks, unresolved endpoints, future timestamps and stale observations
+do not. Public and declared private checks both count. Provider-only or
+unmonitored states remain unverified. No probe or live action is initiated by
+this decision. The guard logs the durable monitor record IDs and interval;
+the drill also preserves those references in its private admission receipt.
+
+These observations describe Launchplane's monitor vantage. A network, DNS or
+TLS fault in that vantage can look like a lane outage even if a person can reach
+it elsewhere. A staff-testing hold remains authoritative regardless of monitor
+results. [Director decision Q380](https://github.com/cbusillo/launchplane/issues/3812#issuecomment-6217513435)
+accepts this bounded monitor-vantage rule for an unheld non-production lane.
+
+The common disposable guard covers runtime repair/deploy, preview operations,
+replacement target setup, held-operation supersession and rehearsal admission.
+The Odoo daily drill uses the same usage decision before queueing and worker
+activation. Its down-lane read still runs the original container, storage,
+network, credential and copy-witness inspections, including protection of an
+already-opened replacement copy; it skips login-history collection.
+UNKNOWN is preserved in that scoped receipt, which remains usable only by
+the same continuously leased attempt. Its captured usage revision covers the
+unchanged historical observation if monitoring expires or recovers during the
+attempt; a newer use observation is evaluated again, and holds, needed-copy and
+resource protections are always rechecked. Admission uses the scheduler's clock.
+Reclaim needs new admission and a new captured usage revision.
+Storage maintenance uses the same usage rule before dispatch and at readback:
+deleting retained copies still requires the full fresh custody/isolation guard,
+while capacity-only inspection keeps its independent receiver and copy-witness
+checks without requiring a negative usage read.
+Connection-isolation and environment-staging guards also use the shared usage
+decision. Acknowledged activation/interlock lifting keeps its original explicit
+hold and known-use checks; it has no UNKNOWN usage requirement. Preview operations
+use the common guard, but previews without stable-lane monitor authority remain
+unverified and retain their existing admission paths.
+Existing preview refresh, never-live retirement and non-destructive isolation
+paths continue to protect known use without demanding a universal negative
+occupancy observation. This change adds no UNKNOWN restriction to those paths.
+Walkthrough account and browser operations also retain known-use protection;
+they do not use the downtime repair exception.
+
+Downtime does not qualify needed-copy custody, physical isolation, secret
+separation, backup, authorization, deployment fences or unknown provider
+effects. Their existing checks still run. In particular, no missing usage
+record becomes a reproducible-data or production-isolation fact. Preserve old
+operations, keys and retained resources when replacing a stranded generation.
+
+For an update, deploy the compatible API and Odoo worker together through the
+normal service path; no migration, grant, new runtime flag or per-product rule
+is required. Use the bounded collection client from that compatible source
+revision; older coverage/enum validation refuses the newly qualified resource
+facts. Use the existing monitor history and collect immediately before
+apply; a hold or changed recipient still refuses. Source tests do not qualify
+a real lane. Before a queued drill uses a downtime receipt, retain this image
+or a compatible successor and forward-fix: older workers require a negative
+usage result and cannot continue the new UNKNOWN admission. Do not rewrite
+receipts or clear fences to roll back. No live lane action is part of source
+delivery.
+
 The source accepts exact-scope `disposable_lane_safety` observations on the
 dedicated DB-backed lane record (and a separate collection for filesystem
 rehearsals). Each observation binds the profile and current
@@ -17,7 +93,8 @@ usage (`unused`/`in_use`/`unknown`), data custody
 (`isolated`/`shared`/`separation_ready`/`unknown`), with each known fact's source
 reference and a timezone-aware observation/expiry window of at most fifteen
 minutes. A changed binding, expired observation, positive
-staff-testing hold or any required unknown fact refuses the new permission.
+staff-testing hold or any required unknown custody/isolation fact refuses the new
+permission. UNKNOWN usage alone has the verified-down repair exception above.
 A target ID also bound to another lane refuses it independently of the observation.
 The existing Odoo preview-refresh exception below uses direct resource inspection
 and protected-use reports instead of positive occupancy/custody observations.
@@ -43,8 +120,10 @@ complete single-web/database inventory and unchanged container/placement snapsho
 must agree. Missing databases or session directories, unreadable or malformed
 files, replicas, custom startup, oversized inventories and incomplete/provider
 failures leave usage unknown. A provider authorization denial returns its service
-trace and is never retried with another identity. Only complete negative login
-and session reads can produce `unused`; staff holds still protect the lane.
+trace and is never retried with another identity. Complete negative login
+and session reads can produce `unused`. The separate
+[never-served rule](#never-served-testing-generations) can also qualify non-use
+from complete durable generation records; staff holds protect both paths.
 Other drivers and previews retain their existing collection behavior.
 
 Collection returns the first failed checkpoint as an allowlisted code, never
@@ -52,7 +131,8 @@ exception text, command lines, session identifiers, account names or topology.
 The bounded client preserves that code and rejects malformed diagnostics.
 A code introduced by a newer service is mapped to `diagnostics_unrecognized`
 without echoing it, preserving validated facts and the trace. Such a code cannot
-qualify non-use: when diagnostics are present, `unused` requires `complete`. A
+qualify non-use: when diagnostics are present, `unused` requires `complete`
+for runtime reads or `never_served` for the durable generation proof. A
 service image predating diagnostics is reported as `diagnostics_unavailable`;
 that means deploy the compatible collector before diagnosing the lane, not that
 any particular runtime checkpoint failed. Inspecting only the binding does not
@@ -76,9 +156,10 @@ For a stranded runtime, deliver the diagnostics image through the normal service
 deploy and collect again through the same client, without starting, restarting or
 repairing that lane to obtain evidence. Record its code and service trace. If it
 cannot read the original served configuration/database/session store, that exact
-prerequisite remains unsupported: a stopped process, missing database or absent
-staff hold is not a substitute. Preserve the original lane and custody and leave
-its rebuild blocked. No alternative credential, direct database qualification or
+prerequisite remains unsupported for a negative usage assertion: a stopped process,
+missing database or absent staff hold is not a substitute. The verified-down
+repair rule can independently qualify usage eligibility while preserving the
+original lane's custody and every other rebuild gate. No alternative credential, direct database qualification or
 new grant is needed for diagnosis. The service read is the proof of the concrete
 failed checkpoint; a fixture qualification or an old generic UNKNOWN is not.
 
@@ -462,8 +543,28 @@ its supplied facts and references cannot affect the result. The existing stored
 actor kind and observation schema remain compatible with the previous image.
 
 For Odoo testing, the read-only login/session probe described above can also
-publish `unused`. Custody and physical isolation remain unknown. Missing holds,
-distinct target IDs and old preview-generation
+publish `unused`. On a verified-down lane with a resettable data policy and a
+current completed service-created testing generation, collection can independently
+reinspect its original physical containers, storage, networks and copy binding
+through the fixed receiver, without requiring login history. Only a passing
+inspection supplies reproducible-data and isolated-resource facts. Unsupported
+or failed inspection leaves those facts unknown; it never substitutes downtime
+for a resource proof. A provider refusal returns authorization_denied with its
+trace, without another identity or transport.
+
+Collection retains known use, only-copy, shared-resource and separation-staging
+protection. Use the existing acknowledged activation path for staged separation.
+The existing `clear` then fresh `collect` path removes the whole observation, so
+use it only after verifying that every protection on that row is resolved,
+including any needed copy or current use; otherwise retain the row and its
+protections. Collection alone never erases resource protection. It also retains independent
+fresh custody/isolation facts on the same binding, capped at their original expiry;
+collection cannot renew an old proof. A new physical inspection can publish a fresh
+proof; a failed attempted inspection replaces those independent facts with UNKNOWN
+instead of reusing the previous proof. The response reports the stored facts, including retained historical use,
+while the login/session diagnostic remains UNKNOWN. An unheld down lane can use
+that historical positive usage for repair eligibility without erasing it.
+Missing holds, distinct target IDs and old preview-generation
 states do not establish occupancy, custody, physical isolation or executor
 exclusion. The response and bounded client name these coverage limits. Collection
 changes only lane evidence, performs no provider mutation and uses its existing
@@ -632,6 +733,151 @@ no safe automatic conversion to the new digest. Preserve the original operation,
 generation, key and copy custody; do not edit its digest or invent a safe-release
 attestation. A forward fix for new journals does not establish recovery of an
 already stranded legacy operation.
+
+### Continue a restored generation's public edge
+
+An independent Dokploy hostname does not provision its public edge. With a
+separate TLS-terminating proxy, origin ACME HTTP-01 can hit that proxy's default
+host instead of the origin: HTTP redirects to HTTPS, the default certificate
+fails public verification, and the challenge returns 404. Qualify DNS, the
+effective edge host and origin evidence before changing anything. A healthy
+container does not prove public TLS.
+
+`POST /v1/products/{product}/testing-public-ingress` supplies the bounded
+Director-agent continuation for the **current** fresh Odoo testing generation.
+It uses the same Director-agent identity boundary as testing preparation;
+generic instance ingress remains adoption-only, and no policy grant, credential,
+workflow or broader ingress authority is added. The request names only the
+product, context and original generation operation, reason and mode. It accepts
+no hostname, provider ID, upstream, certificate, raw config or source-copy input.
+
+The service derives the new domain from the current generation/profile/target,
+and its edge from the lane's existing active service-owned NPMplus binding.
+Live provider placement must agree with that recorded endpoint. The existing
+edge host must be public, enabled, free of custom locations/config/access
+controls, and use an existing unexpired certificate covering the new domain.
+The only allowed template config is this operation's own audited identity
+comment. Its generated comment is preserved by the current provider API;
+legacy `meta` is neither accepted on writes nor returned by that API.
+Fresh provider reads must show loaded Nginx configuration and no private TLS,
+extra location/directory config or authentication upstream before publication
+and during readback.
+Only that certificate's public metadata is read; DNS credentials and private
+keys never leave the provider. No certificate is issued by this operation.
+Unknown placement, certificate coverage, foreign/wildcard edge authority,
+staff hold, shared target or changed records refuse the operation. Missing
+prerequisites are reported, not repaired through another identity or provider.
+
+```bash
+uv run python scripts/prepare-testing-public-ingress.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product example-odoo --context example \
+  --operation-id original-testing-generation-operation \
+  --reason 'Publish the current restored testing hostname at its existing edge' \
+  --evidence-file /private/operator-evidence/testing-public-ingress.json
+```
+
+After reviewing the receipt, use `apply` with exactly the same inputs and
+private evidence, `--reviewed-dry-run` and one stable `--idempotency-key`. Then
+use `readback` with that same evidence. The deployed API must include this
+capability and use PostgreSQL fencing; running the client from a newer checkout
+does not activate it. Keep the original bootstrap/resource requests, keys,
+generation and copy-capture witness. The operation creates only the new exact
+edge host, writes its audit and compare-and-writes the testing route binding
+against every reviewed source. It preserves the profile, origin routes,
+targets, storage, passwords, restored database and capture records.
+
+Recovery is forward-only under the original edge key: a lost create response
+can adopt only the exact provider route carrying the reviewed plan's marker.
+That marker is a generated Nginx comment, with no directives or caller-supplied
+config. The service also refuses active redirection/404 host claims before
+creation. Provider legacy protocol settings must retain their supported
+defaults; enable/disable remains the provider's separate lifecycle operation.
+Existing disabled hosts retain that state during updates and can use the normal
+lifecycle endpoints. The provider always creates hosts enabled, so a request
+to create a disabled host refuses before transport rather than briefly exposing
+it. This continuation deliberately publishes an enabled public testing route.
+Its pending audit binds the generation, route authority and exact provider
+payload, so certificate renewal with the same ID and unrelated metadata refresh
+do not strand adoption. Meaningful authority or payload drift still refuses;
+publication revalidates current records and uses a fresh compare-and-write.
+An absent or foreign route after a dispatched create stays unknown and is
+never created again. `readback` checks actual route, certificate and binding;
+a terminal apply replay is historical evidence, not a fresh health check.
+Do not issue a new key, edit records, replay bootstrap/restore, recapture data,
+change the origin certificate policy, or dismiss an incident to resolve TLS.
+Retain private review/receipts outside the checkout for same-key recovery.
+The retained edge host and its certificate are not changed or removed.
+
+Existing provider certificate renewal remains its maintenance path. A changed
+certificate ID or route is drift requiring the supported ingress maintenance
+path and fresh review; this create-only continuation never updates, disables
+or deletes a host. No global proxy restart or verification setting changes.
+After edge publication the operational parent still proves strict public
+HTTPS, exact runtime identity and monitor-driven incident resolution through
+the existing service checks. `public_health_verified` remains false in these
+configuration receipts; source tests or private HTTP success cannot clear the
+real incident.
+
+### Complete verification after public TLS repair
+
+A completed copy and post-deploy pass can precede a public TLS failure. Until
+public verification finishes, the generation remains incomplete and inventory
+still names the previous deployment. Repeating bootstrap or restore would not
+repair that publication gap. This applies to every fresh Odoo testing lane.
+
+`POST /v1/products/{product}/testing-verification` is the Director-agent
+continuation for the same generation and installed terminal deployment. It
+accepts only context, `instance: testing`, original generation operation ID,
+deployment record ID, reason, mode and reviewed plan digest. It derives the
+artifact, target, database, hostname and copy witness from service records.
+Production and slot-cutover lanes are excluded.
+
+```bash
+uv run python scripts/complete-testing-verification.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product example-odoo --context example \
+  --operation-id original-testing-generation-operation \
+  --deployment-record-id installed-terminal-deployment \
+  --reason 'Finish public verification after TLS repair' \
+  --evidence-file /private/operator-evidence/testing-verification.json
+```
+
+Review the private evidence, then repeat the identical arguments with `apply`,
+`--reviewed-dry-run` and one stable `--idempotency-key`. Use `readback` with
+the same evidence afterward. The service must already expose this capability;
+apply requires PostgreSQL. A newer local checkout does not activate the API.
+
+Both planning and application qualify the current target, actual running web
+and runner image digests and deployment identity, original database copy marker,
+isolated volumes/networks and payload-bound web gate. The fixed host inspection
+acquires the shared copy lock (recreating only its empty coordination file after
+host reboot or temporary-file cleanup) and performs no restore,
+registry initialization, setting change, container restart or provider schedule.
+All public HTTPS health, canonical, logo and runtime-identity checks must pass.
+A hold, active operation/fence, changed generation/authority, missing copy
+witness, wrong artifact or later deployment refuses publication.
+
+Application holds the generation executor lock and existing synchronous lane
+reservation, preventing another deploy from starting. After the live reads,
+a short authority comparison transaction preserves the failed deployment in a
+separate prior-evidence record, completes the original deployment, and publishes
+inventory, testing release tuple and generation completion atomically. Original
+operation requests, keys, terminal results, retry budgets, capture receipts,
+retained custody and the restored password are unchanged. The new deployment's
+`testing_verification_previous_record_id` links the preserved failure.
+
+Recovery uses the exact reviewed request and original key. Once the original
+request commits, a lost response replays its atomic receipt without another
+provider effect. An active original executor reports `testing_verification_in_progress`;
+observe its completion before same-key recovery. `readback` separately
+checks current records and live evidence. A failure before commit publishes
+nothing. Preserve evidence and record a refusal with its trace; never change
+records by hand, reset attempt budgets or restore again. If authority changed,
+review the changed evidence before planning further. Incidents resolve through
+normal monitor checks after truthful inventory publication; this endpoint never
+dismisses or edits an incident. Keep operational acceptance open until that
+monitor observation is recorded.
 
 ### Retire an incomplete legacy generation into custody
 
@@ -911,6 +1157,78 @@ forward-fix. There is no production rollback or cleanup step in this testing-onl
 procedure. Retained old targets, storage, partial-copy evidence and hostnames stay
 in custody until separately authorized disposition.
 
+## Never-served testing generations
+
+Before consulting records, the service must observe no serving Odoo process, or
+two unchanged complete inventories with no containers for the exact project, and
+read a complete empty provider deployment history for that exact target. The
+empty-inventory path supports fresh bootstrap resources before the first container
+exists; unreadable or changing inventories never qualify. Process
+inventory is read before the serving configuration, so a closed startup gate can
+be inspected without creating a configuration. A running process with an unreadable
+configuration/session/login store, an incomplete history, or any provider deployment
+cannot be overridden by this rule. These are collection-time checks, not a reservation
+against someone starting a lane afterward; collect immediately before apply.
+
+The service collector can qualify non-use without reading a serving configuration
+only for a generation with a complete lifetime witness, created by the supported
+fresh-resource bootstrap. It requires all of the following:
+
+- The exact current target has one current generation,
+  its original bootstrap operation and its matching fresh-resource allocation.
+- Lifetime tracking began when that generation was prepared. The bootstrap has
+  not completed, no drill database was selected, and the witness has never been
+  revoked. Legacy records have no witness and stay UNKNOWN; there is no backfill.
+- Complete public and private HTTP histories since preparation both contain
+  failed public checks whose base, health and probed URLs bind to the generation's
+  hostname, and failed private checks
+  bound to its active, lane-owned private endpoint authority. Private observations
+  have no public base URL. Neither history may contain a successful or skipped
+  check or target. Missing either history or private endpoint authority stays UNKNOWN.
+- No deployment record since preparation exists, even a failed deployment, and
+  no current inventory publication since preparation exists. This includes
+  uncertain serving attempts, not just successful final health checks.
+- No current hold or recorded use exists. Setting a hold permanently revokes
+  the generation's witness, even if the hold is later lifted. Known use also
+  revokes it even when a delayed positive-use observation is rejected by ordering.
+  A hold already present at generation creation also revokes it. Retired custody
+  is immutable and supplies no current-generation proof. A testing deployment
+  record revokes it atomically when written, before provider dispatch, covering
+  both service and other replacement routes. The guarded
+  replacement worker also revokes it before its first provider dispatch, including
+  a dispatch that times out; that revocation covers all later chunks in the
+  attempt. This deliberately excludes more states than only an acknowledged web
+  start; an incomplete restore is not assumed safe.
+
+Only their conjunction produces `usage=unused`, reason `never_served`. Session
+and login booleans remain null: this is a separate proof, not an empty-session
+claim. Source reads are complete DB queries, without a history limit. Pure collection
+reads do not hold the global authority write lock; revoked generations return
+early. Publication and consumption use their existing locked transaction. The proof
+binds to the generation rather than a growing list of failed checks. Failed checks
+against an earlier route do not count toward coverage. The predicate is rechecked
+under the shared authority lock before publication and again when
+consumed, including through the supersession snapshot adapter. Dispatch/hold
+revocation removes an already-published never-served usage witness; a delayed
+collector cannot republish it. An observation with needed-copy, shared-resource
+or separation-staging protection retains those facts, binding and expiry with
+usage set to UNKNOWN, so revocation cannot erase independent protection. Data custody, physical
+isolation, backup gates and retained-operation fences remain independent.
+
+Use the existing evidence-only `scripts/collect-disposable-lane.py collect`
+procedure. When runtime occupancy is unavailable, the service tries this rule
+and returns a bounded `never_served_qualification` result. Skipped qualification
+is `never_served_not_attempted`; an older response without the field is
+`never_served_diagnostics_unavailable` in the client. The client cross-checks a
+positive qualification against the matching usage reason. A missing source,
+legacy witness, uncertain dispatch, served-once record or incomplete history
+stays UNKNOWN. Never start or repair a lane to manufacture negative evidence.
+A newer client rejects an older service's different coverage; deliver compatible
+API and Odoo workers together before using this path. After tracked generations
+exist, retain a compatible image and forward-fix: older images cannot read the
+new generation fields or enforce lifetime revocation. No migration, grant or
+production change enables the rule.
+
 ## Scheduled Odoo testing rebuild drill
 
 The API service owns a daily drill for each enabled active Odoo testing lane. It queues
@@ -939,7 +1257,8 @@ hold. Every account counts, including staff, Client, portal and administrator
 accounts; no maintained account list or current-use registry is required. The
 read excludes logins older than copy preparation, uses a read-only SQL transaction,
 creates no Odoo login, and returns only a
-boolean. Recent sign-ins, a hold or an unreadable check skip the daily slot with
+boolean. A hold skips the daily slot. On a serving or unverified lane, recent
+sign-ins or an unreadable check also skip the slot with
 a value-free reason on the lane's drill evidence. Missing tables/databases,
 runtime mismatch, provider refusal, incomplete reads and unavailable credentials
 cannot mean idle. This is the agreed recent-use check, not proof that an old
@@ -984,7 +1303,13 @@ does not expire in the middle of that continuously leased restore. A reclaimed
 attempt requires fresh admission. It reads login history from the original served database and its committed
 copy witness, including when web is stopped or the new copy is incomplete;
 copied production login rows in the new database cannot stand in for testing use.
-An unavailable original database still skips rather than assuming non-use.
+An unavailable original login database normally skips rather than assuming
+non-use. The verified-down repair rule above can instead qualify usage while
+preserving UNKNOWN; the independent resource/copy inspection must still pass.
+This also applies when Launchplane's own stop or stalled operation caused the
+downtime: excluding that cause would recreate a repair deadlock. The original
+database is retained and the already-opened new-copy gate below still protects
+testers; an explicit staff-testing hold always refuses the operation.
 If the selected new copy already has its web-start gate, reclaim
 skips and preserves it: people may have used it before final completion was
 recorded. A stopped web process alone does not erase that gate's protection.
@@ -1002,28 +1327,92 @@ A drill can stop the testing web service, replace its disposable contents, load
 the production source with the existing bounded read-only export, and consume
 testing storage. It never changes production data, ports, storage, routes,
 credentials or permissions. Its copy has live keys and outbound connections
-removed before the first registry process. After the new copy passes sanitization,
-module and integration readback, the restore guard may dispose of the older
-service-created drill database and its filestore. The immediate completed
-predecessor is retained through final web/health checks, including when those
-checks fail. Only the copy two generations behind can be disposed of, and it must carry
-its exact committed copy witness; DROP uses no FORCE, so an unexpected connection
-refuses disposal. The new copy is distinct and the initial bootstrap database
-is retained. Successful cleanup bounds steady-state drill storage to the initial copy, current
-copy, immediate predecessor and in-progress copy. Cleanup runs after the sanitized
-new web process starts; a cleanup refusal preserves that working copy, emits
-`testing_drill_disposal_deferred=true` in the operation logs, and retains the old
-copy under the slot receipt's custody. Deferred cleanup and failed partial
-captures/copies require explicit disposition and can accumulate; admission does
-not establish available filesystem capacity. Durable deferred-disposal telemetry,
-capacity admission and bounded cleanup reconciliation are tracked in
-[#3729](https://github.com/cbusillo/launchplane/issues/3729).
+removed before the first registry process. The immediate completed predecessor,
+initial bootstrap database and current selection are retained. Disposal runs
+before a later drill selects its new database, independently of that new copy's
+health. Up to four outstanding slot receipts are reconciled per worker pass,
+oldest first, against fresh authoritative unused/reproducible/isolated facts,
+no hold, unchanged resource allocation and actual container/backing-consumer
+inspection. The same host lock excludes restore and cleanup processes. A copy
+must have its exact committed database witness; DROP uses neither FORCE nor
+connection termination. A connected database or failed filestore removal stays
+deferred. No receipt or failed raw-copy evidence is erased.
+Copies from different resource generations, protected current/predecessor copies,
+and legacy absent databases with a remaining filestore but no host write-ahead
+receipt become retained attention. They are never deleted, remain queryable and
+alert through the existing policy, but do not permanently block the new lane.
+An outstanding retriable disposal prevents the next capture from starting;
+the last healthy copy keeps serving. Later scheduled attempts reconcile the
+same original identities instead of adding another copy to a growing backlog.
+Successful bounded batches with more work requeue the same slot for another worker
+pass before capture, without a cleanup-failure alert or waiting for tomorrow.
+Completed batch snapshots remain immutable when the latest intent is reused.
+
+Before DROP, the host fsyncs a write-ahead receipt in its account's private
+`~/.local/state/launchplane-testing-disposal/<namespace>/` directory, outside
+PGDATA and container mounts, binding the original database and witness. If DROP succeeds but filestore
+removal or transport fails, the original-key retry reacquires the host lock and
+uses that receipt. An absent database with a remaining filestore and no receipt
+is retained without deleting files; absence of both needs no deletion. Foreign witnesses, symlinks and
+current/immediate-predecessor identities are refused. Directory-relative,
+no-follow opens protect receipt creation/readback, and actual mount inspection
+refuses any writable container access to the host state directory. Historical slot receipts
+remain queryable after cleanup. Legacy `testing_drill_disposal_deferred` log
+markers are consumed into service evidence, but new copies no longer perform
+inline best-effort deletion after web startup. Activated failed/cancelled slots
+stay in the ledger too; success is not the source of disposal custody.
+
+Each testing lane's `odoo_testing_drill_storage` record supplies positive integer
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`.
+`staging_bytes` covers the complete working staging peak: SSH host staging must
+include both dump and rsynced filestore; the runner copy holds the dump. Native
+staging must include chunks and assembled artifacts. Already verified staged
+native bytes are deducted at the later host check, while space for the immutable
+capture's assembly remains required. Set these
+working-headroom requirements through the existing authenticated product-profile
+write path, preserving the rest of the current profile. There are no invented
+real sizes, default budgets, new grants or assumed observation lifetimes.
+Unconfigured requirements refuse a drill before database selection. Choose the
+requirements from qualified source size and restore/staging overhead; they are
+an explicit capacity requirement, **not a quota or a claim about future source
+growth**. A budget is not established by a healthy deployment or yesterday's
+free-space observation.
+
+A capacity-only pass sends no deletion candidates and requires no general
+positive custody observation. Recorded holds, use, only-copy or shared-resource
+protection still wins, including expired protection. Receiver inspection proves
+actual resource isolation and the committed current-copy witness. This read
+does not authorize disposal: any old-copy deletion still requires fresh general
+custody facts for its original receipt; drill-scoped successful-login evidence
+is not silently generalized to other copies.
+
+On every new worker attempt, the shared resource guard reads current filesystem
+capacity, using non-root available bytes and the actual backing device. Demands
+for DB, filestore and capture staging on the same filesystem are summed before
+adding its reserve. SSH capture accounts for both host staging and the runner's
+simultaneous dump copy. Native staging requires a known runner writable-layer
+backing; unsupported storage layouts stay unverified. Cleanup can reclaim old
+copies even when that pass then refuses capacity. Capacity evidence is bound to
+the exact generation, authority and worker attempt before activation, and the
+host repeats the free-space check before touching the web gate or capturing.
+A witnessed existing-copy resume does not demand another complete copy or staging
+allocation. Holds and the existing destructive authorization checkpoint are
+rechecked under the lane/authority locks immediately before sending the remote
+program. Locks are released for the remote wait, then results are recorded under
+locks; changed authority preserves completed cleanup evidence while refusing
+activation from that capacity snapshot.
+Insufficient or unavailable capacity alerts through the existing Discord policy
+and preserves the selected generation and its usable predecessor. This is a
+current admission check, not a filesystem reservation: unrelated writers or a
+source larger than the recorded working requirements can still consume space.
 A failed copy never deletes its predecessor. Final web and health verification
 still gates a passing operation and generation completion.
 
 `GET /v1/products/{product}/environments/testing` includes value-free
 `testing_rebuild_drill` evidence: queued/pass/fail/skipped, observation time,
-operation/deployment IDs, failing step, trace and alert delivery status. A pass
+operation/deployment IDs, failing step, trace, alert delivery status, pending
+disposal count, up to four original pending discard-copy bindings,
+retained-attention count and capacity status. A pass
 requires the worker's health result and this exact generation's committed copy
 completion. It does not replace monitor freshness or prove platform updates.
 Failures use the lane's existing enabled Discord notification destinations and
@@ -1069,3 +1458,28 @@ is not authorized. Private slot receipts retain prior generation identities;
 they are provenance, not a promise that a successfully superseded drill database
 still exists after bounded disposal. Remove failed raw-copy evidence only under
 the existing custody procedure above. No production rollback is part of this drill.
+
+Once a profile or generation contains a drill storage budget, use this image or a
+compatible successor for recovery. Older images cannot interpret those fields;
+forward-fix rather than removing custody evidence to roll back. Disabling the
+existing drill flag prevents new scheduled captures and changes no retained copy.
+
+For a deliberately retained copy, the existing authenticated profile path accepts
+`odoo_testing_drill_storage.retained_copy_bindings`, a list of exact original
+committed discard-copy bindings exposed as `disposal_pending_bindings` in that
+existing environment evidence. The bounded service
+pass records these as retained attention without deleting data, erasing receipts,
+changing identity or granting access. This is the supported continuation for a
+copy that must stay connected or cannot be removed: it prevents an indefinite
+retriable-cleanup block while preserving its storage/custody. Capacity and fresh
+lane safety still gate each new capture. It is not a recurring manual usage
+approval or permission to delete a retained copy. Budget or retention edits made
+before activation are accepted only after fresh capacity qualification and only
+while every other source/copy identity remains unchanged. Once selected, recovery
+keeps the original generation and its budget.
+
+The guarded terminal program send has its own bounded deadline; expiry shuts
+down that connection and retains original-key uncertainty. Alert delivery writes
+only delivery fields for its original failure, and cannot overwrite worker
+storage/disposal evidence. A hold or positive use report arriving while a completed
+cleanup result is in flight preserves that result but skips the new activation.

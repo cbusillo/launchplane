@@ -40,6 +40,7 @@ from control_plane.merge_train import MergeTrainReviewConversations
 from control_plane.merge_train import review_conversations_reason
 from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import _stack_collapse_commit_message
 from control_plane.merge_train_github import MergeTrainGitHubCandidateEntryConflictError
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
@@ -710,12 +711,16 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 {
                     "sha": "parent-after-child",
                     "commit": {
-                        "message": (
-                            "Launchplane stack collapse collapse-123: merge PR #11 into PR #10"
-                        )
+                        "tree": {"sha": "planned-tree"},
+                        "message": _stack_collapse_commit_message(
+                            collapse_id="collapse-123",
+                            child_pull_request_number=11,
+                            parent_pull_request_number=10,
+                        ),
                     },
                     "parents": [{"sha": "parent-head"}, {"sha": "child-head"}],
                 },
+                {"head": {"sha": "child-head"}},
             )
         )
 
@@ -726,17 +731,45 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             child_head_sha="child-head",
             expected_parent_head_sha="parent-head",
             parent_head_ref="feature/root",
+            expected_merge_tree_sha="planned-tree",
             collapse_id="collapse-123",
             child_pull_request_number=11,
             parent_pull_request_number=10,
         )
 
         self.assertEqual(merge_commit_sha, "parent-after-child")
-        self.assertEqual(transport.requests[-1].method, "GET")
-        self.assertEqual(
-            transport.requests[-1].path,
-            "/repos/example/merge-train-repo/commits/parent-after-child",
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+
+    def test_find_stack_child_merge_commit_rejects_forged_merge_tree(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="forged-merge"),
+                {
+                    "sha": "forged-merge",
+                    "commit": {
+                        "message": _stack_collapse_commit_message(
+                            collapse_id="collapse-123",
+                            child_pull_request_number=11,
+                            parent_pull_request_number=10,
+                        ),
+                        "tree": {"sha": "unreviewed-tree"},
+                    },
+                    "parents": [{"sha": "parent-head"}, {"sha": "child-head"}],
+                },
+            )
         )
+
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            GitHubMergeTrainClient(transport=transport).find_stack_child_merge_commit(
+                repository="example/merge-train-repo",
+                child_head_sha="child-head",
+                expected_parent_head_sha="parent-head",
+                parent_head_ref="feature/root",
+                expected_merge_tree_sha="planned-tree",
+                collapse_id="collapse-123",
+                child_pull_request_number=11,
+                parent_pull_request_number=10,
+            )
 
     def test_find_stack_child_merge_commit_rejects_unrelated_branch_advance(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
@@ -756,6 +789,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 child_head_sha="child-head",
                 expected_parent_head_sha="parent-head",
                 parent_head_ref="feature/root",
+                expected_merge_tree_sha="planned-tree",
                 collapse_id="collapse-123",
                 child_pull_request_number=11,
                 parent_pull_request_number=10,

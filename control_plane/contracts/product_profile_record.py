@@ -8,6 +8,7 @@ from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
 from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, model_validator
 
@@ -34,6 +35,11 @@ class ProductImageProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repository: str = ""
+    scan_enabled: bool = Field(
+        default=False,
+        exclude_if=lambda value: value is False,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_image(self) -> "ProductImageProfile":
@@ -299,6 +305,11 @@ class ProductLaneProfile(BaseModel):
         exclude_if=lambda value: not value,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
+    odoo_testing_drill_storage: OdooTestingDrillStorageBudget | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     instance: str
     context: str
@@ -332,7 +343,9 @@ class ProductLaneProfile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductLaneProfile":
-        if self.odoo_testing_drill_enabled and self.instance != "testing":
+        if (
+            self.odoo_testing_drill_enabled or self.odoo_testing_drill_storage
+        ) and self.instance != "testing":
             raise ValueError("Odoo testing drills require the testing instance.")
         if not self.instance.strip():
             raise ValueError("product lane profile requires instance")
@@ -356,6 +369,11 @@ class ProductPreviewProfile(BaseModel):
         pattern=r"^(-[a-z0-9-]+)?$",
     )
     template_instance: str = "testing"
+    generic_web_extensions: GenericWebLaneExtensions = Field(
+        default_factory=GenericWebLaneExtensions,
+        exclude_if=lambda value: not value.configured,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     required_template_env_keys: tuple[str, ...] = ()
     copied_env_keys: tuple[str, ...] = ()
     omitted_env_keys: tuple[str, ...] = ()
@@ -413,6 +431,8 @@ class ProductPreviewProfile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_preview(self) -> "ProductPreviewProfile":
+        if any(item.on_reset for item in self.generic_web_extensions.maintenance):
+            raise ValueError("Reset-only commands require a recorded testing lane, not a preview.")
         if self.enabled and not self.context.strip():
             raise ValueError("enabled product preview profile requires context")
         if self.enabled and "{number}" not in self.slug_template:
@@ -646,10 +666,14 @@ class ProductOwnerProfile(BaseModel):
 ReleaseOnAcceptance = Literal["held", "promote", "promote_with_rollback_drill", "director_standing"]
 
 
+APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION = 2
+CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION = APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION
+
+
 class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(default=CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION, ge=1)
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
@@ -771,6 +795,10 @@ class LaunchplaneProductProfileRecord(BaseModel):
         if self.lifecycle_state != "active" and self.preview.enabled:
             raise ValueError("non-active product profiles cannot retain enabled previews")
         for lane in self.lanes:
+            if lane.instance != "testing" and any(
+                item.on_reset for item in lane.generic_web_extensions.maintenance
+            ):
+                raise ValueError("Reset-only commands require the recorded testing lane.")
             if lane.generic_web_extensions.verification_extension and (
                 self.driver_id.strip() != "generic-web" or lane.instance != "testing"
             ):
@@ -808,6 +836,17 @@ class LaunchplaneProductProfileRecord(BaseModel):
         )
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
+        legacy_extensions = self.preview.transport_extension == "verireel-postgres" or any(
+            lane.generic_web_extensions.verification_extension == "verireel-testing"
+            for lane in self.lanes
+        )
+        if legacy_extensions and (
+            self.schema_version < CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION
+            or "schema_version" not in self.model_fields_set
+        ):
+            raise ValueError(
+                "Legacy extension writes require a fresh current-schema profile; read the current profile and use the reviewed generic-web transition to preserve or remove declarations explicitly."
+            )
         for lane in self.lanes:
             for check in lane.health_monitoring.checks:
                 if not check.enabled:

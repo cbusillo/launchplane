@@ -16,7 +16,7 @@ from typing import Any, Callable, Protocol, cast
 
 from pydantic import BaseModel
 from control_plane.lane_movement import LaneMovementRefused
-from control_plane.odoo_testing_drill import DrillSkipped
+from control_plane.odoo_testing_drill import DrillSkipped, DrillPrerequisite
 from control_plane.odoo_testing_restore import read_current_testing_generation
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
@@ -741,17 +741,6 @@ def run_odoo_stable_operation_worker_once(
         if promotion_store is not None
         else None
     )
-    if (
-        promotion_operation is None
-        and cutover_provider_factory is not None
-        and isinstance(record_store, PostgresRecordStore)
-    ):
-        promotion_operation = record_store.claim_odoo_cutover_reconciliation_record(
-            lease_owner=normalized_lease_owner,
-            lease_expires_at=claim_expires_at,
-            claimed_at=claim_started_at,
-            max_attempts=max_attempts,
-        )
     if promotion_store is not None and promotion_operation is not None:
         terminal_write_committed = _execute_prod_promotion_operation(
             record_store=promotion_store,
@@ -816,6 +805,36 @@ def run_odoo_stable_operation_worker_once(
             recovered_operation_ids=recovered_operation_ids,
             terminal_write_committed=terminal_write_committed,
         )
+    # Held recovery yields to pending release queues. Its persisted delay also
+    # survives a worker restart and preserves the provider-attempt budget on denial.
+    if (
+        promotion_store is not None
+        and cutover_provider_factory is not None
+        and isinstance(record_store, PostgresRecordStore)
+    ):
+        promotion_operation = record_store.claim_odoo_cutover_reconciliation_record(
+            lease_owner=normalized_lease_owner,
+            lease_expires_at=claim_expires_at,
+            claimed_at=claim_started_at,
+            max_attempts=max_attempts,
+        )
+        if promotion_operation is not None:
+            terminal_write_committed = _execute_prod_promotion_operation(
+                record_store=promotion_store,
+                control_plane_root_path=control_plane_root_path,
+                operation=promotion_operation,
+                cutover_provider_factory=cutover_provider_factory,
+                lease_owner=normalized_lease_owner,
+                lease_seconds=lease_seconds,
+                heartbeat_seconds=heartbeat_seconds,
+            )
+            return OdooStableOperationWorkerResult(
+                status="worked",
+                operation_kind="odoo_prod_promotion",
+                operation_id=promotion_operation.operation_id,
+                recovered_operation_ids=recovered_operation_ids,
+                terminal_write_committed=terminal_write_committed,
+            )
     # Last, so a real deploy operation always wins over a plan.
     if hasattr(record_store, "claim_next_product_reconcile_request"):
         reconciled = run_product_reconcile_once(
@@ -2248,6 +2267,16 @@ def _execute_target_replacement_with_checkpoint(
                 deploy_failure_description(TESTING_RESTORE_REQUIRED_CODE),
             )
         if isinstance(record_store, PostgresRecordStore):
+            from control_plane.odoo_testing_storage import prepare_drill_storage
+
+            prepare_drill_storage(
+                record_store,
+                operation,
+                control_plane_root_path,
+                checkpoint=lambda: authorization_guard.recheck_provider_effect(
+                    TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE
+                ),
+            )
             record_store.activate_odoo_testing_drill(operation, time.time())
         require_unchanged_production_artifact(
             record_store=record_store,
@@ -2307,12 +2336,25 @@ def _execute_target_replacement_with_checkpoint(
             }
         )
     except Exception as error:
-        logging.exception(
-            "Odoo stable target replacement operation %s failed before producing a result.",
-            operation.operation_id,
+        storage_pending = (
+            isinstance(error, DrillPrerequisite)
+            and error.code == "testing_storage_reconciliation_pending"
         )
+        if storage_pending:
+            logging.info("Odoo testing storage reconciliation will continue in the worker queue.")
+        else:
+            logging.exception(
+                "Odoo stable target replacement operation %s failed before producing a result.",
+                operation.operation_id,
+            )
         terminal_operation = (
-            _retry_source_order_read(operation)
+            _retry_source_order_read(
+                operation,
+                code="testing_storage_reconciliation_pending",
+                message="Continue bounded storage reconciliation before selecting a new copy.",
+            )
+            if storage_pending
+            else _retry_source_order_read(operation)
             if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable"
             else operation.model_copy(
                 update={
@@ -2401,7 +2443,12 @@ class _StaffTestingHoldError(Exception):
     """A reconcile deploy reached a testing lane that site staff hold; nothing ran."""
 
 
-def _retry_source_order_read(operation: Any) -> Any:
+def _retry_source_order_read(
+    operation: Any,
+    *,
+    code: str = "lane_movement.source_order_unavailable",
+    message: str = "Source history could not be read; retry before any provider write.",
+) -> Any:
     """Keep a no-effect source read refusal durable and available to the worker."""
     return operation.model_copy(
         update={
@@ -2412,8 +2459,8 @@ def _retry_source_order_read(operation: Any) -> Any:
             "lease_owner": "",
             "lease_expires_at": "",
             "heartbeat_at": "",
-            "error_code": "lane_movement.source_order_unavailable",
-            "error_message": "Source history could not be read; retry before any provider write.",
+            "error_code": code,
+            "error_message": message,
             "result": None,
         }
     )

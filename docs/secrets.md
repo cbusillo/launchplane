@@ -144,7 +144,81 @@ not performed by these readers. For a source rollback,
 older reader code uses the bootstrap binding and may be unable to authenticate
 against a preserved restored login. Do not solve that by changing the login.
 
+## Odoo config-parameter reference agreement
+
+A typed config-parameter's `secret_binding_id` identifies the binding delivered
+under its neutral `ODOO_OVERRIDE_SECRET__CONFIG_PARAM__*` environment key. The
+payload keeps both fields for adapter compatibility. The adapter consumes the
+environment key; Launchplane checks the binding metadata before rendering. A
+context binding shadowed by an exact-lane binding must be reconciled before
+replacement planning, runtime delivery or post-deploy can render that override.
+An explicitly selected Fishbowl preview source is separate: its existing copy
+resolver qualifies the read-only testing binding and delivers that binding's
+value directly. Its transient payload must match that exact qualified source
+and preview; it cannot waive agreement for a stored lane override.
+
+Use the service route
+`/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile`:
+
+1. GET the value-free plan, or POST `{"mode":"dry-run","keys":["example.password"]}`
+   to select existing secret-backed parameters. The result lists parameter/key
+   names, whether each reference agrees, and a `review_digest`. It reads secret
+   metadata only, never secret versions, ciphertext or passwords.
+   GET reviews all secret-backed parameters and returns an empty plan when none
+   exist. To review a subset, POST that subset in dry-run mode; apply must use
+   exactly the reviewed key set, or the digest will differ.
+2. After reviewing the exact lane and plan, POST the same `keys`, `mode: "apply"`,
+   the returned `review_digest`, and `confirmation: "APPLY PRODUCT/ENVIRONMENT"`.
+   Use the existing signed-in admin or `local_operator` service authentication;
+   browser writes require Origin and CSRF. GET requires
+   `product_environment.read`, dry-run requires `product_config.plan`, and apply
+   requires `product_config.apply` for that product/lane. Terminal-agent
+   credentials remain read/plan only. This adds no authorization grant.
+3. Apply changes those reference pointers to the bindings already selected
+   by lane delivery. Its independent record readback must match. GET again to
+   confirm `already_agrees`. No managed secret, binding, classification, sharing
+   metadata, runtime environment, provider or Odoo database is changed. Full
+   override intent and apply receipts are preserved. `updated_at` and
+   `source_label` record the metadata edit's time and service path; keep its
+   authenticated request/trace receipt with the reviewed production operation.
+
+The review covers the product profile, full override snapshot, lane secret
+metadata (including versions and disabled candidates) and retirement metadata.
+The service replans on apply and checks those snapshots under the authority
+transaction lock, including newly inserted candidates. HTTP 409 means read the
+record back and review again; the correction may have committed before a
+subsequent edit changed its readback. Never replay an uncertain write blindly.
+Changing a literal's JSON type also invalidates the snapshot; unrelated values
+retain their types when an override is written.
+An already-agreeing plan with a fresh digest applies as a no-op. An old digest
+does not authorize another correction after the record changes.
+
+Missing, disabled, wrong-scope, wrong-key or ambiguous references fail closed.
+Context inheritance follows normal lane delivery; global and other-product
+secrets cannot be selected. The correction cannot create/relabel/copy a secret
+or unretire a key. Resolve those separate authority problems through their
+existing supported paths, then obtain a fresh plan. After later selection drift,
+use this same reviewed correction again; do not remove the render check.
+There is no automatic inverse to an obsolete pointer: recovery always follows
+current delivery authority. Reverting source does not undo corrected metadata,
+whose payload schema remains compatible.
+
+Deploy compatible API/worker source before using the route. Source delivery is
+not permission for a production correction or a later sync/deploy. Each live
+action retains its own review, authorization and Director/Client boundary.
+Enforcement becomes active with this source. A lane with a known mismatch
+remains blocked until its separately authorized reviewed metadata correction;
+do not attempt a release or post-deploy on that lane first.
+
 ## Current Contract
+
+[Private testing TLS](private-testing-transport.md) uses purpose-separated
+Chris-owned certificate/key files, mounted read-only by the isolated proxy.
+Agents handle only public CA/leaf metadata and custody references. The optional
+testing endpoint `tls_ca_pem` stores public CA certificates with that exact
+endpoint; its probe uses a separate verified TLS context trusting only that public bundle. It is not a managed
+secret, private-key input or process-wide trust change. The receiver's CA bundle
+and real issuer/key provisioning remain the custodian's reviewed steps.
 
 The [testing local-consumer path](testing-local-consumer.md) delivers one exact
 testing bridge binding through a human-reviewed recipient-encrypted envelope.

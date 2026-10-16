@@ -10,8 +10,12 @@ ownership. Preparation changes no Odoo database, deployment or access grant.
 The request names the product/context, `instance: prod`, a reason, and
 `website_settings: {artifact_id, settings}`. The artifact must be the product's
 current recorded testing artifact. The origin must match the production lane's
-recorded HTTPS base URL; configure that URL through the existing product-profile
-service API/UI before preparing settings if it is absent. Settings contain the native `website_id`,
+resolved HTTPS base URL: the first public hostname on its tracked target takes
+precedence, using the same public-host resolver as stable deployment. Without
+public hostnames, the recorded product-profile base URL remains the fallback.
+The profile's internal origin and health URLs need no rewrite to prepare public
+settings. Preparation rechecks this resolution on apply; it changes no target,
+profile or live website setting. Settings contain the native `website_id`,
 `public_origin` (HTTPS), `public_indexing_enabled`, `google_analytics_key`
 (`G-…` or empty), `cookies_bar` and `block_third_party_domains`. Empty analytics
 supports preparing indexing before the stream is supplied. GA4 requires both
@@ -64,12 +68,19 @@ not retain forward-release settings. Collection-only historical rollback preserv
 applied snapshot separately from pending intent, so subsequent review compares
 against production's applied settings. A failed maintenance retains its exact attempted snapshot as unverified, outside the production checklist; the existing maintenance or durable operation retry must verify it before a new release review.
 
-The supported application path is the stopped-web stable-target replacement driver.
-The two-slot host provider currently has no website-settings maintenance receipt;
-promotion with website snapshots refuses before provider effects. Preparation
-and release review remain supported, and existing products configured for the
-stable-target driver use the path above. Two-slot activation requires adding that
-provider capability ([#3620](https://github.com/cbusillo/launchplane/issues/3620)); never change a live product's driver to bypass the refusal.
+The stopped-web stable-target replacement driver supports native application.
+Two-slot lanes use the service's admitted host factory and native maintenance,
+settings and writer adapters described in
+[the cutover binding contract](generic-web-two-slot-releases.md). The installed
+host must provide startup preflight and recreation in both slots; missing
+capabilities refuse before candidate effects. The same writer inventory flows
+through fencing, settings verification and handoff. A rollback factory refusal
+records a failed rollback before any provider effect, preserving its failure
+receipt instead of leaving it pending. Installed-package import or construction
+errors report an unavailable host capability without exposing package details.
+Source assembly does not
+prove installation, lane activation or visitor behavior; #3268 retains that
+qualification. Never change a live product's driver to bypass the refusal.
 
 The devkit consumer runs on data workflows and every web startup, clearing
 every copied website's native GA key and disabling
@@ -94,3 +105,15 @@ Native Odoo consent behavior remains Essential only / Accept all. These fields
 are an application contract, not proof of Client consent acceptance, personal-
 data exclusion from events, provider event delivery or real visitors. The
 product's analytics issue owns those checks and the real Measurement ID.
+
+Startup preflight checks each observed Compose service's literal image against
+the slot's immutable image and requires the authoritative `.env` last in its
+`env_file` list, without an explicit payload override. An interpolated/mutable
+image or a later env-file override refuses before writes; install the admitted
+immutable definition before qualification. Recreation always reads the new
+container identities, even after a lost reply. An unavailable identity readback keeps the release held. A later unique
+Compose readback recovers the inventory before retrying; zero or multiple
+containers remain uncertain and require the installed host's recovery procedure.
+The host transport must qualify interruption/convergence and fresh inventory
+reconstruction on restart before activation (#3268). Source support does not
+supply a live admin repair path or treat removed IDs as a successful receipt.

@@ -97,7 +97,9 @@ before its guarded startup.
 
 The `OdooRecoveryTuple` records both backup IDs, image, selected database,
 recovery timestamp and dump/filestore hashes. Image-only rollback of a
-database-changing release refuses. Use the existing authorized coherent-tuple
+database-changing release refuses. Rollback target resolution and the product
+path check share that same refusal: `rollback_requires_coherent_restore` is a
+blocked image-rollback path, never a recorded usable target. Use the existing authorized coherent-tuple
 restore workflow; source cutover work never authorizes restoring a live site's
 data or overwriting later business writes.
 
@@ -110,6 +112,16 @@ removed. It cannot recreate that lane's serving project. Use the accepted
 two-slot release path; repairing missing lane authority requires restoring its
 record before another release. Apply rechecks current lane authority after
 planning and before any provider effect.
+
+Stable logs and outgoing-email diagnostics select the slot in current serving
+inventory from the lane's recorded Compose coordinates. They inspect that
+slot's container/image/runtime identity and reject missing slot authority or an
+unfinished cutover. Switch-back events prove the retained runtime identity
+through their explicit deployment link. Mail diagnostics use the recorded
+public route host and independently verify its current runtime identity before
+authentication; private slots do not acquire public Dokploy domains. Selection
+is checked again after the read, so a concurrent switch cannot return stale
+diagnostics as current evidence.
 
 `DeploymentCutoverStore` stores typed checkpoints, slot/route identities,
 classification, maintenance/readiness/backup observations and the full
@@ -131,7 +143,12 @@ releases cannot bypass another unfinished cutover; recover it first. Configured
 two-slot lanes also refuse an in-place rollback after a switch-back event.
 Authorization is checked again at recovery boundaries. Denial performs no
 effects and keeps the unfinished cutover's lane hold without consuming the
-provider retry budget. A refused finished-release replay preserves its existing
+provider retry budget. Held cutover reconciliation yields to pending release
+queues, including rollback and replacement. Product reconciliation remains
+available between delayed recovery attempts. A persisted
+30-second delay after the last recovery update prevents immediate reclaims
+after denial and survives worker restarts; other eligible lanes remain claimable.
+A refused finished-release replay preserves its existing
 promotion audit record. Switch-back intent persists its start time so a crash
 before publishing the deployment event cannot replace it with retry times.
 The direct promotion
@@ -171,7 +188,62 @@ including recovery from persisted intermediate steps. The deployment bridge
 records the verified applied baseline separately from pending preparation.
 
 The installed host adapter must bind `configure_startup` and the driver's
-`website_settings` capability. The former merges the selected snapshot and its legacy indexing parameter
+`website_settings` capability. `dokploy.slot_startup.DokploySlotStartup` supplies
+the concrete Compose startup operation using the existing host transport and
+the same `ContainerSlotWriters`. Read-only preflight verifies both projects'
+observed Compose files and env-file consumption. Under the writer fence it
+preserves unrelated provider/file payload values, reads back both, recreates
+only inventoried consumers with `up --no-start --no-deps`, and refreshes their
+shared inventory before native image/settings verification. An incomplete or
+uncertain recreation keeps the release held. Source delivery does not install
+this capability or configure a real lane.
+
+### Interrupted startup recovery
+
+`DokploySlotStartup` requires an explicit host `authority_directory`: an existing,
+canonical private runtime directory, persistent across API/worker replacements
+and available through the same admitted host transport. It is recovery evidence,
+not checked-in configuration or a second lane catalog. Before the first provider,
+file or recreation effect, the adapter atomically publishes and fsyncs an immutable
+record keyed by the complete admitted plan. It contains observed project,
+working-directory, Compose-file and writer/service coordinates; no environment
+values or Docker IDs. A conflicting, missing or malformed record never grants
+recovery authority. Retain it while that cutover can require recovery.
+
+Normal startup refreshes IDs from fresh Docker project/service label inventory.
+A lost reply leaves the operation held. If interruption leaves zero or multiple
+containers, the installed host uses `DokploySlotStartup.recover(plan, slot,
+intent, verify_guard=..., active_jobs=...)`, under the original exclusive release
+guard and already-published prepared-serving write pause. `verify_guard` must
+freshly verify both that guard and the persisted pause; `active_jobs` observes the
+selected physical database by logical slot/writer identity, even when no container
+exists. Neither callback may infer drain from a missing or stale Docker ID.
+Reconstruct the writer binding from the original admitted writer identities;
+recovery reloads service coordinates from durable authority before reading IDs.
+It does not repeat native maintenance, clear uncertain maintenance/backup markers,
+close the pause, commit native settings, release a web guard or resume writers.
+
+A recovery call performs one convergence pass, validating both projects, immutable
+Compose images, env-file consumption and every matching container before effects.
+It refuses foreign images/labels/files, one-offs, running/restarting/paused writers
+and undrained jobs. Fully matched stopped duplicate remnants can be removed with
+non-force container removal, retaining volumes. Zero inventory is recreated with
+`up --no-start --no-deps --force-recreate --no-build --pull never`. Both durable
+startup payloads are merged/read back, unique stopped inventory refreshes the
+same shared writer object, and independent effective image/settings/indexing
+verification precedes the receipt. Missing readback, guard loss or a lost reply
+keeps the operation held; a later call begins with fresh observation. There is no
+unbounded retry loop, deployment fallback or shell repair procedure.
+
+Before activation, [the installed qualification](https://github.com/cbusillo/launchplane/issues/3268)
+must prove the host package/transport, persistent authority directory and its
+atomic publication permissions, exact Compose behavior under interruption,
+logical-writer database observer, guard/pause callbacks and shared writer wiring.
+Qualify these capabilities and representative forward/rollback recovery in
+isolation before any exact Client-accepted gated real release; source tests do
+not activate a lane.
+
+`configure_startup` merges the selected snapshot and its legacy indexing parameter
 into both slots' durable managed startup payloads, preserves unrelated settings
 and secrets, and returns `StartupSettingsReadback` only after readback. It must
 recreate every stopped writer container in both slots from those payloads and

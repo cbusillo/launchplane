@@ -91,6 +91,7 @@ class GenericWebDeployRequest(BaseModel):
     source_git_ref: str
     timeout_seconds: int | None = Field(default=None, ge=1)
     no_cache: bool = False
+    reset: bool = False
 
     @model_validator(mode="after")
     def _validate_request(self) -> "GenericWebDeployRequest":
@@ -546,7 +547,9 @@ def execute_generic_web_deploy(
                         deploy_reference=request.deploy_reference,
                     ),
                 )
-            selected_provider = deploy_provider or default_generic_web_deploy_provider()
+            selected_provider = deploy_provider or default_generic_web_deploy_provider(
+                record_store=record_store, control_plane_root=control_plane_root
+            )
             factory = cast(
                 Callable[[GenericWebCutoverPlan], WebCutoverProvider] | None,
                 getattr(selected_provider, "cutover_provider_factory", None),
@@ -620,7 +623,9 @@ def _execute_generic_web_deploy_unserialized(
     normalized_provider_operation_title = provider_operation_title.strip()
     if provider_effect_checkpoint is not None and not normalized_provider_operation_title:
         raise ValueError("Durable generic web deploys require a provider operation title.")
-    resolved_deploy_provider = deploy_provider or default_generic_web_deploy_provider()
+    resolved_deploy_provider = deploy_provider or default_generic_web_deploy_provider(
+        record_store=record_store, control_plane_root=control_plane_root
+    )
     resolved_profile = profile
     resolved_lane = lane
     if resolved_profile is None or resolved_lane is None:
@@ -770,6 +775,28 @@ def _execute_generic_web_deploy_unserialized(
         mark_provider_effect_started()
 
     try:
+        if request.reset:
+            from control_plane.disposable_lanes import DisposableLaneStore, require_disposable_lane
+
+            if rollback or resolved_lane.instance != "testing":
+                raise click.ClickException(
+                    "Application reset requires a disposable testing deploy."
+                )
+            if not any(
+                command.on_reset for command in resolved_lane.generic_web_extensions.maintenance
+            ):
+                raise click.ClickException("The testing profile declares no reset command.")
+            try:
+                require_disposable_lane(
+                    cast(DisposableLaneStore, record_store),
+                    product=resolved_profile.product,
+                    context=resolved_lane.context,
+                    instance=resolved_lane.instance,
+                )
+            except (ValueError, AttributeError) as error:
+                raise click.ClickException(
+                    "Testing reset requires current disposable-lane evidence."
+                ) from error
         desired_build = LaneBuild(
             request.artifact_id,
             request.source_git_ref,
@@ -822,6 +849,8 @@ def _execute_generic_web_deploy_unserialized(
             rollback_source_deployment_record_id=rollback_source_deployment_record_id,
             rollback_target_deployment_record_id=rollback_target_deployment_record_id,
         )
+        if snapshot is not None:
+            snapshot.reset = request.reset
         application_lifecycle = application_lifecycle_for_lane(
             control_plane_root=control_plane_root,
             snapshot=snapshot,

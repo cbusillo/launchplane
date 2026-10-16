@@ -884,6 +884,180 @@
         "sha256": "268032095bd2319af919a168ff034754dcbbd838a893134de873a11cf831780c"
       },
       "verification": "valid"
+    },
+    {
+      "challenge_response": {
+        "canonical_json": "{\"approval_request\":{\"descriptor_id\":\"production-backup-policy\",\"descriptor_version\":1,\"evidence_digest\":\"78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-388d443d5212028b75273a867206f607\",\"operation_id\":\"privileged-operation-023d13328d615ba332a92d104f015606\",\"owner_github_id\":37657042,\"plan_digest\":\"c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09\",\"policy_record_id\":\"owner-policy-023d13328d615ba332a9\",\"policy_revision\":1,\"policy_sha256\":\"2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c\",\"pre_state_digest\":\"92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5\",\"request_digest\":\"0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"production-backup-policy\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-023d13328d615ba332a92d10\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b\",\"channel_binding_sha256\":\"a91603379115c818afd75e6fa9ae60436ae711727421879fd0a9e25934b249d3\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1}",
+        "payload": {
+          "approval_request": {
+            "descriptor_id": "production-backup-policy",
+            "descriptor_version": 1,
+            "evidence_digest": "78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-388d443d5212028b75273a867206f607",
+            "operation_id": "privileged-operation-023d13328d615ba332a92d104f015606",
+            "owner_github_id": 37657042,
+            "plan_digest": "c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09",
+            "policy_record_id": "owner-policy-023d13328d615ba332a9",
+            "policy_revision": 1,
+            "policy_sha256": "2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c",
+            "pre_state_digest": "92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5",
+            "request_digest": "0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "production-backup-policy"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-023d13328d615ba332a92d10",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b",
+          "channel_binding_sha256": "a91603379115c818afd75e6fa9ae60436ae711727421879fd0a9e25934b249d3",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "sha256": "ee072821d56787b203362e35f1ea36619476cb14fa5a1f736f0d9c0ae9981193"
+      },
+      "channel_binding": {
+        "canonical_json": "{\"channel_session_id\":\"channel-session-fed4d7c8f33efb4666a5cdae20c457bf\",\"owner_github_id\":37657042,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "channel_session_id": "channel-session-fed4d7c8f33efb4666a5cdae20c457bf",
+          "owner_github_id": 37657042,
+          "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+          "schema_version": 1,
+          "session_expires_at": "2030-01-02T03:09:05+00:00",
+          "session_issued_at": "2030-01-02T03:00:05+00:00",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "a91603379115c818afd75e6fa9ae60436ae711727421879fd0a9e25934b249d3"
+      },
+      "confirmation_envelope": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"production-backup-policy\",\"descriptor_version\":1,\"evidence_digest\":\"78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-388d443d5212028b75273a867206f607\",\"operation_id\":\"privileged-operation-023d13328d615ba332a92d104f015606\",\"owner_github_id\":37657042,\"plan_digest\":\"c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09\",\"policy_record_id\":\"owner-policy-023d13328d615ba332a9\",\"policy_revision\":1,\"policy_sha256\":\"2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c\",\"pre_state_digest\":\"92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5\",\"request_digest\":\"0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"production-backup-policy\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-023d13328d615ba332a92d10\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b\",\"channel_binding_sha256\":\"a91603379115c818afd75e6fa9ae60436ae711727421879fd0a9e25934b249d3\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"channel_binding\":{\"channel_session_id\":\"channel-session-fed4d7c8f33efb4666a5cdae20c457bf\",\"owner_github_id\":37657042,\"owner_public_key\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"schema_version\":1,\"session_expires_at\":\"2030-01-02T03:09:05+00:00\",\"session_issued_at\":\"2030-01-02T03:00:05+00:00\",\"signature_algorithm\":\"ed25519\"},\"schema_version\":1,\"signature\":\"cdwQ_OxwpRQHMz-Sh01N6TRaQOssNDP3m7dTOH6x_KX7ilDvMZz6e95zrntMFUZeKFgqf91FjxrlP4daCBpWDw\",\"signature_algorithm\":\"ed25519\"}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "production-backup-policy",
+              "descriptor_version": 1,
+              "evidence_digest": "78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-388d443d5212028b75273a867206f607",
+              "operation_id": "privileged-operation-023d13328d615ba332a92d104f015606",
+              "owner_github_id": 37657042,
+              "plan_digest": "c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09",
+              "policy_record_id": "owner-policy-023d13328d615ba332a9",
+              "policy_revision": 1,
+              "policy_sha256": "2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c",
+              "pre_state_digest": "92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5",
+              "request_digest": "0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "production-backup-policy"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "policy_admin"
+                  }
+                ],
+                "review_id": "review-023d13328d615ba332a92d10",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b",
+            "channel_binding_sha256": "a91603379115c818afd75e6fa9ae60436ae711727421879fd0a9e25934b249d3",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "channel_binding": {
+            "channel_session_id": "channel-session-fed4d7c8f33efb4666a5cdae20c457bf",
+            "owner_github_id": 37657042,
+            "owner_public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+            "schema_version": 1,
+            "session_expires_at": "2030-01-02T03:09:05+00:00",
+            "session_issued_at": "2030-01-02T03:00:05+00:00",
+            "signature_algorithm": "ed25519"
+          },
+          "schema_version": 1,
+          "signature": "cdwQ_OxwpRQHMz-Sh01N6TRaQOssNDP3m7dTOH6x_KX7ilDvMZz6e95zrntMFUZeKFgqf91FjxrlP4daCBpWDw",
+          "signature_algorithm": "ed25519"
+        },
+        "sha256": "d2d34a8090998249decfaf7e56f1d531a1dc1ab26f232bbd6fe7ff0315e0af93"
+      },
+      "descriptor_id": "production-backup-policy",
+      "descriptor_version": 1,
+      "signature_payload": {
+        "canonical_json": "{\"challenge_response\":{\"approval_request\":{\"descriptor_id\":\"production-backup-policy\",\"descriptor_version\":1,\"evidence_digest\":\"78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-388d443d5212028b75273a867206f607\",\"operation_id\":\"privileged-operation-023d13328d615ba332a92d104f015606\",\"owner_github_id\":37657042,\"plan_digest\":\"c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09\",\"policy_record_id\":\"owner-policy-023d13328d615ba332a9\",\"policy_revision\":1,\"policy_sha256\":\"2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c\",\"pre_state_digest\":\"92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5\",\"request_digest\":\"0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"production-backup-policy\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-023d13328d615ba332a92d10\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b\",\"channel_binding_sha256\":\"a91603379115c818afd75e6fa9ae60436ae711727421879fd0a9e25934b249d3\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1},\"domain\":\"launchplane-owner-control-confirmation-v1\",\"schema_version\":1}",
+        "payload": {
+          "challenge_response": {
+            "approval_request": {
+              "descriptor_id": "production-backup-policy",
+              "descriptor_version": 1,
+              "evidence_digest": "78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc",
+              "expires_at": "2030-01-02T03:09:05+00:00",
+              "issued_at": "2030-01-02T03:00:05+00:00",
+              "nonce": "owner-control-388d443d5212028b75273a867206f607",
+              "operation_id": "privileged-operation-023d13328d615ba332a92d104f015606",
+              "owner_github_id": 37657042,
+              "plan_digest": "c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09",
+              "policy_record_id": "owner-policy-023d13328d615ba332a9",
+              "policy_revision": 1,
+              "policy_sha256": "2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c",
+              "pre_state_digest": "92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5",
+              "request_digest": "0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92",
+              "schema_version": 1,
+              "server_review": {
+                "items": [
+                  {
+                    "key": "descriptor",
+                    "label": "Operation class",
+                    "value": "production-backup-policy"
+                  },
+                  {
+                    "key": "safety_class",
+                    "label": "Safety class",
+                    "value": "policy_admin"
+                  }
+                ],
+                "review_id": "review-023d13328d615ba332a92d10",
+                "schema_version": 1,
+                "summary": "Review this exact privileged operation before confirming.",
+                "title": "Owner approval required"
+              }
+            },
+            "approval_request_digest": "01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b",
+            "channel_binding_sha256": "a91603379115c818afd75e6fa9ae60436ae711727421879fd0a9e25934b249d3",
+            "confirmed_at": "2030-01-02T03:04:05+00:00",
+            "decision": "approved",
+            "schema_version": 1
+          },
+          "domain": "launchplane-owner-control-confirmation-v1",
+          "schema_version": 1
+        },
+        "sha256": "c245001860d7a856b6f84e959b51ed3c864c3e0d8f9d98cae03fb62b01208608"
+      },
+      "verification": "valid"
     }
   ],
   "golden_vectors": [
@@ -1241,6 +1415,95 @@
         "sha256": "bca3c7c96a2e5d60503e6c261602d25c86d54bd1fc1d2ffd71cb30e1acb5f9db"
       },
       "descriptor_id": "ordinary-agent-delivery-activation",
+      "descriptor_version": 1
+    },
+    {
+      "approval_request": {
+        "canonical_json": "{\"descriptor_id\":\"production-backup-policy\",\"descriptor_version\":1,\"evidence_digest\":\"78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-388d443d5212028b75273a867206f607\",\"operation_id\":\"privileged-operation-023d13328d615ba332a92d104f015606\",\"owner_github_id\":37657042,\"plan_digest\":\"c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09\",\"policy_record_id\":\"owner-policy-023d13328d615ba332a9\",\"policy_revision\":1,\"policy_sha256\":\"2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c\",\"pre_state_digest\":\"92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5\",\"request_digest\":\"0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"production-backup-policy\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-023d13328d615ba332a92d10\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}}",
+        "payload": {
+          "descriptor_id": "production-backup-policy",
+          "descriptor_version": 1,
+          "evidence_digest": "78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc",
+          "expires_at": "2030-01-02T03:09:05+00:00",
+          "issued_at": "2030-01-02T03:00:05+00:00",
+          "nonce": "owner-control-388d443d5212028b75273a867206f607",
+          "operation_id": "privileged-operation-023d13328d615ba332a92d104f015606",
+          "owner_github_id": 37657042,
+          "plan_digest": "c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09",
+          "policy_record_id": "owner-policy-023d13328d615ba332a9",
+          "policy_revision": 1,
+          "policy_sha256": "2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c",
+          "pre_state_digest": "92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5",
+          "request_digest": "0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92",
+          "schema_version": 1,
+          "server_review": {
+            "items": [
+              {
+                "key": "descriptor",
+                "label": "Operation class",
+                "value": "production-backup-policy"
+              },
+              {
+                "key": "safety_class",
+                "label": "Safety class",
+                "value": "policy_admin"
+              }
+            ],
+            "review_id": "review-023d13328d615ba332a92d10",
+            "schema_version": 1,
+            "summary": "Review this exact privileged operation before confirming.",
+            "title": "Owner approval required"
+          }
+        },
+        "sha256": "01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b"
+      },
+      "challenge_response": {
+        "canonical_json": "{\"approval_request\":{\"descriptor_id\":\"production-backup-policy\",\"descriptor_version\":1,\"evidence_digest\":\"78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc\",\"expires_at\":\"2030-01-02T03:09:05+00:00\",\"issued_at\":\"2030-01-02T03:00:05+00:00\",\"nonce\":\"owner-control-388d443d5212028b75273a867206f607\",\"operation_id\":\"privileged-operation-023d13328d615ba332a92d104f015606\",\"owner_github_id\":37657042,\"plan_digest\":\"c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09\",\"policy_record_id\":\"owner-policy-023d13328d615ba332a9\",\"policy_revision\":1,\"policy_sha256\":\"2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c\",\"pre_state_digest\":\"92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5\",\"request_digest\":\"0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92\",\"schema_version\":1,\"server_review\":{\"items\":[{\"key\":\"descriptor\",\"label\":\"Operation class\",\"value\":\"production-backup-policy\"},{\"key\":\"safety_class\",\"label\":\"Safety class\",\"value\":\"policy_admin\"}],\"review_id\":\"review-023d13328d615ba332a92d10\",\"schema_version\":1,\"summary\":\"Review this exact privileged operation before confirming.\",\"title\":\"Owner approval required\"}},\"approval_request_digest\":\"01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b\",\"channel_binding_sha256\":\"cbf7c1580bd438f4dd5e08dc6fb42afdb860971c179c08c3cab78f2c77997b75\",\"confirmed_at\":\"2030-01-02T03:04:05+00:00\",\"decision\":\"approved\",\"schema_version\":1}",
+        "payload": {
+          "approval_request": {
+            "descriptor_id": "production-backup-policy",
+            "descriptor_version": 1,
+            "evidence_digest": "78fafabd3081b5930dbea5e3270d19e4b29bbe017ea88689b3d67f0b3b493bfc",
+            "expires_at": "2030-01-02T03:09:05+00:00",
+            "issued_at": "2030-01-02T03:00:05+00:00",
+            "nonce": "owner-control-388d443d5212028b75273a867206f607",
+            "operation_id": "privileged-operation-023d13328d615ba332a92d104f015606",
+            "owner_github_id": 37657042,
+            "plan_digest": "c17976f51bd4db42f22e7c837bed263fd36496ee58ad320ec6944ce0f1e58d09",
+            "policy_record_id": "owner-policy-023d13328d615ba332a9",
+            "policy_revision": 1,
+            "policy_sha256": "2749cb4786ee522b04a1f52d99fd0be449f7b410390aea3df8be711798b6c04c",
+            "pre_state_digest": "92cf2089c0b6a023cbe6aea095c9314f2f56d588af2c3c2ec09301cb7f72bdc5",
+            "request_digest": "0aebaa3612de97ab07cd99306feb05e388cca9fe170e6da826893ef824bc5f92",
+            "schema_version": 1,
+            "server_review": {
+              "items": [
+                {
+                  "key": "descriptor",
+                  "label": "Operation class",
+                  "value": "production-backup-policy"
+                },
+                {
+                  "key": "safety_class",
+                  "label": "Safety class",
+                  "value": "policy_admin"
+                }
+              ],
+              "review_id": "review-023d13328d615ba332a92d10",
+              "schema_version": 1,
+              "summary": "Review this exact privileged operation before confirming.",
+              "title": "Owner approval required"
+            }
+          },
+          "approval_request_digest": "01cc258850d847d7662a4b1d08e35841eda422e990e25cb052d300ff8c11062b",
+          "channel_binding_sha256": "cbf7c1580bd438f4dd5e08dc6fb42afdb860971c179c08c3cab78f2c77997b75",
+          "confirmed_at": "2030-01-02T03:04:05+00:00",
+          "decision": "approved",
+          "schema_version": 1
+        },
+        "sha256": "03f9d7f5818a80c7fe6d5f931a47774708bdee42964e0c56a2b404d2e319ad9f"
+      },
+      "descriptor_id": "production-backup-policy",
       "descriptor_version": 1
     }
   ],
@@ -3617,6 +3880,7 @@
       "properties": {
         "descriptor_id": {
           "enum": [
+            "production-backup-policy",
             "managed-secret-reencryption",
             "managed-authz-policy-set",
             "managed-merge-train-policy-import",
@@ -3730,6 +3994,7 @@
           "properties": {
             "descriptor_id": {
               "enum": [
+                "production-backup-policy",
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
                 "managed-merge-train-policy-import",
@@ -4018,6 +4283,7 @@
           "properties": {
             "descriptor_id": {
               "enum": [
+                "production-backup-policy",
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
                 "managed-merge-train-policy-import",
@@ -4344,6 +4610,7 @@
           "properties": {
             "descriptor_id": {
               "enum": [
+                "production-backup-policy",
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
                 "managed-merge-train-policy-import",

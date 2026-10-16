@@ -78,8 +78,8 @@ def main() -> int:
         facts = {key: result[key] for key in ("usage", "data", "production_resources")}
         for key, allowed in (
             ("usage", {"unknown", "in_use", "unused"}),
-            ("data", {"unknown"}),
-            ("production_resources", {"unknown", "shared"}),
+            ("data", {"unknown", "reproducible", "only_copy"}),
+            ("production_resources", {"unknown", "shared", "isolated", "separation_ready"}),
         ):
             if facts[key] not in allowed:
                 raise ValueError("Invalid fact response.")
@@ -95,20 +95,42 @@ def main() -> int:
         if reason_code not in ODOO_USAGE_REASON_CODES:
             reason_code = "diagnostics_unrecognized"
         if "reason_code" in usage and (
-            (facts["usage"] == "unused" and reason_code != "complete")
-            or (facts["usage"] == "unknown" and reason_code == "complete")
+            (facts["usage"] == "unused" and reason_code not in {"complete", "never_served"})
+            or (facts["usage"] == "unknown" and reason_code in {"complete", "never_served"})
         ):
             raise ValueError("Odoo usage and diagnostic disagree.")
         if any(value is not None and type(value) is not bool for value in usage_facts.values()):
             raise ValueError("Invalid Odoo usage evidence.")
-        if facts["usage"] == "unused" and any(value is not False for value in usage_facts.values()):
+        historical_usage_retained = result.get("historical_usage_retained", False)
+        if type(historical_usage_retained) is not bool or (
+            historical_usage_retained and facts["usage"] != "in_use"
+        ):
+            raise ValueError("Invalid retained usage evidence.")
+        if facts["usage"] == "unused" and any(
+            value is not (None if reason_code == "never_served" else False)
+            for value in usage_facts.values()
+        ):
             raise ValueError("Unused requires complete Odoo usage evidence.")
+        qualification = result.get(
+            "never_served_qualification", "never_served_diagnostics_unavailable"
+        )
+        if qualification not in {
+            "never_served",
+            "never_served_records_incomplete",
+            "never_served_protection_seen",
+            "never_served_not_attempted",
+        }:
+            qualification = "never_served_diagnostics_unavailable"
+        if (reason_code == "never_served") != (qualification == "never_served"):
+            raise ValueError("Never-served qualification and usage disagree.")
         print(
             json.dumps(
                 {
                     "mode": args.mode,
                     "facts": facts,
+                    "historical_usage_retained": historical_usage_retained,
                     "odoo_usage": {**usage_facts, "reason_code": reason_code},
+                    "never_served_qualification": qualification,
                     "source_coverage": coverage,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
                 }

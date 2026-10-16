@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 import re
 from typing import Final
 from urllib.parse import quote
@@ -293,3 +294,76 @@ def _filename(value: object) -> str:
 def _path(repository: str) -> str:
     owner, name = repository.strip().split("/", 1)
     return f"{quote(owner, safe='')}/{quote(name, safe='')}"
+
+
+@dataclass(frozen=True)
+class WaitingSourceChanges:
+    total_commits: int
+    titles: tuple[str, ...]
+    waiting_hours: int | None
+    comparison_url: str
+
+
+def read_waiting_source_changes(
+    *,
+    repository: str,
+    production_commit: str,
+    head_commit: str,
+    read: SourceControlRead,
+    now: datetime,
+) -> WaitingSourceChanges:
+    """Bounded change summary with a complete comparison link and honest time coverage."""
+    repository_path = _path(repository)
+    comparison = read(f"/repos/{repository_path}/compare/{production_commit}...{head_commit}")
+    if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
+        raise ValueError("Release ancestry unavailable")
+    commits, count = comparison.get("commits"), comparison.get("total_commits")
+    if (
+        not isinstance(commits, list)
+        or not commits
+        or not isinstance(count, int)
+        or count < len(commits)
+    ):
+        raise ValueError("Release changes unavailable")
+    titles = []
+    for commit in commits[:5]:
+        if not isinstance(commit, dict) or not isinstance(commit.get("commit"), dict):
+            raise ValueError("Release change metadata unavailable")
+        title = str(commit["commit"].get("message", "")).splitlines()[0:1]
+        titles.append(title[0] if title else "Change")
+    return WaitingSourceChanges(
+        total_commits=count,
+        titles=tuple(titles),
+        waiting_hours=_landing_age(commits, production_commit, head_commit, now),
+        comparison_url=f"https://github.com/{repository_path}/compare/{production_commit}...{head_commit}",
+    )
+
+
+def _landing_age(commits: list[object], base: str, head: str, now: datetime) -> int | None:
+    # Only first-parent commits measure time on the default branch. Feature
+    # branch dates can precede their merge by months. Truncation stays unknown.
+    by_sha = {item.get("sha"): item for item in commits if isinstance(item, dict)}
+    dates = []
+    seen: set[str] = set()
+    while head != base:
+        item = by_sha.get(head)
+        if not isinstance(item, dict) or head in seen:
+            return None
+        seen.add(head)
+        parents = item.get("parents")
+        metadata = item.get("commit")
+        if not isinstance(parents, list) or not parents or not isinstance(parents[0], dict):
+            return None
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("committer"), dict):
+            return None
+        try:
+            dates.append(
+                datetime.fromisoformat(str(metadata["committer"]["date"]).replace("Z", "+00:00"))
+            )
+            head = str(parents[0]["sha"])
+        except (KeyError, ValueError):
+            return None
+    try:
+        return max(0, int((now - min(dates)).total_seconds() // 3600))
+    except (ValueError, TypeError):
+        return None

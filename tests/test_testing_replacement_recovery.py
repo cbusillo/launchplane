@@ -1203,6 +1203,54 @@ class TestingReplacementRecoveryTests(unittest.TestCase):
         ):
             yield
 
+    def test_non_use_is_revoked_before_provider_dispatch_even_if_the_reply_is_lost(self) -> None:
+        for store, _root in self.stores():
+            if not isinstance(store, PostgresRecordStore):
+                continue
+            operation = self.running(store)
+            from tests.test_odoo_testing_restore import generation
+
+            tracked = generation().model_copy(
+                update={
+                    "product": operation.product,
+                    "context": operation.context,
+                    "operation_id": operation.operation_id,
+                    "target_id": "compose-123",
+                }
+            )
+            tracked = tracked.model_copy(
+                update={"non_use_tracking_started_at": tracked.prepared_at}
+            )
+            store.write_fresh_odoo_testing_generation(tracked)
+
+            def dispatch(**_: object) -> api.JsonValue:
+                current = store.read_fresh_odoo_testing_generation(
+                    operation.product, operation.context
+                )
+                assert current is not None
+                self.assertTrue(current.non_use_invalidated)
+                raise TimeoutError("fixture lost reply")
+
+            with (
+                patch(
+                    "control_plane.testing_replacement_recovery.current_binding_fingerprint",
+                    return_value="fixture-binding",
+                ),
+                patch.object(api, "_dokploy_request", side_effect=dispatch),
+                guard_testing_replacement(store, operation, "worker", lambda _: None),
+                self.assertRaises(TimeoutError),
+            ):
+                api.dokploy_request(
+                    host="https://provider.test",
+                    token="fixture-token",
+                    path="/api/compose.deploy",
+                    method="POST",
+                    payload={"composeId": "compose-123"},
+                )
+            current = store.read_fresh_odoo_testing_generation(operation.product, operation.context)
+            assert current is not None
+            self.assertTrue(current.non_use_invalidated)
+
     def test_recovery_excludes_surviving_worker_then_cancels_with_proof_and_wakes_reconcile(
         self,
     ) -> None:

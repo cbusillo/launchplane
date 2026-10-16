@@ -352,16 +352,17 @@ workflows or non-Markdown runtime files in those directories.
 The `.github/github.json` catalog's Launchplane routing fields also retain
 `repo_metadata_ergonomics` evidence: capability booleans, service environment
 variable names, the catalog context/admin helpers and local config example,
-and merge-train label, branch, workflow repository/name/ref, controller mode
-and revision-response field paths. These are hints to the supported surfaces,
-not records of live state. Catalog paths may include the catalog-root `skills/`
-prefix; literal labels may use Unicode, spaces and namespace punctuation while
-URLs, host-and-port endpoints and absolute paths remain findings. Only the documented
-field/value shapes are accepted;
-URLs, private credential paths, product/provider/runtime coordinates, malformed
-routing values and unknown Launchplane fields remain findings. The workflow
-repository allowance applies only to its exact catalog field in this file.
-Omit unused optional fields rather than supplying null or empty routing values.
+with optional catalog-root `skills/` prefixes. URLs, private credential paths,
+product/provider/runtime coordinates, malformed routing values and unknown
+Launchplane fields remain findings. Omit unused optional fields rather than
+supplying null or empty routing values.
+
+Merge-train enrollment, branches, enqueue labels and runner policy belong to
+active Launchplane service records. The removed `launchplane.mergeTrain` fields
+remain findings, including either `enabled` boolean. Remove these copies and
+read Launchplane's merge policy; an unavailable policy read means enrollment
+is unknown. Repository metadata can link the canonical train procedure under
+`docs` without copying those values.
 
 In `pyproject.toml`, Black's `tool.black.target-version` list accepts its
 supported lowercase Python target identifiers with
@@ -403,6 +404,40 @@ topology material. Product repos should use this changed-file gate to reject
 reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
+
+Filesystem paths with `./`, `../`, `/` or `\\` prefixes in Python strings are not
+repository references. A separate owner/repository reference elsewhere in the same string
+is still audited. Historical profile-conversion command constants in
+`control_plane/contracts/*_migration.py` may contain HTTP loopback endpoints:
+they translate in-container behavior into stored declarations. This does not
+classify external hosts, embedded credentials, or runtime defaults outside a
+profile conversion as schema.
+
+For Python source, a fixed protocol identifier can be classified as `schema_only`
+when a single uppercase module binding holds an identifier-shaped string and
+every local reference uses the same protocol field role. Evidence must include
+an equality/inequality comparison against `integration`, `binding_key`, or
+`code` (an attribute or a one-argument dictionary `get`). Secret receivers must
+be unambiguously bound by iteration over `list_secret_records`,
+`list_secret_bindings`, or a payload's `get("secrets")` list. Binding-key
+attributes require secret bindings. Error-code receivers must be bound by an
+`except` handler for a local exception class whose constructor uses its code
+parameter only to store `self.code`. Integration selectors on the secret-list
+APIs and raised instances of those exceptions may accompany the comparisons.
+This classifies generic discriminators,
+payload keys, and error codes; it does not allow names merely because they
+contain diagnostic, secret, or error words. Mixed runtime/grant uses, rebinding,
+shadowing (including wildcard imports and match captures), aliases, unused
+declarations, and imported-only declarations provide no classification proof
+within the declaring module. Cross-module consumers remain unchecked; this
+local syntax classification is not a whole-program proof. It also leaves
+repeated receiver bindings in one scope, annotated iterable assignments, and
+comprehensions over an iterable assigned in the enclosing scope unclassified.
+Direct secret-list comprehensions and payload-list `for` loops are supported.
+Evidence is bound to the committed declaration's
+path, line, key, and value; a same-named settings or environment assignment
+does not inherit it. Audit completion (`status: ok`) remains distinct from
+the enforcement result (`gate.status`).
 
 Enforcement also fails when a scanned Python file cannot be decoded or parsed,
 even if the report has zero findings. Python encoding declarations are honored;

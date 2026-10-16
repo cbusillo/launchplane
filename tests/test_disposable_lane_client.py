@@ -24,11 +24,15 @@ class DisposableLaneClientTests(unittest.TestCase):
         binding_sha256: str = "a" * 64,
         usage: str = "unknown",
         reason_code: object = None,
+        runtime_facts: bool | None = False,
+        qualification: str | None = None,
+        data: str = "unknown",
+        production_resources: str = "unknown",
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
         )
-        facts = {"usage": usage, "data": "unknown", "production_resources": "unknown"}
+        facts = {"usage": usage, "data": data, "production_resources": production_resources}
         inspected = {
             "trace_id": "fixture-trace",
             "result": {"mode": "inspect", "binding_sha256": "a" * 64, **facts},
@@ -38,9 +42,14 @@ class DisposableLaneClientTests(unittest.TestCase):
             "source_coverage": disposable_collection_coverage(),
             "binding_sha256": binding_sha256,
             "provider_mutation": provider_mutation,
-            "odoo_usage": {"recent_signins": False, "authenticated_sessions": False},
+            "odoo_usage": {
+                "recent_signins": runtime_facts,
+                "authenticated_sessions": runtime_facts,
+            },
             **facts,
         }
+        if qualification is not None:
+            collected_result["never_served_qualification"] = qualification
         if reason_code is not None:
             odoo_usage = collected_result["odoo_usage"]
             assert isinstance(odoo_usage, dict)
@@ -88,6 +97,14 @@ class DisposableLaneClientTests(unittest.TestCase):
                 status = client["main"]()
             return status, output.getvalue(), request
 
+    def test_qualified_resource_facts_are_reported_without_private_evidence(self) -> None:
+        for data, resources in (("reproducible", "isolated"), ("only_copy", "shared")):
+            status, output, _ = self.call_client(data=data, production_resources=resources)
+            self.assertEqual(status, 0, output)
+            facts = json.loads(output)["facts"]
+            self.assertEqual((facts["data"], facts["production_resources"]), (data, resources))
+            self.assertNotIn("private-fixture", output)
+
     def test_collection_uses_inspected_binding_and_reports_only_safe_facts_and_coverage(
         self,
     ) -> None:
@@ -115,6 +132,37 @@ class DisposableLaneClientTests(unittest.TestCase):
         status, output, _ = self.call_client(usage="unused")
         self.assertEqual(status, 0)
         self.assertEqual(json.loads(output)["facts"]["usage"], "unused")
+
+    def test_never_served_uses_no_invented_session_or_login_boolean(self) -> None:
+        status, output, _ = self.call_client(
+            usage="unused",
+            reason_code="never_served",
+            runtime_facts=None,
+            qualification="never_served",
+        )
+        self.assertEqual(status, 0)
+        result = json.loads(output)
+        self.assertIsNone(result["odoo_usage"]["recent_signins"])
+        self.assertIsNone(result["odoo_usage"]["authenticated_sessions"])
+        status, _, _ = self.call_client(usage="unused", reason_code="never_served")
+        self.assertEqual(status, 1)
+
+    def test_never_served_receipt_requires_matching_qualification_and_marks_old_diagnostics_missing(
+        self,
+    ) -> None:
+        status, output, _ = self.call_client()
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            json.loads(output)["never_served_qualification"], "never_served_diagnostics_unavailable"
+        )
+        for reason, qualification in (("never_served", None), ("complete", "never_served")):
+            status, _, _ = self.call_client(
+                usage="unused",
+                reason_code=reason,
+                qualification=qualification,
+                runtime_facts=None if reason == "never_served" else False,
+            )
+            self.assertEqual(status, 1)
 
     def test_truncated_or_mismatched_receipt_stays_unverified(self) -> None:
         for truncated, mutation, digest in (

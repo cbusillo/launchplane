@@ -118,6 +118,27 @@ class OdooProdRollbackTargetMissingError(click.ClickException):
     """No earlier passing deployment exists to roll back to."""
 
 
+class OdooCutoverCoherentRestoreRequiredError(click.ClickException):
+    """The image-only rollback route cannot restore an incompatible database."""
+
+    code = "rollback_requires_coherent_restore"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Database-changing cutover recovery requires the authorized coherent "
+            "image/DB/filestore backup restore workflow; image-only rollback is refused."
+        )
+
+
+def _require_cutover_image_rollback(deployment: DeploymentRecord | None) -> None:
+    if (
+        deployment is not None
+        and deployment.odoo_cutover is not None
+        and deployment.odoo_cutover.plan.compatibility.classification != "compatible"
+    ):
+        raise OdooCutoverCoherentRestoreRequiredError()
+
+
 def _lane_cutover_deployment(
     store: OdooProdRollbackStore, request: OdooProdRollbackRequest
 ) -> DeploymentRecord | None:
@@ -314,6 +335,7 @@ def resolve_odoo_prod_rollback_target(
 
     typed_record_store = _require_record_store(record_store)
     current_cutover = _lane_cutover_deployment(typed_record_store, request)
+    _require_cutover_image_rollback(current_cutover)
     if request.artifact_id:
         target = OdooProdRollbackTarget(artifact_id=request.artifact_id)
     elif current_cutover is not None:
@@ -465,17 +487,14 @@ def execute_odoo_prod_rollback(
                 raise click.ClickException(
                     "Rollback website snapshots differ from the release decision."
                 )
-            if current_deployment.odoo_cutover.plan.compatibility.classification != "compatible":
-                raise click.ClickException(
-                    "Database-changing cutover recovery requires the authorized coherent image/DB/filestore backup restore workflow; image-only rollback is refused."
-                )
-            if cutover_provider is None and cutover_provider_factory is not None:
-                cutover_provider = cutover_provider_factory(current_deployment.odoo_cutover.plan)
-            if cutover_provider is None:
-                raise click.ClickException(
-                    "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
-                )
+            _require_cutover_image_rollback(current_deployment)
             try:
+                if cutover_provider is None and cutover_provider_factory is not None:
+                    cutover_provider = cutover_provider_factory(plan)
+                if cutover_provider is None:
+                    raise click.ClickException(
+                        "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
+                    )
                 cutover_provider.preflight(plan)
             except ValueError as error:
                 raise click.ClickException(str(error)) from error

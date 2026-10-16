@@ -74,6 +74,7 @@ class MergeTrainStackCollapseMutation(BaseModel):
     parent_head_ref: str
     status: MergeTrainStackCollapseRunStatus = "planned"
     merge_commit_sha: str = ""
+    expected_merge_tree_sha: str = Field(default="", exclude_if=lambda value: not value)
     detail: str = ""
 
     @model_validator(mode="after")
@@ -88,6 +89,7 @@ class MergeTrainStackCollapseMutation(BaseModel):
         self.parent_head_ref = _normalize_required_value(
             self.parent_head_ref, "merge train stack collapse mutation requires parent_head_ref"
         )
+        self.expected_merge_tree_sha = self.expected_merge_tree_sha.strip()
         self.merge_commit_sha = self.merge_commit_sha.strip()
         self.detail = self.detail.strip()
         return self
@@ -211,6 +213,17 @@ class MergeTrainStackCollapsePlanRecord(BaseModel):
 
 
 class MergeTrainStackCollapseBranchClient(Protocol):
+    def plan_stack_child_merge_tree(
+        self,
+        *,
+        repository: str,
+        child_head_sha: str,
+        expected_parent_head_sha: str,
+        protected_base_ref: str,
+        collapse_id: str,
+        child_pull_request_number: int,
+    ) -> str: ...
+
     def find_stack_child_merge_commit(
         self,
         *,
@@ -218,6 +231,7 @@ class MergeTrainStackCollapseBranchClient(Protocol):
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -231,6 +245,7 @@ class MergeTrainStackCollapseBranchClient(Protocol):
         expected_parent_head_sha: str,
         parent_head_ref: str,
         protected_base_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -269,8 +284,9 @@ def execute_merge_train_stack_collapse_plan(
     branch_client: MergeTrainStackCollapseBranchClient,
     child_readiness_reasons: Callable[[int], tuple[str, ...]],
     effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+    recovered_child_readiness_reasons: Callable[[int], tuple[str, ...]] | None = None,
     updated_at: str,
-    checkpoint: Callable[[MergeTrainStackCollapsePlan], None] | None = None,
+    checkpoint: Callable[[MergeTrainStackCollapsePlan], None],
 ) -> MergeTrainStackCollapsePlan:
     if plan.status not in {"planned", "collapsing"}:
         raise ValueError("merge train stack collapse plan is not executable")
@@ -299,20 +315,62 @@ def execute_merge_train_stack_collapse_plan(
             checkpoint(in_progress_plan)
         if mutation.parent_head_ref == plan.base_branch:
             raise ValueError("stack collapse cannot mutate the protected base branch")
+        if mutation.expected_merge_tree_sha and (
+            mutation.child_head_sha != child_head_sha
+            or mutation.expected_parent_head_sha != expected_parent_head_sha
+        ):
+            raise ValueError("saved stack merge inputs no longer match collapse progress")
         merge_commit_sha = branch_client.find_stack_child_merge_commit(
             repository=plan.repository,
             child_head_sha=child_head_sha,
             expected_parent_head_sha=expected_parent_head_sha,
             parent_head_ref=mutation.parent_head_ref,
+            expected_merge_tree_sha=mutation.expected_merge_tree_sha,
             collapse_id=plan.collapse_id,
             child_pull_request_number=mutation.child_pull_request_number,
             parent_pull_request_number=mutation.parent_pull_request_number,
         )
+        # Only a proved effect can use readiness for a child GitHub has closed.
+        readiness_check = child_readiness_reasons
+        if merge_commit_sha and recovered_child_readiness_reasons is not None:
+            readiness_check = recovered_child_readiness_reasons
+        not_ready_reasons = readiness_check(mutation.child_pull_request_number)
+        if not_ready_reasons:
+            raise MergeTrainStackChildNotReadyError(not_ready_reasons)
         if not merge_commit_sha:
-            # Read just before each new merge: a child can be held while the collapse runs.
-            not_ready_reasons = child_readiness_reasons(mutation.child_pull_request_number)
-            if not_ready_reasons:
-                raise MergeTrainStackChildNotReadyError(not_ready_reasons)
+            if not mutation.expected_merge_tree_sha:
+                expected_tree = branch_client.plan_stack_child_merge_tree(
+                    repository=plan.repository,
+                    child_head_sha=child_head_sha,
+                    expected_parent_head_sha=expected_parent_head_sha,
+                    protected_base_ref=plan.base_branch,
+                    collapse_id=plan.collapse_id,
+                    child_pull_request_number=mutation.child_pull_request_number,
+                )
+                mutation = mutation.model_copy(
+                    update={
+                        "child_head_sha": child_head_sha,
+                        "expected_parent_head_sha": expected_parent_head_sha,
+                        "expected_merge_tree_sha": _normalize_required_value(
+                            expected_tree, "planned stack merge requires expected tree"
+                        ),
+                    }
+                )
+                checkpoint(
+                    _stack_collapse_plan_with_progress(
+                        plan=plan,
+                        mutations=tuple(updated_mutations)
+                        + (mutation,)
+                        + plan.mutations[mutation_index + 1 :],
+                        current_head_shas=current_head_shas,
+                        status="collapsing",
+                        updated_at=updated_at,
+                    )
+                )
+                # Construction and storage can take time; recheck before the branch effect.
+                not_ready_reasons = child_readiness_reasons(mutation.child_pull_request_number)
+                if not_ready_reasons:
+                    raise MergeTrainStackChildNotReadyError(not_ready_reasons)
             if effect_executor is None:
                 merge_commit_sha = branch_client.merge_stack_child_into_parent(
                     repository=plan.repository,
@@ -320,6 +378,7 @@ def execute_merge_train_stack_collapse_plan(
                     expected_parent_head_sha=expected_parent_head_sha,
                     parent_head_ref=mutation.parent_head_ref,
                     protected_base_ref=plan.base_branch,
+                    expected_merge_tree_sha=mutation.expected_merge_tree_sha,
                     collapse_id=plan.collapse_id,
                     child_pull_request_number=mutation.child_pull_request_number,
                     parent_pull_request_number=mutation.parent_pull_request_number,
@@ -332,6 +391,7 @@ def execute_merge_train_stack_collapse_plan(
                             base_branch=plan.base_branch,
                             collapse_id=plan.collapse_id,
                         ),
+                        expected_merge_tree_sha=mutation.expected_merge_tree_sha,
                         child_head_sha=child_head_sha,
                         expected_parent_head_sha=expected_parent_head_sha,
                         parent_head_ref=mutation.parent_head_ref,

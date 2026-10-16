@@ -39,6 +39,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
   approval gate and new website repo checklist.
 - [artifact-provenance.md](artifact-provenance.md) — how Launchplane verifies
   which repository and commit a product's own build came from.
+- [artifact-security.md](artifact-security.md) — verified-image scanning before event deploys and service-side retention dry runs.
 - [release-database-compatibility.md](release-database-compatibility.md) — verified full-input release classification and targeted module-plan producer contract.
 - [event-driven-deploys.md](event-driven-deploys.md) — GitHub App webhook
   receiver and reconciler that deploy verified builds to testing and previews
@@ -112,9 +113,9 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [operations.md](operations.md) — admin workflows and runtime boundary rules.
 - [health-alert-drills.md](health-alert-drills.md) — isolated routing reads and
   explicitly marked, rate-limited Discord test alerts for existing lane checks.
-- [production-recipient.md](production-recipient.md) — inert generic-web production
+- [production-recipient.md](production-recipient.md) — generic-web production
   recipient preparation, purpose-bound read-only sources, isolated MariaDB recovery,
-  retained serving custody and remaining activation gates.
+  atomic Client accepted-release cutover, exact inverse and original-key continuation.
 - [testing-activation.md](testing-activation.md) — qualified generic-web testing
   allocation consumption, retained custody and supported hold/rebuild continuation.
 - [stored-record-preflight.md](stored-record-preflight.md) — scrubbed service export,
@@ -132,8 +133,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   and local contract.
 - [testing-local-consumer.md](testing-local-consumer.md) — Recipient-encrypted
   delivery of one testing bridge credential to a local client.
-- [private-testing-transport.md](private-testing-transport.md) — inert planning and
-  configuration readback for isolated no-website testing HTTPS/WSS listeners.
+- [private-testing-transport.md](private-testing-transport.md) — private testing
+  HTTPS/WSS planning, reviewed source installation/recovery and scoped CA trust.
 - [github-actions-security.md](github-actions-security.md) — GitHub Actions
   supply-chain pinning, source classification, provenance, and update policy.
 - [dependency-health-contract.md](dependency-health-contract.md) — causal

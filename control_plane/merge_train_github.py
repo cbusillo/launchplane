@@ -84,6 +84,14 @@ from control_plane.merge_train_codeowners import (
 )
 from control_plane.merge_train_dependency_updates import DependencyUpdateClass
 from control_plane.merge_train_dependency_updates import classify_dependency_update
+from control_plane.merge_train_handoff import (
+    MergeTrainReadyHandoff,
+    handoff_actor_allowed,
+    handoff_head,
+    handoff_kind,
+    handoff_timestamp,
+    ready_handoff_refusal,
+)
 from control_plane.source_control_change import change_fingerprint
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
@@ -93,6 +101,7 @@ from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import MergeTrainPullRequestState
 from control_plane.merge_train import MergeTrainQueueEntry
 from control_plane.merge_train import MergeTrainReviewConversations
+from control_plane.merge_train import enqueue_label_refusal
 from control_plane.merge_train import CODE_SCANNING_REVIEW_AUTHOR
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
@@ -392,7 +401,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int
     ) -> MergeTrainPullRequestSnapshot:
         return GitHubMergeTrainSnapshotReader(
-            transport=self.transport, branch_refresh_store=self._branch_refresh_store
+            transport=self.transport,
+            branch_refresh_store=self._branch_refresh_store,
+            repository_policy=self._snapshot_policy,
         ).read_pull_request_snapshot(repository=repository, pull_request_number=pull_request_number)
 
     def read_review_conversations(
@@ -2640,6 +2651,82 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 status_code=409,
             )
 
+    def plan_stack_child_merge_tree(
+        self,
+        *,
+        repository: str,
+        child_head_sha: str,
+        expected_parent_head_sha: str,
+        protected_base_ref: str,
+        collapse_id: str,
+        child_pull_request_number: int,
+    ) -> str:
+        """Construct the immutable merge inputs before any feature-branch effect."""
+        repository_path = _repository_path(repository)
+        identity = sha256(
+            json.dumps(
+                [collapse_id, expected_parent_head_sha, child_head_sha], separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        reference = merge_train_construction_ref(f"stack-collapse:{identity}")
+        lineage = MergeTrainEffectLineage(
+            repository=repository,
+            base_branch=protected_base_ref,
+            collapse_id=collapse_id,
+        )
+        executor = self.semantic_effect_executor
+        executor.prepare_candidate_ref(
+            CandidateRefPrepareEffect(
+                lineage=lineage,
+                candidate_ref=reference,
+                base_sha=expected_parent_head_sha,
+            )
+        )
+        try:
+            outcome = executor.merge_candidate_head(
+                CandidateHeadMergeEffect(
+                    lineage=lineage,
+                    candidate_ref=reference,
+                    rolling_parent_sha=expected_parent_head_sha,
+                    pull_request_number=child_pull_request_number,
+                    head_sha=child_head_sha,
+                )
+            )
+            if outcome.result_sha is None:
+                observed_sha, tree_sha = _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=_base_branch_sha(
+                        transport=self.transport,
+                        repository_path=repository_path,
+                        base_branch=_branch_name_from_ref(reference),
+                    ),
+                )
+                if observed_sha != expected_parent_head_sha or not self.branch_contains_commit(
+                    repository=repository,
+                    branch_ref=observed_sha,
+                    commit_sha=child_head_sha,
+                ):
+                    raise MergeTrainGitHubStaleHeadError(
+                        "Stack construction no-op does not prove the planned inputs.",
+                        status_code=409,
+                    )
+                return tree_sha
+            return _validated_merge_commit_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                commit_sha=outcome.result_sha,
+                expected_parent_sha=expected_parent_head_sha,
+                expected_head_sha=child_head_sha,
+            )[1]
+        finally:
+            executor.delete_candidate_ref(
+                CandidateRefDeleteEffect(
+                    lineage=lineage,
+                    candidate_ref=reference,
+                )
+            )
+
     def merge_stack_child_into_parent(
         self,
         *,
@@ -2648,6 +2735,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         expected_parent_head_sha: str,
         parent_head_ref: str,
         protected_base_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -2673,6 +2761,10 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 "Stack collapse parent branch moved outside the stored plan.",
                 status_code=409,
             )
+        if expected_merge_tree_sha:
+            self._require_stack_child_head(
+                repository_path, child_pull_request_number, child_head_sha
+            )
         # A fresh plan may include a merge carried by retired execution or a
         # lost checkpoint. Prove inclusion at the immutable, currently expected head;
         # an older collapse marker is not authority for this plan.
@@ -2681,6 +2773,18 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             branch_ref=current_parent_sha,
             commit_sha=child_head_sha,
         ):
+            if (
+                expected_merge_tree_sha
+                and _git_commit_identity(
+                    transport=self.transport,
+                    repository_path=repository_path,
+                    commit_sha=current_parent_sha,
+                )[1]
+                != expected_merge_tree_sha
+            ):
+                raise MergeTrainGitHubStaleHeadError(
+                    "Stack merge tree differs from the saved plan.", status_code=409
+                )
             return current_parent_sha
         payload = self.transport.request(
             method="POST",
@@ -2699,7 +2803,20 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         if not isinstance(payload, dict):
             raise MergeTrainGitHubError("GitHub stack merge response must be a JSON object.")
-        return _required_text(payload.get("sha"), "GitHub stack merge response requires sha.")
+        result_sha = _required_text(payload.get("sha"), "GitHub stack merge response requires sha.")
+        if expected_merge_tree_sha:
+            _, tree_sha = _validated_merge_commit_identity(
+                transport=self.transport,
+                repository_path=repository_path,
+                commit_sha=result_sha,
+                expected_parent_sha=expected_sha,
+                expected_head_sha=child_head_sha,
+            )
+            if tree_sha != expected_merge_tree_sha:
+                raise MergeTrainGitHubStaleHeadError(
+                    "Stack merge tree differs from the saved plan.", status_code=409
+                )
+        return result_sha
 
     def find_stack_child_merge_commit(
         self,
@@ -2708,6 +2825,7 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -2738,24 +2856,44 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         message = str(commit.get("message") or "").strip()
         parents = payload.get("parents")
         parent_shas = (
-            {str(parent.get("sha") or "").strip() for parent in parents if isinstance(parent, dict)}
+            [parent.get("sha") if isinstance(parent, dict) else None for parent in parents]
             if isinstance(parents, list)
-            else set()
+            else []
         )
+        tree = commit.get("tree")
+        tree_sha = tree.get("sha") if isinstance(tree, dict) else None
         expected_message = _stack_collapse_commit_message(
             collapse_id=collapse_id,
             child_pull_request_number=child_pull_request_number,
             parent_pull_request_number=parent_pull_request_number,
         )
-        if message == expected_message and parent_shas == {
-            expected_parent_sha,
-            _required_value(child_head_sha, "Stack collapse child head SHA is required."),
-        }:
+        if (
+            expected_merge_tree_sha
+            and payload.get("sha") == current_parent_sha
+            and message == expected_message
+            and parent_shas == [expected_parent_sha, child_head_sha]
+            and tree_sha == expected_merge_tree_sha
+        ):
+            self._require_stack_child_head(
+                repository_path, child_pull_request_number, child_head_sha
+            )
             return current_parent_sha
         raise MergeTrainGitHubStaleHeadError(
             "Stack collapse parent branch moved outside the stored plan.",
             status_code=409,
         )
+
+    def _require_stack_child_head(
+        self, repository_path: str, number: int, expected_sha: str
+    ) -> None:
+        observed = self._pull_request_head_sha(
+            pull_request_path=f"/repos/{repository_path}/pulls/{number}"
+        )
+        if observed != expected_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Stack child moved outside the saved merge plan.",
+                status_code=409,
+            )
 
     def _create_or_reset_reference(self, *, repository_path: str, reference: str, sha: str) -> None:
         normalized_sha = _required_value(sha, "GitHub reference SHA is required.")
@@ -2862,6 +3000,7 @@ class LegacyMergeTrainEffectExecutor:
     def merge_stack_child(self, effect: StackChildMergeEffect) -> str:
         return self.client.merge_stack_child_into_parent(
             repository=effect.lineage.repository,
+            expected_merge_tree_sha=effect.expected_merge_tree_sha,
             child_head_sha=effect.child_head_sha,
             expected_parent_head_sha=effect.expected_parent_head_sha,
             parent_head_ref=effect.parent_head_ref,
@@ -2921,6 +3060,7 @@ class GitHubMergeTrainSnapshotReader:
         self._actor_roles: dict[tuple[str, str], str] = {}
         self._author_roles: dict[tuple[str, str], str] = {}
         self._dependency_classes: dict[tuple[str, int, str, str], DependencyUpdateClass] = {}
+        self._ready_handoffs: dict[int, MergeTrainReadyHandoff] = {}
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
@@ -2928,6 +3068,7 @@ class GitHubMergeTrainSnapshotReader:
         self._actor_roles.clear()
         self._author_roles.clear()
         self._dependency_classes.clear()
+        self._ready_handoffs.clear()
         repository_path = _repository_path(repository)
         normalized_base_branch = _required_value(
             base_branch, "GitHub pull request base branch is required."
@@ -3045,14 +3186,11 @@ class GitHubMergeTrainSnapshotReader:
             or str(head.get("ref") or "").startswith("launchplane/train/")
         ):
             return True
-        if (
-            user.get("id") not in policy.enqueue.dependency_update_github_user_ids
-            or user.get("type") != "Bot"
-        ):
-            return False
         base = _json_object(pull_request.get("base"), "GitHub pull request base")
-        return (
-            self._safe_dependency_update_class(
+        if (
+            user.get("id") in policy.enqueue.dependency_update_github_user_ids
+            and user.get("type") == "Bot"
+            and self._safe_dependency_update_class(
                 repository_path=_repository_path(policy.repository),
                 pull_request_number=_required_int(
                     pull_request.get("number"), "GitHub pull request requires number."
@@ -3063,7 +3201,19 @@ class GitHubMergeTrainSnapshotReader:
                 base_sha=str(base.get("sha") or ""),
             )
             == "patch_or_minor"
+        ):
+            return True
+        number = _required_int(pull_request.get("number"), "PR requires number.")
+        head_sha = _required_text(head.get("sha"), "PR requires head SHA.")
+        handoff = self._read_ready_handoff(
+            repository_path=_repository_path(policy.repository),
+            number=number,
+            head_sha=head_sha,
+            base_branch=str(base.get("ref") or ""),
+            base_sha=str(base.get("sha") or ""),
         )
+        self._ready_handoffs[number] = handoff
+        return not ready_handoff_refusal(policy, handoff, head_sha)
 
     def read_pull_request_snapshot(
         self, *, repository: str, pull_request_number: int
@@ -3071,6 +3221,7 @@ class GitHubMergeTrainSnapshotReader:
         self._actor_roles.clear()
         self._author_roles.clear()
         self._dependency_classes.clear()
+        self._ready_handoffs.clear()
         repository_path = _repository_path(repository)
         snapshot = self._pull_request_snapshot(
             repository_path=repository_path,
@@ -3241,7 +3392,25 @@ class GitHubMergeTrainSnapshotReader:
         ):
             review_intent = ClientTestNotes(False)
         owner_review_required = review_intent.review_required
+        ready_handoff = self._ready_handoffs.get(pull_request_number)
+        policy = self._repository_policy
+        if (
+            enrich
+            and policy is not None
+            and policy.enqueue.label_required
+            and ready_handoff is None
+            and dependency_update_class != "patch_or_minor"
+            and enqueue_label_refusal(policy, labels=labels, label_actors=label_actors)
+        ):
+            ready_handoff = self._read_ready_handoff(
+                repository_path=repository_path,
+                number=pull_request_number,
+                head_sha=head_sha,
+                base_branch=str(base.get("ref") or ""),
+                base_sha=str(base.get("sha") or ""),
+            )
         return MergeTrainPullRequestSnapshot(
+            ready_handoff=ready_handoff,
             owner_review_required=owner_review_required,
             client_test_notes_error=review_intent.error,
             number=pull_request_number,
@@ -3283,6 +3452,331 @@ class GitHubMergeTrainSnapshotReader:
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
         )
+
+    def _read_ready_handoff(
+        self,
+        *,
+        repository_path: str,
+        number: int,
+        head_sha: str,
+        base_branch: str = "",
+        base_sha: str = "",
+    ) -> MergeTrainReadyHandoff:
+        policy = self._repository_policy
+        if policy is None:
+            return MergeTrainReadyHandoff(status="missing")
+        latest: tuple[datetime, int, str, str, int, str] | None = None
+        handoffs: list[tuple[tuple[datetime, int, str, str, int, str], dict[str, object]]] = []
+        try:
+            # A partial discussion cannot establish the latest trusted handoff.
+            for page in range(1, 101):
+                payload = self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/issues/{number}/comments?per_page=100&page={page}",
+                )
+                if not isinstance(payload, list):
+                    raise ValueError("Ready handoff comments must be a list.")
+                for item in payload:
+                    comment = _json_object(item, "Ready handoff comment")
+                    body = str(comment.get("body") or "")
+                    kind = handoff_kind(body)
+                    edited = comment.get("updated_at") not in {None, comment.get("created_at")}
+                    if kind is None and not edited:
+                        continue
+                    actor = _json_object(comment.get("user"), "Ready handoff author")
+                    actor_id = _required_int(actor.get("id"), "Ready handoff author requires id.")
+                    if _on_behalf_via_app(event=comment, actor=actor):
+                        continue
+                    role = (
+                        "trusted_automation"
+                        if actor_id in policy.enqueue.trusted_automation_github_user_ids
+                        else self._actor_role_for_user(
+                            repository_path=repository_path,
+                            username=_required_text(
+                                actor.get("login"), "Handoff author requires login."
+                            ),
+                        )
+                    )
+                    if not handoff_actor_allowed(policy, actor_id=actor_id, actor_role=role):
+                        continue
+                    comment_id = _required_int(comment.get("id"), "Ready handoff requires id.")
+                    timestamp = handoff_timestamp(
+                        str(comment.get("updated_at") or comment.get("created_at") or "")
+                    )
+                    # REST attributes edits to the original author, not the
+                    # editor. A fresh checked handoff is the supported renewal.
+                    handoff: tuple[datetime, int, str, str, int, str] = (
+                        timestamp,
+                        comment_id,
+                        "edited" if edited else kind or "unreadable",
+                        handoff_head(body),
+                        actor_id,
+                        role,
+                    )
+                    handoffs.append((handoff, comment))
+                if len(payload) < 100:
+                    break
+            else:
+                raise ValueError("Ready handoff discussion exceeds the page bound.")
+            # Only comments newer than the latest effective handoff need editor
+            # proof. Keep that proof fresh; do not spend quota on older edits.
+            for handoff, comment in sorted(handoffs, key=lambda item: item[0][:2], reverse=True):
+                if (
+                    handoff[2] == "edited"
+                    and handoff_kind(str(comment.get("body") or "")) is None
+                    and self._trusted_managed_comment_edit(comment, policy)
+                ):
+                    continue
+                latest = handoff
+                break
+        except (MergeTrainGitHubError, ValueError, TypeError) as error:
+            if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
+                raise
+            return MergeTrainReadyHandoff(status="unreadable")
+        if latest is None:
+            return MergeTrainReadyHandoff(status="missing")
+        _, comment_id, latest_kind, declared_head, actor_id, role = latest
+        if latest_kind == "ready" and declared_head and declared_head != head_sha:
+            try:
+                if self._handoff_refresh_chain(
+                    repository_path=repository_path,
+                    number=number,
+                    declared_head=declared_head,
+                    head_sha=head_sha,
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                ):
+                    declared_head = head_sha
+            except (MergeTrainGitHubError, ValueError, TypeError) as error:
+                if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
+                    raise
+                latest_kind = "unreadable"
+        return MergeTrainReadyHandoff(
+            status="waiting"
+            if latest_kind == "waiting"
+            else "edited"
+            if latest_kind == "edited"
+            else "unreadable"
+            if latest_kind == "unreadable"
+            else "ready"
+            if declared_head == head_sha
+            else "stale",
+            head_sha=declared_head,
+            actor_id=actor_id,
+            actor_role=role,
+            comment_id=comment_id,
+        )
+
+    def _handoff_refresh_chain(
+        self,
+        *,
+        repository_path: str,
+        number: int,
+        declared_head: str,
+        head_sha: str,
+        base_branch: str,
+        base_sha: str,
+    ) -> bool:
+        store = self._branch_refresh_store
+        if store is None or not base_branch or not base_sha:
+            return False
+        try:
+            records = store.list_merge_train_branch_refresh_records(
+                repository=repository_path, pull_request_number=number
+            )
+            stack_edges = self._handoff_stack_edges(repository_path, number)
+        except MergeTrainGitHubError:
+            raise
+        except Exception as error:
+            raise ValueError("Ready handoff refresh records are unreadable.") from error
+        current = head_sha
+        seen: set[str] = set()
+        while current != declared_head and len(seen) < 100:
+            if current in seen:
+                return False
+            seen.add(current)
+            matching = tuple(
+                record
+                for record in records
+                if (
+                    record.repository.casefold() == repository_path.casefold()
+                    and record.pull_request_number == number
+                    and record.base_branch == base_branch
+                    and record.result_head_sha == current
+                )
+            )
+            if len(matching) != 1 and current not in stack_edges:
+                return False
+            commit = _json_object(
+                self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/git/commits/{quote(current, safe='')}",
+                ),
+                "Train refresh commit",
+            )
+            if commit.get("sha") != current:
+                return False
+            if len(matching) == 1:
+                record = matching[0]
+                if not self._recorded_base_refresh(
+                    repository_path=repository_path,
+                    pull_request_number=number,
+                    commit=commit,
+                    commit_shas={record.expected_head_sha, current},
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                ):
+                    return False
+                current = record.expected_head_sha
+            else:
+                parent, child, expected_tree = stack_edges[current]
+                tree = commit.get("tree")
+                if expected_tree and (
+                    not isinstance(tree, dict) or tree.get("sha") != expected_tree
+                ):
+                    return False
+                parents = commit.get("parents")
+                if not isinstance(parents, list) or [
+                    p.get("sha") if isinstance(p, dict) else None for p in parents
+                ] != [parent, child]:
+                    return False
+                current = parent
+        return current == declared_head
+
+    def _trusted_managed_comment_edit(
+        self, comment: dict[str, object], policy: MergeTrainRepositoryPolicy
+    ) -> bool:
+        """Ignore unrelated managed updates only with bound installation-bot editor proof."""
+        node_id = comment.get("node_id")
+        if not isinstance(node_id, str) or not node_id:
+            return False
+        payload = _json_object(
+            self.transport.request(
+                method="POST",
+                path="/graphql",
+                body={
+                    "query": "query($id: ID!) { node(id: $id) { ... on IssueComment { id body updatedAt editor { __typename ... on Bot { databaseId } } } } }",
+                    "variables": {"id": node_id},
+                },
+            ),
+            "Comment editor evidence",
+        )
+        if payload.get("errors"):
+            raise _github_graphql_error(
+                payload["errors"],
+                quota_timing=payload.quota_timing
+                if isinstance(payload, _GitHubQuotaResponse)
+                else (None, None, None),
+            )
+        node = _json_object(
+            _json_object(payload.get("data"), "Comment editor data").get("node"),
+            "Comment editor node",
+        )
+        editor = node.get("editor")
+        return (
+            node.get("id") == node_id
+            and node.get("body") == comment.get("body")
+            and handoff_timestamp(str(node.get("updatedAt") or ""))
+            == handoff_timestamp(str(comment.get("updated_at") or ""))
+            and isinstance(editor, dict)
+            and editor.get("__typename") == "Bot"
+            and type(editor.get("databaseId")) is int
+            and editor.get("databaseId") in policy.enqueue.trusted_automation_github_user_ids
+        )
+
+    def _handoff_stack_edges(
+        self, repository_path: str, number: int
+    ) -> dict[str, tuple[str, str, str]]:
+        from control_plane.contracts.merge_train_stack_collapse import (
+            MergeTrainStackCollapsePlanRecord,
+        )
+        from control_plane.contracts.merge_train_policy import (
+            merge_train_repository_execution_sha256,
+        )
+        from control_plane.merge_train_policy_binding import merge_train_policy_bindings_match
+        from control_plane.merge_train_policy_source import resolve_merge_train_policy_record
+        from control_plane.workflows.merge_train_controller import (
+            latest_merge_train_stack_collapse_progress_record,
+        )
+
+        reader = getattr(
+            self._branch_refresh_store, "list_merge_train_stack_collapse_plan_records", None
+        )
+        if not callable(reader) or self._repository_policy is None:
+            return {}
+        base_branch = self._repository_policy.base_branch
+        records = cast(
+            tuple[MergeTrainStackCollapsePlanRecord, ...],
+            reader(repository=repository_path, base_branch=base_branch),
+        )
+        if not records:
+            return {}
+        current = resolve_merge_train_policy_record(self._branch_refresh_store)
+        target = current.policy.find_repository_policy(
+            repository=repository_path, base_branch=base_branch
+        )
+        if merge_train_repository_execution_sha256(
+            target
+        ) != merge_train_repository_execution_sha256(self._repository_policy):
+            return {}
+        groups: dict[str, list[MergeTrainStackCollapsePlanRecord]] = {}
+        for record in records:
+            groups.setdefault(record.plan.collapse_id, []).append(record)
+        edges: dict[str, tuple[str, str, str]] = {}
+        for group in groups.values():
+            latest = latest_merge_train_stack_collapse_progress_record(tuple(group))
+            if (
+                latest is None
+                or latest.status != "active"
+                or latest.ordinary_job_binding is not None
+            ):
+                continue
+            plan = latest.plan
+            if (
+                plan.repository.casefold() != repository_path.casefold()
+                or plan.base_branch != base_branch
+                or plan.status
+                not in {"planned", "collapsing", "waiting_for_root_checks", "ready_for_train"}
+                or plan.policy_key != target.policy_key
+                or not merge_train_policy_bindings_match(
+                    record_store=self._branch_refresh_store,
+                    policy_key=plan.policy_key,
+                    recorded_sha256=plan.policy_sha256,
+                    current_sha256=current.policy_sha256,
+                )
+            ):
+                continue
+            for mutation in plan.mutations:
+                if mutation.parent_pull_request_number != number:
+                    continue
+                merge_sha = mutation.merge_commit_sha if mutation.status == "mutated" else ""
+                if mutation.status == "planned" and mutation.expected_merge_tree_sha:
+                    try:
+                        merge_sha = GitHubMergeTrainClient(
+                            transport=self.transport
+                        ).find_stack_child_merge_commit(
+                            repository=repository_path,
+                            child_head_sha=mutation.child_head_sha,
+                            expected_parent_head_sha=mutation.expected_parent_head_sha,
+                            parent_head_ref=mutation.parent_head_ref,
+                            expected_merge_tree_sha=mutation.expected_merge_tree_sha,
+                            collapse_id=plan.collapse_id,
+                            child_pull_request_number=mutation.child_pull_request_number,
+                            parent_pull_request_number=mutation.parent_pull_request_number,
+                        )
+                    except MergeTrainGitHubStaleHeadError:
+                        continue
+                if not merge_sha:
+                    continue
+                edge = (
+                    mutation.expected_parent_head_sha,
+                    mutation.child_head_sha,
+                    mutation.expected_merge_tree_sha,
+                )
+                if merge_sha in edges and edges[merge_sha] != edge:
+                    return {}
+                edges[merge_sha] = edge
+        return edges
 
     def _safe_dependency_update_class(
         self,

@@ -3129,6 +3129,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         restore_schedule_upsert: Callable[[], dict[str, str]] | None = None,
         external_checkpoint: Callable[[str], None] | None = None,
         fresh_generation: FreshOdooTestingGeneration | None = None,
+        revoke_on_pending: bool = False,
     ) -> tuple[OdooStableTargetReplacementApplyResult, Mock, Mock, _Store]:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
         if live:
@@ -3246,7 +3247,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         with (
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.read_current_testing_generation",
-                return_value=fresh_generation,
+                side_effect=lambda *_args, **_kwargs: (
+                    fresh_generation.model_copy(update={"non_use_invalidated": True})
+                    if revoke_on_pending
+                    and fresh_generation is not None
+                    and store.deployment_records
+                    else fresh_generation
+                ),
             ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.fresh_testing_authority_sha256",
@@ -3774,6 +3781,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "target_id": "compose-opw",
                 "domain_host": urlsplit(lane.base_url).hostname,
                 "reconcile_requested_at": "queued",
+                "non_use_tracking_started_at": generation().prepared_at,
             }
         )
         override = _opw_website_override_record().model_copy(
@@ -3819,6 +3827,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 post_deploy_results=(),
                 test_instance="testing",
                 fresh_generation=fresh,
+                revoke_on_pending=True,
                 real_post_deploy=True,
             )
         self.assertEqual(result.deploy_status, "pass", result.error_message)

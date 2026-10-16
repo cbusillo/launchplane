@@ -40,6 +40,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     LocalOperatorIdentity,
     director_agent_identity,
+    TerminalAgentIdentity,
 )
 from control_plane.storage.postgres import DbOnlyMutationRequest, PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
@@ -268,6 +269,15 @@ def _execute_write(
     request_payload: dict[str, object] | None = None,
 ) -> ProductionBackupAuthorityWriteResponse:
     current_trace_id = trace_id or dependencies.next_trace_id()
+    if envelope.mode == "apply" and isinstance(
+        identity, (LocalOperatorIdentity, TerminalAgentIdentity)
+    ):
+        raise dependencies.http_error(
+            status_code=403,
+            trace_id=current_trace_id,
+            code="authorization_denied",
+            message="Agents may propose backup policies; only a signed-in Director may approve them.",
+        )
     if not authorization_checked:
         _require_write_authorization(
             dependencies=dependencies,
