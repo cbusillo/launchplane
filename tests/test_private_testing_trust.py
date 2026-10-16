@@ -31,6 +31,7 @@ from control_plane.workflows.public_ingress_monitor import (
     run_public_ingress_monitor_once,
 )
 from tests import test_public_ingress_monitor as monitor_fixture
+from tests.support.tls import server_tls_context
 
 
 def certificate_fixture() -> tuple[str, bytes, bytes]:
@@ -125,9 +126,7 @@ class PrivateTestingTrustTests(unittest.TestCase):
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
-        context.load_cert_chain(certificate, key)
+        context = server_tls_context(certificate, key)
         self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         thread = Thread(target=self.server.serve_forever, daemon=True)
         thread.start()
