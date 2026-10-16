@@ -2,7 +2,10 @@
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from control_plane.testing_never_served import NeverServedRecords
 
 from control_plane.contracts.disposable_lane import (
     DisposableLaneSafety,
@@ -35,6 +38,19 @@ class ReplacementBindings:
     secret_bindings: tuple[SecretBinding, ...]
     safety: DisposableLaneSafety
     preparation: DisposableTestingReplacementPreparation
+    non_use_records: "NeverServedRecords | None" = None
+
+    def read_testing_non_use_records(
+        self, product: str, context: str, target_id: str
+    ) -> "NeverServedRecords | None":
+        records = self.non_use_records
+        if records is None or (product, context, target_id) != (
+            records.generation.product,
+            records.generation.context,
+            records.generation.target_id,
+        ):
+            return None
+        return records
 
     def read_disposable_lane_safety(
         self, product: str, context: str, instance: str

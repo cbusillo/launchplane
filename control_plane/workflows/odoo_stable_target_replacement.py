@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from control_plane.integration_readback import web_held_until_integration_readback
 from control_plane.odoo_testing_restore import (
     read_current_testing_generation,
+    generation_snapshot_matches,
     fresh_testing_authority_sha256,
     fresh_testing_mode_refusal,
     preflight_fresh_testing_intent,
@@ -2049,7 +2050,7 @@ def execute_odoo_stable_target_replacement_apply(
             current = read_current_testing_generation(
                 record_store, product=profile.product, context=plan.context, instance=plan.instance
             )
-            if current != generation:
+            if not generation_snapshot_matches(current, generation):
                 raise click.ClickException("Fresh testing generation changed after planning.")
             return
         with _failure_stage(deploy_blocked_code("backup_restore_proof_required")):
