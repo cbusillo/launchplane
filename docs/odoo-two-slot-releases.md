@@ -190,6 +190,51 @@ shared inventory before native image/settings verification. An incomplete or
 uncertain recreation keeps the release held. Source delivery does not install
 this capability or configure a real lane.
 
+### Interrupted startup recovery
+
+`DokploySlotStartup` requires an explicit host `authority_directory`: an existing,
+canonical private runtime directory, persistent across API/worker replacements
+and available through the same admitted host transport. It is recovery evidence,
+not checked-in configuration or a second lane catalog. Before the first provider,
+file or recreation effect, the adapter atomically publishes and fsyncs an immutable
+record keyed by the complete admitted plan. It contains observed project,
+working-directory, Compose-file and writer/service coordinates; no environment
+values or Docker IDs. A conflicting, missing or malformed record never grants
+recovery authority. Retain it while that cutover can require recovery.
+
+Normal startup refreshes IDs from fresh Docker project/service label inventory.
+A lost reply leaves the operation held. If interruption leaves zero or multiple
+containers, the installed host uses `DokploySlotStartup.recover(plan, slot,
+intent, verify_guard=..., active_jobs=...)`, under the original exclusive release
+guard and already-published prepared-serving write pause. `verify_guard` must
+freshly verify both that guard and the persisted pause; `active_jobs` observes the
+selected physical database by logical slot/writer identity, even when no container
+exists. Neither callback may infer drain from a missing or stale Docker ID.
+Reconstruct the writer binding from the original admitted writer identities;
+recovery reloads service coordinates from durable authority before reading IDs.
+It does not repeat native maintenance, clear uncertain maintenance/backup markers,
+close the pause, commit native settings, release a web guard or resume writers.
+
+A recovery call performs one convergence pass, validating both projects, immutable
+Compose images, env-file consumption and every matching container before effects.
+It refuses foreign images/labels/files, one-offs, running/restarting/paused writers
+and undrained jobs. Fully matched stopped duplicate remnants can be removed with
+non-force container removal, retaining volumes. Zero inventory is recreated with
+`up --no-start --no-deps --force-recreate --no-build --pull never`. Both durable
+startup payloads are merged/read back, unique stopped inventory refreshes the
+same shared writer object, and independent effective image/settings/indexing
+verification precedes the receipt. Missing readback, guard loss or a lost reply
+keeps the operation held; a later call begins with fresh observation. There is no
+unbounded retry loop, deployment fallback or shell repair procedure.
+
+Before activation, [the installed qualification](https://github.com/cbusillo/launchplane/issues/3268)
+must prove the host package/transport, persistent authority directory and its
+atomic publication permissions, exact Compose behavior under interruption,
+logical-writer database observer, guard/pause callbacks and shared writer wiring.
+Qualify these capabilities and representative forward/rollback recovery in
+isolation before any exact Client-accepted gated real release; source tests do
+not activate a lane.
+
 `configure_startup` merges the selected snapshot and its legacy indexing parameter
 into both slots' durable managed startup payloads, preserves unrelated settings
 and secrets, and returns `StartupSettingsReadback` only after readback. It must

@@ -64,12 +64,19 @@ not retain forward-release settings. Collection-only historical rollback preserv
 applied snapshot separately from pending intent, so subsequent review compares
 against production's applied settings. A failed maintenance retains its exact attempted snapshot as unverified, outside the production checklist; the existing maintenance or durable operation retry must verify it before a new release review.
 
-The supported application path is the stopped-web stable-target replacement driver.
-The two-slot host provider currently has no website-settings maintenance receipt;
-promotion with website snapshots refuses before provider effects. Preparation
-and release review remain supported, and existing products configured for the
-stable-target driver use the path above. Two-slot activation requires adding that
-provider capability ([#3620](https://github.com/cbusillo/launchplane/issues/3620)); never change a live product's driver to bypass the refusal.
+The stopped-web stable-target replacement driver supports native application.
+Two-slot lanes use the service's admitted host factory and native maintenance,
+settings and writer adapters described in
+[the cutover binding contract](generic-web-two-slot-releases.md). The installed
+host must provide startup preflight and recreation in both slots; missing
+capabilities refuse before candidate effects. The same writer inventory flows
+through fencing, settings verification and handoff. A rollback factory refusal
+records a failed rollback before any provider effect, preserving its failure
+receipt instead of leaving it pending. Installed-package import or construction
+errors report an unavailable host capability without exposing package details.
+Source assembly does not
+prove installation, lane activation or visitor behavior; #3268 retains that
+qualification. Never change a live product's driver to bypass the refusal.
 
 The devkit consumer runs on data workflows and every web startup, clearing
 every copied website's native GA key and disabling

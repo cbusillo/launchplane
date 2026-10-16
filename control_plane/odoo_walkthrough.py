@@ -109,7 +109,9 @@ def plan_walkthrough(
     if generation is None or not generation.completed_at:
         raise ValueError("A completed isolated testing generation is required.")
     if request.operation != "cleanup":
-        require_drill_use_unprotected(store, request.product, request.context)
+        require_drill_use_unprotected(
+            store, request.product, request.context, allow_down_repair=False
+        )
     # Preserve the existing real host storage/network/image/copy inspection.
     # Its aggregate usage boolean includes our own historical task accounts;
     # the native witnessed-account read below distinguishes those from staff.
@@ -409,7 +411,10 @@ class WalkthroughAdapter:
                     lease.assert_current()
                     assert_selection_current(self.store, connection.selection)
                     require_drill_use_unprotected(
-                        self.store, self.request.product, self.request.context
+                        self.store,
+                        self.request.product,
+                        self.request.context,
+                        allow_down_repair=False,
                     )
                     if not testing_task_unused(
                         host=connection.host,

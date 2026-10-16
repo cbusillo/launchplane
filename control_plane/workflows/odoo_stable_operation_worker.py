@@ -16,7 +16,7 @@ from typing import Any, Callable, Protocol, cast
 
 from pydantic import BaseModel
 from control_plane.lane_movement import LaneMovementRefused
-from control_plane.odoo_testing_drill import DrillSkipped
+from control_plane.odoo_testing_drill import DrillSkipped, DrillPrerequisite
 from control_plane.odoo_testing_restore import read_current_testing_generation
 
 from control_plane.contracts.odoo_stable_bootstrap import OdooStableBootstrapResult
@@ -2267,6 +2267,16 @@ def _execute_target_replacement_with_checkpoint(
                 deploy_failure_description(TESTING_RESTORE_REQUIRED_CODE),
             )
         if isinstance(record_store, PostgresRecordStore):
+            from control_plane.odoo_testing_storage import prepare_drill_storage
+
+            prepare_drill_storage(
+                record_store,
+                operation,
+                control_plane_root_path,
+                checkpoint=lambda: authorization_guard.recheck_provider_effect(
+                    TARGET_REPLACEMENT_DESTRUCTIVE_RESTORE
+                ),
+            )
             record_store.activate_odoo_testing_drill(operation, time.time())
         require_unchanged_production_artifact(
             record_store=record_store,
@@ -2326,12 +2336,25 @@ def _execute_target_replacement_with_checkpoint(
             }
         )
     except Exception as error:
-        logging.exception(
-            "Odoo stable target replacement operation %s failed before producing a result.",
-            operation.operation_id,
+        storage_pending = (
+            isinstance(error, DrillPrerequisite)
+            and error.code == "testing_storage_reconciliation_pending"
         )
+        if storage_pending:
+            logging.info("Odoo testing storage reconciliation will continue in the worker queue.")
+        else:
+            logging.exception(
+                "Odoo stable target replacement operation %s failed before producing a result.",
+                operation.operation_id,
+            )
         terminal_operation = (
-            _retry_source_order_read(operation)
+            _retry_source_order_read(
+                operation,
+                code="testing_storage_reconciliation_pending",
+                message="Continue bounded storage reconciliation before selecting a new copy.",
+            )
+            if storage_pending
+            else _retry_source_order_read(operation)
             if isinstance(error, LaneMovementRefused) and error.code == "source_order_unavailable"
             else operation.model_copy(
                 update={
@@ -2420,7 +2443,12 @@ class _StaffTestingHoldError(Exception):
     """A reconcile deploy reached a testing lane that site staff hold; nothing ran."""
 
 
-def _retry_source_order_read(operation: Any) -> Any:
+def _retry_source_order_read(
+    operation: Any,
+    *,
+    code: str = "lane_movement.source_order_unavailable",
+    message: str = "Source history could not be read; retry before any provider write.",
+) -> Any:
     """Keep a no-effect source read refusal durable and available to the worker."""
     return operation.model_copy(
         update={
@@ -2431,8 +2459,8 @@ def _retry_source_order_read(operation: Any) -> Any:
             "lease_owner": "",
             "lease_expires_at": "",
             "heartbeat_at": "",
-            "error_code": "lane_movement.source_order_unavailable",
-            "error_message": "Source history could not be read; retry before any provider write.",
+            "error_code": code,
+            "error_message": message,
             "result": None,
         }
     )

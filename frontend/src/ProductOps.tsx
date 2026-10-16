@@ -174,7 +174,9 @@ export function ProductWorkspaceRoute({
   );
   const loadedProductKey = useRef("");
   useEvidenceExpiry(resource.data?.environments ?? [], [resource.data?.preview.provenance.stale_after ?? ""]);
-  useEvidenceRefresh(productKey, !fixtureMode, resource, () => setRetryToken(value => value + 1));
+  useEvidenceRefresh(productKey, !fixtureMode, resource, () => setRetryToken(value => value + 1),
+    resource.data ? [...resource.data.environments.flatMap(environmentEvidenceDeadlines),
+      resource.data.preview.provenance.stale_after] : []);
 
   useEffect(() => {
     if (fixtureResource) {

@@ -7,6 +7,7 @@ from control_plane.disposable_lanes import (
     disposable_lane_configuration,
 )
 from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
+from control_plane.lane_usage import lane_usage_protected
 
 
 def require_connection_isolation_lane(
@@ -35,7 +36,14 @@ def require_connection_isolation_lane(
     # It does not turn absent or stale observations into unused/reproducible facts.
     # Known exceptions remain protective even after their observation expires.
     if protection is not None and (
-        protection.usage == "in_use"
+        lane_usage_protected(
+            store,
+            product=product,
+            context=context,
+            instance=instance,
+            usage=protection.usage,
+            require_unused=False,
+        )
         or protection.data == "only_copy"
         or protection.production_resources in {"shared", "separation_ready"}
     ):

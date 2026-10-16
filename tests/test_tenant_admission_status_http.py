@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import threading
 from tempfile import TemporaryDirectory
@@ -26,6 +27,7 @@ from control_plane.tenant_admission_controller import (
 from control_plane.tenant_admission_projection import TenantAdmissionProjectionError
 from tests.http_app_test_support import _AsgiResponse, _asgi_get, _asgi_request
 from tests.support.auth import _StubVerifier, _identity
+from tests.support.http import lifespan_client
 from tests.test_tenant_admission_http import (
     CONTEXT,
     PRODUCT,
@@ -347,7 +349,11 @@ class TenantAdmissionStatusHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_slow_provider_keeps_event_loop_free_and_revokes_after_cancellation(
         self,
     ) -> None:
+        loop = asyncio.get_running_loop()
         loop_thread = threading.get_ident()
+        # A fixture waiter must not consume the executor needed by the provider.
+        # The isolated test's runner owns and shuts down this executor.
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
         cases: tuple[tuple[str, str, dict[str, object]], ...] = (
             (
                 "tenant_admission.controller.run_once",
@@ -364,20 +370,20 @@ class TenantAdmissionStatusHttpTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(path=path), TemporaryDirectory() as temporary_directory_name:
                 store = _postgres_store(Path(temporary_directory_name), actions=(action,))
                 store.write_tenant_repository_classification_record(_classification())
-                started = threading.Event()
+                started = asyncio.Event()
                 release = threading.Event()
-                revoked = threading.Event()
+                revoked = asyncio.Event()
                 revocations: list[tuple[str, int]] = []
 
                 def wait_for_release() -> None:
-                    started.set()
+                    loop.call_soon_threadsafe(started.set)
                     if not release.wait(5):
                         raise ValueError("fixture timed out")
 
                 def github_api(**kwargs: object) -> object:
                     if kwargs.get("path") == "/installation/token":
                         revocations.append((str(kwargs["token"]), threading.get_ident()))
-                        revoked.set()
+                        loop.call_soon_threadsafe(revoked.set)
                         return None
                     wait_for_release()
                     return _pull_request_payload(head_sha="b" * 40)
@@ -403,20 +409,24 @@ class TenantAdmissionStatusHttpTests(unittest.IsolatedAsyncioTestCase):
                         authz_policy=_authz_policy(actions=(action,)),
                         record_store_factory=lambda: store,
                     )
-                    await _assert_slow_provider_leaves_loop_free(
-                        self,
-                        call=lambda: _asgi_request(
-                            app,
-                            "POST",
-                            path,
-                            headers={"Authorization": "Bearer valid-token"},
-                            payload=payload,
-                        ),
-                        health=lambda: _asgi_get(app, "/v1/health"),
-                        started=started,
-                        release=release,
-                    )
-                    self.assertTrue(await asyncio.to_thread(revoked.wait, 5))
+                    # Application startup is outside the provider-start deadline;
+                    # health and the cancelled request share one active lifespan.
+                    async with lifespan_client(app) as client:
+                        await _assert_slow_provider_leaves_loop_free(
+                            self,
+                            call=lambda: _asgi_request(
+                                client,
+                                "POST",
+                                path,
+                                headers={"Authorization": "Bearer valid-token"},
+                                payload=payload,
+                            ),
+                            health=lambda: _asgi_get(client, "/v1/health"),
+                            started=started,
+                            release=release,
+                            revoked=revoked,
+                        )
+                        await asyncio.wait_for(revoked.wait(), 5)
 
                 self.assertEqual([token for token, _ in revocations], ["managed-token"])
                 self.assertNotEqual(revocations[0][1], loop_thread)
@@ -427,20 +437,30 @@ async def _assert_slow_provider_leaves_loop_free(
     *,
     call: Callable[[], Awaitable[_AsgiResponse]],
     health: Callable[[], Awaitable[_AsgiResponse]],
-    started: threading.Event,
+    started: asyncio.Event,
     release: threading.Event,
+    revoked: asyncio.Event,
 ) -> None:
     task = asyncio.ensure_future(call())
     try:
-        test.assertTrue(await asyncio.to_thread(started.wait, 3))
+        await asyncio.wait_for(started.wait(), 3)
         healthy = await asyncio.wait_for(health(), 2)
         test.assertEqual(healthy.status_code, 200)
         test.assertFalse(task.done(), "the event loop waited for the blocked provider")
+        test.assertFalse(revoked.is_set(), "the provider must still hold its credential")
         task.cancel()
         with test.assertRaises(asyncio.CancelledError):
             await task
+        test.assertFalse(
+            revoked.is_set(), "cancellation must not end the worker's credential scope"
+        )
     finally:
         release.set()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        # Queue behind the released provider in the single-worker executor so
+        # patches and temporary storage outlive its actual completion, even on failure.
+        await asyncio.to_thread(lambda: None)
 
 
 def _classification(
