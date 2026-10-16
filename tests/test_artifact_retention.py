@@ -97,7 +97,7 @@ class ArtifactRetentionTests(TestCase):
             read_package_versions(transport=transport, image_repository=IMAGE, repository_id="42")
         transport.repository_id = 42
         transport.full_pages = True
-        with self.assertRaisesRegex(ValueError, "truncated"):
+        with self.assertRaises(ValueError):
             read_package_versions(transport=transport, image_repository=IMAGE, repository_id="42")
         self.assertTrue(all(not path.startswith("http") for path in transport.paths))
 

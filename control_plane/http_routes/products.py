@@ -43,7 +43,11 @@ from control_plane.contracts.product_incident_read_model import (
     preview_fence_incident_scope,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.artifact_retention import ArtifactRetentionPlan, product_retention_dry_run
+from control_plane.artifact_retention import (
+    ArtifactRetentionPlan,
+    ArtifactRetentionProductMissingError,
+    product_retention_dry_run,
+)
 from control_plane.contracts.product_operational_readiness import ProductOperationalReadiness
 from control_plane.http_routes.mutation_support import idempotency_scope
 from control_plane.product_profile_mutation_receipt import (
@@ -779,6 +783,13 @@ def register_protected_artifact_read_routes(
         try:
             store = require_protected_artifact_store(record_store)
             plan = product_retention_dry_run(store, product=product)
+        except ArtifactRetentionProductMissingError as error:
+            raise common.http_error(
+                status_code=404,
+                trace_id=trace_id,
+                code="product_not_found",
+                message="An active product profile was not found.",
+            ) from error
         except (TypeError, ValueError) as error:
             raise common.http_error(
                 status_code=503,
@@ -797,6 +808,7 @@ def register_protected_artifact_read_routes(
         summary="Read a dry-run image retention plan",
         responses={
             403: {"model": common.error_response_model},
+            404: {"model": common.error_response_model},
             503: {"model": common.error_response_model},
         },
     )

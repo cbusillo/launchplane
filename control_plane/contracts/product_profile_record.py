@@ -36,8 +36,8 @@ class ProductImageProfile(BaseModel):
 
     repository: str = ""
     scan_enabled: bool = Field(
-        default=True,
-        exclude_if=lambda value: value is True,
+        default=False,
+        exclude_if=lambda value: value is False,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
 

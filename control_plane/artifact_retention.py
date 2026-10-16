@@ -15,6 +15,10 @@ _BUILD_TAG = re.compile(r"(?:sha-[0-9a-f]{40}|pr-[1-9][0-9]*(?:-sha-[0-9a-f]{7,4
 _MAX_PAGES = 10
 
 
+class ArtifactRetentionProductMissingError(ValueError):
+    """The requested product is absent or inactive."""
+
+
 class RetentionVersion(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -171,7 +175,7 @@ def product_retention_dry_run(
         if profile.product == product
     ]
     if len(profiles) != 1 or not profiles[0].is_active:
-        raise ValueError("An active product profile is required.")
+        raise ArtifactRetentionProductMissingError("An active product profile is required.")
     profile = profiles[0]
     now = datetime.now(UTC)
     try:

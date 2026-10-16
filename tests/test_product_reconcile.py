@@ -288,7 +288,7 @@ def _profile(product: str = "site", *, repository_id: str = "") -> dict[str, obj
     payload = _odoo_preview_profile_payload(product)
     payload.update(
         repository=REPOSITORY if product == "site" else f"example/{product}",
-        image={"repository": IMAGE_REPOSITORY},
+        image={"repository": IMAGE_REPOSITORY, "scan_enabled": True},
         repository_id=repository_id,
         repository_owner_id="1" if repository_id else "",
     )
@@ -505,7 +505,7 @@ class ProductReconcileTestCase(unittest.TestCase):
         from control_plane.artifact_scan import ArtifactScanResult
 
         scanner_patch = patch(
-            "control_plane.artifact_scan.scan_artifact",
+            "control_plane.artifact_scan.scan_product_artifact",
             side_effect=lambda image: ArtifactScanResult(
                 image_reference=image,
                 status="pass",
@@ -1135,6 +1135,9 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         recorded = self.store.read_artifact_manifest("artifact-cm-run-20-1")
         self.assertEqual(recorded.image.digest, _digest(DEPLOYABLE))
 
+        self.artifact_scanner.side_effect = AssertionError(
+            "An active attempt must not be rescanned"
+        )
         self.request()
         repeated = self.reconcile()
 
@@ -1652,7 +1655,7 @@ def _generic_web_profile() -> LaunchplaneProductProfileRecord:
     payload = product_profile_payload("site")
     payload.update(
         repository=REPOSITORY,
-        image={"repository": IMAGE_REPOSITORY},
+        image={"repository": IMAGE_REPOSITORY, "scan_enabled": True},
         lanes=(
             {"instance": "testing", "context": "cm", "base_url": "https://testing.example.test"},
             {"instance": "prod", "context": "cm", "base_url": "https://example.test"},
@@ -3912,6 +3915,8 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.driver.changes, [("refresh", 5)])
 
+        self.assertEqual(self.artifact_scanner.call_count, 1)
+
     def test_a_failed_refresh_keeps_driver_text_out_and_waits_for_a_new_build(self) -> None:
         self.driver.refresh_status = "fail"
         self.github.add_run(50, PR_HEAD, event="pull_request")
@@ -3928,6 +3933,7 @@ class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
                     self.assertNotIn(fragment, text)
         self.assertIn("tries again when the PR has a new build", failures[-1].last_error)
         self.assertEqual(self.driver.changes, [("refresh", 5)])
+        self.assertEqual(self.artifact_scanner.call_count, 1)
 
         # A re-run of the Build workflow can produce the same image; it is tried again.
         self.driver.refresh_status = "pass"
@@ -5362,10 +5368,6 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
         self.assertEqual(sweep.call_count, 2)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ProductArtifactScanGateTests(ProductReconcileTestCase):
     def test_unavailable_and_vulnerable_scans_hold_before_testing_or_preview_effects(self) -> None:
         from control_plane.artifact_scan import ArtifactScanResult
@@ -5381,7 +5383,9 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                     )
                     commit = PR_HEAD if target == "preview" else DEPLOYABLE
                     self.github.add_run(
-                        20, commit, event="pull_request" if target == "preview" else "push"
+                        (50 if target == "preview" else 20) + (status == "unavailable"),
+                        commit,
+                        event="pull_request" if target == "preview" else "push",
                     )
                     self.request(target, 5 if target == "preview" else None)
                     plan = self.reconcile()
@@ -5394,7 +5398,6 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
                     self.assertFalse(
                         self.store.list_odoo_stable_target_replacement_operation_records()
                     )
-                    self.assertFalse(self.store.list_artifact_manifests())
 
     def test_preview_destroy_does_not_require_an_image_scan(self) -> None:
         self.github.pull_request["state"] = "closed"
@@ -5422,3 +5425,7 @@ class ProductArtifactScanGateTests(ProductReconcileTestCase):
         self.assertEqual(plan["artifact_scan"], {"status": "disabled"})
         self.assertTrue(self.provider.applied)
         self.artifact_scanner.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

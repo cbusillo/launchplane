@@ -1,18 +1,32 @@
 """Scan a provenance-verified image without executing it or reading host credentials."""
 
 from datetime import UTC, datetime
+from collections import OrderedDict
+from dataclasses import dataclass, field
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
+from threading import Lock
+from time import monotonic
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 _IMAGE = re.compile(r"[a-z0-9][a-z0-9._:/-]*@sha256:[0-9a-f]{64}")
 _MAX_REPORT_BYTES = 32 * 1024 * 1024
+SCAN_RESULT_TTL_SECONDS = 30 * 60
+GHCR_ARTIFACT_READ_INTEGRATION = "ghcr_artifact_read"
+_SCAN_LOCK = Lock()
+
+
+@dataclass(frozen=True)
+class RegistryReadCredentials:
+    username: str = field(repr=False)
+    password: str = field(repr=False)
 
 
 class ArtifactScanResult(BaseModel):
@@ -26,7 +40,60 @@ class ArtifactScanResult(BaseModel):
     critical: int = Field(default=0, ge=0)
 
 
-def scan_artifact(image_reference: str) -> ArtifactScanResult:
+_RESULTS: OrderedDict[tuple[str, str], tuple[float, ArtifactScanResult]] = OrderedDict()
+
+
+def scan_product_artifact(image_reference: str) -> ArtifactScanResult:
+    from control_plane import secrets
+    import click
+
+    credentials = None
+    try:
+        values = (
+            {
+                key: secrets.resolve_context_secret_value(
+                    integration=GHCR_ARTIFACT_READ_INTEGRATION,
+                    context_name="launchplane",
+                    binding_key=key,
+                )
+                for key in ("username", "password")
+            }
+            if image_reference.startswith("ghcr.io/")
+            else {}
+        )
+        if values.get("username") and values.get("password"):
+            credentials = RegistryReadCredentials(**values)
+    except (click.ClickException, OSError, ValueError):
+        pass  # Public registries remain usable without private registry authority.
+    return scan_artifact(image_reference, credentials=credentials)
+
+
+def scan_artifact(
+    image_reference: str, *, credentials: RegistryReadCredentials | None = None
+) -> ArtifactScanResult:
+    """Bound repeated scans while keeping scanner databases in an isolated cache."""
+    credential_key = hashlib.sha256(
+        repr((credentials.username, credentials.password)).encode() if credentials else b"anonymous"
+    ).hexdigest()
+    key = image_reference, credential_key
+    with _SCAN_LOCK:
+        cached = _RESULTS.get(key)
+        if cached is not None and monotonic() - cached[0] < (
+            60 if cached[1].status == "unavailable" else SCAN_RESULT_TTL_SECONDS
+        ):
+            _RESULTS.move_to_end(key)
+            return cached[1]
+        result = _scan_artifact(image_reference, credentials=credentials)
+        _RESULTS[key] = monotonic(), result
+        _RESULTS.move_to_end(key)
+        while len(_RESULTS) > 128:
+            _RESULTS.popitem(last=False)
+        return result
+
+
+def _scan_artifact(
+    image_reference: str, *, credentials: RegistryReadCredentials | None
+) -> ArtifactScanResult:
     """Scan remotely by digest; an unavailable scanner never means a clean image.
 
     Trivy gets a clean working directory and explicit options, rather than product
@@ -61,6 +128,10 @@ def scan_artifact(image_reference: str) -> ArtifactScanResult:
                 "XDG_CONFIG_HOME": directory,
                 "XDG_CACHE_HOME": directory,
             }
+            if credentials is not None:
+                environment.update(
+                    TRIVY_USERNAME=credentials.username, TRIVY_PASSWORD=credentials.password
+                )
             completed = subprocess.run(
                 [
                     "trivy",
@@ -82,7 +153,7 @@ def scan_artifact(image_reference: str) -> ArtifactScanResult:
                     "--ignorefile",
                     str(ignore),
                     "--cache-dir",
-                    str(root / "cache"),
+                    str(Path(gettempdir()) / "launchplane-artifact-scan-cache"),
                     "--timeout",
                     "4m",
                     "--output",

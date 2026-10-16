@@ -28151,7 +28151,7 @@
             "type": "string"
           },
           "scan_enabled": {
-            "default": true,
+            "default": false,
             "title": "Scan Enabled",
             "type": "boolean",
             "x-launchplane-optional-response": true

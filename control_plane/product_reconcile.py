@@ -484,13 +484,13 @@ def _scan_deploy_artifact(
     plan: dict[str, object],
     verified: VerifiedBuildArtifact | VerifiedGenericWebBuild,
 ) -> bool:
-    from control_plane.artifact_scan import scan_artifact
+    from control_plane.artifact_scan import scan_product_artifact
 
     if not profile.image.scan_enabled:
         plan["artifact_scan"] = {"status": "disabled"}
         return True
     image = f"{verified.manifest.image.repository}@{verified.manifest.image.digest}"
-    result = scan_artifact(image)
+    result = scan_product_artifact(image)
     plan["artifact_scan"] = result.model_dump(mode="json")
     if result.status == "pass" and result.image_reference == image:
         return True
@@ -539,8 +539,6 @@ def reconcile_testing_target(
         if qualification != "pass":
             plan.update(action="deploy", reason="testing_qualification_missing")
     if desired is None or plan["action"] != "deploy":
-        return ReconcileOutcome(plan)
-    if not _scan_deploy_artifact(profile, plan, desired):
         return ReconcileOutcome(plan)
     if isinstance(desired, VerifiedGenericWebBuild):
         return _deploy_generic_web_testing(
@@ -681,6 +679,8 @@ def reconcile_testing_target(
                 f"{plan['last_failed_error_code']}: {plan['last_failed_error_summary']}"
             ),
         )
+    if not _scan_deploy_artifact(profile, plan, desired):
+        return ReconcileOutcome(plan)
     created_at = _utc_now()
     idempotency_key = attempt.idempotency_key
     try:
@@ -914,6 +914,13 @@ def _deploy_generic_web_testing(
                             plan, error=f"{held_outcome.error} Testing recovery refused: {refusal}."
                         )
                     return held_outcome
+            existing = record_store.read_idempotency_record(
+                scope=reconcile_reservation_scope(profile.product),
+                route_path=GENERIC_WEB_DEPLOY_ROUTE,
+                idempotency_key=idempotency_key,
+            )
+            if existing is None and not _scan_deploy_artifact(profile, plan, desired):
+                return ReconcileOutcome(plan)
             result = run_durable_provider_operation(
                 store=cast(DurableProviderOperationStore, record_store),
                 scope=reconcile_reservation_scope(profile.product),
@@ -1569,7 +1576,7 @@ def reconcile_preview_target(
         if unresolved:
             plan.update(held=True, reason="held_preview_recovery_required")
         return ReconcileOutcome(plan)
-    if plan["action"] == "apply" and decision.verified is not None:
+    if plan["action"] == "apply" and isinstance(decision.verified, VerifiedBuildArtifact):
         if not _scan_deploy_artifact(profile, plan, decision.verified):
             return ReconcileOutcome(plan)
     odoo = product_profile_uses_odoo_driver(profile)
@@ -2127,6 +2134,9 @@ def _run_generic_web_preview_operation(
         return ReconcileOutcome(plan, deferred=True)
     if not lease_held():
         raise ProductReconcileError(_LEASE_LOST, code="preview_lease_lost")
+    if isinstance(verified, VerifiedGenericWebBuild):
+        if not _scan_deploy_artifact(profile, plan, verified):
+            return ReconcileOutcome(plan)
     try:
         if isinstance(verified, VerifiedGenericWebBuild):
             _records, result = preview_hooks.refresh_generic_web(
