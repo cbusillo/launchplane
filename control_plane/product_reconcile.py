@@ -1197,6 +1197,7 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
 _UNKNOWN_TESTING_FAILURE = "The deploy failed with a code this Launchplane does not describe."
 # What each replacement-plan blocker code means, for ``plan_not_ready.<code>``.
 PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
+    "two_slot_cutover_required": "This lane requires its two-slot release path; stable target replacement would bypass traffic authority.",
     "fresh_testing_bootstrap_incomplete": "The original testing bootstrap has not committed its route and queue preparation.",
     "fresh_testing_authority_unverified": "The fresh testing generation's resource or credential authority is unverified.",
     "fresh_testing_restore_required": "The fresh testing generation must complete its sanitized production-copy restore first.",
