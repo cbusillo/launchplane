@@ -2050,8 +2050,9 @@ for the bounded client and separate isolation/sanitization requirements.
 Expected-config apply is a narrower metadata mutation for runtime contract
 requirements already owned by product profiles. The authenticated Director's
 `local_operator` credential can add declarations on any product, including Live products,
-without an additional grant. This exception cannot remove requirements and
-does not extend to other agent identities. Other callers and removals require
+without an additional grant. This exception cannot remove requirements or
+publish Client credential requests through `owner_input`, and does not extend
+to other agent identities. Other callers and removals require
 `product_profile.expected_config.apply` for the target product in the
 Launchplane service context. The route loads the existing DB-backed product profile,
 appends supplied runtime keys or managed secret binding requirements only when
@@ -2063,7 +2064,10 @@ request asks for removals, each section also reports `removed` and `absent`
 configured stored bindings for a removed requirement, which this route never
 unbinds or deletes. Dry-run returns the same redacted summary without writing. Apply updates only the profile `expected_config`, `updated_at`, and
 `source` fields. Requirements must come from the intended application contract,
-not simply every currently configured key. Runtime delivery is a separate
+not simply every currently configured key. Declaring a required key that is
+missing from the lane can block a later delivery until it is configured or
+the declaration is corrected. Inspect config status when reviewing the plan.
+Runtime delivery is a separate
 operation through the supported runtime-sync path and its own authorization;
 declaring requirements does not start it. The route does not accept secret
 plaintext, runtime values, release settings, or caller-supplied identity markers.

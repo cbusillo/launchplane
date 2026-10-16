@@ -124,6 +124,27 @@ class DirectorExpectedConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 403, response.text)
         self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
 
+    async def test_client_secret_requests_do_not_inherit_declaration_authority(self) -> None:
+        response = await self.post(
+            {
+                **self.payload,
+                "managed_secret_bindings": [
+                    {
+                        "binding_key": "API_TOKEN",
+                        "context": "example-site",
+                        "instance": "prod",
+                        "owner_input": {
+                            "label": "Service credential",
+                            "instructions": "Supply the service credential.",
+                        },
+                    }
+                ],
+            },
+            "client-request",
+        )
+        self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual(self.store.read_product_profile_record(self.profile.product), self.profile)
+
     async def test_runtime_values_and_identity_assertions_are_not_declarations(self) -> None:
         for extra in ({"env": {"APP_MODE": "replacement"}}, {"director_agent": True}):
             with self.subTest(extra=extra):

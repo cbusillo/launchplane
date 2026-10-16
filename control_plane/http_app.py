@@ -13540,7 +13540,12 @@ def create_launchplane_fastapi_app(
                 message="Product expected config request failed validation.",
             ) from error
         director_declaration = (
-            director_agent_identity(identity) and not expected_config_request.requests_removal
+            director_agent_identity(identity)
+            and not expected_config_request.requests_removal
+            and not any(
+                requirement.owner_input is not None
+                for requirement in expected_config_request.managed_secret_bindings
+            )
         )
         if (
             not director_declaration
@@ -13611,8 +13616,8 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="live_product_requires_operator",
                 message=(
-                    "A live product's expected configuration is changed by an admin, "
-                    "not with the local_operator credential the Director's agent uses."
+                    "A live product's expected configuration requires an admin for "
+                    "scoped agents, removals, or Client credential requests."
                 ),
             )
         secret_bindings: tuple[SecretBinding, ...] = ()
