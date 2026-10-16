@@ -546,7 +546,9 @@ def execute_generic_web_deploy(
                         deploy_reference=request.deploy_reference,
                     ),
                 )
-            selected_provider = deploy_provider or default_generic_web_deploy_provider()
+            selected_provider = deploy_provider or default_generic_web_deploy_provider(
+                record_store=record_store, control_plane_root=control_plane_root
+            )
             factory = cast(
                 Callable[[GenericWebCutoverPlan], WebCutoverProvider] | None,
                 getattr(selected_provider, "cutover_provider_factory", None),
@@ -620,7 +622,9 @@ def _execute_generic_web_deploy_unserialized(
     normalized_provider_operation_title = provider_operation_title.strip()
     if provider_effect_checkpoint is not None and not normalized_provider_operation_title:
         raise ValueError("Durable generic web deploys require a provider operation title.")
-    resolved_deploy_provider = deploy_provider or default_generic_web_deploy_provider()
+    resolved_deploy_provider = deploy_provider or default_generic_web_deploy_provider(
+        record_store=record_store, control_plane_root=control_plane_root
+    )
     resolved_profile = profile
     resolved_lane = lane
     if resolved_profile is None or resolved_lane is None:
