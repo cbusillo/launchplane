@@ -14,7 +14,12 @@ from control_plane.odoo_runtime_reads import (
     OdooRuntimeSelection,
 )
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
-from control_plane.odoo_walkthrough import plan_walkthrough, WALKTHROUGH_SECRET_INTEGRATION
+from control_plane.odoo_walkthrough import (
+    plan_walkthrough,
+    WALKTHROUGH_SECRET_INTEGRATION,
+    WalkthroughPrerequisite,
+    WalkthroughPrerequisiteError,
+)
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS
 from tests.test_odoo_walkthrough import task_request
 
@@ -159,15 +164,49 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.connect.assert_not_called()
 
     def test_missing_or_incomplete_generation_and_unreadable_isolation_refuse(self) -> None:
-        for generation in (None, self.generation.model_copy(update={"completed_at": ""})):
+        for generation, code in (
+            (None, WalkthroughPrerequisite.GENERATION_MISSING),
+            (
+                self.generation.model_copy(update={"completed_at": ""}),
+                WalkthroughPrerequisite.GENERATION_INCOMPLETE,
+            ),
+        ):
             self.generation_read.return_value = generation
-            with self.assertRaises(ValueError):
+            with self.assertRaises(WalkthroughPrerequisiteError) as caught:
                 self.plan()
+            self.assertEqual(caught.exception.code, code)
+        self.hold.assert_not_called()
+        self.usage.assert_not_called()
+        self.connect.assert_not_called()
+        self.store.find_secret_record.assert_not_called()
         self.generation_read.return_value = self.generation
         self.usage.side_effect = ValueError("unreadable physical isolation")
         with self.assertRaises(ValueError):
             self.plan()
         self.connect.assert_not_called()
+
+    def test_failed_private_reads_report_the_checkpoint_without_exception_details(self) -> None:
+        private_detail = "private-password private-provider.example private-copy-id"
+        for dependency, code in (
+            (self.select, WalkthroughPrerequisite.IDENTITY),
+            (self.generation_read, WalkthroughPrerequisite.GENERATION),
+            (self.hold, WalkthroughPrerequisite.USE),
+            (self.usage, WalkthroughPrerequisite.PHYSICAL_COPY),
+            (self.connect, WalkthroughPrerequisite.RUNTIME),
+            (self.domain, WalkthroughPrerequisite.ORIGIN),
+            (self.environment, WalkthroughPrerequisite.DATABASE),
+            (self.unused, WalkthroughPrerequisite.ISOLATION_OR_USAGE),
+            (self.store.find_secret_record, WalkthroughPrerequisite.CREDENTIAL),
+        ):
+            with self.subTest(checkpoint=code):
+                dependency.side_effect = RuntimeError(private_detail)
+                try:
+                    with self.assertRaises(WalkthroughPrerequisiteError) as caught:
+                        self.plan()
+                    self.assertEqual(caught.exception.code, code)
+                    self.assertNotIn(private_detail, str(caught.exception))
+                finally:
+                    dependency.side_effect = None
 
     def test_recipient_domain_and_database_must_all_match_before_secret_selection(self) -> None:
         self.connect.return_value = replace(
