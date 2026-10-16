@@ -9,6 +9,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
+from control_plane import odoo_runtime_reads
 
 
 TrackedTargetLogSource = Literal["runtime", "deployment"]
@@ -92,6 +93,22 @@ def build_tracked_target_logs_payload(
         raise ValueError("Tracked deployment logs do not support compose service selection.")
     if target_record.target_type == "application" and normalized_service:
         raise ValueError("Tracked application logs do not support compose service selection.")
+    selection = _odoo_slot_selection(record_store, normalized_context, normalized_instance)
+    if selection is not None:
+        target_id_record = target_id_record.model_copy(
+            update={"target_id": selection.slot_target_id}
+        )
+        target_record = target_record.model_copy(
+            update={"target_type": "compose", "target_name": selection.identity.slot}
+        )
+        # Inspect the active slot's actual image/identity even for a named worker
+        # or deployment-log request; the legacy recipient is no longer authority.
+        odoo_runtime_reads.connect_runtime(
+            store=cast(odoo_runtime_reads.OdooRuntimeReadStore, record_store),
+            selection=selection,
+            control_plane_root=control_plane_root,
+            database_url=None,
+        )
     try:
         host, token = dokploy_source.read_dokploy_config(control_plane_root=control_plane_root)
     except click.ClickException as error:
@@ -200,7 +217,45 @@ def build_tracked_target_logs_payload(
     }
     if deployment is not None:
         result["deployment"] = deployment
+    if selection is not None:
+        odoo_runtime_reads.assert_selection_current(
+            cast(odoo_runtime_reads.OdooRuntimeReadStore, record_store), selection
+        )
     return result
+
+
+def _odoo_slot_selection(
+    store: object, context: str, instance: str
+) -> odoo_runtime_reads.OdooRuntimeSelection | None:
+    read_inventory = getattr(store, "read_environment_inventory", None)
+    if not callable(read_inventory):
+        return None
+    try:
+        inventory = read_inventory(context_name=context, instance_name=instance)
+    except FileNotFoundError:
+        return None
+    identity = inventory.runtime_identity
+    if identity is None or not identity.product:
+        return None
+    typed = cast(odoo_runtime_reads.OdooRuntimeReadStore, store)
+    try:
+        profile = typed.read_product_profile_record(identity.product)
+    except FileNotFoundError:
+        if identity.slot:
+            raise ValueError("The recorded slot has no product authority.") from None
+        return None
+    if profile.driver_id != "odoo":
+        return None
+    lane = next(
+        (lane for lane in profile.lanes if lane.context == context and lane.instance == instance),
+        None,
+    )
+    if not identity.slot and (lane is None or lane.odoo_cutover is None):
+        return None
+    selection = odoo_runtime_reads.select_stable_runtime(typed, profile, instance)
+    if selection.identity.context != context or not selection.slot_target_id:
+        raise ValueError("The selected Odoo slot does not match the tracked lane.")
+    return selection
 
 
 def normalize_tracked_target_log_source(value: str) -> TrackedTargetLogSource:
