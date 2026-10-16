@@ -97,9 +97,11 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
             retained += (" " if retained else "") + check[0].upper() + check[1:]
         return retained
 
-    displayed = "\n".join(
-        line if fence else _RELEASE_PROCESS_INSTRUCTION.sub(remove_process, line)
-        for line, _heading, fence in _markdown_lines(notes)
+    displayed = "".join(
+        original if fence else _RELEASE_PROCESS_INSTRUCTION.sub(remove_process, original)
+        for original, (_line, _heading, fence) in zip(
+            notes.splitlines(keepends=True), _markdown_lines(notes), strict=True
+        )
     )
     displayed = _NOTE_LINK.sub(replace, displayed)
     if changed:

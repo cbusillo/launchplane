@@ -33,6 +33,7 @@ class ReleaseProcessNotesTests(unittest.TestCase):
             "Nothing for the Client to test: Internal cleanup and memory evidence only.",
             "Check the available memory in Launchplane's service diagnostics.",
             "Approve the release in Launchplane after checking that the memory panel shows data.",
+            "Check the contact page.\r\nCheck the footer.",
         ):
             with self.subTest(notes=notes):
                 self.assertEqual(release_test_notes(notes), (notes, False))
