@@ -101,7 +101,8 @@ for (const view of ["index", "workspace", "environment"] as const) {
       await advanceRead(milliseconds);
       // Check response replacement and its freshness in one browser assertion.
       // Retained loading data cannot match because it still has the old name.
-      const previousObservation = page.locator(view === "index" ? ".directory-product strong" : "h1")
+      const previousObservation = page.locator(view === "index" ? ".directory-product strong"
+        : view === "workspace" ? "h1" : ".environment-back-link")
         .filter({ hasText: new RegExp(`^${previousName}$`) });
       const nextSurface = main.filter({ hasNot: previousObservation });
       await expect(findSignal(nextSurface)).toHaveAttribute(attribute, tone);
@@ -111,7 +112,15 @@ for (const view of ["index", "workspace", "environment"] as const) {
       // minute-sized clock jump would answer the pending read too late and
       // hide the publication race for the rest of this long-lived page.
       await advance(origin + (minute + 1) * cadence + 1 - browserTime, "warning");
-      await advance(publicationDelay + DEADLINE_RETRY_INTERVAL_MS, healthy);
+      if (minute === 0) {
+        // Repeated stale reads must keep following this deadline. Publishing
+        // at +11 seconds leaves both +5 and +10 second responses stale.
+        await advance(DEADLINE_RETRY_INTERVAL_MS, "warning");
+        await advance(DEADLINE_RETRY_INTERVAL_MS, "warning");
+        await advance(DEADLINE_RETRY_INTERVAL_MS, healthy);
+      } else {
+        await advance(publicationDelay + DEADLINE_RETRY_INTERVAL_MS, healthy);
+      }
     }
     await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-${view}-${testInfo.project.name}.png`, fullPage: true });
     // Successful GETs must not renew stopped monitor evidence.
@@ -123,10 +132,14 @@ for (const view of ["index", "workspace", "environment"] as const) {
     const stoppedReads = reads;
     browserTime += DEADLINE_RETRY_INTERVAL_MS * 2;
     await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS * 2);
+    await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-stopped-${view}-${testInfo.project.name}.png`, fullPage: true });
     expect(reads).toBe(stoppedReads);
     unavailable = true;
     await advanceRead(READ_REFRESH_INTERVAL_MS);
     await expect(page.getByText("Cadence fixture unavailable", { exact: false }).first()).toBeVisible();
+    // Check after the response renders too, so queued intercepted requests
+    // cannot escape the earlier synchronous no-spin assertion.
+    expect(reads).toBe(stoppedReads + 1);
     await expect(signal).toHaveAttribute(attribute, "warning");
     expect(mutations).toEqual([]);
   });
