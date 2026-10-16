@@ -66,6 +66,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, ExceptionContext, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.pool import NullPool
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -575,6 +576,7 @@ from control_plane.storage.product_authority_bundle import (
     PublicHostAuthorityBusy,
     SecretCopySourceConflictError,
     SecretDeliveryConflictError,
+    odoo_instance_override_records_match,
     SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
@@ -6167,7 +6169,10 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 ):
                     raise ValueError("Provider operation no longer owns this evidence write.")
-            session.merge(row)
+            if isinstance(row, LaunchplaneOdooInstanceOverrideRow):
+                self._merge_odoo_override_row(session, row)
+            else:
+                session.merge(row)
             session.commit()
 
     @contextmanager
@@ -6204,6 +6209,13 @@ class PostgresRecordStore(HumanSessionStore):
     def _after_product_authority_bundle_step(self, step_name: str) -> None:
         return None
 
+    @staticmethod
+    def _merge_odoo_override_row(session: Any, row: LaunchplaneOdooInstanceOverrideRow) -> None:
+        merged = session.merge(row)
+        # SQLAlchemy's JSON dirty check also treats True and 1 as equal. An
+        # explicit override write must persist the caller's actual scalar types.
+        flag_modified(merged, "payload")
+
     def _after_authz_policy_write_step(self, step_name: str) -> None:
         return None
 
@@ -6212,7 +6224,10 @@ class PostgresRecordStore(HumanSessionStore):
             self._protect_testing_hold_non_use(
                 session, DokployTargetRecord.model_validate(row.payload)
             )
-        session.merge(row)
+        if isinstance(row, LaunchplaneOdooInstanceOverrideRow):
+            self._merge_odoo_override_row(session, row)
+        else:
+            session.merge(row)
         self._after_product_authority_bundle_step(step_name)
 
     def _product_profile_row(
@@ -6689,10 +6704,9 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                     .with_for_update()
                 )
-                if (
-                    current is None
-                    or OdooInstanceOverrideRecord.model_validate(current.payload)
-                    != write.expected_record
+                if current is None or not odoo_instance_override_records_match(
+                    OdooInstanceOverrideRecord.model_validate(current.payload),
+                    write.expected_record,
                 ):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
                 self._merge_authority_row(
@@ -28276,7 +28290,7 @@ class PostgresRecordStore(HumanSessionStore):
                     if current is not None
                     else None
                 )
-                if current_record != expected_record:
+                if not odoo_instance_override_records_match(current_record, expected_record):
                     raise OdooInstanceOverrideConflictError("Odoo overrides changed before commit.")
             require_bundle_context_owner(
                 ProductAuthorityBundle(
@@ -28288,7 +28302,7 @@ class PostgresRecordStore(HumanSessionStore):
                     for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                 ),
             )
-            session.merge(row)
+            self._merge_odoo_override_row(session, row)
             session.commit()
 
     def update_odoo_instance_override_apply_result(

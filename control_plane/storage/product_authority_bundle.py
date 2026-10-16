@@ -51,6 +51,17 @@ class OdooInstanceOverrideConflictError(ValueError):
     """The reviewed override record changed before its reconciliation committed."""
 
 
+def odoo_instance_override_records_match(
+    current: OdooInstanceOverrideRecord | None, expected: OdooInstanceOverrideRecord | None
+) -> bool:
+    """Compare the full snapshot without treating bool and numeric literals as equal."""
+    if current is None or expected is None:
+        return current is expected
+    return json.dumps(current.model_dump(mode="json"), sort_keys=True) == json.dumps(
+        expected.model_dump(mode="json"), sort_keys=True
+    )
+
+
 class OdooInstanceOverrideWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

@@ -172,7 +172,15 @@ class SecretReferenceStorageTests(unittest.TestCase):
 
     def test_transaction_guards_insertions_mutations_and_unrelated_override_edits(self) -> None:
         for sql in (False, True):
-            for change in ("binding", "insert", "version", "runtime", "override", "profile"):
+            for change in (
+                "binding",
+                "insert",
+                "version",
+                "runtime",
+                "override",
+                "scalar_type",
+                "profile",
+            ):
                 with self.subTest(sql=sql, change=change), TemporaryDirectory() as directory:
                     store: Store = (
                         PostgresRecordStore(
@@ -185,6 +193,21 @@ class SecretReferenceStorageTests(unittest.TestCase):
                         store.ensure_schema()
                         self.addCleanup(store.close)
                     profile, before = seed(store)
+                    if change == "scalar_type":
+                        item = before.config_parameters[1]
+                        before = before.model_copy(
+                            update={
+                                "config_parameters": (
+                                    before.config_parameters[0],
+                                    item.model_copy(
+                                        update={
+                                            "value": item.value.model_copy(update={"value": True})
+                                        }
+                                    ),
+                                )
+                            }
+                        )
+                        store.write_odoo_instance_override_record(before)
                     _, bundle = plan_secret_reference_reconciliation(
                         store=store, profile=profile, record=before, keys=(KEY,)
                     )
@@ -219,6 +242,23 @@ class SecretReferenceStorageTests(unittest.TestCase):
                             )
                         )
                         expected_error = RuntimeEnvironmentConflictError
+                    elif change == "scalar_type":
+                        item = before.config_parameters[1]
+                        store.write_odoo_instance_override_record(
+                            before.model_copy(
+                                update={
+                                    "config_parameters": (
+                                        before.config_parameters[0],
+                                        item.model_copy(
+                                            update={
+                                                "value": item.value.model_copy(update={"value": 1})
+                                            }
+                                        ),
+                                    )
+                                }
+                            )
+                        )
+                        expected_error = OdooInstanceOverrideConflictError
                     elif change == "override":
                         store.write_odoo_instance_override_record(
                             before.model_copy(
@@ -234,6 +274,13 @@ class SecretReferenceStorageTests(unittest.TestCase):
                     current = store.read_odoo_instance_override_record(
                         context_name="cm", instance_name="prod"
                     )
+                    if change == "scalar_type":
+                        self.assertIs(type(current.config_parameters[1].value.value), int)
+                        with self.assertRaises(OdooInstanceOverrideConflictError):
+                            store.write_odoo_instance_override_record(
+                                bundle.odoo_instance_override_writes[0].record,
+                                expected_record=before,
+                            )
                     with self.assertRaises(expected_error):
                         store.write_product_authority_bundle(bundle)
                     self.assertEqual(
@@ -242,6 +289,17 @@ class SecretReferenceStorageTests(unittest.TestCase):
                         ),
                         current,
                     )
+                    if change == "scalar_type":
+                        self.assertIs(
+                            type(
+                                store.read_odoo_instance_override_record(
+                                    context_name="cm", instance_name="prod"
+                                )
+                                .config_parameters[1]
+                                .value.value
+                            ),
+                            int,
+                        )
 
     def test_unsafe_selection_refuses_and_context_precedence_is_supported(self) -> None:
         for change in (

@@ -28,6 +28,7 @@ from control_plane.storage.product_authority_bundle import (
     ProductProfileConflictError,
     RuntimeEnvironmentConflictError,
     SecretDeliveryConflictError,
+    odoo_instance_override_records_match,
 )
 
 ROUTE = "/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile"
@@ -149,7 +150,7 @@ def register_secret_reference_routes(
                     if bundle.requires_write()
                     else record
                 )
-                if stored != expected:
+                if not odoo_instance_override_records_match(stored, expected):
                     raise OdooInstanceOverrideConflictError("Correction readback changed")
                 plan = plan.model_copy(
                     update={"applied": bundle.requires_write(), "read_back_matches": True}

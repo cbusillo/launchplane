@@ -12649,12 +12649,25 @@ class RealPostgresSecretReferenceTests(unittest.TestCase):
         from tests.test_odoo_secret_references import seed, KEY
         from control_plane.odoo_secret_references import plan_secret_reference_reconciliation
         from control_plane.storage.product_authority_bundle import SecretDeliveryConflictError
+        from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 
         with (
             _head_postgres_database() as url,
             closing(PostgresRecordStore(database_url=url)) as store,
         ):
             profile, original = seed(store)
+            item = original.config_parameters[1]
+            original = original.model_copy(
+                update={
+                    "config_parameters": (
+                        original.config_parameters[0],
+                        item.model_copy(
+                            update={"value": item.value.model_copy(update={"value": True})}
+                        ),
+                    )
+                }
+            )
+            store.write_odoo_instance_override_record(original)
             _, bundle = plan_secret_reference_reconciliation(
                 store=store, profile=profile, record=original, keys=(KEY,)
             )
@@ -12669,6 +12682,32 @@ class RealPostgresSecretReferenceTests(unittest.TestCase):
             )
             peer = PostgresRecordStore(database_url=url)
             self.addCleanup(peer.close)
+            item = original.config_parameters[1]
+            peer.write_odoo_instance_override_record(
+                original.model_copy(
+                    update={
+                        "config_parameters": (
+                            original.config_parameters[0],
+                            item.model_copy(
+                                update={"value": item.value.model_copy(update={"value": 1})}
+                            ),
+                        )
+                    }
+                )
+            )
+            with self.assertRaises(OdooInstanceOverrideConflictError):
+                store.write_product_authority_bundle(bundle)
+            self.assertIs(
+                type(
+                    store.read_odoo_instance_override_record(
+                        context_name="cm", instance_name="prod"
+                    )
+                    .config_parameters[1]
+                    .value.value
+                ),
+                int,
+            )
+            peer.write_odoo_instance_override_record(original)
             candidate = next(item for item in peer.list_secret_bindings() if item.instance)
             peer.write_secret_binding(
                 candidate.model_copy(update={"binding_id": "concurrent-candidate"})

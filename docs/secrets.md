@@ -186,6 +186,8 @@ The service replans on apply and checks those snapshots under the authority
 transaction lock, including newly inserted candidates. HTTP 409 means read the
 record back and review again; the correction may have committed before a
 subsequent edit changed its readback. Never replay an uncertain write blindly.
+Changing a literal's JSON type also invalidates the snapshot; unrelated values
+retain their types when an override is written.
 An already-agreeing plan with a fresh digest applies as a no-op. An old digest
 does not authorize another correction after the record changes.
 
