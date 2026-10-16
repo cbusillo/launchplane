@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import sys
+from collections.abc import Mapping, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.client import HTTPException as HTTPTransportError
@@ -31,12 +33,20 @@ from control_plane.contracts.runtime_identity import (
     runtime_identity_from_health_payload,
 )
 from control_plane.dokploy import api, source
+from control_plane.odoo_diagnostic_identity import (
+    OdooDiagnosticIdentity,
+    OdooDiagnosticIdentityStore,
+    read_diagnostic_identity,
+    DIAGNOSTIC_IDENTITY_UNAVAILABLE,
+)
 from control_plane.preview_serving_evidence import verify_serving_preview
 from control_plane.workflows.odoo_preview_runtime import (
     discover_odoo_preview_target,
     odoo_compose_has_domain,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+
+ODOO_READ_REJECTED = "odoo_read_rejected"
 
 
 class OdooRuntimeReadError(ValueError):
@@ -46,7 +56,7 @@ class OdooRuntimeReadError(ValueError):
         super().__init__(message)
 
 
-class OdooRuntimeReadStore(Protocol):
+class OdooRuntimeReadStore(OdooDiagnosticIdentityStore, Protocol):
     def read_preview_record(self, preview_id: str) -> PreviewRecord: ...
 
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord: ...
@@ -180,6 +190,7 @@ class OdooRuntimeConnection:
     server_id: str
     app_name: str
     credentials: dict[str, str] = field(repr=False)
+    diagnostic_identity: OdooDiagnosticIdentity | None = field(default=None, repr=False)
 
 
 def connect_runtime(
@@ -188,6 +199,7 @@ def connect_runtime(
     selection: OdooRuntimeSelection,
     control_plane_root: Path,
     database_url: str | None,
+    diagnostics: bool = False,
 ) -> OdooRuntimeConnection:
     identity = selection.identity
     host, token = source.read_dokploy_config(
@@ -254,6 +266,14 @@ def connect_runtime(
     environment = inspect_runtime_container(
         host, token, server_id, container_id, app_name, identity
     )
+    diagnostic_identity = None
+    if diagnostics and not _production_runtime(selection):
+        try:
+            diagnostic_identity = read_diagnostic_identity(
+                store, identity, environment.get("ODOO_DB_NAME", "")
+            )
+        except ValueError:
+            raise _diagnostic_unavailable() from None
     return OdooRuntimeConnection(
         selection=selection,
         evidence=OdooRuntimeEvidence(
@@ -271,7 +291,118 @@ def connect_runtime(
             key: environment.get(key, "")
             for key in ("ODOO_DB_NAME", "ODOO_ADMIN_LOGIN", "ODOO_ADMIN_PASSWORD")
         },
+        diagnostic_identity=diagnostic_identity,
     )
+
+
+def _production_runtime(selection: OdooRuntimeSelection) -> bool:
+    return selection.identity.environment_kind == "stable" and selection.identity.instance == "prod"
+
+
+def _diagnostic_unavailable() -> OdooRuntimeReadError:
+    return OdooRuntimeReadError(
+        DIAGNOSTIC_IDENTITY_UNAVAILABLE,
+        "The lane's Odoo diagnostic identity is unavailable.",
+        503,
+    )
+
+
+def diagnostic_authentication(connection: OdooRuntimeConnection) -> dict[str, str]:
+    """Production retains its existing startup contract until separately migrated."""
+    credentials = connection.credentials
+    database = credentials.get("ODOO_DB_NAME", "")
+    if _production_runtime(connection.selection):
+        password = credentials.get("ODOO_ADMIN_PASSWORD", "")
+        if not database or not password:
+            raise OdooRuntimeReadError(
+                "odoo_credentials_missing",
+                "The running Odoo container has no configured diagnostic credentials.",
+                503,
+            )
+        return {
+            "db": database,
+            "login": credentials.get("ODOO_ADMIN_LOGIN", "") or "admin",
+            "password": password,
+        }
+    identity = connection.diagnostic_identity
+    if identity is None or (
+        identity.product,
+        identity.context,
+        identity.instance,
+        identity.database,
+    ) != (
+        connection.selection.identity.product,
+        connection.selection.identity.context,
+        connection.selection.identity.instance,
+        database,
+    ):
+        raise _diagnostic_unavailable()
+    return {
+        "db": database,
+        "login": identity.login,
+        "password": identity.password.get_secret_value(),
+    }
+
+
+def has_odoo_session(authenticated: object) -> bool:
+    return (
+        isinstance(authenticated, dict)
+        and type(authenticated.get("uid")) is int
+        and authenticated["uid"] > 0
+    )
+
+
+def authenticate_diagnostic(
+    connection: OdooRuntimeConnection, authenticate: Callable[[], object]
+) -> object:
+    try:
+        authenticated = authenticate()
+    except OdooRuntimeReadError as error:
+        if _production_runtime(connection.selection) or error.code != ODOO_READ_REJECTED:
+            raise
+        raise _diagnostic_unavailable() from None
+    if not has_odoo_session(authenticated):
+        require_diagnostic_user(connection, authenticated)
+    return authenticated
+
+
+def destroy_diagnostic_session(
+    connection: OdooRuntimeConnection, destroy: Callable[[], object]
+) -> None:
+    refusal = sys.exception()
+    try:
+        destroy()
+    except OdooRuntimeReadError:
+        # Preserve an already-decided identity refusal if logout transport fails.
+        # Successful reads still fail on logout errors; production keeps its
+        # previous exception behavior.
+        if (
+            _production_runtime(connection.selection)
+            or not isinstance(refusal, OdooRuntimeReadError)
+            or refusal.code != DIAGNOSTIC_IDENTITY_UNAVAILABLE
+        ):
+            raise
+
+
+def require_diagnostic_user(connection: OdooRuntimeConnection, authenticated: object) -> None:
+    if (
+        not isinstance(authenticated, dict)
+        or not has_odoo_session(authenticated)
+        or (
+            not _production_runtime(connection.selection)
+            and (
+                connection.diagnostic_identity is None
+                or authenticated["uid"] != connection.diagnostic_identity.user_id
+            )
+        )
+    ):
+        if _production_runtime(connection.selection):
+            raise OdooRuntimeReadError(
+                "odoo_authentication_failed",
+                "Odoo rejected its configured diagnostic credentials.",
+                503,
+            )
+        raise _diagnostic_unavailable()
 
 
 def inspect_runtime_container(
@@ -433,7 +564,7 @@ def _rpc(
     opener: OpenerDirector,
     base_url: str,
     path: str,
-    params: dict[str, object],
+    params: Mapping[str, object],
     *,
     expect_result: bool = True,
 ) -> object:
@@ -455,7 +586,7 @@ def _rpc(
         or (expect_result and "result" not in result)
     ):
         raise OdooRuntimeReadError(
-            "odoo_read_rejected", "Odoo rejected the authenticated mail-status read.", 503
+            ODOO_READ_REJECTED, "Odoo rejected the authenticated mail-status read.", 503
         )
     return result.get("result")
 
@@ -478,12 +609,7 @@ def read_outgoing_email(
             "invalid_odoo_url", "Mail-status reads require the recorded HTTPS runtime origin.", 503
         )
     credentials = connection.credentials
-    if not credentials["ODOO_DB_NAME"] or not credentials["ODOO_ADMIN_PASSWORD"]:
-        raise OdooRuntimeReadError(
-            "odoo_credentials_missing",
-            "The running Odoo container has no configured diagnostic credentials.",
-            503,
-        )
+    authentication = diagnostic_authentication(connection)
     if not odoo_compose_has_domain(
         host=connection.host,
         token=connection.token,
@@ -499,27 +625,10 @@ def read_outgoing_email(
     require_runtime_identity(
         connection.selection.identity, runtime_identity_from_health_payload(health)
     )
-    authenticated = _rpc(
-        opener,
-        base_url,
-        "/web/session/authenticate",
-        {
-            "db": credentials["ODOO_DB_NAME"],
-            # This is the Odoo image's startup contract, not a tenant identity default.
-            "login": credentials["ODOO_ADMIN_LOGIN"] or "admin",
-            "password": credentials["ODOO_ADMIN_PASSWORD"],
-        },
+    authenticated = authenticate_diagnostic(
+        connection,
+        lambda: _rpc(opener, base_url, "/web/session/authenticate", authentication),
     )
-    if (
-        not isinstance(authenticated, dict)
-        or type(authenticated.get("uid")) is not int
-        or authenticated["uid"] <= 0
-    ):
-        raise OdooRuntimeReadError(
-            "odoo_authentication_failed",
-            "Odoo rejected its configured diagnostic credentials.",
-            503,
-        )
     fields = [
         "id",
         "state",
@@ -532,14 +641,20 @@ def read_outgoing_email(
         "auto_delete",
     ]
     try:
+        require_diagnostic_user(connection, authenticated)
         result = _search_mail(opener, base_url, fields, query)
     finally:
-        _rpc(opener, base_url, "/web/session/destroy", {}, expect_result=False)
+        destroy_diagnostic_session(
+            connection,
+            lambda: _rpc(opener, base_url, "/web/session/destroy", {}, expect_result=False),
+        )
     health = _http_json(opener, Request(base_url + "/launchplane/health"))
     require_runtime_identity(
         connection.selection.identity, runtime_identity_from_health_payload(health)
     )
-    return _mail_result(query, result, credentials)
+    return _mail_result(
+        query, result, {**credentials, "ODOO_DIAGNOSTIC_PASSWORD": authentication["password"]}
+    )
 
 
 def _search_mail(
@@ -626,7 +741,8 @@ def _literal_like(value: str) -> str:
 
 def _redact(value: object, credentials: dict[str, str]) -> str:
     text = value if isinstance(value, str) else ""
-    password = credentials.get("ODOO_ADMIN_PASSWORD", "")
-    if password:
-        text = text.replace(password, "[redacted]")
+    for key in ("ODOO_ADMIN_PASSWORD", "ODOO_DIAGNOSTIC_PASSWORD"):
+        password = credentials.get(key, "")
+        if password:
+            text = text.replace(password, "[redacted]")
     return api.redact_dokploy_log_line(text)[:1000]

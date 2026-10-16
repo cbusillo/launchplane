@@ -16894,6 +16894,43 @@ def create_launchplane_fastapi_app(
         context_wide_config = not product_config_request.instance or any(
             secret.scope == "context" for secret in product_config_request.secrets
         )
+        from control_plane.odoo_diagnostic_identity import (
+            DIAGNOSTIC_SECRET_INTEGRATION,
+            diagnostic_lane_secret_name,
+            is_diagnostic_preview_config,
+        )
+
+        diagnostic_admin = isinstance(identity, LocalAdminIdentity) or (
+            isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"
+        )
+        if (
+            product_config_request.mode == "apply"
+            and not diagnostic_admin
+            and any(
+                secret.get("integration") == DIAGNOSTIC_SECRET_INTEGRATION
+                for secret in cast(list[dict[str, object]], request_payload["secrets"])
+            )
+        ):
+            raise _launchplane_http_error(
+                status_code=403,
+                trace_id=trace_id,
+                code="authorization_denied",
+                message="Odoo diagnostic identities must be recorded by an authorized admin.",
+            )
+
+        if any(
+            secret.get("integration") == DIAGNOSTIC_SECRET_INTEGRATION
+            and secret.get("scope") == "context_instance"
+            and secret.get("name") != diagnostic_lane_secret_name(str(secret.get("instance", "")))
+            for secret in cast(list[dict[str, object]], request_payload["secrets"])
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Stable Odoo diagnostic identities must reuse the lane's fixed secret name.",
+            )
+
         try:
             config_profile = control_plane_product_config_service.resolve_product_config_profile(
                 database_store,
@@ -16901,6 +16938,7 @@ def create_launchplane_fastapi_app(
                 context=product_config_request.context,
                 instance=product_config_request.instance,
                 context_wide=context_wide_config,
+                diagnostic_preview=is_diagnostic_preview_config(request_payload),
             )
         except control_plane_product_config.ProductConfigError as error:
             profile_error = control_plane_product_config_service.product_config_service_error(error)

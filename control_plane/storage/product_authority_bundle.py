@@ -299,9 +299,54 @@ def require_bundle_context_owner(
         if product_target_owner_products(profiles, context=context, instance=instance) != frozenset(
             (product,)
         ):
-            raise ProductProfileConflictError(
-                "Product config target ownership changed before commit."
+            # Service-only preview identities live in the product's preview
+            # context, individually named for their exact runtime instance.
+            # This does not authorize runtime configuration or another purpose.
+            from control_plane.odoo_diagnostic_identity import (
+                DIAGNOSTIC_SECRET_INTEGRATION,
+                DIAGNOSTIC_IDENTITY_KEY,
+                diagnostic_preview_context_owned,
+                diagnostic_preview_secret_name,
             )
+
+            other_writes = bundle.model_copy(
+                update={
+                    "secret_records": (),
+                    "secret_versions": (),
+                    "secret_bindings": (),
+                    "secret_audit_events": (),
+                    "idempotency_record": None,
+                }
+            )
+            if (
+                instance
+                or other_writes.requires_write()
+                or not diagnostic_preview_context_owned(profiles, product, context)
+                or any(
+                    record.scope != "context"
+                    or record.context != context
+                    or record.instance
+                    or record.integration != DIAGNOSTIC_SECRET_INTEGRATION
+                    or not record.name.startswith(diagnostic_preview_secret_name(""))
+                    for record in bundle.secret_records
+                )
+                or any(
+                    binding.integration != DIAGNOSTIC_SECRET_INTEGRATION
+                    or binding.binding_key != DIAGNOSTIC_IDENTITY_KEY
+                    or binding.context != context
+                    or binding.instance
+                    or binding.secret_id
+                    not in {record.secret_id for record in bundle.secret_records}
+                    for binding in bundle.secret_bindings
+                )
+                or any(
+                    version.secret_id not in {record.secret_id for record in bundle.secret_records}
+                    for version in bundle.secret_versions
+                )
+            ):
+                raise ProductProfileConflictError(
+                    "Product config target ownership changed before commit."
+                )
 
 
 class ProductAuthorityBundleStore(Protocol):

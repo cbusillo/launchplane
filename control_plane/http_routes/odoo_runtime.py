@@ -168,13 +168,14 @@ def register_odoo_runtime_read_routes(
         return selection
 
     def connect(
-        store: object, selection: reads.OdooRuntimeSelection
+        store: object, selection: reads.OdooRuntimeSelection, *, diagnostics: bool = False
     ) -> reads.OdooRuntimeConnection:
         return reads.connect_runtime(
             store=cast(reads.OdooRuntimeReadStore, store),
             selection=selection,
             control_plane_root=dependencies.control_plane_root,
             database_url=dependencies.database_url,
+            diagnostics=diagnostics,
         )
 
     def email_response(
@@ -183,7 +184,7 @@ def register_odoo_runtime_read_routes(
         query: reads.OutgoingEmailQuery,
         trace_id: str,
     ) -> OdooOutgoingEmailResponse:
-        connection = connect(store, selection)
+        connection = connect(store, selection, diagnostics=True)
         result = reads.read_outgoing_email(connection, query)
         reads.assert_selection_current(cast(reads.OdooRuntimeReadStore, store), selection)
         return OdooOutgoingEmailResponse(
