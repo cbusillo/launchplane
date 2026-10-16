@@ -1,13 +1,18 @@
 """Persisted lane authority and narrowly resumable native worker ownership."""
 
-from datetime import UTC, datetime
+from contextlib import closing
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 import os
+from unittest.mock import Mock, patch
 from concurrent.futures import ThreadPoolExecutor
 
-from control_plane.contracts.odoo_prod_promotion_operation import OdooProdPromotionOperationRecord
+from control_plane.contracts.odoo_prod_promotion_operation import (
+    OdooProdPromotionOperationRecord,
+    ODOO_CUTOVER_RECONCILIATION_DELAY,
+)
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
@@ -18,9 +23,12 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.odoo_cutover_plan import cutover_identity, resolve_profile_cutover_plan
 from tests.support.profiles import _odoo_preview_profile_payload
 from tests.test_odoo_cutover import IsolatedCutoverProvider
-from tests.test_odoo_prod_promotion_operation import _operation, _store
+from tests.test_odoo_prod_promotion_operation import _operation, _rollback_operation, _store
 from tests.test_postgres_integration import _store_for_fresh_head_database
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.odoo_stable_operation_worker import (
+    run_odoo_stable_operation_worker_once,
+)
 
 
 class OdooCutoverActivationTests(unittest.TestCase):
@@ -243,5 +251,56 @@ class OdooCutoverActivationTests(unittest.TestCase):
             assert claimed is not None
             self.assertIn(claimed.lease_owner, {"worker-a", "worker-b"})
             self.assertEqual(claimed.attempt, 2)
+
+            # A denied resume retains its lane and provider budget. Its update
+            # time is durable, so a fresh worker cannot immediately reclaim it.
+            denied_at = datetime.fromisoformat(claimed.updated_at.replace("Z", "+00:00"))
+            denied = held.model_copy(
+                update={"updated_at": denied_at.isoformat(), "error_code": "authorization_denied"}
+            )
+            store.write_odoo_prod_promotion_operation_record(denied)
+            with closing(PostgresRecordStore(database_url=store.database_url)) as restarted:
+
+                def retry(at: datetime) -> OdooProdPromotionOperationRecord | None:
+                    return restarted.claim_odoo_cutover_reconciliation_record(
+                        lease_owner="restarted",
+                        lease_expires_at=(at + timedelta(minutes=5)).isoformat(),
+                        claimed_at=at.isoformat(),
+                        max_attempts=3,
+                    )
+
+                self.assertIsNone(retry(denied_at))
+                self.assertIsNone(retry(denied_at + ODOO_CUTOVER_RECONCILIATION_DELAY / 2))
+                unchanged = restarted.read_odoo_prod_promotion_operation_record(denied.operation_id)
+                self.assertEqual(unchanged, denied)
+                resumed = retry(denied_at + ODOO_CUTOVER_RECONCILIATION_DELAY)
+                assert resumed is not None
+                self.assertEqual(resumed.attempt, denied.attempt + 1)
             store.write_odoo_prod_promotion_operation_record(held.model_copy(update={"attempt": 3}))
             self.assertIsNone(claim("worker-b"))
+
+    def test_pending_rollback_precedes_held_reconciliation(self) -> None:
+        with TemporaryDirectory() as temporary:
+            store = self.store(temporary)
+            rollback = _rollback_operation()
+            recovery = Mock(side_effect=AssertionError("held recovery must yield"))
+            with (
+                patch.object(store, "claim_odoo_cutover_reconciliation_record", recovery),
+                patch.object(
+                    store, "claim_next_odoo_prod_rollback_operation_record", return_value=rollback
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker._execute_prod_rollback_operation",
+                    return_value=True,
+                ) as execute,
+            ):
+                result = run_odoo_stable_operation_worker_once(
+                    record_store=store,
+                    control_plane_root_path=Path(temporary),
+                    lease_owner="worker",
+                    cutover_provider_factory=Mock(),
+                )
+            self.assertEqual(result.operation_id, rollback.operation_id)
+            self.assertTrue(result.terminal_write_committed)
+            execute.assert_called_once()
+            recovery.assert_not_called()

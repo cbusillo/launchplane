@@ -135,7 +135,12 @@ releases cannot bypass another unfinished cutover; recover it first. Configured
 two-slot lanes also refuse an in-place rollback after a switch-back event.
 Authorization is checked again at recovery boundaries. Denial performs no
 effects and keeps the unfinished cutover's lane hold without consuming the
-provider retry budget. A refused finished-release replay preserves its existing
+provider retry budget. Held cutover reconciliation yields to pending release
+queues, including rollback and replacement. Product reconciliation remains
+available between delayed recovery attempts. A persisted
+30-second delay after the last recovery update prevents immediate reclaims
+after denial and survives worker restarts; other eligible lanes remain claimable.
+A refused finished-release replay preserves its existing
 promotion audit record. Switch-back intent persists its start time so a crash
 before publishing the deployment event cannot replace it with retry times.
 The direct promotion
@@ -175,7 +180,17 @@ including recovery from persisted intermediate steps. The deployment bridge
 records the verified applied baseline separately from pending preparation.
 
 The installed host adapter must bind `configure_startup` and the driver's
-`website_settings` capability. The former merges the selected snapshot and its legacy indexing parameter
+`website_settings` capability. `dokploy.slot_startup.DokploySlotStartup` supplies
+the concrete Compose startup operation using the existing host transport and
+the same `ContainerSlotWriters`. Read-only preflight verifies both projects'
+observed Compose files and env-file consumption. Under the writer fence it
+preserves unrelated provider/file payload values, reads back both, recreates
+only inventoried consumers with `up --no-start --no-deps`, and refreshes their
+shared inventory before native image/settings verification. An incomplete or
+uncertain recreation keeps the release held. Source delivery does not install
+this capability or configure a real lane.
+
+`configure_startup` merges the selected snapshot and its legacy indexing parameter
 into both slots' durable managed startup payloads, preserves unrelated settings
 and secrets, and returns `StartupSettingsReadback` only after readback. It must
 recreate every stopped writer container in both slots from those payloads and

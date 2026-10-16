@@ -94,3 +94,15 @@ Native Odoo consent behavior remains Essential only / Accept all. These fields
 are an application contract, not proof of Client consent acceptance, personal-
 data exclusion from events, provider event delivery or real visitors. The
 product's analytics issue owns those checks and the real Measurement ID.
+
+Startup preflight checks each observed Compose service's literal image against
+the slot's immutable image and requires the authoritative `.env` last in its
+`env_file` list, without an explicit payload override. An interpolated/mutable
+image or a later env-file override refuses before writes; install the admitted
+immutable definition before qualification. Recreation always reads the new
+container identities, even after a lost reply. An unavailable identity readback keeps the release held. A later unique
+Compose readback recovers the inventory before retrying; zero or multiple
+containers remain uncertain and require the installed host's recovery procedure.
+The host transport must qualify interruption/convergence and fresh inventory
+reconstruction on restart before activation (#3268). Source support does not
+supply a live admin repair path or treat removed IDs as a successful receipt.
