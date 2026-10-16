@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
 from control_plane.contracts.disposable_lane import (
     DISPOSABLE_LANE_OBSERVATION_ROUTE,
@@ -92,6 +93,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        PRIVATE_TESTING_TRANSPORT_ROUTE,
+        "Plan or compare private testing HTTPS and WSS configuration using current target evidence; no activation or transport verification.",
+        ("service_api", "local_cli"),
+        ("dry-run", "readback"),
+        "none",
+        ("expected_plan_sha256",),
+    ),
     OperationSpec(
         "POST",
         WALKTHROUGH_ROUTE,
