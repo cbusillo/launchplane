@@ -738,7 +738,10 @@ from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRequest,
 )
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
-from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_inventory_scan_record import (
+    PreviewInventoryScanRecord,
+    PREVIEW_INVENTORY_COLLECTION_SOURCE,
+)
 from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
@@ -2846,6 +2849,7 @@ class _PreviewLifecyclePlanApplyStore(Protocol):
         context_name: str | None = None,
         limit: int | None = 50,
         offset: int = 0,
+        exclude_source: str = "",
     ) -> tuple[PreviewInventoryScanRecord, ...]: ...
 
     def write_preview_lifecycle_plan_record(
@@ -23467,9 +23471,12 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
+        # Filter before limiting: background scans must not crowd lifecycle
+        # evidence out of its read window between daily sweeps.
         inventory_scans = plan_store.list_preview_inventory_scan_records(
             context_name=plan_request.context,
             limit=1,
+            exclude_source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
         )
         plan_record = build_preview_lifecycle_plan(
             product=plan_request.product,

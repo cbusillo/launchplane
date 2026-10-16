@@ -18067,10 +18067,13 @@ class PostgresRecordStore(HumanSessionStore):
         *,
         context_name: str = "",
         limit: int | None = None,
+        exclude_source: str = "",
     ) -> tuple[PreviewInventoryScanRecord, ...]:
         filters: list[object] = []
         if context_name:
             filters.append(LaunchplanePreviewInventoryScanRow.context == context_name)
+        if exclude_source:
+            filters.append(LaunchplanePreviewInventoryScanRow.source != exclude_source)
         return self._list_models(
             model_type=PreviewInventoryScanRecord,
             orm_model=LaunchplanePreviewInventoryScanRow,
