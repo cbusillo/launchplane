@@ -31,6 +31,7 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
         "service_unavailable",
         "serving_configuration_mismatch",
         "serving_process_absent",
+        "serving_container_absent",
         "session_alias_unsupported",
         "session_file_unavailable",
         "session_file_unreadable",
@@ -52,6 +53,13 @@ ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
         "diagnostics_unavailable",
         "diagnostics_unrecognized",
         "not_collected",
+        "never_served",
+        "never_served_records_incomplete",
+        "never_served_protection_seen",
+        "never_served_not_attempted",
+        "never_served_diagnostics_unavailable",
+        "provider_history_unavailable",
+        "serving_history_present",
         "provider_config_unavailable",
         "provider_target_changed",
         "provider_target_unavailable",
@@ -69,6 +77,9 @@ class OdooTestingUsage:
     recent_signins: bool | None = None
     authenticated_sessions: bool | None = None
     reason_code: str = "not_collected"
+
+    proof_sha256: str = ""
+    never_served_candidate: bool = False
 
     def payload(self) -> dict[str, object]:
         return {
@@ -166,6 +177,13 @@ def probe():
     if os.environ.get('PLATFORM_INSTANCE')!='testing':
         raise UsageUnavailable('unsupported_lane')
     database=os.environ['ODOO_DB_NAME']
+    checkpoint='process_inventory_unavailable'
+    processes=[[a for a in p.read_bytes().split(b'\0') if a]
+               for p in Path('/proc').glob('[0-9]*/cmdline')]
+    odoo_processes=[p for p in processes if any(
+        arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'} for arg in p[:2])]
+    if not odoo_processes:
+        raise UsageUnavailable('serving_process_absent')
     checkpoint='web_configuration_unavailable'
     config=configparser.ConfigParser(interpolation=None)
     if config.read(CONFIG_PATH)!=[CONFIG_PATH]:
@@ -181,13 +199,6 @@ def probe():
         raise UsageUnavailable('session_location_unavailable')
     # The supported startup hands this configuration to Odoo. A waiting gate,
     # custom command or another config cannot qualify this read.
-    checkpoint='process_inventory_unavailable'
-    processes=[[a for a in p.read_bytes().split(b'\0') if a]
-               for p in Path('/proc').glob('[0-9]*/cmdline')]
-    odoo_processes=[p for p in processes if any(
-        arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'} for arg in p[:2])]
-    if not odoo_processes:
-        raise UsageUnavailable('serving_process_absent')
     if not all(serving_configured(p,options,database) for p in odoo_processes):
         raise UsageUnavailable('serving_configuration_mismatch')
     session_use=read_sessions(data_dir/'sessions',database)
@@ -244,8 +255,10 @@ def docker(*args,stdin=None):
 
 def containers():
     ids=docker('ps','-aq','--filter','label=com.docker.compose.project='+spec['project']).decode().split()
-    if not ids or len(ids)>16:
+    if len(ids)>16:
         raise UsageUnavailable('container_inventory_unavailable')
+    if not ids:
+        return {}
     values=json.loads(docker('inspect',*ids))
     if not isinstance(values,list) or len(values)!=len(ids):
         raise UsageUnavailable('container_inventory_unavailable')
@@ -282,7 +295,10 @@ def containers():
 try:
     before=containers()
     checkpoint='container_probe_unavailable'
-    output=docker('exec','-i',before['web']['Id'],'python3','-',stdin=spec['container_program'].encode())
+    if before:
+        output=docker('exec','-i',before['web']['Id'],'python3','-',stdin=spec['container_program'].encode())
+    else:
+        output=json.dumps({'type':'complete','unavailable':True,'reason_code':'serving_container_absent'})
     checkpoint='container_inventory_unavailable'
     after=containers()
     # Compare full Docker snapshots: identities, start times, env, command,
@@ -361,6 +377,17 @@ def read_odoo_testing_usage(
                 and isinstance(reason, str)
                 and reason in ODOO_USAGE_PROBE_REASON_CODES
             ):
+                if reason in {"serving_process_absent", "serving_container_absent"}:
+                    checkpoint = "provider_history_unavailable"
+                    if api.list_deployments_for_target(
+                        host=host,
+                        token=token,
+                        target_type="compose",
+                        target_id=target_id.target_id,
+                        require_complete=True,
+                    ):
+                        return OdooTestingUsage(reason_code="serving_history_present")
+                    return OdooTestingUsage(reason_code=reason, never_served_candidate=True)
                 return OdooTestingUsage(reason_code=reason)
         if (
             len(frames) != 1

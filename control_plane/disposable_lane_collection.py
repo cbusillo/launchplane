@@ -70,6 +70,8 @@ def collect_disposable_lane_facts(
         usage_evidence=(
             f"service:staff-testing-hold:{binding_sha256}"
             if held
+            else f"service:odoo-testing-never-served:{usage.proof_sha256}"
+            if usage.usage == "unused" and usage.reason_code == "never_served"
             else f"service:odoo-testing-usage:{binding_sha256}"
             if usage.usage != "unknown"
             else ""
@@ -85,7 +87,7 @@ def collect_disposable_lane_facts(
 
 def disposable_collection_coverage() -> dict[str, str]:
     return {
-        "usage": "staff_testing_hold; odoo_testing_recent_logins_and_authenticated_session_files",
+        "usage": "staff_testing_hold; odoo_testing_recent_logins_and_authenticated_session_files; durable_never_served_generation",
         "data": "authoritative_custody_inventory_unavailable",
         "production_resources": "same_kind_production_target_alias_only; physical_isolation_unavailable",
         "historical_generations": "not_current_executor_evidence",
