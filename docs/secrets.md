@@ -152,6 +152,10 @@ payload keeps both fields for adapter compatibility. The adapter consumes the
 environment key; Launchplane checks the binding metadata before rendering. A
 context binding shadowed by an exact-lane binding must be reconciled before
 replacement planning, runtime delivery or post-deploy can render that override.
+An explicitly selected Fishbowl preview source is separate: its existing copy
+resolver qualifies the read-only testing binding and delivers that binding's
+value directly. Its transient payload must match that exact qualified source
+and preview; it cannot waive agreement for a stored lane override.
 
 Use the service route
 `/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile`:
@@ -160,6 +164,9 @@ Use the service route
    to select existing secret-backed parameters. The result lists parameter/key
    names, whether each reference agrees, and a `review_digest`. It reads secret
    metadata only, never secret versions, ciphertext or passwords.
+   GET reviews all secret-backed parameters and returns an empty plan when none
+   exist. To review a subset, POST that subset in dry-run mode; apply must use
+   exactly the reviewed key set, or the digest will differ.
 2. After reviewing the exact lane and plan, POST the same `keys`, `mode: "apply"`,
    the returned `review_digest`, and `confirmation: "APPLY PRODUCT/ENVIRONMENT"`.
    Use the existing signed-in admin or `local_operator` service authentication;
@@ -195,6 +202,9 @@ whose payload schema remains compatible.
 Deploy compatible API/worker source before using the route. Source delivery is
 not permission for a production correction or a later sync/deploy. Each live
 action retains its own review, authorization and Director/Client boundary.
+Enforcement becomes active with this source. A lane with a known mismatch
+remains blocked until its separately authorized reviewed metadata correction;
+do not attempt a release or post-deploy on that lane first.
 
 ## Current Contract
 

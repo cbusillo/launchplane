@@ -24,7 +24,10 @@ from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_import_overrides import plan_import_override_reconciliation
-from control_plane.odoo_instance_overrides import build_post_deploy_environment
+from control_plane.odoo_instance_overrides import (
+    build_post_deploy_environment,
+    config_parameter_secret_env_key,
+)
 from control_plane.service_auth import (
     BearerIdentityConfig,
     LaunchplaneAuthzPolicy,
@@ -141,7 +144,7 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
                 secret_id="cm-password-fixture",
                 integration="runtime_environment",
                 context="cm",
-                binding_key="ODOO_OVERRIDE_SECRET__CONFIG_PARAM__CM_DATA__DB__PASSWORD",
+                binding_key=config_parameter_secret_env_key("cm_data.db.password"),
                 created_at="2026-10-07T23:00:00Z",
                 updated_at="2026-10-07T23:00:00Z",
             )

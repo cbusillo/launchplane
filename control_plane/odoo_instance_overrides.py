@@ -1,6 +1,9 @@
 import base64
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
+
+if TYPE_CHECKING:
+    from control_plane.odoo_preview_import_source import FishbowlPreviewSource
 
 import click
 from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
@@ -235,9 +238,12 @@ def render_post_deploy_payload(
     clear_undeclared_shopify: bool = True,
     record_store: object | None = None,
     selected_website_settings: OdooWebsiteSettings | None = None,
+    preview_import_source: "FishbowlPreviewSource | None" = None,
 ) -> OdooPostDeployPayload:
     try:
-        if any(item.value.source == "secret_binding" for item in record.config_parameters):
+        if preview_import_source is not None:
+            preview_import_source.require_override_agreement(record)
+        elif any(item.value.source == "secret_binding" for item in record.config_parameters):
             from control_plane.odoo_secret_references import (
                 SecretReferenceStore,
                 require_config_parameter_secret_agreement,
@@ -422,6 +428,7 @@ def build_post_deploy_environment(
     clear_undeclared_shopify: bool = True,
     record_store: object | None = None,
     selected_website_settings: OdooWebsiteSettings | None = None,
+    preview_import_source: "FishbowlPreviewSource | None" = None,
 ) -> PostDeployOverrideEnvironment:
     payload = render_post_deploy_payload(
         record,
@@ -430,6 +437,7 @@ def build_post_deploy_environment(
         clear_undeclared_shopify=clear_undeclared_shopify,
         record_store=record_store,
         selected_website_settings=selected_website_settings,
+        preview_import_source=preview_import_source,
     )
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),

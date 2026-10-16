@@ -202,7 +202,7 @@ def plan_secret_reference_reconciliation(
     record: OdooInstanceOverrideRecord,
     keys: tuple[str, ...],
 ) -> tuple[SecretReferencePlan, ProductAuthorityBundle]:
-    if not keys or len(keys) != len(set(keys)):
+    if len(keys) != len(set(keys)):
         raise ValueError("Unique existing secret-backed config parameter keys are required.")
     if profile.driver_id != "odoo" or not any(
         (lane.context, lane.instance) == (record.context, record.instance) for lane in profile.lanes

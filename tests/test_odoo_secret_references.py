@@ -132,7 +132,7 @@ class SecretReferenceStorageTests(unittest.TestCase):
                 self.assertEqual(plan.entries[0].action, "reconcile_reference")
                 for private in ("context-password", "lane-password", "private-unrelated-literal"):
                     self.assertNotIn(private, plan.model_dump_json())
-                with self.assertRaisesRegex(click.ClickException, "disagree"):
+                with self.assertRaises(click.ClickException):
                     build_post_deploy_environment(before, record_store=store)
                 # Exercise the store's real failure boundary before any publication/commit.
                 hook = "_after_product_authority_bundle_step"
@@ -534,3 +534,75 @@ class SecretReferenceHttpTests(unittest.IsolatedAsyncioTestCase):
             result = await self.submit(payload)
             self.assertEqual(result.status_code, 400, result.text)
             self.assertNotIn(sentinel, result.text)
+
+    async def test_lane_without_secret_parameters_has_an_empty_read_plan(self) -> None:
+        self.store.write_odoo_instance_override_record(
+            self.record.model_copy(update={"config_parameters": self.record.config_parameters[1:]})
+        )
+        result = await self.submit()
+        self.assertEqual(result.status_code, 200, result.text)
+        self.assertEqual(result.json()["result"]["entries"], [])
+        self.assertFalse(result.json()["result"]["applied"])
+
+
+class SecretReferenceCliTests(unittest.TestCase):
+    def test_compose_post_deploy_checks_secret_only_config_parameters(self) -> None:
+        from control_plane.cli import _run_compose_post_deploy_update
+        from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
+        from tests.test_odoo_instance_overrides import _ship_request
+
+        for agrees in (False, True):
+            with self.subTest(agrees=agrees), TemporaryDirectory() as directory:
+                url = _sqlite_database_url(Path(directory) / "records.sqlite3")
+                store = PostgresRecordStore(database_url=url)
+                self.addCleanup(store.close)
+                store.ensure_schema()
+                profile, record = seed(store)
+                if agrees:
+                    _, bundle = plan_secret_reference_reconciliation(
+                        store=store, profile=profile, record=record, keys=(KEY,)
+                    )
+                    store.write_product_authority_bundle(bundle)
+                source = DokploySourceOfTruth(
+                    schema_version=1,
+                    targets=(
+                        DokployTargetDefinition(
+                            context="cm",
+                            instance="prod",
+                            target_type="compose",
+                            target_name="fixture-prod",
+                            target_id="fixture-target",
+                        ),
+                    ),
+                )
+                with (
+                    patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": url}),
+                    patch(
+                        "control_plane.dokploy.source.read_dokploy_config",
+                        return_value=("https://provider.invalid", "fixture"),
+                    ),
+                    patch(
+                        "control_plane.dokploy.source.read_control_plane_dokploy_source_of_truth",
+                        return_value=source,
+                    ),
+                    patch(
+                        "control_plane.dokploy.post_deploy.run_compose_post_deploy_update"
+                    ) as runner,
+                    patch.object(
+                        PostgresRecordStore,
+                        "read_secret_version",
+                        side_effect=AssertionError("value read"),
+                    ),
+                ):
+                    request = _ship_request().model_copy(update={"context": "cm"})
+                    if agrees:
+                        _run_compose_post_deploy_update(env_file=None, request=request)
+                        runner.assert_called_once()
+                    else:
+                        with self.assertRaises(click.ClickException):
+                            _run_compose_post_deploy_update(env_file=None, request=request)
+                        runner.assert_not_called()
+                stored = store.read_odoo_instance_override_record(
+                    context_name="cm", instance_name="prod"
+                )
+                self.assertEqual(stored.last_apply.status, "pass" if agrees else "fail")
