@@ -1,7 +1,7 @@
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Callable
+from typing import Any, Callable, cast
 import unittest
 from unittest.mock import patch
 from urllib.parse import unquote
@@ -89,8 +89,8 @@ class _Provider:
                 labels=[{"name": "merge-blocked"}] if number in self.held else [],
                 body="## Client test notes\nNothing for the Client to test: internal recovery.",
             )
-            pull["head"]["ref"] = entry.head_ref
-            pull["base"]["ref"] = entry.base_ref
+            cast(dict[str, object], pull["head"])["ref"] = entry.head_ref
+            cast(dict[str, object], pull["base"])["ref"] = entry.base_ref
             return pull
         if method == "GET" and "/status?" in path:
             return _combined_status()
