@@ -4922,6 +4922,76 @@
         "summary": "Restart one lane service on its current artifact"
       }
     },
+    "/v1/local-consumer-deliveries": {
+      "post": {
+        "operationId": "deliver_testing_local_consumer",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConsumerDeliveryEnvelope"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConsumerDeliveryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Deliver"
+      }
+    },
     "/v1/odoo-prod-promotions": {
       "post": {
         "operationId": "enqueue_odoo_prod_promotion",
@@ -10542,6 +10612,245 @@
           "step"
         ],
         "title": "ClientReleaseStepView",
+        "type": "object"
+      },
+      "ConsumerDeliveryEnvelope": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ConsumerRequest"
+          },
+          "reviewed_plan_digest": {
+            "default": "",
+            "maxLength": 64,
+            "title": "Reviewed Plan Digest",
+            "type": "string"
+          }
+        },
+        "required": [
+          "request"
+        ],
+        "title": "ConsumerDeliveryEnvelope",
+        "type": "object"
+      },
+      "ConsumerDeliveryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "package": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConsumerPackage"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan_digest": {
+            "default": "",
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "ready_to_deliver": {
+            "title": "Ready To Deliver",
+            "type": "boolean"
+          },
+          "request_fingerprint": {
+            "title": "Request Fingerprint",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "version_id": {
+            "default": "",
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "package",
+          "plan_digest",
+          "ready_to_deliver",
+          "request_fingerprint",
+          "trace_id",
+          "version_id"
+        ],
+        "title": "ConsumerDeliveryResponse",
+        "type": "object"
+      },
+      "ConsumerPackage": {
+        "additionalProperties": false,
+        "properties": {
+          "ciphertext": {
+            "maxLength": 16384,
+            "title": "Ciphertext",
+            "type": "string"
+          },
+          "issued_by": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Issued By",
+            "type": "string"
+          },
+          "nonce": {
+            "maxLength": 64,
+            "title": "Nonce",
+            "type": "string"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/ConsumerPlan"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ConsumerRequest"
+          },
+          "wrapped_key": {
+            "maxLength": 1024,
+            "title": "Wrapped Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ciphertext",
+          "issued_by",
+          "nonce",
+          "plan",
+          "request",
+          "wrapped_key"
+        ],
+        "title": "ConsumerPackage",
+        "type": "object"
+      },
+      "ConsumerPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "endpoint_digest": {
+            "title": "Endpoint Digest",
+            "type": "string"
+          },
+          "expires_at": {
+            "title": "Expires At",
+            "type": "integer"
+          },
+          "profile_digest": {
+            "title": "Profile Digest",
+            "type": "string"
+          },
+          "request_fingerprint": {
+            "title": "Request Fingerprint",
+            "type": "string"
+          },
+          "secret_id": {
+            "title": "Secret Id",
+            "type": "string"
+          },
+          "version_id": {
+            "title": "Version Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "endpoint_digest",
+          "expires_at",
+          "profile_digest",
+          "request_fingerprint",
+          "secret_id",
+          "version_id"
+        ],
+        "title": "ConsumerPlan",
+        "type": "object"
+      },
+      "ConsumerRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "directory": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Directory",
+            "type": "string"
+          },
+          "endpoint_key": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Endpoint Key",
+            "type": "string"
+          },
+          "environment": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Environment",
+            "type": "string"
+          },
+          "kind": {
+            "const": "agent_session_token_file_v1",
+            "default": "agent_session_token_file_v1",
+            "title": "Kind",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "public_key": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "Public Key",
+            "type": "string"
+          },
+          "request_id": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Request Id",
+            "type": "string"
+          },
+          "schema_version": {
+            "const": 1,
+            "default": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
+          "server_url": {
+            "maxLength": 2048,
+            "title": "Server Url",
+            "type": "string"
+          },
+          "service_origin": {
+            "maxLength": 2048,
+            "title": "Service Origin",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "directory",
+          "endpoint_key",
+          "environment",
+          "kind",
+          "product",
+          "public_key",
+          "request_id",
+          "schema_version",
+          "server_url",
+          "service_origin"
+        ],
+        "title": "ConsumerRequest",
         "type": "object"
       },
       "DataProvenance": {
