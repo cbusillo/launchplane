@@ -1324,6 +1324,8 @@ process.on('beforeExit', () => {{
                 "log-response-body": "false",
             },
             environment={
+                # Requests advance the deadline clock; runner scheduling does not.
+                "TEST_CLOCK_STEP_MS": "10",
                 "TEST_RESULT_FIELD": "deploy_state",
                 "TEST_REFRESH_STATUSES": "draining,draining,requested",
                 "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2",
@@ -1357,6 +1359,7 @@ process.on('beforeExit', () => {{
                         "log-response-body": "false",
                     },
                     environment={
+                        "TEST_CLOCK_STEP_MS": "10",
                         "TEST_RESULT_FIELD": "deploy_state",
                         "TEST_REFRESH_STATUS": "draining",
                         "TEST_LAUNCHPLANE_NETWORK_FAILURE_ATTEMPTS": "2" if network_failure else "",
@@ -1382,7 +1385,7 @@ process.on('beforeExit', () => {{
                 "poll-interval-ms": "1",
                 "poll-timeout-ms": "1",
             },
-            environment={"TEST_REFRESH_STATUS": "pending"},
+            environment={"TEST_CLOCK_STEP_MS": "10", "TEST_REFRESH_STATUS": "pending"},
         )
 
         self.assertNotEqual(result.returncode, 0)
