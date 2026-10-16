@@ -54,7 +54,7 @@ def _other_stack(
         mutation["parent_pull_request_number"] += offset
         mutation["parent_head_ref"] = root_ref
         if status == "planned":
-            mutation.update(status="planned", merge_commit_sha="")
+            mutation.update(status="planned", merge_commit_sha="", expected_merge_tree_sha="")
     for disposition in plan["child_dispositions"]:
         disposition["pull_request_number"] += offset
         if status == "ready_for_train":

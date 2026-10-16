@@ -1542,6 +1542,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
                 branch_client=_FakeMergeTrainGitHubClient(transport=object()),
                 child_readiness_reasons=lambda _pull_request_number: (),
                 updated_at="2026-05-13T21:02:00Z",
+                checkpoint=lambda progress: None,
             )
             executed_plan_record = build_merge_train_stack_collapse_plan_record(
                 plan=executed_record,
