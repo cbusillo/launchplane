@@ -3551,6 +3551,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status, 202, payload)
                 self.assertEqual(len(stored.expected_config.managed_secret_bindings), 1)
 
+    @scoped_agent_test
     async def test_apply_product_expected_config_refuses_local_operator_on_live(self) -> None:
         for mode in ("dry-run", "apply"):
             with self.subTest(mode=mode):
@@ -3713,6 +3714,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                             },
                         )
 
+    @scoped_agent_test
     async def test_apply_product_expected_config_stale_local_operator_cannot_revert_live(
         self,
     ) -> None:

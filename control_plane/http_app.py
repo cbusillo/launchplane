@@ -13539,18 +13539,25 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product expected config request failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="product_profile.expected_config.apply",
-            product=expected_config_request.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and not (
-            expected_config_request.mode != "apply"
-            and resolved_authz_policy_runtime.allows(
+        director_declaration = (
+            director_agent_identity(identity) and not expected_config_request.requests_removal
+        )
+        if (
+            not director_declaration
+            and not resolved_authz_policy_runtime.allows(
                 identity=identity,
-                action="product_profile.expected_config.plan",
+                action="product_profile.expected_config.apply",
                 product=expected_config_request.product,
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+            and not (
+                expected_config_request.mode != "apply"
+                and resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="product_profile.expected_config.plan",
+                    product=expected_config_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                )
             )
         ):
             raise _launchplane_http_error(
@@ -13597,6 +13604,7 @@ def create_launchplane_fastapi_app(
             expected_config_request.mode == "apply"
             and isinstance(identity, LocalOperatorIdentity)
             and profile.production_use == "live"
+            and not director_declaration
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -13655,7 +13663,7 @@ def create_launchplane_fastapi_app(
                         "compare_and_write_product_profile_record"
                     ),
                 )
-            # Publish only over the exact profile that passed the live guard and built the
+            # Publish only over the exact profile that passed authorization and built the
             # merge, so a concurrent profile change is never overwritten with stale fields.
             # With a key, the database stores the replay result in the same transaction.
             mutation = (
