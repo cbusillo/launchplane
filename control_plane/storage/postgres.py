@@ -6064,6 +6064,16 @@ class PostgresRecordStore(HumanSessionStore):
                     self._assert_unreserved_disposable_hosts(
                         session, DokployTargetRecord.model_validate(row.payload)
                     )
+                elif isinstance(row, LaunchplaneDokployTargetIdRow):
+                    previous_target = session.get(
+                        LaunchplaneDokployTargetRow, (row.context, row.instance)
+                    )
+                    if previous_target is not None:
+                        self._assert_unreserved_disposable_hosts(
+                            session,
+                            DokployTargetRecord.model_validate(previous_target.payload),
+                            target_id=row.target_id,
+                        )
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -6501,7 +6511,28 @@ class PostgresRecordStore(HumanSessionStore):
                 self._disposable_authority_context, "adoption_checkpoint", None
             )
             for target in bundle.dokploy_targets:
-                self._assert_unreserved_disposable_hosts(session, target)
+                next_identities: list[str | None] = [
+                    item.target_id
+                    for item in bundle.dokploy_target_ids
+                    if (item.context, item.instance) == (target.context, target.instance)
+                ]
+                for next_id in next_identities or [None]:
+                    self._assert_unreserved_disposable_hosts(session, target, target_id=next_id)
+            for identity in bundle.dokploy_target_ids:
+                if any(
+                    (item.context, item.instance) == (identity.context, identity.instance)
+                    for item in bundle.dokploy_targets
+                ):
+                    continue
+                previous_target = session.get(
+                    LaunchplaneDokployTargetRow, (identity.context, identity.instance)
+                )
+                if previous_target is not None:
+                    self._assert_unreserved_disposable_hosts(
+                        session,
+                        DokployTargetRecord.model_validate(previous_target.payload),
+                        target_id=identity.target_id,
+                    )
             if adoption_checkpoint is not None:
                 outer = getattr(self._disposable_authority_context, "session", None)
                 self._disposable_authority_context.session = session
@@ -11281,13 +11312,40 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
-    def _retained_disposable_hostnames(self, session: Session) -> frozenset[str]:
+    def _retained_disposable_hostnames(
+        self,
+        session: Session,
+        *,
+        current_target: DokployTargetRecord | None = None,
+        target_id: str | None = None,
+    ) -> frozenset[str]:
         hosts: set[str] = set()
         from control_plane.testing_generation_retirement import RetainedTestingGeneration
 
         for payload in session.scalars(select(LaunchplaneRetainedTestingGenerationRow.payload)):
             retained_generation = RetainedTestingGeneration.model_validate(payload)
-            hosts.add(retained_generation.generation.domain_host)
+            generation = retained_generation.generation
+            if current_target is not None and (current_target.context, current_target.instance) == (
+                generation.context,
+                "testing",
+            ):
+                current_identity = session.get(
+                    LaunchplaneDokployTargetIdRow, (generation.context, "testing")
+                )
+                current_record = session.get(
+                    LaunchplaneDokployTargetRow, (generation.context, "testing")
+                )
+                if current_identity is not None and current_record is not None:
+                    existing = DokployTargetRecord.model_validate(current_record.payload)
+                    if (
+                        current_identity.target_id == generation.target_id
+                        and target_id in (None, generation.target_id)
+                        and generation.domain_host in {*existing.domains, *existing.public_hosts}
+                    ):
+                        # Preserve an existing route on its exact original recipient.
+                        # A new ID in this same bundle must never inherit that host.
+                        continue
+            hosts.add(generation.domain_host)
         for payload in session.scalars(
             select(LaunchplaneDisposableTestingResourceAllocationRow.payload)
         ):
@@ -11308,14 +11366,20 @@ class PostgresRecordStore(HumanSessionStore):
             return self._retained_disposable_hostnames(session)
 
     def _assert_unreserved_disposable_hosts(
-        self, session: Session, target: DokployTargetRecord
+        self,
+        session: Session,
+        target: DokployTargetRecord,
+        *,
+        target_id: str | None = None,
     ) -> None:
         requested = {
             *target.domains,
             *target.public_hosts,
             *(effect.host for effect in target.pending_public_host_effects),
         }
-        if requested.intersection(self._retained_disposable_hostnames(session)):
+        if requested.intersection(
+            self._retained_disposable_hostnames(session, current_target=target, target_id=target_id)
+        ):
             raise DokployTargetRecordChanged(
                 "A hostname remains reserved by retained testing custody."
             )

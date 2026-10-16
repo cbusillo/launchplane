@@ -482,3 +482,52 @@ class TestingGenerationRetirementTests(unittest.TestCase):
         self.assertEqual(
             fixture.store.read_native_testing_copy_capture(generation_binding(fixture.gen)), capture
         )
+
+    def test_original_target_can_keep_its_host_while_metadata_changes_but_rebinding_refuses(
+        self,
+    ) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+        from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
+
+        self.apply()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        held = target.model_copy(
+            update={
+                "policies": target.policies.model_copy(
+                    update={
+                        "staff_testing_hold": DokployTargetStaffTestingHold(
+                            reason="Staff protection on retained target"
+                        )
+                    }
+                )
+            }
+        )
+        self.store.write_dokploy_target_record(held)
+        self.store.write_product_authority_bundle(ProductAuthorityBundle(dokploy_targets=(held,)))
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            held,
+        )
+        identity = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        different = identity.model_copy(update={"target_id": "unrelated-recipient"})
+        with self.assertRaises(ValueError):
+            self.store.write_dokploy_target_id_record(different)
+        with self.assertRaises(ValueError):
+            self.store.write_product_authority_bundle(
+                ProductAuthorityBundle(dokploy_targets=(held,), dokploy_target_ids=(different,))
+            )
+        with self.assertRaises(ValueError):
+            self.store.write_dokploy_target_record(held.model_copy(update={"context": "unrelated"}))
+        self.assertEqual(
+            self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            identity,
+        )
+        self.assertIn(self.gen.domain_host, self.store.retained_disposable_hostnames())

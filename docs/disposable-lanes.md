@@ -589,6 +589,9 @@ snapshot and original capture receipt if present. Capture records, private cache
 bytes, targets, storage and hostname remain untouched. The old hostname stays
 reserved, and the retired generation cannot be reactivated. Automatic recovery
 cannot cancel or retry that held operation.
+The original recipient can retain its existing hostname during metadata updates,
+including placing a staff hold. A different recipient cannot inherit that hostname,
+including through an identity-only write or a combined target/identity bundle.
 
 The existing replacement-resources and bootstrap clients can subsequently name
 the **still-held operation** as the retained operation. They must qualify a
