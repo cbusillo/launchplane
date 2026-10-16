@@ -33,6 +33,7 @@ class _FakeNpmplusClient:
     ) -> NpmplusProxyHost:
         self.calls.append(f"update:{host_id}")
         updated = NpmplusProxyHost.model_validate({"id": host_id, **payload.to_api_payload()})
+        updated.enabled = next(host.enabled for host in self.proxy_hosts if host.id == host_id)
         self.proxy_hosts = [updated if host.id == host_id else host for host in self.proxy_hosts]
         return updated
 
@@ -153,7 +154,7 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
         self.assertFalse(result.proxy_host.enabled if result.proxy_host else True)
         self.assertEqual(client.calls, ["list", "disable:78"])
 
-    def test_apply_update_skips_redundant_lifecycle_call(self) -> None:
+    def test_apply_update_uses_the_separate_provider_disable_operation(self) -> None:
         client = _FakeNpmplusClient((_proxy_host(enabled=True, forward_port=8080),))
 
         result = apply_npmplus_ingress_route(
@@ -166,7 +167,7 @@ class NpmplusIngressWorkflowTests(unittest.TestCase):
             ("update", "disable"),
         )
         self.assertFalse(result.proxy_host.enabled if result.proxy_host else True)
-        self.assertEqual(client.calls, ["list", "update:78"])
+        self.assertEqual(client.calls, ["list", "update:78", "disable:78"])
 
     def test_noop_when_existing_route_matches_desired_state(self) -> None:
         client = _FakeNpmplusClient((_proxy_host(),))

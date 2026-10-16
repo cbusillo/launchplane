@@ -45,7 +45,7 @@ class NpmplusIngressProvider:
         return apply_npmplus_ingress_route(client=self._client, request=request)
 
 
-def build_npmplus_ingress_client_from_env() -> NpmplusIngressClient:
+def build_npmplus_ingress_client_from_env() -> NpmplusClient:
     required_env = (
         NPMPLUS_BASE_URL_ENV_KEY,
         NPMPLUS_IDENTITY_ENV_KEY,
