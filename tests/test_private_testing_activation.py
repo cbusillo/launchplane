@@ -6,7 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, cast
 import unittest
 from unittest.mock import patch
 from click.testing import CliRunner
@@ -27,6 +27,7 @@ from control_plane.private_testing_activation import (
     PrivateTestingActivationAdapter,
     PrivateTestingActivationRequest,
 )
+from control_plane.private_testing_transport import transport_overlay
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact
@@ -306,6 +307,23 @@ class PrivateTestingActivationTests(unittest.TestCase):
             self.template["services"]["bridge"].update(service_change)
             with self.subTest(service_change=service_change), self.assertRaises(ValueError):
                 self.prepare()
+        self.assertFalse(self.calls)
+
+    def test_merged_proxy_interpolation_refuses_before_source_installation(self) -> None:
+        def interpolated_overlay(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            overlay = cast(dict[str, Any], transport_overlay(*args, **kwargs))
+            service = next(iter(overlay["services"].values()))
+            service["entrypoint"] = ["/bin/sh", "-c", "exec $UNREVIEWED"]
+            return overlay
+
+        with (
+            patch(
+                "control_plane.private_testing_activation.transport_overlay",
+                side_effect=interpolated_overlay,
+            ),
+            self.assertRaises(ValueError),
+        ):
+            self.prepare()
         self.assertFalse(self.calls)
 
     def test_http_auth_review_and_database_execution_guards(self) -> None:

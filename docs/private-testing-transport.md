@@ -164,8 +164,14 @@ qualifies these facts independently. Source installation does not prove them:
    issuer's server certificate with the exact IP SAN. Public CAs are not assumed
    to issue for private IPs. Chris places `server.crt` and `server.key` in the exact
    dedicated directory returned in `custody.directory`, with no symlinks/shared
-   production material. The engine needs traversal/read access; the mounted key
-   is readable only by proxy UID/GID 65534 (for example UID 65534, mode 0400).
+   production material. On the supported rootful engine, require both
+   `certificate_root` and its lane namespace directory to be root-owned mode
+   0700. The daemon can traverse these parents to create the read-only bind;
+   a host process sharing the proxy's UID cannot. The mounted key is owned by
+   UID/GID 65534, mode 0400, so the unprivileged proxy can read it inside its
+   container. UID 65534 is shared `nobody`, not a distinct host identity;
+   file mode alone does not isolate the host key. A rootless engine or different
+   custody mechanism needs its own qualified ownership/traversal path.
    Verify CA/leaf public digests, chain, SAN, validity and key/certificate agreement
    in the custodian's trusted environment. Do not print or transmit key bytes.
    Compose mounts both files read-only as secrets. Missing/unreadable files stop

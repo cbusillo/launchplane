@@ -2,6 +2,7 @@ import asyncio
 from copy import deepcopy
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -42,6 +43,10 @@ from tests.support.stores import sqlite_database_url
 
 
 class PrivateTestingEntrypointTests(unittest.TestCase):
+    @unittest.skipUnless(
+        Path("/bin/sh").is_file() and shutil.which("base64", path=os.defpath),
+        "POSIX shell/base64 bootstrap tools are unavailable on this test platform",
+    )
     def test_entrypoint_materializes_its_own_file_and_never_interprets_payload(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

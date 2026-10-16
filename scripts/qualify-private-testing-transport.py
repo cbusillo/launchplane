@@ -12,6 +12,7 @@ import logging
 import os
 from pathlib import Path
 import socket
+import signal
 import ssl
 import subprocess
 from tempfile import TemporaryDirectory
@@ -236,7 +237,9 @@ def qualify(binary: Path, compose_binary: Path) -> None:
                 if checked.returncode:
                     raise RuntimeError(checked.stderr.decode())
                 with (root / "nginx.log").open("wb") as log:
-                    process = subprocess.Popen(command, stdout=log, stderr=log)
+                    process = subprocess.Popen(
+                        command, stdout=log, stderr=log, start_new_session=True
+                    )
                     try:
                         deadline = time.monotonic() + 10
                         while True:
@@ -324,7 +327,14 @@ def qualify(binary: Path, compose_binary: Path) -> None:
                             raise AssertionError("Transport qualification sent bridge messages.")
                     finally:
                         process.terminate()
-                        process.wait(timeout=10)
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            process.wait(timeout=10)
             finally:
                 backend.shutdown()
                 thread.join(timeout=5)

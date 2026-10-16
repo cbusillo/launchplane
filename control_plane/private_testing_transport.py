@@ -143,6 +143,7 @@ def transport_overlay(
             namespace: {
                 "image": request.nginx_image,
                 "user": "65534:65534",
+                "restart": "unless-stopped",
                 "entrypoint": nginx_entrypoint(
                     nginx_configuration(service=request.runtime_service, runtime_port=runtime_port)
                 ),

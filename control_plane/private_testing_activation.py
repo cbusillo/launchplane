@@ -121,7 +121,12 @@ def _qualify_template(document: dict[str, Any], runtime_service: str) -> None:
                 and re.fullmatch(r"\$\{[A-Z_][A-Z0-9_]*(?:(?::?\?[^}]*)|:-|-)?\}", value)
             ):
                 raise PrivateTestingTransportRefused("Source cannot contain a credential literal.")
-        # Structural interpolation could redirect storage or alter isolation at deploy time.
+    _qualify_structural_interpolation(document)
+
+
+def _qualify_structural_interpolation(document: dict[str, Any]) -> None:
+    # Structural interpolation could redirect storage or alter isolation at deploy time.
+    for service in document["services"].values():
         structural = {
             key: value for key, value in service.items() if key not in {"image", "environment"}
         }
@@ -328,6 +333,7 @@ class PrivateTestingActivationAdapter:
                 if set(_object(additions)) & set(_object(desired.get(section, {}))):
                     raise PrivateTestingTransportRefused("Listener namespace is already in use.")
                 desired.setdefault(section, {}).update(_object(additions))
+            _qualify_structural_interpolation(desired)
             after = {
                 **before,
                 "sourceType": "raw",
