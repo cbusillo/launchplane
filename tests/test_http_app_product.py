@@ -25,7 +25,7 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
 )
 from control_plane.contracts.public_ingress_monitoring import (
-    PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
+    health_monitor_freshness_seconds,
     PublicIngressIncidentEventRecord,
     PublicIngressIncidentMaterialFingerprint,
     PublicIngressIncidentRecord,
@@ -2349,7 +2349,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                         observed_at = datetime.now(timezone.utc)
                         if mode == "stale":
                             observed_at -= timedelta(
-                                seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1
+                                seconds=health_monitor_freshness_seconds(lane["instance"]) + 1
                             )
                         store.write_public_ingress_observation_record(
                             PublicIngressObservationRecord(

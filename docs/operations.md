@@ -1643,14 +1643,14 @@ and scheduler receipts do not wake another probe. Probes retain their existing
 timeouts and the single runtime-identity confirmation wait, so a slow/failing
 batch can miss its deadline; expired evidence stays stale. Health, runtime identity
 and public-ingress projections share `health_monitor_freshness_seconds`: one
-configured lane interval plus half that interval (rounded up) for polling jitter,
-probe duration and publication lag. This is 90 seconds for production and
-450 seconds for testing at the current cadences, rather than expiring a passing
-observation exactly when the next probe starts. The allowance is bounded below
-a second full interval; it does not renew observations on reads or extend watchdog
-completion deadlines. Failed probes and mismatched identities remain failures
-immediately, and stopped probes become stale at their original observation's
-deadline. Qualify actual completion latency and storage growth
+configured lane interval plus two service polling ticks (scheduling jitter and
+publication lag), two probe timeout budgets and the identity-confirmation delay.
+The latter matters because one lane changing runtime can delay publication of the healthy lanes in
+its batch too. These shared settings currently produce 120 seconds for production
+and 360 seconds for testing. Reads never renew an observation, and watchdog
+completion deadlines remain unchanged. Failed probes and mismatched identities
+remain failures immediately, and stopped probes become stale at their original
+observation's deadline. Qualify actual completion latency and storage growth
 on the deployed service before starting a continuous-green observation clock.
 Probe leases expire after 30 seconds and renew every 10 seconds so a dead worker
 does not retain a production slot for two minutes. The watchdog reads lane

@@ -126,6 +126,9 @@ PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service",
 PUBLIC_TLS_EXPIRING_DAYS = 14
 PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS = 60
 TESTING_HEALTH_MONITOR_INTERVAL_SECONDS = 5 * 60
+HEALTH_MONITOR_POLL_SECONDS = 5
+HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS = 10
+HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS = 30
 PUBLIC_TLS_STALE_AFTER_SECONDS = 2 * 60 * 60
 PUBLIC_INGRESS_DEFAULT_REMINDER_INTERVAL_SECONDS = 6 * 60 * 60
 PUBLIC_INGRESS_MIN_REMINDER_INTERVAL_SECONDS = 15 * 60
@@ -143,9 +146,13 @@ def health_monitor_interval_seconds(instance: str) -> int:
 
 
 def health_monitor_freshness_seconds(instance: str) -> int:
-    """Cover one cadence plus a bounded half-cadence scheduling/publication budget."""
-    interval = health_monitor_interval_seconds(instance)
-    return interval + (interval + 1) // 2
+    """Cover polling/publication ticks, initial probe, identity wait and reprobe."""
+    return (
+        health_monitor_interval_seconds(instance)
+        + 2 * HEALTH_MONITOR_POLL_SECONDS
+        + 2 * HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS
+        + HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS
+    )
 
 
 def monitored_check_identity(check_name: str) -> tuple[PublicIngressCheckKind, str] | None:

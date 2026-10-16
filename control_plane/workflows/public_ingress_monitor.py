@@ -53,6 +53,7 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS,
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     MONITOR_CADENCE_CHECK_PREFIX,
     monitored_check_identity,
@@ -742,7 +743,7 @@ def run_public_ingress_monitor_once(
     *,
     record_store: PublicIngressMonitorStore,
     checked_at: str = "",
-    timeout_seconds: int = 10,
+    timeout_seconds: int = HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS,
     notify: bool = True,
     http_get: HttpGet | None = None,
     private_http_get: HttpGet | None = None,
