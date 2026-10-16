@@ -18,9 +18,7 @@ class LaunchplaneRequestActionTests(unittest.TestCase):
     def test_train_runner_manual_target_preserves_inputs_and_rejects_newlines(self) -> None:
         workflow = yaml.safe_load(Path(".github/workflows/merge-train-runner.yml").read_text())
         step = next(
-            step
-            for step in workflow["jobs"]["run"]["steps"]
-            if step.get("name") == "Resolve manual merge-train target"
+            step for step in workflow["jobs"]["run"]["steps"] if step.get("id") == "manual_target"
         )
         requested = {
             "REPOSITORY": "example/project",

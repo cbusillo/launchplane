@@ -133,6 +133,7 @@ jobs:
         }}
     steps:
       - name: Resolve manual merge-train target
+        id: manual_target
         shell: bash
         env:
           REQUESTED_REPOSITORY: ${{ inputs.repository }}

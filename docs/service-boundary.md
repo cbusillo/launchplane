@@ -1240,7 +1240,8 @@ transition summaries instead of writing ad hoc comments from scheduler scripts.
 `GET /v1/work-graph/merge-train/policy-targets` is a native FastAPI route that
 returns the authorized repository/base-branch targets from the active DB-backed
 merge-train policy. It performs no GitHub reads or mutations and is the source
-of truth for Launchplane UI target selection and scheduled runner intent; callers
+of truth for Launchplane UI target selection; the service scheduler reads the
+active policy record directly. Callers
 should not infer merge-train targets from product inventory, work-graph
 awareness items, or repository variables.
 
@@ -1403,17 +1404,14 @@ scheduler for this route: every five minutes by default it runs one pass over
 the scheduler-enabled policy targets, one target at a time, calling the same
 admission and worker functions in-process. See [merge-train policy](merge-train-policy.md).
 
-`.github/workflows/merge-train-runner.yml` is the external caller for
+`.github/workflows/merge-train-runner.yml` is a manual external caller for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
-reads DB-backed policy targets for scheduled runs, reads admission, and calls
-one worker entrypoint only when the decision is `admitted`. Scheduled
-repository, base-branch, runner-mode, and mutation selection come from the
-active merge-train policy record through `policy-targets`; manual dispatch uses
-explicit workflow inputs. Scheduled runs with no enabled policy scheduler target
-complete as no-ops before admission, and each enabled target gets its own
-independent run job. The default manual runner mode calls the Level 1 `run-once`
-route; setting manual `runner_mode: controller` switches an admitted pass to one
-full-controller `run-once` call instead.
+reads admission, and calls one worker entrypoint only when the decision is
+`admitted`. Repository, base branch, runner mode and mutation come from explicit
+workflow inputs. Automatic sweeps and event progression belong to the service
+worker; the workflow has no schedule or target fan-out. The default manual
+runner mode calls the Level 1 `run-once` route; setting `runner_mode: controller`
+switches an admitted pass to one full-controller `run-once` call instead.
 Controller-mode dry-runs do not deliver PR feedback comments; feedback delivery
 is reserved for mutate runs and explicit manual phase workflows.
 Workflow dispatches may select at most one non-`none` phase input across
