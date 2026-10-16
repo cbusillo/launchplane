@@ -460,6 +460,13 @@ quoted, fenced, stale or unreadable head evidence cannot admit a PR. The adapter
 reports unavailable or incomplete discussion evidence as unreadable rather than
 guessing a previous handoff is still current.
 
+The train's own recorded branch refresh is the exception to requiring a new
+handoff after a push. It carries the source handoff only through a complete
+chain of its persisted refresh records, rechecking exact merge parents, base
+ancestry and unchanged source patches using the same proof as dependency
+refreshes. Unrecorded pushes or a changed source patch need a fresh handoff.
+Checks on the refreshed current head must still pass before admission.
+
 The handoff author must satisfy the existing enqueue policy: an allowed
 `repo_owner` or `repo_admin` role, or a numeric trusted-automation id. An App using a person's token
 does not inherit that person's authority. The PR author's existing eligibility

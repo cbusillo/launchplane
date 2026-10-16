@@ -1,4 +1,6 @@
 from copy import deepcopy
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -10,11 +12,16 @@ from control_plane.merge_train import (
     merge_train_snapshot_of,
 )
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
+from control_plane.contracts.merge_train_branch_refresh_record import (
+    build_merge_train_branch_refresh_record,
+)
+from control_plane.merge_train_codeowners import individual_landing_snapshots
 from control_plane.merge_train_controller_run_once import (
     _merge_train_candidate_matches_dry_run_queue,
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainSnapshotReader,
+    GitHubMergeTrainClient,
     MergeTrainGitHubError,
     RecordingMergeTrainGitHubTransport,
 )
@@ -29,6 +36,7 @@ from tests.test_merge_train_github import (
     _github_branch,
     _github_pull_request,
 )
+from tests.test_merge_train_dependency_refresh import _change
 from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
 from tests.test_merge_train_dependency_requalification import (
     _controller,
@@ -123,6 +131,15 @@ class HandoffAdmissionTests(unittest.TestCase):
                 snapshot=_snapshot(_ready().model_copy(update={"ready_handoff": handoff})),
                 batch_landing=True,
                 new_candidate=True,
+            )
+            self.assertFalse(result.queue_order)
+            self.assertTrue(result.queue[0].ineligible_reasons)
+
+    def test_manual_block_holds_handoff_admission_in_every_queue_mode(self) -> None:
+        held = _ready().model_copy(update={"labels": (self.policy.policies[0].blocked_label,)})
+        for batch in (False, True):
+            result = build_merge_train_dry_run_result(
+                policy=self.policy, snapshot=_snapshot(held), batch_landing=batch
             )
             self.assertFalse(result.queue_order)
             self.assertTrue(result.queue[0].ineligible_reasons)
@@ -353,6 +370,108 @@ class GitHubHandoffTests(unittest.TestCase):
         ):
             self.assertFalse(handoff_head(body))
         self.assertEqual(handoff_head(f"Head: `{HEAD}`"), HEAD)
+
+    def test_recorded_refresh_carries_only_the_verified_unchanged_source_patch(self) -> None:
+        refreshed, base = "b" * 40, "c" * 40
+        record = build_merge_train_branch_refresh_record(
+            repository=REPOSITORY,
+            base_branch="main",
+            pull_request_number=1,
+            expected_head_sha=HEAD,
+            result_head_sha=refreshed,
+            merged_base_sha=base,
+            requested_at=datetime.now(timezone.utc),
+        )
+        for recorded, unchanged, expected in (
+            (True, True, "ready"),
+            (True, False, "stale"),
+            (False, True, "stale"),
+        ):
+            transport = RecordingMergeTrainGitHubTransport(
+                responses=(
+                    [_comment(user={"id": 20, "login": "example"})],
+                    {"sha": refreshed, "parents": [{"sha": HEAD}, {"sha": base}]},
+                    {"status": "identical"},
+                    _change(),
+                    _change(patch_text="-different\n+patch") if not unchanged else _change(),
+                )
+            )
+            store = SimpleNamespace(
+                list_merge_train_branch_refresh_records=lambda **_: (record,) if recorded else ()
+            )
+            reader = GitHubMergeTrainSnapshotReader(
+                transport=transport, repository_policy=self.policy, branch_refresh_store=store
+            )
+            handoff = reader._read_ready_handoff(
+                repository_path=REPOSITORY,
+                number=1,
+                head_sha=refreshed,
+                base_branch="main",
+                base_sha=base,
+            )
+            self.assertEqual(handoff.status, expected)
+            if expected == "ready":
+                self.assertEqual(handoff.head_sha, refreshed)
+                self.assertFalse(transport.responses)
+
+    def test_client_single_pr_reader_keeps_policy_for_handoff_stack_children(self) -> None:
+        pull = _github_pull_request(
+            2, repository=REPOSITORY, head_sha=HEAD, author_association="OWNER"
+        )
+        pull["labels"] = []
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                pull,
+                [_comment(user={"id": 20, "login": "example"})],
+                _combined_status(),
+                {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
+                [],
+            )
+        )
+        client = GitHubMergeTrainClient(transport=transport)
+        client.begin_snapshot_pass(policy=self.policy, read_only=False)
+        child = client.read_pull_request_snapshot(repository=REPOSITORY, pull_request_number=2)
+        self.assertIsNotNone(child.ready_handoff)
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(repository=REPOSITORY),
+            snapshot=_snapshot(child),
+            batch_landing=True,
+        )
+        self.assertEqual(result.queue_order, (2,))
+        self.assertFalse(transport.responses)
+
+    def test_optional_area_read_failure_does_not_hold_a_repo_without_ownership_rules(self) -> None:
+        failure: object
+        for failure in ([], MergeTrainGitHubError("File service unavailable", status_code=503)):
+            with patch("control_plane.merge_train_codeowners._read_patterns", return_value=()):
+                (pr,) = individual_landing_snapshots(
+                    transport=RecordingMergeTrainGitHubTransport(responses=(failure,)),
+                    repository_path=REPOSITORY,
+                    base_sha="base",
+                    pull_requests=(_ready(),),
+                )
+            self.assertFalse(pr.requires_individual_landing)
+            self.assertFalse(pr.changed_paths)
+
+    def test_handoff_and_optional_area_reads_preserve_provider_quota_backoff(self) -> None:
+        quota = MergeTrainGitHubError("quota", status_code=429, rate_limited=True)
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=RecordingMergeTrainGitHubTransport(responses=(quota,)),
+            repository_policy=self.policy,
+        )
+        with self.assertRaises(MergeTrainGitHubError) as raised:
+            reader._read_ready_handoff(repository_path=REPOSITORY, number=1, head_sha=HEAD)
+        self.assertIs(raised.exception, quota)
+        with patch("control_plane.merge_train_codeowners._read_patterns", return_value=()):
+            with self.assertRaises(MergeTrainGitHubError) as raised:
+                individual_landing_snapshots(
+                    transport=RecordingMergeTrainGitHubTransport(responses=(quota,)),
+                    repository_path=REPOSITORY,
+                    base_sha="base",
+                    pull_requests=(_ready(),),
+                )
+        self.assertIs(raised.exception, quota)
 
 
 class HandoffControllerTests(unittest.IsolatedAsyncioTestCase):

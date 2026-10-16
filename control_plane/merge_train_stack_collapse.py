@@ -102,6 +102,12 @@ def execute_merge_train_stack_collapse_run_once(
     )
     if request.mode == "execute":
         github_client = GitHubMergeTrainClient(transport=transport)
+        github_client.begin_snapshot_pass(
+            policy=policy.find_repository_policy(
+                repository=request.repository, base_branch=request.base_branch
+            ),
+            read_only=False,
+        )
         executed_plan = execute_merge_train_stack_collapse_plan(
             plan=existing_record.plan,
             branch_client=github_client,

@@ -400,7 +400,9 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int
     ) -> MergeTrainPullRequestSnapshot:
         return GitHubMergeTrainSnapshotReader(
-            transport=self.transport, branch_refresh_store=self._branch_refresh_store
+            transport=self.transport,
+            branch_refresh_store=self._branch_refresh_store,
+            repository_policy=self._snapshot_policy,
         ).read_pull_request_snapshot(repository=repository, pull_request_number=pull_request_number)
 
     def read_review_conversations(
@@ -3075,7 +3077,11 @@ class GitHubMergeTrainSnapshotReader:
         number = _required_int(pull_request.get("number"), "PR requires number.")
         head_sha = _required_text(head.get("sha"), "PR requires head SHA.")
         handoff = self._read_ready_handoff(
-            repository_path=_repository_path(policy.repository), number=number, head_sha=head_sha
+            repository_path=_repository_path(policy.repository),
+            number=number,
+            head_sha=head_sha,
+            base_branch=str(base.get("ref") or ""),
+            base_sha=str(base.get("sha") or ""),
         )
         self._ready_handoffs[number] = handoff
         return not ready_handoff_refusal(policy, handoff, head_sha)
@@ -3268,7 +3274,11 @@ class GitHubMergeTrainSnapshotReader:
             and dependency_update_class != "patch_or_minor"
         ):
             ready_handoff = self._read_ready_handoff(
-                repository_path=repository_path, number=pull_request_number, head_sha=head_sha
+                repository_path=repository_path,
+                number=pull_request_number,
+                head_sha=head_sha,
+                base_branch=str(base.get("ref") or ""),
+                base_sha=str(base.get("sha") or ""),
             )
         return MergeTrainPullRequestSnapshot(
             ready_handoff=ready_handoff,
@@ -3315,7 +3325,13 @@ class GitHubMergeTrainSnapshotReader:
         )
 
     def _read_ready_handoff(
-        self, *, repository_path: str, number: int, head_sha: str
+        self,
+        *,
+        repository_path: str,
+        number: int,
+        head_sha: str,
+        base_branch: str = "",
+        base_sha: str = "",
     ) -> MergeTrainReadyHandoff:
         policy = self._repository_policy
         if policy is None:
@@ -3373,11 +3389,28 @@ class GitHubMergeTrainSnapshotReader:
                     break
             else:
                 raise ValueError("Ready handoff discussion exceeds the page bound.")
-        except (MergeTrainGitHubError, ValueError, TypeError):
+        except (MergeTrainGitHubError, ValueError, TypeError) as error:
+            if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
+                raise
             return MergeTrainReadyHandoff(status="unreadable")
         if latest is None:
             return MergeTrainReadyHandoff(status="missing")
         _, comment_id, latest_kind, declared_head, actor_id, role = latest
+        if latest_kind == "ready" and declared_head and declared_head != head_sha:
+            try:
+                if self._handoff_refresh_chain(
+                    repository_path=repository_path,
+                    number=number,
+                    declared_head=declared_head,
+                    head_sha=head_sha,
+                    base_branch=base_branch,
+                    base_sha=base_sha,
+                ):
+                    declared_head = head_sha
+            except (MergeTrainGitHubError, ValueError, TypeError) as error:
+                if isinstance(error, MergeTrainGitHubError) and error.rate_limited:
+                    raise
+                latest_kind = "unreadable"
         return MergeTrainReadyHandoff(
             status="waiting"
             if latest_kind == "waiting"
@@ -3391,6 +3424,60 @@ class GitHubMergeTrainSnapshotReader:
             actor_role=role,
             comment_id=comment_id,
         )
+
+    def _handoff_refresh_chain(
+        self,
+        *,
+        repository_path: str,
+        number: int,
+        declared_head: str,
+        head_sha: str,
+        base_branch: str,
+        base_sha: str,
+    ) -> bool:
+        store = self._branch_refresh_store
+        if store is None or not base_branch or not base_sha:
+            return False
+        records = store.list_merge_train_branch_refresh_records(
+            repository=repository_path, pull_request_number=number
+        )
+        current = head_sha
+        seen: set[str] = set()
+        while current != declared_head and len(seen) < 100:
+            if current in seen:
+                return False
+            seen.add(current)
+            matching = tuple(
+                record
+                for record in records
+                if (
+                    record.repository.casefold() == repository_path.casefold()
+                    and record.pull_request_number == number
+                    and record.base_branch == base_branch
+                    and record.result_head_sha == current
+                )
+            )
+            if len(matching) != 1:
+                return False
+            record = matching[0]
+            commit = _json_object(
+                self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/git/commits/{quote(current, safe='')}",
+                ),
+                "Train refresh commit",
+            )
+            if commit.get("sha") != current or not self._recorded_base_refresh(
+                repository_path=repository_path,
+                pull_request_number=number,
+                commit=commit,
+                commit_shas={record.expected_head_sha, current},
+                base_branch=base_branch,
+                base_sha=base_sha,
+            ):
+                return False
+            current = record.expected_head_sha
+        return current == declared_head
 
     def _safe_dependency_update_class(
         self,

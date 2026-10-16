@@ -3208,7 +3208,7 @@ def _reflow_stale_candidate_record(
         ),
         batch_landing=candidate_record.ordinary_job_binding is None,
         existing_candidate_size=len(candidate_record.candidate.entries),
-        planned_dependency_heads=frozenset(
+        planned_handoff_heads=frozenset(
             (entry.pull_request_number, entry.head_sha)
             for entry in candidate_record.candidate.entries
         ),

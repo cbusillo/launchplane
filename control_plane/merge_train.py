@@ -318,6 +318,7 @@ def build_merge_train_dry_run_result(
     new_candidate: bool = False,
     existing_candidate_size: int | None = None,
     planned_dependency_heads: frozenset[tuple[int, str]] = frozenset(),
+    planned_handoff_heads: frozenset[tuple[int, str]] = frozenset(),
 ) -> MergeTrainDryRunResult:
     repository_policy = policy.find_repository_policy(
         repository=snapshot.repository, base_branch=snapshot.base_branch
@@ -333,7 +334,7 @@ def build_merge_train_dry_run_result(
             pull_request,
             skip_blocked=batch_landing,
             allow_unknown_mergeability=(pull_request.number, pull_request.head_sha)
-            in planned_dependency_heads,
+            in planned_dependency_heads | planned_handoff_heads,
         )
         for pull_request in sorted(
             base_pull_requests, key=lambda item: (item.created_at, item.number)
@@ -792,7 +793,7 @@ def _build_queue_entry(
         ineligible_reasons.append("pull request is not open")
     if pull_request.is_draft:
         ineligible_reasons.append("draft pull request")
-    if skip_blocked and any(
+    if (skip_blocked or pull_request.ready_handoff is not None) and any(
         label.casefold() == repository_policy.blocked_label.casefold()
         for label in pull_request.labels
     ):

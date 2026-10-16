@@ -58,9 +58,16 @@ def individual_landing_snapshots(
                 )
             individual = _paths_require_individual_landing(paths, patterns)
         except _IncompleteCodeOwnerEvidence:
-            # Incomplete evidence can never justify transferring this PR's
-            # approval to a batch. Other PRs may still proceed.
-            individual = True
+            # With ownership rules, incomplete evidence cannot transfer this
+            # PR's approval to a batch. Without them it withholds grouping only.
+            individual = bool(patterns)
+            paths = ()
+        except MergeTrainGitHubError as error:
+            if patterns or error.rate_limited:
+                raise
+            # Without ownership assignments, files supply grouping hints only.
+            # Unavailable hints cannot deny unrelated ready work.
+            individual = False
             paths = ()
         result.append(
             pr.model_copy(
