@@ -782,6 +782,7 @@ def _build_queue_entry(
     *,
     skip_blocked: bool = False,
     allow_unknown_mergeability: bool = False,
+    allow_closed: bool = False,
 ) -> MergeTrainQueueEntry:
     ineligible_reasons: list[str] = []
     is_trusted_automation = (
@@ -789,7 +790,7 @@ def _build_queue_entry(
         and pull_request.actor_id in repository_policy.enqueue.trusted_automation_github_user_ids
     )
     actor_role = "trusted_automation" if is_trusted_automation else pull_request.actor_role
-    if pull_request.state != "open":
+    if pull_request.state != "open" and not allow_closed:
         ineligible_reasons.append("pull request is not open")
     if pull_request.is_draft:
         ineligible_reasons.append("draft pull request")
@@ -964,9 +965,16 @@ def merge_train_stack_child_readiness_reasons(
     *,
     repository_policy: MergeTrainRepositoryPolicy,
     pull_request: MergeTrainPullRequestSnapshot,
+    recovered_merge: bool = False,
 ) -> tuple[str, ...]:
     # Collapsing merges the child into the root, so the child must be ready to land on its own.
-    queue_entry = _build_queue_entry(repository_policy, pull_request)
+    queue_entry = _build_queue_entry(
+        repository_policy,
+        pull_request,
+        skip_blocked=True,
+        allow_closed=recovered_merge,
+        allow_unknown_mergeability=recovered_merge,
+    )
     return tuple(
         f"stacked pull request #{pull_request.number} is not ready for the train: {reason}"
         for reason in queue_entry.ineligible_reasons
@@ -978,10 +986,12 @@ def merge_train_stack_child_readiness_check(
     reader: MergeTrainPullRequestReader,
     repository: str,
     repository_policy: MergeTrainRepositoryPolicy,
+    recovered_merge: bool = False,
 ) -> Callable[[int], tuple[str, ...]]:
     def readiness_reasons(pull_request_number: int) -> tuple[str, ...]:
         return merge_train_stack_child_readiness_reasons(
             repository_policy=repository_policy,
+            recovered_merge=recovered_merge,
             pull_request=reader.read_pull_request_snapshot(
                 repository=repository, pull_request_number=pull_request_number
             ),
