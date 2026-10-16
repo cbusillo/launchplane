@@ -7,6 +7,7 @@ from control_plane.contracts.disposable_lane import (
     DISPOSABLE_LANE_OBSERVATION_ROUTE,
     TESTING_REPLACEMENT_RESOURCES_ROUTE,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
+    TESTING_PUBLIC_INGRESS_ROUTE,
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 from control_plane.testing_generation_retirement import ROUTE as TESTING_GENERATION_RETIREMENT_ROUTE
@@ -93,6 +94,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        TESTING_PUBLIC_INGRESS_ROUTE,
+        "Publish the current independent Odoo testing hostname at its recorded edge using an existing covering certificate; preserve its restored copy and retained routes.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
     OperationSpec(
         "POST",
         PRIVATE_TESTING_TRANSPORT_ROUTE,

@@ -14154,6 +14154,12 @@
             ],
             "title": "Provider Host Id"
           },
+          "provider_route_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Provider Route Sha256",
+            "type": "string"
+          },
           "reason": {
             "title": "Reason",
             "type": "string"
@@ -14187,6 +14193,18 @@
               "unchanged"
             ],
             "title": "Status",
+            "type": "string"
+          },
+          "testing_authority_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Authority Sha256",
+            "type": "string"
+          },
+          "testing_generation_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Generation Sha256",
             "type": "string"
           },
           "tls_owner": {
@@ -23986,6 +24004,26 @@
             "title": "Deployment Record Id",
             "type": "string"
           },
+          "disposal_attention": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Disposal Attention",
+            "type": "integer"
+          },
+          "disposal_pending": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Disposal Pending",
+            "type": "integer"
+          },
+          "disposal_pending_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Disposal Pending Bindings",
+            "type": "array"
+          },
           "observed_at": {
             "title": "Observed At",
             "type": "string"
@@ -24010,6 +24048,17 @@
             "title": "Step",
             "type": "string"
           },
+          "storage_status": {
+            "default": "unknown",
+            "enum": [
+              "unknown",
+              "pass",
+              "insufficient",
+              "unconfigured"
+            ],
+            "title": "Storage Status",
+            "type": "string"
+          },
           "trace": {
             "default": "",
             "title": "Trace",
@@ -24021,6 +24070,48 @@
           "observed_at"
         ],
         "title": "OdooTestingDrillEvidence",
+        "type": "object"
+      },
+      "OdooTestingDrillStorageBudget": {
+        "additionalProperties": false,
+        "description": "Admin-supplied working headroom, never an inferred source-size guarantee.",
+        "properties": {
+          "database_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Database Bytes",
+            "type": "integer"
+          },
+          "filestore_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Filestore Bytes",
+            "type": "integer"
+          },
+          "reserve_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Reserve Bytes",
+            "type": "integer"
+          },
+          "retained_copy_bindings": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Retained Copy Bindings",
+            "type": "array"
+          },
+          "staging_bytes": {
+            "exclusiveMinimum": 0.0,
+            "title": "Staging Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "database_bytes",
+          "filestore_bytes",
+          "staging_bytes",
+          "reserve_bytes"
+        ],
+        "title": "OdooTestingDrillStorageBudget",
         "type": "object"
       },
       "OdooTestingRouteBindingRefreshEnvelope": {
@@ -34285,6 +34376,17 @@
             "default": false,
             "title": "Odoo Testing Drill Enabled",
             "type": "boolean",
+            "x-launchplane-optional-response": true
+          },
+          "odoo_testing_drill_storage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/OdooTestingDrillStorageBudget"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "x-launchplane-optional-response": true
           }
         },
@@ -49422,6 +49524,55 @@
           "target_source_label"
         ],
         "title": "TestingHoldRehearsal",
+        "type": "object"
+      },
+      "TestingPublicIngressRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "operation_id",
+          "reason"
+        ],
+        "title": "TestingPublicIngressRequest",
         "type": "object"
       },
       "TestingReplacementBootstrapRequest": {
@@ -90800,6 +90951,127 @@
           }
         },
         "summary": "Retain an incomplete testing generation without releasing its operation"
+      }
+    },
+    "/v1/products/{product}/testing-public-ingress": {
+      "post": {
+        "operationId": "prepare_testing_public_ingress",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingPublicIngressRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Publish one independent testing hostname at its existing public edge"
       }
     },
     "/v1/products/{product}/testing-replacement-bootstrap": {

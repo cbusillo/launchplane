@@ -828,6 +828,7 @@ from control_plane.contracts.disposable_lane import (
 )
 from control_plane.disposable_lane_collection import (
     collect_disposable_lane_facts,
+    collect_down_testing_resource_facts,
     disposable_collection_coverage,
 )
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
@@ -975,6 +976,7 @@ from control_plane.http_routes.testing_replacement_resources import (
 from control_plane.http_routes.testing_replacement_bootstrap import (
     register_testing_replacement_bootstrap_routes,
 )
+from control_plane.http_routes.testing_public_ingress import register_testing_public_ingress_routes
 from control_plane.http_routes.testing_generation_retirement import (
     register_testing_generation_retirement_routes,
 )
@@ -23982,6 +23984,43 @@ def create_launchplane_fastapi_app(
                     binding_sha256=fingerprint,
                     odoo_usage=odoo_usage,
                 )
+                resource_facts: dict[str, str] | None = None
+                if (
+                    profile.driver_id == "odoo"
+                    and observation.instance == "testing"
+                    and facts.production_resources != "shared"
+                ):
+                    try:
+                        resource_facts = await run_in_threadpool(
+                            collect_down_testing_resource_facts,
+                            store,
+                            product=profile.product,
+                            context=observation.context,
+                            now=store.disposable_lane_observation_time(),
+                        )
+                    except NativeSourceAuthorizationDenied:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="The provider refused the testing resource inspection.",
+                        ) from None
+                if fingerprint != disposable_lane_binding_sha256(
+                    store.read_product_profile_record(profile.product),
+                    store.read_dokploy_target_record(
+                        context_name=observation.context, instance_name=observation.instance
+                    )
+                    if target is not None
+                    else None,
+                    store.read_dokploy_target_id_record(
+                        context_name=observation.context, instance_name=observation.instance
+                    )
+                    if target_id is not None
+                    else None,
+                    preview,
+                    disposable_lane_configuration(store, observation.context, observation.instance),
+                ):
+                    raise ValueError("The lane changed during resource collection; collect again.")
                 previous = store.read_disposable_lane_safety(
                     profile.product, observation.context, observation.instance
                 )
@@ -24001,10 +24040,26 @@ def create_launchplane_fastapi_app(
                         "observed_at": observed_at,
                         "expires_at": observed_at + timedelta(seconds=observation.lifetime_seconds),
                         **facts.payload(),
+                        # Each fresh positive read is distinct from retained
+                        # historical use when only the row's resource TTL changes.
+                        "usage_evidence": (
+                            facts.usage_evidence + ":" + observed_at.isoformat()
+                            if facts.usage == "in_use"
+                            else facts.usage_evidence
+                        ),
+                        **(resource_facts or {}),
                     }
                 )
-                if not store.publish_collected_disposable_lane_safety(evidence):
+                if not store.publish_collected_disposable_lane_safety(
+                    evidence, collect_facts=True, replace_resource_facts=resource_facts is not None
+                ):
                     raise ValueError("Newer or protected usage evidence exists; collect again.")
+                published = store.read_disposable_lane_safety(
+                    profile.product, observation.context, observation.instance
+                )
+                if published is None or published.binding_sha256 != fingerprint:
+                    raise ValueError("The collected lane binding changed; collect again.")
+                evidence = published
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={"product_profile": profile.product},
@@ -24013,7 +24068,9 @@ def create_launchplane_fastapi_app(
                         "binding_sha256": fingerprint,
                         "observed_by": evidence.observed_by,
                         "observer_kind": evidence.observer_kind,
-                        **facts.payload(),
+                        **{key: getattr(evidence, key) for key in facts.payload()},
+                        "historical_usage_retained": facts.usage == "unknown"
+                        and evidence.usage == "in_use",
                         "observed_at": evidence.observed_at.isoformat(),
                         "odoo_usage": odoo_usage.payload(),
                         "never_served_qualification": never_served.reason_code,
@@ -29833,6 +29890,13 @@ def create_launchplane_fastapi_app(
         run_provider_mutation=run_provider_mutation,
     )
     register_testing_replacement_bootstrap_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
+    register_testing_public_ingress_routes(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,

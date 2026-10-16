@@ -37,6 +37,26 @@ class _Opener:
         self.requests: list[tuple[str, str, object | None]] = []
         self.token_payload: object = {"expires": "2026-06-01T01:17:27.592Z"}
         self.proxy_hosts_payload: object = [_proxy_host_payload(id=78)]
+        self.other_hosts_payload: object = [
+            {"domain_names": ["claimed.example.test"], "enabled": True},
+            {"domain_names": ["disabled.example.test"], "enabled": False},
+        ]
+        self.host_details: dict[str, object] = {
+            **_proxy_host_payload(id=78),
+            "npmplus_nginx_online": True,
+            "npmplus_mtls_certificate_id": 0,
+            "npmplus_mtls_verify_client_optional": False,
+            "npmplus_mtls_bypass_auth_request": False,
+            "npmplus_auth_request_upstream": "",
+            "npmplus_location_config": "",
+            "npmplus_directory": "",
+        }
+        self.certificate_payload = {
+            "id": 47,
+            "domain_names": ["*.example.test"],
+            "expires_on": "2027-01-01 00:00:00",
+            "meta": {"dns_provider_credentials": "fixture-secret"},
+        }
 
     def open(self, request: Request, timeout: int | float) -> _Response:
         body_bytes = cast(bytes | None, request.data)
@@ -50,11 +70,17 @@ class _Opener:
             return _Response(self.token_payload)
         if method == "POST" and path == "/api/nginx/proxy-hosts":
             assert isinstance(payload, dict)
+            if set(payload) & {"meta", "enabled", "http2_support", "trust_forwarded_proto"}:
+                raise AssertionError("Current NPMplus rejects legacy request properties")
             return _Response({"id": 78, **payload})
         if method == "GET" and path == "/api/nginx/proxy-hosts/78":
-            return _Response(_proxy_host_payload(id=78, enabled=True, npmplus_noindex=True))
+            return _Response({**self.host_details, "npmplus_noindex": True})
         if method == "GET" and path == "/api/nginx/proxy-hosts":
             return _Response(self.proxy_hosts_payload)
+        if method == "GET" and path in ("/api/nginx/redirection-hosts", "/api/nginx/dead-hosts"):
+            return _Response(self.other_hosts_payload)
+        if method == "GET" and path == f"/api/nginx/certificates/{self.certificate_payload['id']}":
+            return _Response(self.certificate_payload)
         if method == "PUT" and path == "/api/nginx/proxy-hosts/78":
             assert isinstance(payload, dict)
             return _Response({"id": 78, **payload})
@@ -239,6 +265,66 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
 
 class NpmplusClientTests(unittest.TestCase):
+    def test_disabled_creation_refuses_before_exposing_a_temporarily_enabled_host(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        with self.assertRaises(click.ClickException):
+            client.create_proxy_host(
+                NpmplusProxyHostPayload.model_validate({**_proxy_host_payload(), "enabled": False})
+            )
+        self.assertEqual(opener.requests, [])
+
+    def test_public_read_refuses_private_tls_and_unloaded_configuration(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        self.assertTrue(client.get_proxy_host(78, public_only=True).enabled)
+        for field, value in (
+            ("npmplus_mtls_certificate_id", 12),
+            ("npmplus_nginx_online", False),
+            ("npmplus_location_config", "return 403;"),
+        ):
+            with self.subTest(field=field):
+                original = opener.host_details[field]
+                opener.host_details[field] = value
+                with self.assertRaises(click.ClickException):
+                    client.get_proxy_host(78, public_only=True)
+                opener.host_details[field] = original
+
+    def test_other_host_claims_are_read_before_any_proxy_write(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        domains = client.list_other_host_domains()
+        self.assertIn("claimed.example.test", domains)
+        self.assertNotIn("disabled.example.test", domains)
+        self.assertFalse(
+            any(
+                method != "GET" and path.endswith("proxy-hosts")
+                for method, path, _ in opener.requests
+            )
+        )
+
+    def test_removed_protocol_settings_refuse_before_transport(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        with self.assertRaises(ValueError):
+            client.create_proxy_host(
+                NpmplusProxyHostPayload.model_validate(
+                    {**_proxy_host_payload(), "trust_forwarded_proto": True}
+                )
+            )
+        self.assertFalse(any(path.endswith("proxy-hosts") for _, path, _ in opener.requests))
+
+    def test_certificate_reader_retains_only_public_metadata(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        certificate = client.get_certificate(cast(int, opener.certificate_payload["id"]))
+        self.assertEqual(
+            certificate.domain_names,
+            tuple(cast(list[str], opener.certificate_payload["domain_names"])),
+        )
+        self.assertNotIn("meta", certificate.model_dump())
+        self.assertNotIn("fixture-secret", certificate.model_dump_json())
+
     def test_create_proxy_host_authenticates_and_posts_payload(self) -> None:
         opener = _Opener()
         client = NpmplusClient(credentials=_credentials(), opener=opener)
