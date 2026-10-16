@@ -172,6 +172,20 @@ test("route proof expiry stays diagnostic while health and identity remain fresh
   assert.equal(lane.topology.provider_recorded.trust_state, sourceTrust);
 });
 
+test("combined lane and product evidence expire when topology expires before health", () => {
+  const lane = environment();
+  const now = Date.now();
+  lane.topology.trust_state = "recorded";
+  lane.topology.observed.placement.provenance.stale_after = new Date(now).toISOString();
+  const product = structuredClone(productsForFixture("products")[0]);
+  product.trust_state = "recorded";
+  product.environments = [lane];
+  const expired = expireProductEvidence(product, now + 1);
+  assert.equal(expired.environments[0].health_monitoring.checks[0].trust_state, "verified");
+  assert.equal(expired.environments[0].trust_state, "stale");
+  assert.equal(expired.trust_state, "stale");
+});
+
 test("missing and expired route authority cannot hide verified public health", () => {
   for (const trust_state of ["missing", "stale"]) {
     const lane = environment();

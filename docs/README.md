@@ -16,6 +16,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [role-words.md](role-words.md) — Director, Client, the admin permission, and
   what legacy `owner` and `operator` identifiers mean.
 - [architecture.md](architecture.md) — ownership boundaries and system shape.
+- [reviewed-retirement.md](reviewed-retirement.md) — exact stored-setting removal and inert selected workflow-rule retirement plans.
 - [config-boundary.md](config-boundary.md) — bootstrap-vs-DB config authority
   and checked-in config authority limits.
 - [authorization-authority.md](authorization-authority.md) — who can do what,

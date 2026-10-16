@@ -449,6 +449,8 @@ from control_plane.contracts.public_ingress_monitoring import (
 )
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.runtime_setting_removal import RuntimeSettingRemovalRequest
+from control_plane.service_auth import LaunchplaneIdentity
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
@@ -6516,6 +6518,7 @@ class PostgresRecordStore(HumanSessionStore):
         write_session: Session | None = None,
         commit: bool = True,
         validate_only: bool = False,
+        write_transaction_started: bool = False,
     ) -> None:
         if not bundle.requires_write():
             return
@@ -6524,7 +6527,8 @@ class PostgresRecordStore(HumanSessionStore):
             if write_session is not None
             else self._session_factory() as session
         ):
-            self._begin_serialized_write(session)
+            if not write_transaction_started:
+                self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
             adoption_checkpoint = getattr(
                 self._disposable_authority_context, "adoption_checkpoint", None
@@ -27302,6 +27306,312 @@ class PostgresRecordStore(HumanSessionStore):
             session.delete(row)
             session.commit()
             return "deleted"
+
+    def runtime_setting_removal(
+        self,
+        *,
+        request: "RuntimeSettingRemovalRequest",
+        identity: LaunchplaneIdentity,
+        trace_id: str,
+        idempotency_key: str = "",
+    ) -> dict[str, object]:
+        """Keep review preimages private; commit the contraction and receipt together."""
+        from control_plane.service_auth import AuthorizationTarget
+        from control_plane.contracts.product_profile_record import product_context_owner_map
+        from control_plane.storage.product_authority_bundle import RuntimeEnvironmentDelete
+        from control_plane.runtime_setting_removal import (
+            ROUTE,
+            REVIEW_ROUTE,
+            removal_plan,
+            request_fingerprint,
+        )
+        from control_plane.http_routes.mutation_support import (
+            idempotency_scope,
+        )
+        from control_plane.service_auth import director_agent_identity
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            # Match the policy writer's lock order before touching product authority.
+            self._lock_active_authz_policy(session)
+            active = self._locked_active_authz_policy_record(session)
+            self._lock_product_authority_bundle_write(session)
+            admin = (
+                isinstance(identity, GitHubHumanIdentity)
+                and identity.role == "admin"
+                and authz_policy_allows_immutable_github_id_administration(
+                    policy=active.policy, github_id=identity.github_id
+                )
+            )
+            target = AuthorizationTarget(
+                scope=request.scope,
+                instances=(request.instance,) if request.instance else (),
+            )
+            if request.mode == "apply":
+                if not admin or not active.policy.allows(
+                    identity=identity,
+                    action="product_config.apply",
+                    product=request.product,
+                    context=request.context or "launchplane",
+                    target=target,
+                    inherit_agent_read_role=False,
+                ):
+                    raise PermissionError(
+                        "Removal requires the authorized signed-in administrator."
+                    )
+            elif not director_agent_identity(identity) and not (
+                admin
+                and active.policy.allows(
+                    identity=identity,
+                    action="secret.list",
+                    product=request.product,
+                    context=request.context or "launchplane",
+                    target=target,
+                )
+            ):
+                raise PermissionError("Identity cannot review runtime setting removal.")
+
+            profile = None
+            if request.scope != "global":
+                profiles = tuple(
+                    LaunchplaneProductProfileRecord.model_validate(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                )
+                owners = product_context_owner_map(profiles).get(request.context, ())
+                if set(owners) != {request.product}:
+                    raise ValueError("The product does not exclusively own this context.")
+                profile = next(p for p in profiles if p.product == request.product)
+                require_bundle_context_owner(
+                    ProductAuthorityBundle(
+                        required_product_config_target=(
+                            request.product,
+                            request.context,
+                            request.instance,
+                        )
+                    ),
+                    profiles,
+                )
+            authority_sha256 = request_fingerprint(
+                {
+                    "policy": (active.record_id, active.revision, active.policy_sha256),
+                    "profile": profile.model_dump(mode="json") if profile else None,
+                }
+            )
+            current_row = session.scalar(
+                self._runtime_environment_statement(
+                    scope=request.scope,
+                    context=request.context,
+                    instance=request.instance,
+                    for_update=True,
+                )
+            )
+            current = (
+                RuntimeEnvironmentRecord.model_validate(current_row.payload)
+                if current_row
+                else None
+            )
+            now = self._database_mutation_timestamp(session)
+            if request.mode == "dry-run":
+                if current is None:
+                    raise ValueError("The selected runtime record is absent.")
+                private_nonce = secrets.token_hex(32)
+                plan = removal_plan(
+                    current, request, authority_sha256=authority_sha256, private_nonce=private_nonce
+                )
+                review_id = str(plan["review_id"])
+                existing = session.scalar(
+                    self._idempotency_statement(
+                        scope="runtime-setting-review",
+                        route_path=REVIEW_ROUTE,
+                        idempotency_key=review_id,
+                        for_update=True,
+                    )
+                )
+                if existing is None:
+                    # A private rollback preimage, never a wire response. No new export route.
+                    archive = LaunchplaneIdempotencyRecord(
+                        record_id=review_id,
+                        scope="runtime-setting-review",
+                        route_path=REVIEW_ROUTE,
+                        idempotency_key=review_id,
+                        request_fingerprint=str(plan["plan_sha256"]),
+                        response_status_code=200,
+                        response_trace_id=trace_id,
+                        recorded_at=now,
+                        response_payload={
+                            "plan": plan,
+                            "private_nonce": private_nonce,
+                            "intent": request.intent(),
+                            "before": current.model_dump(mode="json"),
+                            "reviewed_by": idempotency_scope(identity),
+                        },
+                    )
+                    session.add(self._idempotency_row(archive))
+                    session.commit()
+                return plan
+            review_row = session.scalar(
+                self._idempotency_statement(
+                    scope="runtime-setting-review",
+                    route_path=REVIEW_ROUTE,
+                    idempotency_key=request.review_id,
+                    for_update=True,
+                )
+            )
+            if review_row is None:
+                raise ValueError("A service-owned dry run must precede removal.")
+            review = LaunchplaneIdempotencyRecord.model_validate(review_row.payload)
+            if (
+                review.request_fingerprint != request.reviewed_plan_sha256
+                or review.response_payload["intent"] != request.intent()
+            ):
+                raise ValueError("The reviewed selection differs from this request.")
+            before = RuntimeEnvironmentRecord.model_validate(review.response_payload["before"])
+            plan = dict(review.response_payload["plan"])
+            remaining = {key: value for key, value in before.env.items() if key not in request.keys}
+            if request.mode == "readback":
+                matches = (
+                    current is None
+                    if plan["record_deleted"]
+                    else current is not None
+                    and request_fingerprint(current.env) == request_fingerprint(remaining)
+                    and current.retired_provider_keys == before.retired_provider_keys
+                    and current.source_label == before.source_label
+                    and current.schema_version == before.schema_version
+                )
+                return {
+                    **plan,
+                    "readback_matches": matches,
+                    "current_record_present": current is not None,
+                }
+            if not idempotency_key.strip():
+                raise ValueError("Apply requires the original stable idempotency key.")
+            fingerprint = request_fingerprint(request.model_dump(mode="json"))
+            mutation = DbOnlyMutationRequest(
+                scope=idempotency_scope(identity),
+                route_path=ROUTE,
+                idempotency_key=idempotency_key.strip(),
+                request_fingerprint=fingerprint,
+                lease_owner=trace_id,
+                response_status_code=200,
+                response_trace_id=trace_id,
+                response_payload={},
+            )
+            status, receipt_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session,
+                mutation=mutation,
+            )
+            if status == "replayed":
+                return {**reservation.response_payload, "replayed": True}
+            if status != "acquired":
+                raise ValueError("The original removal outcome requires reconciliation.")
+            assert receipt_row is not None
+            # Reservation collisions may roll back and reopen the transaction. Re-lock
+            # and re-read every precondition in that case, never reuse a stale row.
+            self._lock_active_authz_policy(session)
+            if self._locked_active_authz_policy_record(session) != active:
+                raise ValueError("Policy changed during removal.")
+            self._lock_product_authority_bundle_write(session)
+            session.expire_all()
+            current_row = session.scalar(
+                self._runtime_environment_statement(
+                    scope=request.scope,
+                    context=request.context,
+                    instance=request.instance,
+                    for_update=True,
+                )
+            )
+            if current_row is None:
+                raise ValueError("Reviewed runtime record disappeared.")
+            current = RuntimeEnvironmentRecord.model_validate(current_row.payload)
+            if (
+                removal_plan(
+                    current,
+                    request,
+                    authority_sha256=authority_sha256,
+                    private_nonce=str(review.response_payload["private_nonce"]),
+                )
+                != plan
+            ):
+                raise ValueError("Reviewed runtime record or authority changed.")
+            replacement = None
+            if not plan["record_deleted"]:
+                replacement = RuntimeEnvironmentRecord.model_validate(
+                    {
+                        **before.model_dump(mode="json"),
+                        "env": remaining,
+                        "updated_at": now,
+                    }
+                )
+            event = RuntimeEnvironmentDeleteEvent(
+                event_id="runtime-setting-removal-" + str(plan["plan_sha256"]),
+                recorded_at=now,
+                actor=idempotency_scope(identity),
+                scope=request.scope,
+                context=request.context,
+                instance=request.instance,
+                source_label=before.source_label,
+                env_keys=tuple(sorted(before.env)),
+                env_value_count=len(before.env),
+                detail="Reviewed record removal; rollback preimage retained in "
+                + request.review_id,
+            )
+            bundle = ProductAuthorityBundle(
+                expected_product_profiles=(profile,) if profile else (),
+                required_context_owner=(request.product, request.context) if profile else None,
+                runtime_environment_writes=(
+                    RuntimeEnvironmentWrite(
+                        record=replacement,
+                        expected_record=before,
+                    ),
+                )
+                if replacement
+                else (),
+                delete_runtime_environments=(
+                    RuntimeEnvironmentDelete(
+                        expected_record=before,
+                        event=event,
+                    ),
+                )
+                if replacement is None
+                else (),
+            )
+            self._write_product_authority_bundle(
+                bundle, write_session=session, commit=False, write_transaction_started=True
+            )
+            session.flush()
+            written_row = session.scalar(
+                self._runtime_environment_statement(
+                    scope=request.scope,
+                    context=request.context,
+                    instance=request.instance,
+                    for_update=True,
+                )
+            )
+            written = (
+                RuntimeEnvironmentRecord.model_validate(written_row.payload)
+                if written_row
+                else None
+            )
+            if written != replacement:
+                raise ValueError("Removal readback did not match its committed intent.")
+            result = {
+                **plan,
+                "applied": True,
+                "applied_at": now,
+                "audit_review_id": request.review_id,
+                "readback_matches": True,
+            }
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=200,
+                response_trace_id=trace_id,
+                completed_at=now,
+                response_payload=result,
+            )
+            self._sync_idempotency_row(receipt_row, completion)
+            self._after_product_authority_bundle_step("runtime_setting_removal_receipt")
+            session.commit()
+            return result
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
         self._write_bundled_metadata_row(self._runtime_environment_row(record))
