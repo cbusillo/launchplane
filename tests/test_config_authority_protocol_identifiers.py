@@ -137,6 +137,20 @@ class ProtocolIdentifierTests(unittest.TestCase):
                 audit = self.audit(source)
                 self.assertEqual(evaluate_config_authority_gate(audit)["status"], "fail")
 
+    def test_bound_non_protocol_receivers_remain_rejected(self) -> None:
+        for usage in (
+            "for database in list_databases():\n    database.binding_key == ODOO_DATABASE\n",
+            "[d for d in list_databases() if d.binding_key == ODOO_DATABASE]\n",
+            "for target in provider_targets():\n    target.integration == ODOO_DATABASE\n",
+            "for record in store.list_secret_records():\n    record.binding_key == ODOO_DATABASE\n",
+            "for item in payload.get('databases'):\n    item.get('integration') == ODOO_DATABASE\n",
+            "try:\n    read_runtime()\nexcept KeyError as error:\n"
+            "    error.code == ODOO_DATABASE\n",
+        ):
+            with self.subTest(usage=usage):
+                audit = self.audit('ODOO_DATABASE = "production"\n' + ERROR_CLASS + usage)
+                self.assertEqual(evaluate_config_authority_gate(audit)["status"], "fail")
+
     def test_ambiguous_error_constructors_remain_rejected(self) -> None:
         for error_class in (
             ERROR_CLASS.replace("(ValueError)", ""),

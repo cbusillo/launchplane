@@ -420,8 +420,11 @@ payload keys, and error codes; it does not allow names merely because they
 contain diagnostic, secret, or error words. Mixed runtime/grant uses, rebinding,
 shadowing (including wildcard imports and match captures), aliases, unused
 declarations, and imported-only declarations provide no classification proof
-within the declaring module. Cross-module consumers are not followed; this is
-a conservative local syntax classification, not a whole-program proof.
+within the declaring module. Cross-module consumers remain unchecked; this
+local syntax classification is not a whole-program proof. It also leaves
+repeated receiver bindings in one scope, annotated iterable assignments, and
+comprehensions over an iterable assigned in the enclosing scope unclassified.
+Direct secret-list comprehensions and payload-list `for` loops are supported.
 Evidence is bound to the committed declaration's
 path, line, key, and value; a same-named settings or environment assignment
 does not inherit it. Audit completion (`status: ok`) remains distinct from
