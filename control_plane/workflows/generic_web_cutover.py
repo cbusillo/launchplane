@@ -13,7 +13,11 @@ from control_plane.contracts.generic_web_cutover import (
     WebRouteObservation,
     WebCutoverStep,
 )
-from control_plane.traffic_switch import require_serving_route, require_fresh_readiness
+from control_plane.traffic_switch import (
+    require_serving_route,
+    require_fresh_readiness,
+    require_route_authority,
+)
 
 
 class WebCutoverStore(Protocol):
@@ -52,7 +56,12 @@ def require_route(route: WebRouteObservation, plan: GenericWebCutoverPlan, slot:
 
 
 def require_ready(
-    ready: WebSlotReadiness, plan: GenericWebCutoverPlan, slot: WebSlot, now: datetime
+    ready: WebSlotReadiness,
+    plan: GenericWebCutoverPlan,
+    slot: WebSlot,
+    now: datetime,
+    *,
+    require_fenced: bool = True,
 ) -> None:
     require_fresh_readiness(
         observed_at=ready.observed_at,
@@ -65,6 +74,7 @@ def require_ready(
         or ready.image != slot.image
         or ready.host != plan.lane.host
         or ready.runtime_settings_sha256 != plan.lane.runtime_settings_sha256
+        or (require_fenced and not ready.background_workers_fenced)
     ):
         raise ValueError("private readiness differs from the exact slot/settings")
 
@@ -169,14 +179,29 @@ def rollback_web_cutover(
             return record
         route = provider.current_route(plan)
         current = plan.old if route.slot_id == plan.old.slot_id else plan.new
-        require_route(route, plan, current)
+        require_route_authority(
+            route,
+            route_id=plan.lane.route_id,
+            host=plan.lane.host,
+            target_url=current.private_url,
+            slot_id=current.slot_id,
+        )
+        observed_identity = route.public_health.observed_runtime_identity
+        if observed_identity is not None and observed_identity != current.runtime_identity:
+            raise ValueError("public runtime differs from the admitted rollback authority")
         if record.step != "rolling_back":
             record = record.model_copy(
                 update={"step": "rolling_back", "rollback_started_at": clock()}
             )
             store.save(record)
         try:
-            require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
+            require_ready(
+                provider.readiness(plan, plan.old),
+                plan,
+                plan.old,
+                clock(),
+                require_fenced=current != plan.old,
+            )
             if current != plan.old:
                 checkpoint("rollback_atomic_switch")
                 route = provider.switch(plan, plan.old)

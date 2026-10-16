@@ -340,7 +340,26 @@ class WebCutoverRehearsalTests(unittest.TestCase):
                             nested("inspect", "--format", "{{.Image}}", container),
                             nested("image", "inspect", "--format", "{{.Id}}", slot.image),
                         )
-                    return fixture.readiness(p, slot)
+                    durations = []
+                    for path in ("/", "/static/app.css", "/"):
+                        began = time.perf_counter()
+                        body = docker(
+                            "exec",
+                            engine,
+                            "wget",
+                            "-qO-",
+                            "--header",
+                            "Host: " + p.lane.host,
+                            slot.private_url + path,
+                        )
+                        durations.append((time.perf_counter() - began) * 1000)
+                        self.assertIn(slot.runtime_identity.source_git_ref, body)
+                    return fixture.readiness(p, slot).model_copy(
+                        update={
+                            "first_request_ms": durations[0],
+                            "warmed_request_ms": durations[-1],
+                        }
+                    )
 
                 def health(slot: WebSlot, payload: Any, url: str) -> HealthcheckEvidence:
                     from control_plane.contracts.runtime_identity import RuntimeIdentity

@@ -63,6 +63,13 @@ def require_generic_web_promotion_target(
 ) -> None:
     if not isinstance(record_store, PostgresRecordStore):
         raise TypeError("Live generic-web promotion requires Launchplane database storage.")
+    if lane.generic_web_cutover is not None:
+        if (
+            resolved_deploy_target.resolved_target.target_id
+            != "route:" + lane.generic_web_cutover.route_id
+        ):
+            raise PromotionTargetChanged("The reserved traffic authority changed.")
+        return
     try:
         current = record_store.read_provider_target_record(
             context_name=lane.context,
@@ -122,6 +129,23 @@ class GenericWebProdPromotionProviderMutationAdapter:
                 record_store=cast(GenericWebPromotionStore, self._record_store),
                 request=self._promotion_request.promotion,
             )
+            if self._lane.generic_web_cutover is not None:
+                from control_plane.generic_web_cutover import (
+                    WebCutoverAuthorityStore,
+                    resolve_web_cutover_target,
+                )
+
+                self._resolved_deploy_target = resolve_web_cutover_target(
+                    cast(WebCutoverAuthorityStore, self._record_store),
+                    profile=self._profile,
+                    lane=self._lane,
+                    artifact_id=promotion.artifact_id,
+                    source_git_ref=promotion.source_git_ref,
+                    deploy_reference=promotion.deploy_reference,
+                    provider_id=self._deploy_provider.provider_id,
+                    timeout_seconds=promotion.timeout_seconds,
+                )
+                return self._resolved_deploy_target
             self._resolved_deploy_target = self._deploy_provider.resolve_deploy_target(
                 control_plane_root=self._control_plane_root,
                 request_artifact_id=promotion.artifact_id,

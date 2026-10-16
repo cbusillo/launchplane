@@ -73,6 +73,13 @@ class DokployWebCutoverProvider:
         slot = next((slot for slot in (plan.old, plan.new) if slot.private_url == target), None)
         if slot is None:
             raise ValueError("unknown applied route; no traffic authority inferred")
+        try:
+            public_health = self.driver.public_health(plan)
+        except Exception:
+            # Applied traffic authority remains independently observable when
+            # a broken candidate times out. Forward progress still needs health;
+            # rollback can privately verify old before restoring its exact route.
+            public_health = HealthcheckEvidence(status="fail")
         return WebRouteObservation(
             route_id=plan.lane.route_id,
             host=plan.lane.host,
@@ -81,7 +88,7 @@ class DokployWebCutoverProvider:
             evidence_id=self.route.evidence_id(),
             applied=True,
             authoritative_router_count=1,
-            public_health=self.driver.public_health(plan),
+            public_health=public_health,
         )
 
     def prepare_candidate(self, plan: GenericWebCutoverPlan) -> None:
@@ -120,7 +127,13 @@ class DokployWebCutoverProvider:
 
     def readiness(self, plan: GenericWebCutoverPlan, slot: WebSlot) -> WebSlotReadiness:
         ready = self.driver.readiness(plan, slot)
-        require_ready(ready, plan, slot, datetime.now(UTC))
+        require_ready(
+            ready,
+            plan,
+            slot,
+            datetime.now(UTC),
+            require_fenced=slot != plan.old or self.route.observed_target() != slot.private_url,
+        )
         health = self.driver.private_health(plan, slot)
         if (
             not health.verified

@@ -29,18 +29,29 @@ def require_serving_route(
     slot_id: str,
     identity: RuntimeIdentity,
 ) -> None:
+    require_route_authority(
+        observation, route_id=route_id, host=host, target_url=target_url, slot_id=slot_id
+    )
     health = observation.public_health
     if (
-        observation.route_id != route_id
-        or observation.host != host
-        or observation.target_url != target_url
-        or observation.slot_id != slot_id
-        or health is None
+        health is None
         or not health.verified
         or health.status != "pass"
         or health.observed_runtime_identity != identity
     ):
         raise ValueError("applied route/public identity differs from expected slot")
+
+
+def require_route_authority(
+    observation: ServingRoute, *, route_id: str, host: str, target_url: str, slot_id: str
+) -> None:
+    if (
+        observation.route_id != route_id
+        or observation.host != host
+        or observation.target_url != target_url
+        or observation.slot_id != slot_id
+    ):
+        raise ValueError("applied traffic authority differs from the exact slot")
 
 
 def require_fresh_readiness(

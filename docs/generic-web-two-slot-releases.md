@@ -89,3 +89,24 @@ It creates only disposable local containers/networks and removes them on exit.
 It never changes the workstation's Swarm membership. Full repository CI and the
 current local gates remain required for delivery; source proof authorizes no
 production switch.
+
+The durable HTTP deploy adapter reserves the lane's traffic route rather than a
+legacy single recipient. Reconciliation reads the exact persisted checkpoint
+and actual route/public identity. `cutover_checkpoint_recoverable` means the
+terminal operation result is absent and the same controller can resume under a
+renewed lease; it does **not** report provider effects or a target deployment as
+absent. Missing checkpoints after an effect journal, foreign authority and
+unavailable readback stay unknown. A completed replay reads the cutover result
+without invoking legacy deployment adoption.
+
+The rollback planner accepts a digest-bound retained slot on an admitted
+cutover lane without requiring a provider tag: switching traffic back never
+redeploys that application. Candidate application preparation still uses its
+validated immutable provider tag. Readiness requires background fencing for
+inactive slots; aborting before the switch verifies the serving slot while its
+existing writer ownership remains intact. A broken candidate's public health
+does not hide independently applied route authority: rollback privately checks
+the old runtime and verifies its public identity after restoring that route.
+Blocked and aborted attempts finish as failed deployment events rather than
+remaining pending. Readiness persists first/warmed request timings alongside
+its render/asset and identity evidence.

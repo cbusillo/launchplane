@@ -130,7 +130,9 @@ class WebSlotReadiness(FrozenRecord):
     render: Literal[True]
     assets: Literal[True]
     warmed: Literal[True]
-    background_workers_fenced: Literal[True]
+    first_request_ms: float = Field(ge=0)
+    warmed_request_ms: float = Field(ge=0)
+    background_workers_fenced: bool
     retained_previous_assets: Literal[True]
 
 

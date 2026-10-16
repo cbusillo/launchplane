@@ -131,6 +131,24 @@ class GenericWebDeployProviderMutationAdapter:
 
     def _resolve_deploy_target(self) -> GenericWebResolvedDeployTarget:
         if self._resolved_deploy_target is None:
+            if self._lane.generic_web_cutover is not None:
+                from control_plane.generic_web_cutover import (
+                    WebCutoverAuthorityStore,
+                    resolve_web_cutover_target,
+                )
+
+                deploy = self._deploy_request.deploy
+                self._resolved_deploy_target = resolve_web_cutover_target(
+                    cast(WebCutoverAuthorityStore, self._record_store),
+                    profile=self._profile,
+                    lane=self._lane,
+                    artifact_id=deploy.artifact_id,
+                    source_git_ref=deploy.source_git_ref,
+                    deploy_reference=deploy.deploy_reference,
+                    provider_id=self._deploy_provider.provider_id,
+                    timeout_seconds=deploy.timeout_seconds,
+                )
+                return self._resolved_deploy_target
             if not self._qualification_authority_digest:
                 self._qualification_authority_digest = generic_web_post_deploy_authority_digest(
                     self._record_store, self._profile, self._lane
@@ -208,6 +226,30 @@ class GenericWebDeployProviderMutationAdapter:
         inspection: _GenericWebDeployProviderInspection,
     ) -> ProviderObservation:
         observation = inspection.observation
+        if self._lane.generic_web_cutover is not None:
+            if observation.outcome != "present":
+                return ProviderObservation(
+                    outcome=observation.outcome, retry_safe=inspection.retry_safe
+                )
+            from control_plane.workflows.generic_web_deploy import cutover_deploy_result
+
+            record = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                self._deployment_record_id(provider_operation_key)
+            )
+            result = cutover_deploy_result(
+                record, product=self._profile.product, provider_id=self._deploy_provider.provider_id
+            ).model_dump(mode="json")
+            result.pop("provider_effect_attempted", None)
+            result.pop("provider_failure_proved", None)
+            return ProviderObservation(
+                outcome="present",
+                response_status_code=202,
+                response_payload=provider_operation_response_payload(
+                    trace_id=self._trace_id,
+                    records={"deployment_record_id": record.record_id},
+                    result=result,
+                ),
+            )
         if observation.outcome != "present" or inspection.resolved_deploy_target is None:
             return ProviderObservation(
                 outcome=observation.outcome,
@@ -248,6 +290,13 @@ class GenericWebDeployProviderMutationAdapter:
         legacy_provider_effect_started_at: str = "",
     ) -> _GenericWebDeployProviderInspection:
         self._proved_pre_image_operation = ""
+        if self._lane.generic_web_cutover is not None:
+            return self._inspect_cutover(
+                provider_operation_key,
+                reconciliation_key,
+                expected_provider_target_key,
+                provider_effect_phase,
+            )
         evidence = self.inspect_evidence(
             provider_operation_key=provider_operation_key,
             provider_effect_phase=provider_effect_phase,
@@ -477,6 +526,13 @@ class GenericWebDeployProviderMutationAdapter:
         reconciliation_key: str,
         expected_provider_target_key: str = "",
     ) -> _GenericWebDeployProviderInspection:
+        if self._lane.generic_web_cutover is not None:
+            return self._inspect_cutover(
+                provider_operation_key,
+                reconciliation_key,
+                expected_provider_target_key,
+                provider_effect_phase,
+            )
         try:
             snapshot = decode_generic_web_provider_reconciliation_target(reconciliation_key)
             # Older reservations omit this field. Their key must remain unchanged
@@ -550,6 +606,105 @@ class GenericWebDeployProviderMutationAdapter:
             provider_evidence=provider_evidence,
         )
 
+    def _inspect_cutover(
+        self,
+        operation_key: str,
+        reconciliation_key: str,
+        expected_target_key: str,
+        effect_phase: str = "",
+    ) -> _GenericWebDeployProviderInspection:
+        from control_plane.generic_web_cutover import WebCutoverAuthorityStore, compile_web_cutover
+        from control_plane.workflows.generic_web_cutover import WebCutoverProvider, require_route
+        from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
+        from control_plane.workflows.generic_web_deploy_provider import (
+            build_generic_web_provider_target_key,
+        )
+
+        try:
+            target = self._resolve_deploy_target()
+            snapshot = decode_generic_web_provider_reconciliation_target(reconciliation_key)
+            if (
+                snapshot.target_id != target.resolved_target.target_id
+                or snapshot.context != self._lane.context
+                or snapshot.instance != self._lane.instance
+                or snapshot.provider_id != self._deploy_provider.provider_id
+                or (
+                    expected_target_key
+                    and expected_target_key != build_generic_web_provider_target_key(target)
+                )
+            ):
+                raise ValueError("cutover reservation differs from lane authority")
+            store = cast(WebCutoverAuthorityStore, self._record_store)
+            try:
+                record = store.read_deployment_record(self._deployment_record_id(operation_key))
+            except FileNotFoundError:
+                if effect_phase:
+                    raise ValueError("effect journal lacks its cutover checkpoint")
+                return _GenericWebDeployProviderInspection(
+                    observation=GenericWebProviderDeploymentObservation(outcome="absent"),
+                    retry_safe=True,
+                    resolved_deploy_target=target,
+                )
+            cutover = record.generic_web_cutover
+            if cutover is None:
+                raise ValueError("cutover reservation lacks its bound checkpoint")
+            deploy = self._deploy_request.deploy
+            plan = compile_web_cutover(
+                store,
+                product=self._profile.product,
+                lane=self._lane,
+                artifact_id=deploy.artifact_id,
+                source_git_ref=deploy.source_git_ref,
+                deploy_reference=deploy.deploy_reference,
+                record_id=record.record_id,
+            )
+            factory = cast(
+                Callable[[GenericWebCutoverPlan], WebCutoverProvider] | None,
+                getattr(self._deploy_provider, "cutover_provider_factory", None),
+            )
+            if factory is None or cutover.step in {"blocked", "rolling_back", "rolled_back"}:
+                raise ValueError("cutover requires its separate recovery or provider capability")
+            provider = factory(plan)
+            with provider.exclusive(plan):
+                observed = provider.current_route(plan)
+                slot = plan.old if observed.slot_id == plan.old.slot_id else plan.new
+                require_route(observed, plan, slot)
+            if cutover.step == "complete" and slot != plan.new:
+                raise ValueError("completed cutover no longer owns public traffic")
+            inventory = store.read_environment_inventory(
+                context_name=self._lane.context, instance_name=self._lane.instance
+            )
+            if (
+                cutover.step == "complete"
+                and record.deploy.status == "pass"
+                and inventory.deployment_record_id == record.record_id
+            ):
+                return _GenericWebDeployProviderInspection(
+                    observation=GenericWebProviderDeploymentObservation(
+                        outcome="present",
+                        deployment_status="success",
+                        deployment_id=record.record_id,
+                        started_at=record.deploy.started_at,
+                        finished_at=record.deploy.finished_at,
+                    ),
+                    resolved_deploy_target=target,
+                    provider_evidence="deployment_present",
+                )
+            # No terminal result exists, but the exact persisted controller is
+            # restartable under the same renewed lease/authorization. This is
+            # never a claim that a provider target/deployment is absent.
+            return _GenericWebDeployProviderInspection(
+                observation=GenericWebProviderDeploymentObservation(outcome="absent"),
+                retry_safe=True,
+                resolved_deploy_target=target,
+                provider_evidence="cutover_checkpoint_recoverable",
+            )
+        except (FileNotFoundError, ValueError, TimeoutError, click.ClickException):
+            return _GenericWebDeployProviderInspection(
+                observation=GenericWebProviderDeploymentObservation(outcome="unknown"),
+                provider_evidence="provider_status_unknown",
+            )
+
     def _retryable_application_attempt(
         self,
         provider_operation_key: str,
@@ -609,7 +764,22 @@ class GenericWebDeployProviderMutationAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        effect_started = False
+        if self._lane.generic_web_cutover is not None:
+            try:
+                previous = cast(_DeploymentRecordReader, self._record_store).read_deployment_record(
+                    self._deployment_record_id(provider_operation_key)
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                effect_started = (
+                    previous.generic_web_cutover is not None
+                    and previous.generic_web_cutover.step not in {"preparing", "blocked"}
+                )
+
         def checkpoint(phase: str) -> None:
+            nonlocal effect_started
             try:
                 self.execution_check()
             except (RuntimeError, SQLAlchemyError) as error:
@@ -620,6 +790,7 @@ class GenericWebDeployProviderMutationAdapter:
                 lease.assert_current()
             else:
                 lease.checkpoint_effect(phase)
+                effect_started = True
 
         proved_pre_image_retry = self._proved_pre_image_operation == provider_operation_key
         self._proved_pre_image_operation = ""
@@ -641,7 +812,13 @@ class GenericWebDeployProviderMutationAdapter:
                 recorded_artifact=self._recorded_artifact,
                 proved_pre_image_retry=proved_pre_image_retry,
             )
+        except TimeoutError as error:
+            if self._lane.generic_web_cutover is not None:
+                raise ProviderMutationUnknownError(type(error).__name__) from error
+            raise
         except (FileNotFoundError, ValueError) as error:
+            if self._lane.generic_web_cutover is not None and effect_started:
+                raise ProviderMutationUnknownError(type(error).__name__) from error
             raise ProviderMutationRejectedError(error)
         except click.ClickException as error:
             from control_plane.lane_movement import LaneMovementRefused

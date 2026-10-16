@@ -519,6 +519,8 @@ def execute_generic_web_deploy(
             from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
             from control_plane.workflows.generic_web_cutover import WebCutoverProvider
 
+            if lane is not None and lane.generic_web_cutover != current_lane.generic_web_cutover:
+                raise ValueError("reserved traffic authority changed before execution")
             if current.driver_id != "generic-web" or current_lane.generic_web_cutover is None:
                 raise ValueError(
                     "recorded traffic authority cannot fall back to in-place deployment"
@@ -561,24 +563,11 @@ def execute_generic_web_deploy(
                 checkpoint=provider_effect_checkpoint or (lambda _phase: None),
                 before_records_commit=before_records_commit or (lambda: None),
             )
-            target = deployment.resolved_target
-            assert target is not None
-            return GenericWebDeployResult(
-                deployment_record_id=deployment.record_id,
-                deploy_status="pass",
-                deploy_started_at=deployment.deploy.started_at,
-                deploy_finished_at=deployment.deploy.finished_at,
+            return cutover_deploy_result(
+                deployment,
                 product=current.product,
-                context=current_lane.context,
-                instance=current_lane.instance,
-                target_name=target.target_name,
-                target_id=target.target_id,
-                target_category=target.target_type,
                 provider_id=selected_provider.provider_id,
-                provider_target_type=target.target_type,
-                provider_effect_attempted=True,
-                image_effect_attempted=not rollback,
-                post_deploy_status="pass",
+                rollback=rollback,
             )
         return _execute_generic_web_deploy_unserialized(
             control_plane_root=control_plane_root,
@@ -1369,3 +1358,32 @@ def _generic_web_post_deploy_operation_title(provider_operation_title: str) -> s
         return ""
     digest = hashlib.sha256(normalized_title.encode("utf-8")).hexdigest()[:24]
     return f"Launchplane post-deploy {digest}"
+
+
+def cutover_deploy_result(
+    deployment: DeploymentRecord, *, product: str, provider_id: str, rollback: bool = False
+) -> GenericWebDeployResult:
+    target = deployment.resolved_target
+    if target is None:
+        raise ValueError("cutover deployment lacks its exact target")
+    return GenericWebDeployResult(
+        deployment_record_id=deployment.record_id,
+        deploy_status="pass" if deployment.deploy.status == "pass" else "fail",
+        deploy_started_at=deployment.deploy.started_at,
+        deploy_finished_at=deployment.deploy.finished_at,
+        product=product,
+        context=deployment.context,
+        instance=deployment.instance,
+        target_name=target.target_name,
+        target_id=target.target_id,
+        target_category=target.target_type,
+        provider_id=provider_id,
+        provider_target_type=target.target_type,
+        provider_effect_attempted=rollback
+        or (
+            deployment.generic_web_cutover is not None
+            and deployment.generic_web_cutover.step != "blocked"
+        ),
+        image_effect_attempted=not rollback,
+        post_deploy_status="pass" if deployment.deploy.status == "pass" else "fail",
+    )

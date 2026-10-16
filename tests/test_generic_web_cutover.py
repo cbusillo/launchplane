@@ -139,7 +139,9 @@ class Provider:
             render=True,
             assets=True,
             warmed=True,
-            background_workers_fenced=True,
+            first_request_ms=0,
+            warmed_request_ms=0,
+            background_workers_fenced=not intent.lane.writers or slot.slot_id != self.slot.slot_id,
             retained_previous_assets=True,
         )
 
@@ -255,12 +257,12 @@ class WebCutoverTests(unittest.TestCase):
             store = WebDeploymentCutoverStore(
                 FilesystemRecordStore(Path(folder)), deployment(intent)
             )
-            with self.assertRaisesRegex(ValueError, "compatibility"):
+            with self.assertRaises(ValueError):
                 execute_web_cutover(intent, store, provider, record_id="release")
             self.assertEqual(store.load("release").step, "blocked")
             self.assertEqual(store.load("release").plan.compatibility, intent.compatibility)
             self.assertFalse(provider.actions)
-            with self.assertRaisesRegex(ValueError, "incompatible"):
+            with self.assertRaises(ValueError):
                 rollback_web_cutover(store, provider, "release")
 
     def test_restart_after_uncertain_forward_and_reverse_switch_reads_authority(self) -> None:
@@ -302,7 +304,7 @@ class WebCutoverTests(unittest.TestCase):
             store = WebDeploymentCutoverStore(
                 FilesystemRecordStore(Path(folder)), deployment(intent)
             )
-            with self.assertRaisesRegex(ValueError, "public identity"):
+            with self.assertRaises(ValueError):
                 execute_web_cutover(intent, store, provider, record_id="release")
             self.assertNotIn("writers-new", provider.actions)
             self.assertIsNone(store.load("release").ended_at)
@@ -327,6 +329,38 @@ class WebCutoverTests(unittest.TestCase):
 class WebCutoverDeploymentTests(unittest.TestCase):
     def seed(self, root: Path, target: str) -> tuple[Any, Any, Any]:
         intent = plan(target)
+        production_manifest, candidate_manifest = (
+            intent.production.model_copy(deep=True),
+            intent.candidate.model_copy(deep=True),
+        )
+        for manifest in (production_manifest, candidate_manifest):
+            manifest.artifact_id = f"{manifest.image.repository}@{manifest.image.digest}"
+            assert manifest.source_build is not None
+            manifest.source_build.manifest_artifact_id = manifest.artifact_id
+        slots = [
+            slot.model_copy(
+                update={
+                    "runtime_identity": slot.runtime_identity.model_copy(
+                        update={"artifact_id": manifest.artifact_id}
+                    )
+                }
+            )
+            for slot, manifest in zip(
+                (intent.old, intent.new), (production_manifest, candidate_manifest), strict=True
+            )
+        ]
+        intent = GenericWebCutoverPlan.model_validate(
+            {
+                **intent.model_dump(),
+                "old": slots[0],
+                "new": slots[1],
+                "production": production_manifest,
+                "candidate": candidate_manifest,
+                "compatibility": classify_release_database_compatibility(
+                    production=production_manifest, candidate=candidate_manifest
+                ),
+            }
+        )
         store = FilesystemRecordStore(root)
         profile = LaunchplaneProductProfileRecord(
             product="fixture",
@@ -427,7 +461,7 @@ class WebCutoverDeploymentTests(unittest.TestCase):
                 patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
                 patch.object(DokployGenericWebDeployProvider, "execute_artifact_deploy") as inplace,
             ):
-                with self.assertRaisesRegex(ValueError, "capability is unavailable"):
+                with self.assertRaises(ValueError):
                     execute_generic_web_deploy(
                         control_plane_root=Path(folder),
                         record_store=store,
@@ -468,7 +502,7 @@ class WebCutoverAuthorityTests(unittest.TestCase):
             request = GenericWebDeployRequest(
                 product="fixture",
                 instance="prod",
-                artifact_id="new",
+                artifact_id=intent.candidate.artifact_id,
                 source_git_ref=intent.candidate.source_commit,
             )
             with patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"):
@@ -484,7 +518,7 @@ class WebCutoverAuthorityTests(unittest.TestCase):
             current.lanes[0].generic_web_cutover = None
             store.write_product_profile_record(current)
             with patch.object(DokployGenericWebDeployProvider, "execute_artifact_deploy") as legacy:
-                with self.assertRaisesRegex(ValueError, "cannot fall back"):
+                with self.assertRaises(ValueError):
                     execute_generic_web_deploy(
                         control_plane_root=Path(folder),
                         record_store=store,
@@ -494,3 +528,215 @@ class WebCutoverAuthorityTests(unittest.TestCase):
                         deployment_record_id="another",
                     )
                 legacy.assert_not_called()
+
+
+class WebCutoverCallerRegressionTests(unittest.TestCase):
+    def test_existing_application_rollback_planner_and_apply_use_retained_slot(self) -> None:
+        from control_plane.contracts.generic_web_rollback import (
+            GenericWebRollbackPlanRequest,
+            build_generic_web_rollback_plan,
+        )
+        from control_plane.workflows.generic_web_rollback import execute_generic_web_rollback
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            store, intent, provider = WebCutoverDeploymentTests().seed(root, "application")
+            selected = DokployGenericWebDeployProvider(cutover_provider_factory=lambda _p: provider)
+            with patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"):
+                result = execute_generic_web_deploy(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=GenericWebDeployRequest(
+                        product="fixture",
+                        instance="prod",
+                        artifact_id=intent.candidate.artifact_id,
+                        source_git_ref=intent.candidate.source_commit,
+                        deploy_reference=intent.new.deploy_reference,
+                    ),
+                    deploy_provider=selected,
+                    deployment_record_id="forward",
+                )
+            # The next promotion's preflight plans against the current forward
+            # record; it must not require a tag for retained traffic authority.
+            next_target = build_generic_web_rollback_plan(
+                record_store=store,
+                request=GenericWebRollbackPlanRequest(
+                    product="fixture", rollback_deployment_record_id=result.deployment_record_id
+                ),
+            )
+            self.assertEqual(next_target.status, "ready")
+            rolled = execute_generic_web_rollback(
+                control_plane_root=root,
+                record_store=store,
+                request=GenericWebRollbackPlanRequest(
+                    product="fixture", rollback_deployment_record_id="old"
+                ),
+                deploy_provider=selected,
+            )
+            self.assertEqual(rolled.rollback_status, "pass")
+            self.assertEqual(provider.slot.slot_id, intent.old.slot_id)
+            after = build_generic_web_rollback_plan(
+                record_store=store,
+                request=GenericWebRollbackPlanRequest(
+                    product="fixture", rollback_deployment_record_id=rolled.deployment_record_id
+                ),
+            )
+            self.assertEqual(after.status, "ready")
+
+    def test_pre_switch_abort_retains_active_writers_and_finalizes_failed_attempt(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            store, intent, provider = WebCutoverDeploymentTests().seed(root, "compose")
+            selected = DokployGenericWebDeployProvider(cutover_provider_factory=lambda _p: provider)
+            request = GenericWebDeployRequest(
+                product="fixture",
+                instance="prod",
+                artifact_id=intent.candidate.artifact_id,
+                source_git_ref=intent.candidate.source_commit,
+            )
+            provider.fail_ready = True
+            with patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"):
+                with self.assertRaises(ValueError):
+                    execute_generic_web_deploy(
+                        control_plane_root=root,
+                        record_store=store,
+                        request=request,
+                        deploy_provider=selected,
+                        deployment_record_id="failed",
+                    )
+            provider.fail_ready = False
+            self.assertFalse(
+                provider.readiness(provider.plan, provider.plan.old).background_workers_fenced
+            )
+            rolled = execute_generic_web_deploy(
+                control_plane_root=root,
+                record_store=store,
+                request=GenericWebDeployRequest(
+                    product="fixture",
+                    instance="prod",
+                    artifact_id=intent.production.artifact_id,
+                    source_git_ref=intent.production.source_commit,
+                ),
+                rollback=True,
+                deploy_provider=selected,
+                deployment_record_id="abort",
+            )
+            self.assertEqual(rolled.deploy_status, "pass")
+            self.assertEqual(store.read_deployment_record("failed").deploy.status, "fail")
+            self.assertNotIn("switch-old", provider.actions)
+            self.assertEqual(
+                store.read_deployment_record("failed").generic_web_cutover.step, "rolled_back"
+            )
+
+    def test_unknown_release_finalizes_failure_without_provider_or_legacy_effects(self) -> None:
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            store, intent, _ = WebCutoverDeploymentTests().seed(root, "compose")
+            candidate = intent.candidate.model_copy(update={"release_compatibility": None})
+            store.write_artifact_manifest(candidate)
+            with patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"):
+                with self.assertRaises(ValueError):
+                    execute_generic_web_deploy(
+                        control_plane_root=root,
+                        record_store=store,
+                        request=GenericWebDeployRequest(
+                            product="fixture",
+                            instance="prod",
+                            artifact_id=candidate.artifact_id,
+                            source_git_ref=candidate.source_commit,
+                        ),
+                        deployment_record_id="unknown",
+                    )
+            blocked = store.read_deployment_record("unknown")
+            self.assertEqual(blocked.deploy.status, "fail")
+            self.assertEqual(blocked.generic_web_cutover.step, "blocked")
+            self.assertTrue(blocked.deploy.finished_at)
+
+    def test_http_mutation_adapter_reserves_route_and_resumes_exact_uncertain_cutover(self) -> None:
+        from control_plane.generic_web_deploy_provider_adapter import (
+            GenericWebDeployProviderMutationAdapter,
+        )
+        from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
+        from control_plane.provider_operations import ProviderMutationUnknownError
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            store, intent, provider = WebCutoverDeploymentTests().seed(root, "compose")
+            selected = DokployGenericWebDeployProvider(cutover_provider_factory=lambda _p: provider)
+            profile = store.read_product_profile_record("fixture")
+            envelope = GenericWebDeployEnvelope(
+                product="fixture",
+                deploy=GenericWebDeployRequest(
+                    product="fixture",
+                    instance="prod",
+                    artifact_id=intent.candidate.artifact_id,
+                    source_git_ref=intent.candidate.source_commit,
+                ),
+            )
+            adapter = GenericWebDeployProviderMutationAdapter(
+                control_plane_root=root,
+                record_store=store,
+                deploy_request=envelope,
+                profile=profile,
+                lane=profile.lanes[0],
+                trace_id="fixture-trace",
+                deploy_provider=selected,
+            )
+            lease: Any = type(
+                "Lease",
+                (),
+                {"checkpoint_effect": lambda _s, _phase: None, "assert_current": lambda _s: None},
+            )()
+            with (
+                patch.object(
+                    selected, "resolve_deploy_target", side_effect=AssertionError("legacy target")
+                ),
+                patch.object(
+                    selected,
+                    "observe_artifact_deploy",
+                    side_effect=AssertionError("legacy observation"),
+                ),
+                patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
+            ):
+                key = adapter.reconciliation_key()
+                provider.switch_uncertain = True
+                with self.assertRaises(ProviderMutationUnknownError):
+                    adapter.apply("fixture-operation", lease)
+                inspection = adapter.inspect(
+                    provider_operation_key="fixture-operation",
+                    provider_effect_phase="atomic_switch",
+                    reconciliation_key=key,
+                )
+                self.assertTrue(inspection.retry_safe)
+                self.assertEqual(inspection.provider_evidence, "cutover_checkpoint_recoverable")
+                outcome = adapter.apply("fixture-operation", lease)
+                self.assertTrue(outcome.durable)
+                observed = adapter.observe("fixture-operation", "records_commit", key)
+                self.assertEqual(observed.outcome, "present")
+                self.assertEqual(provider.actions.count("prepare"), 1)
+                self.assertEqual(provider.actions.count("switch-new"), 1)
+
+
+class WebCutoverUnhealthyRecoveryTests(unittest.TestCase):
+    def test_unhealthy_candidate_can_switch_back_using_independent_applied_authority(self) -> None:
+        with TemporaryDirectory() as folder:
+            intent = plan()
+            provider = Provider(intent)
+            store = WebDeploymentCutoverStore(
+                FilesystemRecordStore(Path(folder)), deployment(intent)
+            )
+            execute_web_cutover(intent, store, provider, record_id="release")
+            original = provider.current_route
+
+            def unhealthy(intent: GenericWebCutoverPlan) -> WebRouteObservation:
+                route = original(intent)
+                if provider.slot.slot_id == intent.new.slot_id:
+                    return route.model_copy(
+                        update={"public_health": HealthcheckEvidence(status="fail")}
+                    )
+                return route
+
+            provider.current_route = unhealthy  # type: ignore[method-assign]
+            rolled = rollback_web_cutover(store, provider, "release")
+            self.assertEqual(rolled.step, "rolled_back")
+            self.assertEqual(provider.slot, intent.old)

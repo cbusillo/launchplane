@@ -5024,8 +5024,9 @@ export type WebSlotCoordinates = {
 
 export type WebSlotReadiness = {
     assets: true;
-    background_workers_fenced: true;
+    background_workers_fenced: boolean;
     evidence_id: string;
+    first_request_ms: number;
     host: string;
     image: string;
     observed_at: string;
@@ -5035,6 +5036,7 @@ export type WebSlotReadiness = {
     runtime_settings_sha256: string;
     slot_id: string;
     warmed: true;
+    warmed_request_ms: number;
 };
 
 export type WorkGraphIssueInboxResponse = {

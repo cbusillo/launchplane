@@ -9963,6 +9963,7 @@
           "provider_evidence": {
             "enum": [
               "deployment_present",
+              "cutover_checkpoint_recoverable",
               "deployment_correlated_legacy",
               "deployment_absent_before_effect",
               "deployment_absent_after_effect",
@@ -50378,7 +50379,6 @@
             "type": "boolean"
           },
           "background_workers_fenced": {
-            "const": true,
             "title": "Background Workers Fenced",
             "type": "boolean"
           },
@@ -50386,6 +50386,11 @@
             "minLength": 1,
             "title": "Evidence Id",
             "type": "string"
+          },
+          "first_request_ms": {
+            "minimum": 0.0,
+            "title": "First Request Ms",
+            "type": "number"
           },
           "host": {
             "title": "Host",
@@ -50426,6 +50431,11 @@
             "const": true,
             "title": "Warmed",
             "type": "boolean"
+          },
+          "warmed_request_ms": {
+            "minimum": 0.0,
+            "title": "Warmed Request Ms",
+            "type": "number"
           }
         },
         "required": [
@@ -50439,6 +50449,8 @@
           "render",
           "assets",
           "warmed",
+          "first_request_ms",
+          "warmed_request_ms",
           "background_workers_fenced",
           "retained_previous_assets"
         ],

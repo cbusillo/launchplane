@@ -1,7 +1,10 @@
 """Compile DB-backed generic-web lane authority and persist in deployment payloads."""
 
 from collections.abc import Callable
-from typing import Protocol
+from typing import Protocol, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -230,6 +233,9 @@ def execute_web_cutover_deployment(
 
         persistence = WebDeploymentCutoverStore(store, source)
         now = datetime.now(UTC)
+        source.deploy.status = "fail"
+        source.deploy.started_at = now.isoformat()
+        source.deploy.finished_at = now.isoformat()
         persistence.save(
             GenericWebCutoverRecord(
                 record_id=source.record_id,
@@ -254,6 +260,12 @@ def execute_web_cutover_deployment(
             plan, persistence, provider, record_id=source.record_id, checkpoint=checkpoint
         )
     )
+    if rollback and source.deploy.status == "pending":
+        source = store.read_deployment_record(source.record_id)
+        source.deploy.status = "fail"
+        source.deploy.started_at = cutover.began_at.isoformat()
+        source.deploy.finished_at = cutover.updated_at.isoformat()
+        store.write_deployment_record(source)
     slot = plan.old if rollback else plan.new
     if cutover.route is None:
         raise ValueError("cutover lacks applied/public runtime evidence")
@@ -301,3 +313,63 @@ def execute_web_cutover_deployment(
         build_environment_inventory(deployment_record=result, updated_at=finished)
     )
     return result
+
+
+def resolve_web_cutover_target(
+    store: WebCutoverAuthorityStore,
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    artifact_id: str,
+    source_git_ref: str,
+    deploy_reference: str,
+    provider_id: str,
+    timeout_seconds: int | None,
+) -> "GenericWebResolvedDeployTarget":
+    """Reserve the stable traffic authority, never an unrelated legacy recipient."""
+    from control_plane.contracts.ship_request import ShipRequest
+    from control_plane.workflows.generic_web_deploy_provider import GenericWebResolvedDeployTarget
+
+    current = store.read_product_profile_record(profile.product)
+    active = next(
+        (
+            item
+            for item in current.lanes
+            if item.context == lane.context and item.instance == lane.instance
+        ),
+        None,
+    )
+    if (
+        active is None
+        or active.generic_web_cutover is None
+        or active.generic_web_cutover != lane.generic_web_cutover
+    ):
+        raise ValueError("two-slot traffic authority changed before reservation")
+    config = active.generic_web_cutover
+    manifest = store.read_artifact_manifest(artifact_id)
+    if manifest.source_commit != source_git_ref:
+        raise ValueError("candidate source differs from its verified artifact")
+    target_type = config.slots[0].target_type
+    target = ResolvedTargetEvidence(
+        target_type=target_type, target_id="route:" + config.route_id, target_name=config.route_id
+    )
+    return GenericWebResolvedDeployTarget(
+        ship_request=ShipRequest(
+            artifact_id=f"{manifest.image.repository}@{manifest.image.digest}",
+            deploy_reference=deploy_reference,
+            context=lane.context,
+            instance=lane.instance,
+            source_git_ref=source_git_ref,
+            target_type=target_type,
+            target_name=config.route_id,
+            deploy_mode="atomic-two-slot",
+            provider_id=provider_id,
+            target_category=target_type,
+            provider_target_type=target_type,
+            wait=True,
+            verify_health=False,
+        ),
+        resolved_target=target,
+        deployed_target=target.to_deployed_target_reference(provider_id=provider_id),
+        deploy_timeout_seconds=timeout_seconds or 300,
+    )

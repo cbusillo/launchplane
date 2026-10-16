@@ -38437,7 +38437,6 @@
             "type": "boolean"
           },
           "background_workers_fenced": {
-            "const": true,
             "title": "Background Workers Fenced",
             "type": "boolean"
           },
@@ -38445,6 +38444,11 @@
             "minLength": 1,
             "title": "Evidence Id",
             "type": "string"
+          },
+          "first_request_ms": {
+            "minimum": 0,
+            "title": "First Request Ms",
+            "type": "number"
           },
           "host": {
             "title": "Host",
@@ -38485,12 +38489,18 @@
             "const": true,
             "title": "Warmed",
             "type": "boolean"
+          },
+          "warmed_request_ms": {
+            "minimum": 0,
+            "title": "Warmed Request Ms",
+            "type": "number"
           }
         },
         "required": [
           "assets",
           "background_workers_fenced",
           "evidence_id",
+          "first_request_ms",
           "host",
           "image",
           "observed_at",
@@ -38499,7 +38509,8 @@
           "runtime_identity",
           "runtime_settings_sha256",
           "slot_id",
-          "warmed"
+          "warmed",
+          "warmed_request_ms"
         ],
         "title": "WebSlotReadiness",
         "type": "object"
