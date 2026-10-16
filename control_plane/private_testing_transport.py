@@ -5,8 +5,10 @@ changes Compose, creates an endpoint record, or deploys a workload.
 """
 
 from copy import deepcopy
+import base64
 from ipaddress import IPv4Address, IPv4Network
 from pathlib import Path, PurePosixPath
+import shlex
 from typing import Literal
 
 import yaml
@@ -110,6 +112,29 @@ def _object(value: object) -> dict[str, object]:
     return value
 
 
+def nginx_entrypoint(
+    configuration: str,
+    *,
+    configuration_file: str = "/tmp/private-tls-nginx.conf",
+    nginx_binary: str = "nginx",
+    nginx_arguments: tuple[str, ...] = (),
+) -> list[str]:
+    """Materialize generated config on the proxy's own tmpfs, then replace the shell.
+
+    Inline Compose configs cannot be injected into a read-only service. Encoding
+    also keeps Nginx variables out of Compose and shell interpolation.
+    """
+    encoded = base64.b64encode(configuration.encode()).decode("ascii")
+    command = shlex.join(
+        [nginx_binary, *nginx_arguments, "-c", configuration_file, "-g", "daemon off;"]
+    )
+    return [
+        "/bin/sh",
+        "-ec",
+        f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(configuration_file)}\nexec {command}",
+    ]
+
+
 def transport_overlay(
     request: PrivateTestingTransportIntent, *, namespace: str, runtime_port: int
 ) -> dict[str, object]:
@@ -118,7 +143,9 @@ def transport_overlay(
             namespace: {
                 "image": request.nginx_image,
                 "user": "65534:65534",
-                "entrypoint": ["nginx", "-g", "daemon off;"],
+                "entrypoint": nginx_entrypoint(
+                    nginx_configuration(service=request.runtime_service, runtime_port=runtime_port)
+                ),
                 "read_only": True,
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges:true"],
@@ -131,18 +158,10 @@ def transport_overlay(
                         "protocol": "tcp",
                     }
                 ],
-                "configs": [{"source": namespace, "target": "/etc/nginx/nginx.conf"}],
                 "secrets": [
                     {"source": namespace + "-certificate", "target": "private_tls_certificate"},
                     {"source": namespace + "-key", "target": "private_tls_key"},
                 ],
-            }
-        },
-        "configs": {
-            namespace: {
-                "content": nginx_configuration(
-                    service=request.runtime_service, runtime_port=runtime_port
-                )
             }
         },
         "secrets": {

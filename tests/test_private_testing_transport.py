@@ -2,6 +2,8 @@ import asyncio
 from copy import deepcopy
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -27,6 +29,7 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.private_testing_transport import (
     ROUTE,
     PrivateTestingTransportRequest,
+    nginx_entrypoint,
     plan_private_testing_transport,
 )
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
@@ -36,6 +39,34 @@ from tests.support.http import request as http_request
 from tests.support.auth import scoped_agent_transport
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import sqlite_database_url
+
+
+class PrivateTestingEntrypointTests(unittest.TestCase):
+    def test_entrypoint_materializes_its_own_file_and_never_interprets_payload(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "must-not-execute"
+            payload = {"literal": f"$(touch {marker}) `touch {marker}` $runtime_backend\n'quoted'"}
+            stub = root / "fixture program.py"
+            stub.write_text(
+                "import json, sys\nfrom pathlib import Path\n"
+                "source = Path(sys.argv[sys.argv.index('-c') + 1])\n"
+                "print(json.dumps(json.loads(source.read_text())))\n"
+            )
+            result = subprocess.run(
+                nginx_entrypoint(
+                    json.dumps(payload),
+                    configuration_file=str(root / "own generated config"),
+                    nginx_binary=sys.executable,
+                    nginx_arguments=(str(stub),),
+                ),
+                env={"PATH": os.defpath},
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            self.assertEqual(json.loads(result.stdout), payload)
+            self.assertFalse(marker.exists())
 
 
 class PrivateTestingTransportTests(unittest.TestCase):

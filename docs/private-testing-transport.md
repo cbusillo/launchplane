@@ -47,6 +47,10 @@ including WebSocket upgrade and authorization, and returns 404 elsewhere.
 Docker DNS is refreshed after runtime container changes. Missing workloads fail
 the route. There is no HTTP redirect/admin listener, access logger or public
 routing label. See [Nginx WebSockets](https://nginx.org/en/docs/http/websocket.html).
+The entrypoint materializes the non-secret generated configuration on its own
+`/tmp` tmpfs and execs Nginx. Base64 transport preserves Nginx variables through
+Compose and shell parsing. It needs no inline Compose config injection into the
+read-only container and no additional host-managed configuration file.
 
 The original planner's overlay uses relative certificate references. Its readback
 requires the original intent and `expected_plan_sha256`, compares the exact
@@ -153,7 +157,8 @@ qualifies these facts independently. Source installation does not prove them:
    including wildcard listeners; both receiver and monitor can reach it, with no
    public forwarding/NAT. RFC1918 syntax alone proves none of this.
 2. The selected immutable Nginx image supports the generated TLS/proxy/rewrite
-   configuration as UID/GID 65534, with all capabilities dropped, read-only root
+   configuration and its `/bin/sh`/`base64 -d` entrypoint as UID/GID 65534,
+   with all capabilities dropped, read-only root
    and only its own tmpfs/network. No production port or storage is changed.
 3. Chris or an explicitly authorized existing custody mechanism supplies a private
    issuer's server certificate with the exact IP SAN. Public CAs are not assumed
@@ -219,7 +224,8 @@ specifically selected disposable Nginx binary:
 
 ```sh
 uv run --extra dev python scripts/qualify-private-testing-transport.py \
-  --nginx-binary /absolute/task-artifact/nginx
+  --nginx-binary /absolute/task-artifact/nginx \
+  --compose-binary /absolute/compose-binary
 ```
 
 It creates its own CA/leaf/keys and fake HTTP/WS runtime, exercises real monitor
