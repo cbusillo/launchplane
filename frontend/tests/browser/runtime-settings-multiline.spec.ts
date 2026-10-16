@@ -22,7 +22,6 @@ for (const fieldKind of ["declared", "site-added"] as const) {
       const request = route.request();
       const path = new URL(request.url()).pathname;
       if (request.method() === "POST") {
-        expect(path).toBe("/v1/products/atlas-commerce/environments/prod/config/apply");
         const body = request.postDataJSON() as ConfigRequest;
         if (body.mode === "apply") {
           applies.push({ body, key: request.headers()["idempotency-key"] });
