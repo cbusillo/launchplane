@@ -2,8 +2,6 @@
 name: Merge Train Runner
 
 "on":
-  schedule:
-    - cron: "*/5 * * * *"
   workflow_dispatch:
     inputs:
       repository:
@@ -17,16 +15,13 @@ name: Merge Train Runner
         default: ""
       mutate:
         description: >-
-          Apply one worker mutation when admitted. Scheduled runs use the
-          active merge-train policy target's scheduler.mutate value instead.
+          Apply one worker mutation when admitted.
         type: boolean
         required: false
         default: false
       runner_mode:
         description: >-
-          Which admitted scheduler entrypoint to call: level1 or controller.
-          Scheduled runs use the active merge-train policy target's
-          scheduler.runner_mode value instead.
+          Which admitted worker entrypoint to call: level1 or controller.
         type: choice
         required: false
         default: level1
@@ -95,104 +90,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  targets:
-    runs-on:
-      - self-hosted
-      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
-    env:
-      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
-    outputs:
-      matrix: ${{ steps.scheduled_targets.outputs.matrix }}
-      count: ${{ steps.scheduled_targets.outputs.count }}
-    steps:
-      - name: Prepare scheduled merge-train target request
-        id: scheduled_target_request
-        if: github.event_name == 'schedule'
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
-          service_audience="$({
-            python3 - <<'PY'
-          import os
-          from urllib.parse import urlsplit
-
-          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
-          if not parsed.hostname:
-              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
-          print(parsed.hostname)
-          PY
-          })"
-          targets_file="launchplane-merge-train-policy-targets.json"
-          {
-            echo "service_audience=${service_audience}"
-            echo "response_file=${targets_file}"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Read scheduled merge-train targets
-        if: github.event_name == 'schedule'
-        id: scheduled_target_read
-        uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
-        with:
-          launchplane-url: ${{ env.LAUNCHPLANE_URL }}
-          audience: ${{ steps.scheduled_target_request.outputs.service_audience }}
-          method: GET
-          route-path: /v1/work-graph/merge-train/policy-targets
-          fail-result-paths: ""
-          response-output-file: ${{ steps.scheduled_target_request.outputs.response_file }}
-          log-response-body: "false"
-
-      - name: Resolve scheduled merge-train targets
-        id: scheduled_targets
-        shell: bash
-        env:
-          TARGETS_FILE: ${{ steps.scheduled_target_request.outputs.response_file }}
-          STATUS_CODE: ${{ steps.scheduled_target_read.outputs.status-code }}
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" != "schedule" ]; then
-            # A manual dispatch runs exactly one target, taken from its inputs.
-            echo 'matrix=[{"manual":true}]' >> "$GITHUB_OUTPUT"
-            echo "count=1" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [ "$STATUS_CODE" != "200" ]; then
-            cat "$TARGETS_FILE" >&2
-            echo "Merge-train policy target lookup failed with HTTP ${STATUS_CODE}." >&2
-            exit 1
-          fi
-
-          jq . "$TARGETS_FILE"
-          # Every enabled target gets its own run job; each train is independent.
-          scheduled_targets="$(jq -c '[.targets[] | select(.scheduler.enabled == true)
-            | {repository, base_branch, runner_mode: .scheduler.runner_mode,
-               mutate: (.scheduler.mutate | tostring)}]' "$TARGETS_FILE")"
-          scheduled_target_count="$(jq 'length' <<< "$scheduled_targets")"
-          {
-            echo "matrix=${scheduled_targets}"
-            echo "count=${scheduled_target_count}"
-          } >> "$GITHUB_OUTPUT"
-          {
-            echo '## Launchplane merge train scheduler'
-            echo
-            if [ "$scheduled_target_count" -eq 0 ]; then
-              echo '- Status: disabled'
-              echo '- Reason: no DB-backed scheduler target is enabled'
-            else
-              echo "- Status: enabled for ${scheduled_target_count} target(s)"
-              jq -r '.[] | "- " + .repository + ":" + .base_branch
-                + " (" + .runner_mode + ", mutate=" + .mutate + ")"' <<< "$scheduled_targets"
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
-
   run:
-    needs: targets
-    if: needs.targets.outputs.count != '0'
-    strategy:
-      fail-fast: false
-      max-parallel: 4
-      matrix:
-        target: ${{ fromJSON(needs.targets.outputs.matrix) }}
     runs-on:
       - self-hosted
       - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
@@ -200,49 +98,41 @@ jobs:
       LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       MERGE_TRAIN_BATCH_CANDIDATE_MODE: >-
         ${{
-          github.event_name != 'schedule' &&
           inputs.batch_candidate_mode ||
           'none'
         }}
       MERGE_TRAIN_BATCH_CANDIDATE_RECORD_ID: >-
         ${{
-          github.event_name != 'schedule' &&
           inputs.batch_candidate_record_id ||
           ''
         }}
       MERGE_TRAIN_BATCH_LANDING_MODE: >-
         ${{
-          github.event_name != 'schedule' &&
           inputs.batch_landing_mode ||
           'none'
         }}
       MERGE_TRAIN_BATCH_LANDING_CANDIDATE_RECORD_ID: >-
         ${{
-          github.event_name != 'schedule' &&
           inputs.batch_landing_candidate_record_id ||
           ''
         }}
       MERGE_TRAIN_BATCH_LANDING_PLAN_RECORD_ID: >-
         ${{
-          github.event_name != 'schedule' &&
           inputs.batch_landing_plan_record_id ||
           ''
         }}
       MERGE_TRAIN_STACK_COLLAPSE_MODE: >-
         ${{
-          github.event_name != 'schedule' &&
           inputs.stack_collapse_mode ||
           'none'
         }}
       MERGE_TRAIN_STACK_COLLAPSE_PLAN_RECORD_ID: >-
         ${{
-          github.event_name != 'schedule' &&
           inputs.stack_collapse_plan_record_id ||
           ''
         }}
     steps:
       - name: Resolve manual merge-train target
-        if: github.event_name != 'schedule'
         shell: bash
         env:
           REQUESTED_REPOSITORY: ${{ inputs.repository }}
@@ -268,38 +158,6 @@ jobs:
             echo "MERGE_TRAIN_BASE_BRANCH=${REQUESTED_BASE_BRANCH}"
             echo "MERGE_TRAIN_MUTATE=${REQUESTED_MUTATE}"
             echo "MERGE_TRAIN_RUNNER_MODE=${REQUESTED_RUNNER_MODE}"
-            echo "MERGE_TRAIN_SCHEDULED_TARGET=manual"
-          } >> "$GITHUB_ENV"
-
-      - name: Resolve scheduled merge-train target
-        if: github.event_name == 'schedule'
-        shell: bash
-        env:
-          MATRIX_TARGET: ${{ toJSON(matrix.target) }}
-        run: |
-          set -euo pipefail
-          repository="$(jq -r '.repository' <<< "$MATRIX_TARGET")"
-          base_branch="$(jq -r '.base_branch' <<< "$MATRIX_TARGET")"
-          runner_mode="$(jq -r '.runner_mode' <<< "$MATRIX_TARGET")"
-          mutate="$(jq -r '.mutate' <<< "$MATRIX_TARGET")"
-          reject_multiline() {
-            case "$1" in
-              *$'\n'*|*$'\r'*)
-                echo "$2 must be a single line." >&2
-                exit 1
-                ;;
-            esac
-          }
-          reject_multiline "$repository" repository
-          reject_multiline "$base_branch" base_branch
-          reject_multiline "$runner_mode" runner_mode
-          reject_multiline "$mutate" mutate
-          {
-            echo "MERGE_TRAIN_REPOSITORY=${repository}"
-            echo "MERGE_TRAIN_BASE_BRANCH=${base_branch}"
-            echo "MERGE_TRAIN_RUNNER_MODE=${runner_mode}"
-            echo "MERGE_TRAIN_MUTATE=${mutate}"
-            echo "MERGE_TRAIN_SCHEDULED_TARGET=enabled"
           } >> "$GITHUB_ENV"
 
       - name: Prepare merge-train admission request
@@ -308,11 +166,7 @@ jobs:
         run: |
           set -euo pipefail
           : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
-          if [ "${MERGE_TRAIN_SCHEDULED_TARGET}" = "disabled" ]; then
-            echo "should_request=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          : "${MERGE_TRAIN_REPOSITORY:?Set repository input or enable one policy scheduler target}"
+          : "${MERGE_TRAIN_REPOSITORY:?Missing repository input}"
           : "${MERGE_TRAIN_BASE_BRANCH:?Missing base branch}"
 
           service_audience="$({
@@ -339,14 +193,12 @@ jobs:
           })"
           response_file="launchplane-merge-train-admission.json"
           {
-            echo "should_request=true"
             echo "service_audience=${service_audience}"
             echo "route_path=/v1/work-graph/merge-train/admission?${query_string}"
             echo "response_file=${response_file}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Read merge-train admission
-        if: steps.admission_request.outputs.should_request == 'true'
         id: admission_read
         uses: cbusillo/launchplane/.github/actions/launchplane-request@88b024d3d093e400c7b134d922105f6ebf63543a # launchplane-request
         with:
@@ -364,18 +216,9 @@ jobs:
         env:
           RESPONSE_FILE: ${{ steps.admission_request.outputs.response_file }}
           SERVICE_AUDIENCE: ${{ steps.admission_request.outputs.service_audience }}
-          SHOULD_REQUEST: ${{ steps.admission_request.outputs.should_request }}
           STATUS_CODE: ${{ steps.admission_read.outputs.status-code }}
         run: |
           set -euo pipefail
-          if [ "$SHOULD_REQUEST" != "true" ]; then
-            {
-              echo "admission_status=deferred"
-              echo "reason_code=no_enabled_scheduler_target"
-              echo "next_allowed_at="
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           if [ "$STATUS_CODE" != "200" ]; then
             cat "$RESPONSE_FILE" >&2
             echo "Merge-train admission failed with HTTP ${STATUS_CODE}." >&2
@@ -613,7 +456,7 @@ jobs:
               echo '## Launchplane merge train controller'
               echo
               echo '- Status: deferred; another controller pass holds the train lease'
-              echo '- Next action: the next scheduled pass reobserves the train'
+              echo '- Next action: the service scheduler or next manual pass reobserves the train'
             } >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi

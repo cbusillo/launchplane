@@ -833,7 +833,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
         "audience": frozenset(
             (
                 "${{ steps.admission_request.outputs.service_audience }}",
-                "${{ steps.scheduled_target_request.outputs.service_audience }}",
                 "${{ steps.admission.outputs.service_audience }}",
             )
         ),
@@ -879,7 +878,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "${{ steps.controller_summary.outputs.feedback_response }}",
                 "${{ steps.level1_request.outputs.response_file }}",
                 "${{ steps.manual_phase_feedback.outputs.feedback_response }}",
-                "${{ steps.scheduled_target_request.outputs.response_file }}",
                 "${{ steps.stack_collapse_request.outputs.response_file }}",
             )
         ),
@@ -890,7 +888,6 @@ WORKFLOW_THIN_CONNECTOR_PATH_VALUES = {
                 "/v1/work-graph/merge-train/controller/run-once",
                 "/v1/work-graph/merge-train/pr-feedback",
                 "/v1/work-graph/merge-train/run-once",
-                "/v1/work-graph/merge-train/policy-targets",
                 "/v1/work-graph/merge-train/stack-collapse/run-once",
                 "${{ steps.admission_request.outputs.route_path }}",
             )

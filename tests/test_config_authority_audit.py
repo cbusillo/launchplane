@@ -2859,7 +2859,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         for key, value in (
             ("audience", "${{ steps.admission_request.outputs.service_audience }}"),
             ("audience", "${{ steps.admission.outputs.service_audience }}"),
-            ("audience", "${{ steps.scheduled_target_request.outputs.service_audience }}"),
             ("fail-result-paths", '""'),
             (
                 "idempotency-key",
@@ -2885,10 +2884,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ("payload-file", "${{ steps.stack_collapse_request.outputs.payload_file }}"),
             (
                 "response-output-file",
-                "${{ steps.scheduled_target_request.outputs.response_file }}",
-            ),
-            (
-                "response-output-file",
                 "${{ steps.admission_request.outputs.response_file }}",
             ),
             (
@@ -2911,7 +2906,6 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "response-output-file",
                 "${{ steps.stack_collapse_request.outputs.response_file }}",
             ),
-            ("route-path", "/v1/work-graph/merge-train/policy-targets"),
             ("route-path", "/v1/work-graph/merge-train/batch-candidate/run-once"),
             ("route-path", "/v1/work-graph/merge-train/batch-landing/run-once"),
             ("route-path", "/v1/work-graph/merge-train/controller/run-once"),

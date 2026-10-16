@@ -15,6 +15,50 @@ ACTION_ENTRYPOINT = Path(".github/actions/launchplane-request/dist/index.js")
 
 
 class LaunchplaneRequestActionTests(unittest.TestCase):
+    def test_train_runner_manual_target_preserves_inputs_and_rejects_newlines(self) -> None:
+        workflow = yaml.safe_load(Path(".github/workflows/merge-train-runner.yml").read_text())
+        step = next(
+            step
+            for step in workflow["jobs"]["run"]["steps"]
+            if step.get("name") == "Resolve manual merge-train target"
+        )
+        requested = {
+            "REPOSITORY": "example/project",
+            "BASE_BRANCH": "release/testing",
+            "MUTATE": "false",
+            "RUNNER_MODE": "controller",
+        }
+        cases: list[tuple[str | None, str]] = [(None, "")]
+        cases.extend((key, newline) for key in requested for newline in ("\n", "\r"))
+        for invalid_key, newline in cases:
+            with self.subTest(invalid_key=invalid_key, newline=newline):
+                with TemporaryDirectory() as directory:
+                    output = Path(directory) / "environment"
+                    values = dict(requested)
+                    if invalid_key is not None:
+                        values[invalid_key] += newline + "INJECTED=true"
+                    result = subprocess.run(
+                        ["bash", "-c", step["run"]],
+                        env={
+                            **os.environ,
+                            "GITHUB_ENV": str(output),
+                            **{f"REQUESTED_{key}": value for key, value in values.items()},
+                        },
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if invalid_key is not None:
+                        self.assertNotEqual(result.returncode, 0)
+                        self.assertFalse(output.exists())
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        actual = dict(
+                            line.split("=", 1) for line in output.read_text().splitlines()
+                        )
+                        for key, value in requested.items():
+                            self.assertEqual(actual[f"MERGE_TRAIN_{key}"], value)
+
     def test_train_runner_defers_only_controller_lease_contention(self) -> None:
         workflow = yaml.safe_load(Path(".github/workflows/merge-train-runner.yml").read_text())
         steps = {step.get("id"): step for step in workflow["jobs"]["run"]["steps"]}
