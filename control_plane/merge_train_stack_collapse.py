@@ -207,7 +207,12 @@ def _execute_admit_mode(
         current_sha256=policy_sha256,
     ):
         raise ValueError("merge train stack collapse policy digest no longer matches")
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = GitHubMergeTrainSnapshotReader(
+        transport=transport,
+        repository_policy=policy.find_repository_policy(
+            repository=request.repository, base_branch=request.base_branch
+        ),
+    ).read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )

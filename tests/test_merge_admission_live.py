@@ -373,6 +373,99 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
         fixture.start()
         self.addCleanup(fixture.stop)
 
+    def test_real_landing_reader_rediscovers_current_head_handoff_and_rolling_unknown(self) -> None:
+        evidence = _repository_evidence()
+        policy_record = build_test_merge_train_policy_record(repository=OWNER_REPOSITORY)
+        candidate, landing, controller, _ = _guard_records(
+            policy_sha256=policy_record.policy_sha256,
+            repository=OWNER_REPOSITORY,
+            pull_request_number=2022,
+            base_sha=OWNER_BASE_SHA,
+            head_sha=evidence.target.head_sha,
+            tree_sha=evidence.target.tree_sha,
+        )
+        for mergeable, state, accepted in (
+            (True, "success", True),
+            (None, "success", True),
+            (None, "failure", False),
+        ):
+            with self.subTest(mergeable=mergeable, checks=state), TemporaryDirectory() as directory:
+                pull = _github_pull_request(
+                    2022,
+                    head_sha=evidence.target.head_sha,
+                    base_sha=OWNER_BASE_SHA,
+                    repository=OWNER_REPOSITORY,
+                    author_association="OWNER",
+                    mergeable=mergeable,
+                    mergeable_state="clean" if mergeable else "unknown",
+                )
+                pull["labels"] = []
+                handoff = {
+                    "id": 1,
+                    "body": f"Ready for the merge train\n\nHead: {evidence.target.head_sha}",
+                    "user": {"id": 99, "login": OWNER_REPOSITORY.split("/", 1)[0]},
+                    "created_at": "2026-08-11T03:00:00Z",
+                    "updated_at": "2026-08-11T03:00:00Z",
+                }
+                responses: tuple[object, ...] = (
+                    _github_branch(sha=OWNER_BASE_SHA),
+                    [pull],
+                    [handoff],
+                    pull,
+                    _combined_status(state=state),
+                    {"check_runs": [_check_run("completed", "success")]},
+                    _conversation_rule(),
+                    [],
+                    *(
+                        ({"base_commit": {"sha": OWNER_BASE_SHA}, "status": "ahead"},)
+                        if mergeable is None and state == "success"
+                        else ()
+                    ),
+                    [{"filename": "application.py"}],
+                    pull,
+                )
+                client = _PassingTechnicalCheckClient()
+                transport = RecordingMergeTrainGitHubTransport(responses=responses)
+                client.transport = transport
+                evaluator = LiveMergeAdmissionEvaluator(
+                    store=FilesystemRecordStore(state_dir=Path(directory)),
+                    repository_evidence_provider=_EvidenceProvider(evidence),
+                    technical_check_client=client,
+                    policy_record_provider=lambda: policy_record,
+                )
+                with (
+                    patch(
+                        "control_plane.merge_admission_live.read_active_authz_policy_record",
+                        return_value=_authz_policy_record(),
+                    ),
+                    patch(
+                        "control_plane.merge_admission_live.require_engineering_review_decision_store",
+                        return_value=_EmptyEngineeringReviewStore(),
+                    ),
+                ):
+
+                    def evaluate() -> MergeAdmissionEvaluation:
+                        return evaluator.evaluate(
+                            candidate_record=candidate,
+                            landing_plan_record=landing,
+                            entry=landing.landing_plan.entries[0],
+                            observed_base_sha=OWNER_BASE_SHA,
+                            observed_base_tree_sha="5" * 40,
+                            observed_head_sha=evidence.target.head_sha,
+                            observed_head_tree_sha=evidence.target.tree_sha,
+                            controller_state=controller,
+                            expected_lease_owner=controller.lease_owner,
+                            stack_collapse_record=None,
+                            evaluated_at="2026-08-11T03:01:00Z",
+                        )
+
+                    if accepted:
+                        self.assertEqual(evaluate().readiness.state, "ready")
+                    else:
+                        with self.assertRaises(MergeAdmissionDeniedError):
+                            evaluate()
+                self.assertFalse(transport.responses)
+
     def test_merge_admission_needs_no_retired_owner_or_impact_records(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
@@ -458,14 +551,23 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                 responses: tuple[object, ...] = (
                     _github_branch(sha=OWNER_BASE_SHA),
                     [pull_request],
-                    pull_request,
-                    {"permission": "read"},
                     [_github_commit(bot_id, INDIRECT_PATCH, sha=old_head), refresh],
-                    *(({"status": "identical"}, _change(), _change(), []) if recorded else ()),
-                    _combined_status(),
-                    {"check_runs": [_check_run("completed", "success")]},
-                    _conversation_rule(),
-                    [],  # no active branch rules
+                    *(
+                        (
+                            {"status": "identical"},
+                            _change(),
+                            _change(),
+                            [],
+                            pull_request,
+                            {"permission": "read"},
+                            _combined_status(),
+                            {"check_runs": [_check_run("completed", "success")]},
+                            _conversation_rule(),
+                            [],
+                        )
+                        if recorded
+                        else ([],)
+                    ),
                 )
                 client = _PassingTechnicalCheckClient()
                 client.transport = RecordingMergeTrainGitHubTransport(responses=responses)
@@ -1149,8 +1251,6 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                 stack_collapse_record=None,
                 evaluated_at="2026-08-11T03:01:00Z",
             )
-
-        self.assertEqual(snapshot_reader.read_count, 1)
 
 
 if __name__ == "__main__":

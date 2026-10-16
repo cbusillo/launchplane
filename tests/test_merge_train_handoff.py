@@ -94,7 +94,7 @@ class HandoffAdmissionTests(unittest.TestCase):
             {"mergeable": "conflicting"},
             {"mergeable": "unknown"},
             {"client_test_notes_error": "Client test notes are missing."},
-            {"labels": ("merge-blocked",)},
+            {"labels": (self.policy.policies[0].blocked_label,)},
             {"is_draft": True},
             {"state": "closed"},
             {"actor_role": "unknown", "actor_id": 999},
@@ -159,6 +159,16 @@ class HandoffAdmissionTests(unittest.TestCase):
             ).queue_order,
             (1,),
         )
+        features = tuple(pr.model_copy(update={"owner_review_required": True}) for pr in prs)
+        self.assertEqual(
+            build_merge_train_dry_run_result(
+                policy=self.policy,
+                snapshot=_snapshot(*features),
+                batch_landing=True,
+                new_candidate=True,
+            ).queue_order,
+            tuple(pr.number for pr in features),
+        )
 
     def test_new_arrivals_and_grouping_do_not_rebuild_an_active_candidate(self) -> None:
         original = _ready(2).model_copy(update={"changed_paths": ("api/a.py",)})
@@ -196,22 +206,24 @@ class GitHubHandoffTests(unittest.TestCase):
         self.assertTrue(all(request.method == "GET" for request in transport.requests))
         return handoff
 
-    def test_latest_trusted_handoff_cancels_ready_and_edits_count(self) -> None:
+    def test_latest_trusted_handoff_cancels_ready_and_edits_are_unproven(self) -> None:
         for body, expected in (
             (f"Ready for the merge train\n\nHead: {'b' * 40}", "stale"),
             ("Engineering ready; waiting for the Client's acceptance", "waiting"),
             (f"Ready for the merge train\nHead: {HEAD}\nHead: {HEAD}", "stale"),
         ):
             with self.subTest(expected=expected):
-                comments = [_comment(), _comment(body, id=2, updated_at="2026-10-16T11:00:00Z")]
+                comments = [_comment(), _comment(body, id=2, created_at="2026-10-16T11:00:00Z")]
                 self.assertEqual(self._read((comments,)).status, expected)
-                comments[1]["updated_at"] = "2026-10-16T09:00:00Z"
+                comments[1]["updated_at"] = "2026-10-16T12:00:00Z"
+                self.assertEqual(self._read((comments,)).status, "unreadable")
+                comments[1]["created_at"] = comments[1]["updated_at"] = "2026-10-16T09:00:00Z"
                 self.assertEqual(self._read((comments,)).status, "ready")
 
     def test_complete_pagination_and_unavailable_or_malformed_evidence_fail_closed(self) -> None:
         ready_page = [_comment(id=index) for index in range(1, 101)]
         wait = _comment(
-            "Engineering ready; waiting for repairs", id=101, updated_at="2026-10-16T11:00:00Z"
+            "Engineering ready; waiting for repairs", id=101, created_at="2026-10-16T11:00:00Z"
         )
         self.assertEqual(self._read((ready_page, [wait])).status, "waiting")
         response: object
@@ -234,6 +246,29 @@ class GitHubHandoffTests(unittest.TestCase):
                     ).status,
                     "missing",
                 )
+
+    def test_automation_handoff_uses_numeric_policy_identity(self) -> None:
+        policy = self.policy.model_copy(
+            update={
+                "enqueue": self.policy.enqueue.model_copy(
+                    update={"trusted_automation_github_user_ids": (20,)}
+                )
+            }
+        )
+        for actor_id, expected in ((20, "ready"), (21, "missing")):
+            transport = RecordingMergeTrainGitHubTransport(
+                responses=(
+                    [_comment(user={"id": actor_id, "login": "automation[bot]", "type": "Bot"})],
+                    MergeTrainGitHubError("No collaborator permission", status_code=404),
+                )
+            )
+            reader = GitHubMergeTrainSnapshotReader(transport=transport, repository_policy=policy)
+            self.assertEqual(
+                reader._read_ready_handoff(
+                    repository_path=REPOSITORY, number=1, head_sha=HEAD
+                ).status,
+                expected,
+            )
 
     def test_unlabelled_pr_is_enriched_and_admitted_from_live_evidence(self) -> None:
         pull = _github_pull_request(
@@ -325,6 +360,7 @@ class HandoffControllerTests(unittest.IsolatedAsyncioTestCase):
         self,
     ) -> None:
         settled = False
+        rolling_unknown = False
 
         class Reader(_FakeExpandedMergeTrainSnapshotReader):
             def read_merge_train_snapshot(
@@ -340,6 +376,9 @@ class HandoffControllerTests(unittest.IsolatedAsyncioTestCase):
                                 update={
                                     "labels": (),
                                     "label_actors": (),
+                                    "mergeable": "unknown"
+                                    if pr.number == 2 and rolling_unknown
+                                    else "mergeable",
                                     "required_checks_status": "pending"
                                     if pr.number == 1 and not settled
                                     else "pass",
@@ -371,4 +410,6 @@ class HandoffControllerTests(unittest.IsolatedAsyncioTestCase):
             settled = True
             for action in ("build_candidate", "observe_candidate", "plan_landing", "land_batch"):
                 await _post(app, request, action)
+                if action == "build_candidate":
+                    rolling_unknown = True
             self.assertEqual(len(_batch_ids(store)), 1)

@@ -3265,6 +3265,7 @@ class GitHubMergeTrainSnapshotReader:
             and policy.enqueue.label_required
             and policy.enqueue_label not in labels
             and ready_handoff is None
+            and dependency_update_class != "patch_or_minor"
         ):
             ready_handoff = self._read_ready_handoff(
                 repository_path=repository_path, number=pull_request_number, head_sha=head_sha
@@ -3355,7 +3356,17 @@ class GitHubMergeTrainSnapshotReader:
                     timestamp = handoff_timestamp(
                         str(comment.get("updated_at") or comment.get("created_at") or "")
                     )
-                    handoff = (timestamp, comment_id, kind, handoff_head(body), actor_id, role)
+                    # REST attributes edits to the original author, not the
+                    # editor. A fresh checked handoff is the supported renewal.
+                    edited = comment.get("updated_at") not in {None, comment.get("created_at")}
+                    handoff = (
+                        timestamp,
+                        comment_id,
+                        "unreadable" if edited else kind,
+                        handoff_head(body),
+                        actor_id,
+                        role,
+                    )
                     if latest is None or handoff[:2] > latest[:2]:
                         latest = handoff
                 if len(payload) < 100:
@@ -3370,6 +3381,8 @@ class GitHubMergeTrainSnapshotReader:
         return MergeTrainReadyHandoff(
             status="waiting"
             if latest_kind == "waiting"
+            else "unreadable"
+            if latest_kind == "unreadable"
             else "ready"
             if declared_head == head_sha
             else "stale",

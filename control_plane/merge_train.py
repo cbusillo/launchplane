@@ -839,7 +839,9 @@ def _build_queue_entry(
                 ineligible_reasons.append(
                     f"current-head required checks are {pull_request.required_checks_status}"
                 )
-            if pull_request.mergeable != "mergeable":
+            if pull_request.mergeable != "mergeable" and not (
+                pull_request.mergeable == "unknown" and allow_unknown_mergeability
+            ):
                 ineligible_reasons.append(f"current-head mergeability is {pull_request.mergeable}")
             if pull_request.client_test_notes_error:
                 ineligible_reasons.append(pull_request.client_test_notes_error)
