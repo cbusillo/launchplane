@@ -47680,8 +47680,12 @@
         "additionalProperties": false,
         "properties": {
           "applied_connection_grants": {
-            "const": "unknown",
             "default": "unknown",
+            "enum": [
+              "read_only",
+              "unsafe",
+              "unknown"
+            ],
             "title": "Applied Connection Grants",
             "type": "string"
           },

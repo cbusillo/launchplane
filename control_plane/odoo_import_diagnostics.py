@@ -18,6 +18,8 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
 from control_plane.odoo_diagnostic_identity import DIAGNOSTIC_IDENTITY_UNAVAILABLE
+from control_plane.odoo_runtime_source_grants import runtime_grants
+from control_plane.odoo_source_probe import GrantStatus
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -69,9 +71,7 @@ class SourceDiagnostic(BaseModel):
     binding: Literal["selected", "missing_or_unsafe"] = "missing_or_unsafe"
     parameters: tuple[ParameterAgreement, ...] = ()
     managed_connection_grants: Literal["read_only", "unsafe", "unknown"] = "unknown"
-    # A connection from the service can select a different host-qualified MySQL
-    # account than a connection from Odoo. Never promote that observation to proof.
-    applied_connection_grants: Literal["unknown"] = "unknown"
+    applied_connection_grants: GrantStatus = "unknown"
 
 
 class ImportDiagnosticResult(BaseModel):
@@ -342,6 +342,65 @@ def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsaf
     return "unknown"
 
 
+def runtime_origin_grants(
+    connection: reads.OdooRuntimeConnection, selected: dict[str, SourceAuthority]
+) -> dict[str, GrantStatus]:
+    keys = {
+        name: (
+            source.binding.binding_id,
+            source.version.version_id,
+            connection.evidence.container_id,
+            "runtime",
+            name,
+        )
+        for name, source in selected.items()
+    }
+    active = {}
+    results: dict[str, GrantStatus] = {name: "unknown" for name in selected}
+    with _PROBE_LOCK:
+        now = time.monotonic()
+        for expired in [key for key, until in _FAILED_PROBES.items() if until <= now]:
+            del _FAILED_PROBES[expired]
+        for name, key in keys.items():
+            if (
+                key not in _ACTIVE_PROBES
+                and key not in _FAILED_PROBES
+                and len(_ACTIVE_PROBES) < 4
+                and len(_FAILED_PROBES) < 128
+            ):
+                _ACTIVE_PROBES.add(key)
+                active[name] = key
+    try:
+        if not active:
+            return results
+        results.update(
+            runtime_grants(
+                connection,
+                tuple(active),
+                prefixes=SOURCE_PREFIXES,
+                fields=FIELDS,
+                environment_keys={
+                    name: {
+                        field: (
+                            config_parameter_secret_env_key(prefix + ".password")
+                            if field == "password"
+                            else config_parameter_runtime_key(prefix + "." + field)
+                        )
+                        for field in (*FIELDS, "password")
+                    }
+                    for name, prefix in SOURCE_PREFIXES.items()
+                },
+            )
+        )
+        return results
+    finally:
+        with _PROBE_LOCK:
+            for name, key in active.items():
+                _ACTIVE_PROBES.discard(key)
+                if results[name] == "unknown":
+                    _FAILED_PROBES[key] = time.monotonic() + 60
+
+
 def parameter_agreement(key: str, expected: str, applied: str) -> Agreement:
     if not applied:
         return "missing"
@@ -368,6 +427,15 @@ def diagnose_imports(
             diagnostics=True,
         )
         applied = read_applied_parameters(connection)
+        runtime_environment = reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
+        runtime_sources: dict[str, SourceAuthority] = {}
         results: list[SourceDiagnostic] = []
         for name, prefix in SOURCE_PREFIXES.items():
             source_name = cast(Literal["cm_data", "repairshopr", "fishbowl"], name)
@@ -411,6 +479,23 @@ def diagnose_imports(
                     )
                     for key in (*FIELDS, "password")
                 )
+                # Runtime evidence needs every applied field and the already
+                # delivered container values to agree with this selected binding.
+                if all(item.agreement == "match" for item in parameters) and all(
+                    parameter_agreement(
+                        key,
+                        settings[key],
+                        runtime_environment.get(
+                            config_parameter_secret_env_key(prefix + ".password")
+                            if key == "password"
+                            else config_parameter_runtime_key(prefix + "." + key),
+                            "",
+                        ),
+                    )
+                    == "match"
+                    for key in (*FIELDS, "password")
+                ):
+                    runtime_sources[name] = selected
                 results.append(
                     SourceDiagnostic(
                         source=source_name,
@@ -437,19 +522,30 @@ def diagnose_imports(
                 )
             except Exception:
                 results.append(SourceDiagnostic(source=source_name))
+        runtime_results = runtime_origin_grants(connection, runtime_sources)
+        results = [
+            result.model_copy(
+                update={"applied_connection_grants": runtime_results.get(result.source, "unknown")}
+            )
+            for result in results
+        ]
         reads.assert_selection_current(store, selection)
         if import_authority(store, product).private_snapshot != authority.private_snapshot:
             return unknown_result()
         # Observe the same immutable container again, including its image and
         # runtime payload, after source I/O and before releasing any agreement.
-        reads.inspect_runtime_container(
-            connection.host,
-            connection.token,
-            connection.server_id,
-            connection.evidence.container_id,
-            connection.app_name,
-            selection.identity,
-        )
+        if (
+            reads.inspect_runtime_container(
+                connection.host,
+                connection.token,
+                connection.server_id,
+                connection.evidence.container_id,
+                connection.app_name,
+                selection.identity,
+            )
+            != runtime_environment
+        ):
+            return unknown_result()
         if read_applied_parameters(connection) != applied:
             return unknown_result()
         if import_authority(store, product).private_snapshot != authority.private_snapshot:

@@ -199,9 +199,28 @@ class DiagnosticFixture:
 class DiagnosticTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = DiagnosticFixture()
+        self.environment = {}
+        for name, prefix in diagnostic.SOURCE_PREFIXES.items():
+            for key in (*diagnostic.FIELDS, "password"):
+                env_key = (
+                    config_parameter_secret_env_key(prefix + ".password")
+                    if key == "password"
+                    else config_parameter_runtime_key(prefix + "." + key)
+                )
+                self.environment[env_key] = self.fixture.applied[prefix + "." + key]
+        self.runtime_probe = patch.object(
+            diagnostic,
+            "runtime_grants",
+            side_effect=lambda connection, sources, **kw: {name: "read_only" for name in sources},
+        )
+        self.runtime_mock = self.runtime_probe.start()
+        self.addCleanup(self.runtime_probe.stop)
+        self.cache = patch.dict(diagnostic._FAILED_PROBES, {}, clear=True)
+        self.cache.start()
+        self.addCleanup(self.cache.stop)
         self.patches = [
             patch.object(reads, "connect_runtime", return_value=self.fixture.connection),
-            patch.object(reads, "inspect_runtime_container", return_value={}),
+            patch.object(reads, "inspect_runtime_container", return_value=self.environment),
             patch.object(
                 diagnostic,
                 "read_applied_parameters",
@@ -222,7 +241,7 @@ class DiagnosticTests(unittest.TestCase):
             database_url=None,
         )
 
-    def test_agreement_is_value_free_and_not_runtime_grant_proof(self) -> None:
+    def test_agreement_and_runtime_grants_are_value_free(self) -> None:
         with (
             contextlib.redirect_stdout(io.StringIO()) as stdout,
             contextlib.redirect_stderr(io.StringIO()) as stderr,
@@ -233,7 +252,7 @@ class DiagnosticTests(unittest.TestCase):
             self.assertEqual(source.binding, "selected")
             self.assertTrue(all(item.agreement == "match" for item in source.parameters))
             self.assertEqual(source.managed_connection_grants, "read_only")
-            self.assertEqual(source.applied_connection_grants, "unknown")
+            self.assertEqual(source.applied_connection_grants, "read_only")
         for private in (PRIVATE, "fixture_reader", ".invalid", "fixture-ciphertext"):
             self.assertNotIn(
                 private, result.model_dump_json() + stdout.getvalue() + stderr.getvalue()
@@ -244,6 +263,69 @@ class DiagnosticTests(unittest.TestCase):
         ]
         self.assertEqual(writes, [])
 
+    def test_origin_privileges_are_independent(self) -> None:
+        self.runtime_mock.side_effect = lambda connection, sources, **kw: {
+            name: "unsafe" if name == "cm_data" else "read_only" for name in sources
+        }
+        result = self.run_diagnostic()
+        self.assertEqual(result.sources[0].managed_connection_grants, "read_only")
+        self.assertEqual(result.sources[0].applied_connection_grants, "unsafe")
+        self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
+        self.runtime_mock.side_effect = lambda connection, sources, **kw: {
+            name: "unknown" for name in sources
+        }
+        result = self.run_diagnostic()
+        self.assertTrue(
+            all(source.applied_connection_grants == "unknown" for source in result.sources)
+        )
+        self.assertTrue(
+            all(source.managed_connection_grants == "read_only" for source in result.sources)
+        )
+
+    def test_runtime_never_receives_mismatched_or_unsafe_sources(self) -> None:
+        self.fixture.applied["cm_data.db.user"] = "writer"
+        self.environment[config_parameter_secret_env_key("repairshopr.sync_db.password")] = "stale"
+        self.fixture.bindings[2] = self.fixture.bindings[2].model_copy(
+            update={"declared_secret_class": "prod_only"}
+        )
+        result = self.run_diagnostic()
+        self.assertTrue(
+            all(source.applied_connection_grants == "unknown" for source in result.sources)
+        )
+        self.runtime_mock.assert_not_called()
+
+    def test_runtime_probe_single_flight_cooldown_and_fresh_success(self) -> None:
+        def nested(connection: object, sources: tuple[str, ...], **kw: object) -> dict[str, str]:
+            self.assertTrue(
+                all(
+                    value == "unknown"
+                    for value in diagnostic.runtime_origin_grants(
+                        self.fixture.connection,
+                        diagnostic.import_authority(
+                            self.fixture.store, self.fixture.profile.product
+                        ).sources,
+                    ).values()
+                )
+            )
+            return {name: "unknown" if name == "cm_data" else "read_only" for name in sources}
+
+        self.runtime_mock.side_effect = nested
+        self.run_diagnostic()
+        self.runtime_mock.side_effect = lambda connection, sources, **kw: {
+            name: "read_only" for name in sources
+        }
+        result = self.run_diagnostic()
+        self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
+        self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
+        self.assertNotIn("cm_data", self.runtime_mock.call_args.args[1])
+        with patch(
+            "control_plane.odoo_import_diagnostics.time.monotonic", return_value=float("inf")
+        ):
+            result = self.run_diagnostic()
+        self.assertTrue(
+            all(source.applied_connection_grants == "read_only" for source in result.sources)
+        )
+
     def test_applied_writer_mismatch_does_not_authenticate_as_writer(self) -> None:
         self.fixture.applied["cm_data.db.user"] = "old_writer"
         self.fixture.applied["cm_data.db.password"] = "old_writer_password"
@@ -251,6 +333,7 @@ class DiagnosticTests(unittest.TestCase):
         fields = {item.field: item.agreement for item in result.sources[0].parameters}
         self.assertEqual(fields["user"], "mismatch")
         self.assertEqual(fields["password"], "mismatch")
+        self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
         settings = self.mocks[-1].call_args_list[0].args[0]
         self.assertEqual(settings["password"], PRIVATE)
         self.assertEqual(settings["user"], "fixture_reader")
@@ -329,7 +412,15 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertEqual(self.mocks[-1].call_count, 2)
 
     def test_runtime_and_config_drift_discard_evidence(self) -> None:
-        for kind in ("runtime", "settings", "binding", "container", "applied", "nonsecret_binding"):
+        for kind in (
+            "runtime",
+            "settings",
+            "binding",
+            "container",
+            "applied",
+            "nonsecret_binding",
+            "delivered",
+        ):
             with self.subTest(kind=kind):
                 fixture = DiagnosticFixture()
                 self.fixture = fixture
@@ -354,6 +445,8 @@ class DiagnosticTests(unittest.TestCase):
                                 }
                             )
                         )
+                    elif kind == "delivered":
+                        self.mocks[1].return_value = {"CHANGED": "fixture"}
                     elif kind == "applied":
                         fixture.applied["fishbowl.password"] = "changed-fixture-password"
                     else:
@@ -364,7 +457,12 @@ class DiagnosticTests(unittest.TestCase):
                 result = self.run_diagnostic()
                 self.assertEqual(result.runtime, "unknown")
                 self.assertTrue(
-                    all(source.managed_connection_grants == "unknown" for source in result.sources)
+                    all(
+                        source.managed_connection_grants
+                        == source.applied_connection_grants
+                        == "unknown"
+                        for source in result.sources
+                    )
                 )
                 self.mocks[1].side_effect = None
 

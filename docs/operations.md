@@ -4840,13 +4840,37 @@ Applicable roles are not expanded by this version. This follows the
 [MySQL SHOW GRANTS contract](https://dev.mysql.com/doc/refman/8.0/en/show-grants.html).
 
 `managed_connection_grants` describes the account MySQL selected for the
-connection from Launchplane, not a connection originating in Odoo. MySQL can
-select different host-qualified accounts for those two origins, so
-`applied_connection_grants` remains unknown. Even matching applied parameters
-and a read-only managed observation do not establish the runtime account's
-effective privileges or complete credential qualification. Do not use this
-read as authorization to run an importer or as proof that testing holds no
-production-capable key. No production credential is decrypted or tested.
+connection from Launchplane. `applied_connection_grants` independently observes
+the account selected from the current Odoo web container, where host-qualified
+MySQL grants may differ. Neither result substitutes for the other.
+
+Runtime-origin qualification requires every applied parameter, the selected
+managed binding and the already delivered container settings to agree. The
+service's existing registered provider transport runs fixed code in the exact
+verified container; it sends no source credentials. Inside the container, a
+read-only PostgreSQL connection reads only the fixed source parameter keys,
+compares them with the installed runtime settings, then runs the same bounded
+TLS/SHOW GRANTS probe using those applied credentials. The current image needs
+Python, psycopg2, PyMySQL, CA trust and the standard Odoo configuration. Missing
+prerequisites remain unknown; no installation or identity fallback is attempted.
+The purpose-specific diagnostic identity guard still applies before this read.
+
+The host verifies container ID, immutable image, compose service and runtime
+identity before execution, and rejects changed Docker snapshots afterward.
+Applied parameters are reread inside the container after source I/O as well as
+through the existing authenticated Odoo read. Source children have ten-second
+deadlines; the container command has a 50-second deadline with forced cleanup,
+and the provider read has a 75-second budget. Runtime probes share the existing
+per-process concurrency bound and unknown-result cooldown, keyed by the selected
+binding/version and container, separately from service-origin observations.
+Passwords remain in the container and its isolated child; only fixed categories
+return. An unreachable source does not hide other source results. Roles and
+partial or unrecognized grants remain unknown for either origin.
+
+Even a read-only runtime observation does not authorize an importer or prove
+that testing holds no production-capable key. Production credential inequality,
+actual identity activation and deployed qualification remain separately owned;
+no production credential is decrypted or tested by this read.
 
 The service rechecks lane authority, binding/version selection, the same
 container and applied parameters after source I/O. Changes discard the evidence.
