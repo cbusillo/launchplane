@@ -1641,17 +1641,19 @@ Persisted authority digests suppress duplicate change runs across replicas and
 restarts; a change during a probe remains due on the next pass. Sensor writes
 and scheduler receipts do not wake another probe. Probes retain their existing
 timeouts and the single runtime-identity confirmation wait, so a slow/failing
-batch can miss its deadline; expired evidence stays stale. Health, runtime identity
+batch can miss its deadline; expired evidence stays stale. Health, runtime identity, DNS diagnostics
 and public-ingress projections share `health_monitor_freshness_seconds`: one
 configured lane interval plus two service polling ticks (scheduling jitter and
 publication lag), two probe timeout budgets and the identity-confirmation delay.
 The latter matters because one lane changing runtime can delay publication of the healthy lanes in
-its batch too. These shared settings currently produce 120 seconds for production
-and 360 seconds for testing. Reads never renew an observation, and watchdog
+its batch too. Reads never renew an observation, and watchdog
 completion deadlines remain unchanged. Failed probes and mismatched identities
 remain failures immediately, and stopped probes become stale at their original
 observation's deadline. Qualify actual completion latency and storage growth
 on the deployed service before starting a continuous-green observation clock.
+A long change-triggered run can still delay a subsequent scheduled slot; multiple
+probe waves can also exceed the publication budget. Those are scheduler latency
+limits, not permission to renew old proof or hide a missed completion.
 Probe leases expire after 30 seconds and renew every 10 seconds so a dead worker
 does not retain a production slot for two minutes. The watchdog reads lane
 profiles independently of the broader settings/secret authority digests.
