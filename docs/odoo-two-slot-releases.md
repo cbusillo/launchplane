@@ -163,7 +163,17 @@ including recovery from persisted intermediate steps. The deployment bridge
 records the verified applied baseline separately from pending preparation.
 
 The installed host adapter must bind `configure_startup` and the driver's
-`website_settings` capability. The former merges the selected snapshot and its legacy indexing parameter
+`website_settings` capability. `dokploy.slot_startup.DokploySlotStartup` supplies
+the concrete Compose startup operation using the existing host transport and
+the same `ContainerSlotWriters`. Read-only preflight verifies both projects'
+observed Compose files and env-file consumption. Under the writer fence it
+preserves unrelated provider/file payload values, reads back both, recreates
+only inventoried consumers with `up --no-start --no-deps`, and refreshes their
+shared inventory before native image/settings verification. An incomplete or
+uncertain recreation keeps the release held. Source delivery does not install
+this capability or configure a real lane.
+
+`configure_startup` merges the selected snapshot and its legacy indexing parameter
 into both slots' durable managed startup payloads, preserves unrelated settings
 and secrets, and returns `StartupSettingsReadback` only after readback. It must
 recreate every stopped writer container in both slots from those payloads and
