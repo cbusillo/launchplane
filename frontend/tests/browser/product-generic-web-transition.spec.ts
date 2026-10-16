@@ -1,4 +1,5 @@
 import { expect, test } from "./state";
+import type { GenericWebPreviewDeclaration } from "../../src/generated/openapi.ts";
 
 async function arrange(page: import("@playwright/test").Page, failure: "none" | "uncertain" | "uncertain-changed" | "stale" = "none", omitPreviewExtensions = false) {
   await page.goto("/ui/products/atlas-commerce?fixture=products");
@@ -11,7 +12,7 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
     owner: { github_login: "example-owner", github_id: "9001" }, image: { repository: "ghcr.io/example/atlas-commerce" },
     production_use: "live", public_website: "required", release_on_acceptance: "held",
     lanes: [{ context: "atlas", instance: "testing", generic_web_extensions: { maintenance: [], schedules: [] } }, { context: "atlas", instance: "prod", generic_web_extensions: { maintenance: [], schedules: [] } }],
-    preview: { data_transport_mode: "driver", transport_extension: "", transport_database_prefix: "", app_name_suffix: "" },
+    preview: { data_transport_mode: "driver", transport_extension: "", transport_database_prefix: "", app_name_suffix: "" } as GenericWebPreviewDeclaration,
   };
   const requests: Array<{ body: Record<string, unknown>; key: string }> = [];
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtureIdentity } }));
@@ -31,7 +32,7 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
         const { generic_web_extensions: _omitted, ...preview } = body.preview;
         stored = { ...stored, preview };
       }
-      if (failure === "uncertain-changed") stored = { ...stored, preview: { ...stored.preview, app_name_suffix: "-concurrent" } };
+      if (failure === "uncertain-changed") stored = { ...stored, preview: { ...stored.preview, generic_web_extensions: { maintenance: [{ name: "concurrent", command: "node /app/concurrent.js", timeout_seconds: 300, on_reset: false }], schedules: [] } } };
       if (failure === "uncertain" || failure === "uncertain-changed") { await route.abort("failed"); return; }
     }
     await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "transition", records: { product_profile: "atlas-commerce" }, result: {
