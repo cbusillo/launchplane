@@ -238,6 +238,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/product-review/decisions": "write_product_review_decision",
     "/v1/product-review/feedback/retry": "retry_product_review_feedback",
     "/v1/owner-secret-inputs/submit": "submit_owner_secret_input",
+    "/v1/local-consumer-deliveries": "deliver_testing_local_consumer",
     "/v1/release-review/decisions": "write_release_review_decision",
     "/v1/release-review/urgent-openings": "open_urgent_release_review",
     "/v1/production-backup-gates": "enqueue_production_backup_gate",

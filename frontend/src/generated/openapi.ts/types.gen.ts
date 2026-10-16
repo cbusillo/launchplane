@@ -350,6 +350,53 @@ export type ClientReleaseStepView = {
     step: string;
 };
 
+export type ConsumerDeliveryEnvelope = {
+    mode?: 'dry-run' | 'apply';
+    request: ConsumerRequest;
+    reviewed_plan_digest?: string;
+};
+
+export type ConsumerDeliveryResponse = {
+    package: ConsumerPackage | null;
+    plan_digest: string;
+    ready_to_deliver: boolean;
+    request_fingerprint: string;
+    trace_id: string;
+    version_id: string;
+};
+
+export type ConsumerPackage = {
+    ciphertext: string;
+    issued_by: string;
+    nonce: string;
+    plan: ConsumerPlan;
+    request: ConsumerRequest;
+    wrapped_key: string;
+};
+
+export type ConsumerPlan = {
+    endpoint_digest: string;
+    expires_at: number;
+    profile_digest: string;
+    request_fingerprint: string;
+    secret_id: string;
+    version_id: string;
+};
+
+export type ConsumerRequest = {
+    context: string;
+    directory: string;
+    endpoint_key: string;
+    environment: 'testing';
+    kind: 'agent_session_token_file_v1';
+    product: string;
+    public_key: string;
+    request_id: string;
+    schema_version: 1;
+    server_url: string;
+    service_origin: string;
+};
+
 export type DataProvenance = {
     detail: string;
     freshness_status: 'verified' | 'recorded' | 'stale' | 'missing' | 'unsupported';
@@ -6420,6 +6467,30 @@ export type RestartLaneServiceResponses = {
 };
 
 export type RestartLaneServiceResponse = RestartLaneServiceResponses[keyof RestartLaneServiceResponses];
+
+export type DeliverTestingLocalConsumerData = {
+    body: ConsumerDeliveryEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/local-consumer-deliveries';
+};
+
+export type DeliverTestingLocalConsumerErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type DeliverTestingLocalConsumerError = DeliverTestingLocalConsumerErrors[keyof DeliverTestingLocalConsumerErrors];
+
+export type DeliverTestingLocalConsumerResponses = {
+    200: ConsumerDeliveryResponse;
+};
+
+export type DeliverTestingLocalConsumerResponse = DeliverTestingLocalConsumerResponses[keyof DeliverTestingLocalConsumerResponses];
 
 export type EnqueueOdooProdPromotionData = {
     body: OdooProdPromotionRunEnvelope;

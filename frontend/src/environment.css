@@ -1082,6 +1082,25 @@
   gap: 16px;
 }
 
+.local-consumer-panel,
+.local-consumer-panel dd {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.local-consumer-panel label {
+  display: grid;
+  gap: 8px;
+}
+
+.local-consumer-panel input[type="file"] {
+  max-width: 100%;
+}
+
+.local-consumer-panel dd {
+  margin: 3px 0 12px;
+}
+
 .config-view-header,
 .diagnostics-route-header {
   display: grid;

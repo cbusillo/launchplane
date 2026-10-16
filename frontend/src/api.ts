@@ -127,6 +127,12 @@ export function subscribeToSessionExpiry(listener: () => void): () => void {
   return () => { sessionExpiryListeners.delete(listener); };
 }
 
+export function deliverTestingLocalConsumer(
+  payload: import("./generated/openapi.ts").ConsumerDeliveryEnvelope,
+): Promise<import("./generated/openapi.ts").ConsumerDeliveryResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.localConsumerDelivery, "POST", payload);
+}
+
 async function requestJson<T>(
   path: string,
   method: "GET" | "POST" = "GET",

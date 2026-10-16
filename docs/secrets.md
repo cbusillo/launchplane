@@ -57,6 +57,12 @@ not part of this input flow.
 
 ## Current Contract
 
+The [testing local-consumer path](testing-local-consumer.md) delivers one exact
+testing bridge binding through a human-reviewed recipient-encrypted envelope.
+It exposes no plaintext read and creates no client service credential or grant.
+The local receiver verifies current custody and actual testing-server
+authentication before creating a separate private token file.
+
 - Dokploy credentials belong to `launchplane`.
 - Launchplane can now persist managed secret values in the Postgres
   shared-service backend when `LAUNCHPLANE_DATABASE_URL` is configured.

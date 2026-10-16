@@ -1,3 +1,4 @@
+import { LocalConsumerDeliveryPanel } from "./LocalConsumerDeliveryPanel";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -116,7 +117,7 @@ export function ManagedSecretsView({
   return (
     <section className="config-view" aria-busy={configResource.status === "loading"}>
       <ConfigViewHeader
-        detail="This surface shows binding names, integration, status, trust, and timestamps only. Secret plaintext and ciphertext never enter browser state."
+        detail="This surface shows binding metadata. Testing-client delivery downloads an envelope encrypted for its local recipient; plaintext is never returned."
         icon={<LockKeyhole />}
         title="Managed secrets"
       />
@@ -148,6 +149,9 @@ export function ManagedSecretsView({
       ) : null}
       {configResource.data && configResource.status !== "ready" ? (
         <ConfigWriteAuthorityUnavailable />
+      ) : null}
+      {configResource.status === "ready" && configResource.data ? (
+        <LocalConsumerDeliveryPanel product={detail.product} context={configResource.data.context} environment={detail.environment} />
       ) : null}
       {configResource.data ? <ConfigStatusSummary items={secrets} /> : null}
       {(configResource.status === "idle" || configResource.status === "loading") &&
