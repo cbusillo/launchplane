@@ -65,23 +65,6 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
                         "helper": "launchplane/scripts/launchplane-write-action.py",
                         "requiresPrivateConfig": True,
                     },
-                    "mergeTrain": {
-                        "controller": True,
-                        "readyLabel": "ready-to-merge",
-                        "baseBranch": "main",
-                        "githubActionsRunner": {
-                            "repo": "example/train-tools",
-                            "workflow": "merge-train-runner.yml",
-                            "ref": "main",
-                            "runnerMode": "controller",
-                            "mutateDefault": False,
-                            "revisionEvidenceFields": {
-                                "runnerWorkflow": "workflow_run.head_sha",
-                                "candidate": "result.candidate.candidate_sha",
-                                "landing": "result.landing_plan.entries[].merge_commit_sha",
-                            },
-                        },
-                    },
                 },
             }
         )
@@ -97,6 +80,8 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
         cases = [
             {"mergeTrain": {"enabled": True}},
             {"mergeTrain": {"enabled": False}},
+            {"mergeTrain": {"readyLabel": "ship-it", "baseBranch": "trunk", "controller": True}},
+            {"mergeTrain": {"githubActionsRunner": {"repo": "example/train-tools"}}},
             {"service": {"url": "https://control.example.test"}},
             {"service": {"contextUrlEnv": "https://control.example.test"}},
             {"service": {"localConfigExample": "/private/credentials.json"}},
@@ -143,7 +128,7 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
                 self.assertEqual(cast("dict[str, object]", payload["gate"])["status"], "fail")
                 self.assertTrue(cast("dict[str, object]", payload["gate"])["rejected_findings"])
 
-    def test_catalog_root_paths_and_namespaced_labels_pass(self) -> None:
+    def test_catalog_root_paths_pass(self) -> None:
         payload = self._gate(
             {
                 "launchplane": {
@@ -156,45 +141,7 @@ class LaunchplaneMetadataRoutingTests(unittest.TestCase):
                             "skills/launchplane/references/launchplane-operator.local.example.json"
                         ),
                     },
-                    "mergeTrain": {
-                        "readyLabel": "status/ready",
-                        "githubActionsRunner": {"repo": "example/.github"},
-                    },
                 },
             }
         )
         self.assertEqual(cast("dict[str, object]", payload["gate"])["status"], "pass")
-
-        for label in (
-            "merge: ready",
-            "🚀 ready",
-            "Ready to merge!",
-            "merge (ready)",
-            "ready+merge",
-        ):
-            with self.subTest(label=label):
-                namespaced_label = self._gate(
-                    {
-                        "launchplane": {
-                            "mergeTrain": {
-                                "readyLabel": label,
-                                "baseBranch": "release+hotfix",
-                                "githubActionsRunner": {"ref": "feature@2"},
-                            }
-                        }
-                    }
-                )
-                self.assertEqual(
-                    cast("dict[str, object]", namespaced_label["gate"])["status"], "pass"
-                )
-
-    def test_workflow_repository_allowance_is_scoped_to_metadata_field(self) -> None:
-        routing = {
-            "launchplane": {"mergeTrain": {"githubActionsRunner": {"repo": "example/train-tools"}}}
-        }
-        allowed = self._gate(routing)
-        self.assertEqual(cast("dict[str, object]", allowed["gate"])["status"], "pass")
-        other_file = self._gate(routing, path="runtime.json")
-        self.assertEqual(cast("dict[str, object]", other_file["gate"])["status"], "fail")
-        other_key = self._gate({"launchplane": {"runtime": {"repo": "example/train-tools"}}})
-        self.assertEqual(cast("dict[str, object]", other_key["gate"])["status"], "fail")
