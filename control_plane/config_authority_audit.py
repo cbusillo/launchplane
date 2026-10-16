@@ -2004,6 +2004,7 @@ def _python_candidates(
         return [], str(error)
     if allow_context is not None:
         allow_context["fixed_authorization_actions"] = _python_fixed_authorization_actions(tree)
+        allow_context["fixed_protocol_identifiers"] = _python_fixed_protocol_identifiers(tree)
     dataclass_fields = _python_dataclass_fields(tree)
     candidates: list[tuple[int, str, object]] = []
     for node in ast.walk(tree):
@@ -2084,6 +2085,125 @@ def _python_fixed_authorization_actions(tree: ast.Module) -> dict[tuple[int, str
         ):
             actions[statement.lineno, target.id] = value
     return actions
+
+
+def _python_fixed_protocol_identifiers(tree: ast.Module) -> dict[tuple[int, str], str]:
+    """Require a single binding used exclusively in one protocol field role.
+
+    This intentionally does not follow aliases or imports. A comparison supplies
+    the field's schema role; only known secret selectors and locally declared
+    exception code constructors may also consume the identifier.
+    """
+    nodes = list(ast.walk(tree))
+    roles: dict[int, str] = {}
+    comparisons: set[int] = set()
+    for node in nodes:
+        if (
+            isinstance(node, ast.Compare)
+            and len(node.ops) == 1
+            and isinstance(node.ops[0], (ast.Eq, ast.NotEq))
+        ):
+            left, right = node.left, node.comparators[0]
+            for reference, field in ((left, right), (right, left)):
+                if isinstance(reference, ast.Name) and (role := _python_protocol_field(field)):
+                    roles[id(reference)] = role
+                    comparisons.add(id(reference))
+
+    error_classes = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and any(
+            isinstance(base, ast.Name) and base.id in {"Exception", "ValueError", "RuntimeError"}
+            for base in node.bases
+        )
+        and any(
+            isinstance(method, ast.FunctionDef)
+            and method.name == "__init__"
+            and len(method.args.args) >= 2
+            and method.args.args[1].arg == "code"
+            and any(
+                isinstance(statement, ast.Assign)
+                and len(statement.targets) == 1
+                and isinstance(statement.targets[0], ast.Attribute)
+                and isinstance(statement.targets[0].value, ast.Name)
+                and statement.targets[0].value.id == method.args.args[0].arg
+                and statement.targets[0].attr == "code"
+                and isinstance(statement.value, ast.Name)
+                and statement.value.id == "code"
+                for statement in method.body
+            )
+            for method in node.body
+        )
+    }
+    for node in nodes:
+        if not isinstance(node, ast.Call):
+            continue
+        if _call_name(node.func).rsplit(".", 1)[-1] in {
+            "list_secret_records",
+            "list_secret_bindings",
+        }:
+            for keyword in node.keywords:
+                if keyword.arg == "integration" and isinstance(keyword.value, ast.Name):
+                    roles[id(keyword.value)] = "integration"
+        if isinstance(node.func, ast.Name) and node.func.id in error_classes and node.args:
+            if isinstance(node.args[0], ast.Name):
+                roles[id(node.args[0])] = "code"
+
+    identifiers: dict[tuple[int, str], str] = {}
+    for statement in tree.body:
+        value_node: ast.expr | None
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target, value_node = statement.targets[0], statement.value
+        elif isinstance(statement, ast.AnnAssign):
+            target, value_node = statement.target, statement.value
+        else:
+            continue
+        if not isinstance(target, ast.Name) or not target.id.isupper():
+            continue
+        value = _literal_value(value_node) if value_node is not None else None
+        if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]*", value):
+            continue
+        references = [node for node in nodes if isinstance(node, ast.Name) and node.id == target.id]
+        loads = [node for node in references if isinstance(node.ctx, ast.Load)]
+        shadowed = any(
+            (isinstance(node, ast.arg) and node.arg == target.id)
+            or (isinstance(node, ast.alias) and (node.asname or node.name) == target.id)
+            or (
+                isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                and node.name == target.id
+            )
+            or (isinstance(node, ast.ExceptHandler) and node.name == target.id)
+            for node in nodes
+        )
+        if (
+            loads
+            and not shadowed
+            and any(id(node) in comparisons for node in loads)
+            and all(id(node) in roles for node in loads)
+            and len({roles[id(node)] for node in loads}) == 1
+            and all(node is target or isinstance(node.ctx, ast.Load) for node in references)
+        ):
+            identifiers[statement.lineno, target.id] = value
+    return identifiers
+
+
+def _python_protocol_field(node: ast.expr) -> str:
+    fields = {"integration", "binding_key", "code"}
+    if isinstance(node, ast.Attribute) and node.attr in fields:
+        return node.attr
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "get"
+        and len(node.args) == 1
+        and not node.keywords
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+        and node.args[0].value in fields
+    ):
+        return node.args[0].value
+    return ""
 
 
 def _python_dataclass_fields(tree: ast.Module) -> dict[str, tuple[str, ...]]:
@@ -2945,14 +3065,15 @@ def _allow_reason(
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
     if normalized == ".github/github.json" and _is_launchplane_metadata_routing(key, value):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
-    fixed_actions = allow_context.get("fixed_authorization_actions")
-    if (
-        normalized.endswith(".py")
-        and isinstance(fixed_actions, dict)
-        and (line, key) in fixed_actions
-        and fixed_actions[line, key] == value
-    ):
-        return ALLOW_REASON_SCHEMA_ONLY
+    for context_key in ("fixed_authorization_actions", "fixed_protocol_identifiers"):
+        declarations = allow_context.get(context_key)
+        if (
+            normalized.endswith(".py")
+            and isinstance(declarations, dict)
+            and (line, key) in declarations
+            and declarations[line, key] == value
+        ):
+            return ALLOW_REASON_SCHEMA_ONLY
     if (
         normalized == "pyproject.toml"
         and re.fullmatch(r"tool\.black\.target-version\[[0-9]+]", key)

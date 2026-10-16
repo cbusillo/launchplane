@@ -404,6 +404,22 @@ reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
 
+For Python source, a fixed protocol identifier can be classified as `schema_only`
+when a single uppercase module binding holds an identifier-shaped string and
+every local reference uses the same protocol field role. Evidence must include
+an equality/inequality comparison against `integration`, `binding_key`, or
+`code` (an attribute or a one-argument dictionary `get`). Secret integration
+selectors on `list_secret_records`/`list_secret_bindings` and positional code
+arguments to locally declared exception constructors that store `self.code`
+may accompany those comparisons. This classifies generic discriminators,
+payload keys, and error codes; it does not allow names merely because they
+contain diagnostic, secret, or error words. Mixed runtime/grant uses, rebinding,
+shadowing, aliases, unused declarations, and imported-only declarations provide
+no classification proof. Evidence is bound to the committed declaration's
+path, line, key, and value; a same-named settings or environment assignment
+does not inherit it. Audit completion (`status: ok`) remains distinct from
+the enforcement result (`gate.status`).
+
 Enforcement also fails when a scanned Python file cannot be decoded or parsed,
 even if the report has zero findings. Python encoding declarations are honored;
 invalid encodings remain coverage failures. Both gate profiles report these failures separately in
