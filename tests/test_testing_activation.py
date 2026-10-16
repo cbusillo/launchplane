@@ -1644,21 +1644,26 @@ class ActivationTests(unittest.TestCase):
                 self.assertEqual(self.inspections, inspections)
                 self.assertEqual(self.store.list_held_provider_target_reservations(), fences)
 
-    def test_route_refuses_a_production_only_carried_binding_before_provider_effects(self) -> None:
+    def test_route_reports_real_carried_key_refusal_before_provider_effects(self) -> None:
         import asyncio
         from control_plane.testing_activation import preparation_resources
         from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
         from control_plane.service_auth import LaunchplaneAuthzPolicy
         from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
         from tests.support.http import request
 
-        binding = next(
-            binding
-            for binding in self.store.list_secret_bindings(instance_name="testing")
-            if binding.binding_key == "DB_PASSWORD"
-        )
-        self.store.write_secret_binding(
-            binding.model_copy(update={"declared_secret_class": "prod_only"})
+        policy = self.store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]
+        self.store.write_runtime_key_safety_policy_record(
+            policy.model_copy(
+                update={
+                    "rules": (
+                        RuntimeSecretSafetyRule(
+                            binding_key="DB_PASSWORD", secret_class="prod_only"
+                        ),
+                    )
+                }
+            )
         )
         resources, _ = preparation_resources(self.store, self.product, self.request, self.scope)
         app = create_launchplane_fastapi_app(

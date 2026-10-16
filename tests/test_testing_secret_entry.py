@@ -206,6 +206,7 @@ class TestingSecretEntryTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(
                         {binding.declared_secret_class for binding in bindings}, {"testing"}
                     )
+                    self.assertEqual({binding.value_source for binding in bindings}, {"supplied"})
                     self.assertEqual(
                         {(binding.context, binding.instance) for binding in bindings},
                         {("example-site", "testing")},
@@ -266,6 +267,9 @@ class IsolatedBindingClassificationTests(unittest.TestCase):
                 "testing",
                 "secret_class_not_allowed",
             ),
+            ({"value_source": "copy"}, "testing", "testing", "secret_class_not_allowed"),
+            ({"value_source": "provider"}, "testing", "testing", "secret_class_not_allowed"),
+            ({"value_source": None}, "testing", "testing", "secret_class_not_allowed"),
         ):
             with self.subTest(changes=changes, target=instance):
                 target = RuntimeKeySafetyTarget.model_validate(
@@ -291,6 +295,7 @@ class IsolatedBindingClassificationTests(unittest.TestCase):
             context="example-site",
             instance="testing",
             declared_secret_class="testing",
+            value_source="supplied",
             created_at="2026-10-15T00:00:00Z",
             updated_at="2026-10-15T00:00:00Z",
         )

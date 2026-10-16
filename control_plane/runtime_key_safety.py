@@ -377,10 +377,11 @@ def _evaluate_binding(
         # credential that happens to use the same key name. Only an explicit
         # non-production class on this exact stable lane can take precedence.
         # Shared-safe, production and preview bindings still need the key's rule.
-        if target.environment_class in {"testing", "dev"} and binding.declared_secret_class in {
-            "testing",
-            "non_prod",
-        }:
+        if (
+            binding.value_source == "supplied"
+            and target.environment_class in {"testing", "dev"}
+            and binding.declared_secret_class in {"testing", "non_prod"}
+        ):
             return ()
     if rule is not None:
         return _evaluate_binding_rule(target=target, binding=binding, rule=rule)
