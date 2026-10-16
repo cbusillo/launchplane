@@ -18,7 +18,9 @@ for (const view of ["index", "workspace", "environment"] as const) {
       product.environments = [lane];
       const detail = module.environmentForFixture("products", product.product, "testing");
       Object.assign(detail, lane);
-      return { product, detail, identity: module.fixtureIdentity,
+      // Exercise the evidence reader without unrelated administrator forms.
+      // Their draft preservation remains covered by open-lane-refresh.spec.ts.
+      return { product, detail, identity: { ...module.fixtureIdentity, role: "read_only" as const },
         incidents: module.incidentsForFixture("products", product.product, "testing") };
     });
     // The service updates at its evidence deadline, independently of when the
@@ -70,9 +72,12 @@ for (const view of ["index", "workspace", "environment"] as const) {
       const name = lastName = `Cadence observation ${reads}`;
       if (unavailable) return route.fulfill({ status: 503, json: { error: { code: "read_unavailable", message: "Cadence fixture unavailable" } } });
       serviceTime = await page.evaluate(() => Date.now());
-      const product = { ...response(fixture.product), display_name: name };
-      const detail = { ...response(fixture.detail), display_name: name };
-      return route.fulfill({ json: { status: "ok", products: [product], product, environment: detail } });
+      const payload = view === "environment"
+        ? { environment: { ...response(fixture.detail), display_name: name } }
+        : view === "workspace"
+          ? { product: { ...response(fixture.product), display_name: name } }
+          : { products: [{ ...response(fixture.product), display_name: name }] };
+      return route.fulfill({ json: { status: "ok", ...payload } });
     });
     await page.route(`${detailUrl}/public-ingress/incidents`, route => route.fulfill({ json: { status: "ok", incident_list: fixture.incidents } }));
     await page.goto(`/ui/products${view === "index" ? "" : `/${fixture.product.product}${view === "environment" ? "/environments/prod" : ""}`}`);
@@ -81,11 +86,14 @@ for (const view of ["index", "workspace", "environment"] as const) {
     const attribute = view === "index" ? "data-operational" : "data-tone";
     const healthy = view === "environment" ? "pass" : "verified";
     await expect(signal).toHaveAttribute(attribute, healthy);
+    await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
     const advance = async (milliseconds: number) => {
-      const before = reads;
+      const previousName = lastName;
       browserTime += milliseconds;
       await page.clock.runFor(milliseconds);
-      await waitForState(() => reads).toBeGreaterThan(before);
+      // Retained data stays rendered while loading. Its replacement proves
+      // React consumed the response without a second host-side polling loop.
+      await expect(page.getByText(previousName, { exact: true })).toHaveCount(0);
       await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
     };
     for (let minute = 0; minute < 31; minute++) {
