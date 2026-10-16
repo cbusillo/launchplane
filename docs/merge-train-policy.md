@@ -459,8 +459,8 @@ quoted, fenced, stale or unreadable head evidence cannot admit a PR. The adapter
 reports unavailable or incomplete discussion evidence as unreadable rather than
 guessing a previous handoff is still current.
 
-The handoff author must satisfy the existing enqueue policy: an allowed owner
-or admin role, or a numeric trusted-automation id. An App using a person's token
+The handoff author must satisfy the existing enqueue policy: an allowed
+`repo_owner` or `repo_admin` role, or a numeric trusted-automation id. An App using a person's token
 does not inherit that person's authority. The PR author's existing eligibility
 is checked independently. No access, merge identity or policy enrollment changes.
 Handoff admission requires passing source-head checks, known conflict-free
