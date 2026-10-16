@@ -1,6 +1,8 @@
 """Recover public verification using real records and fixed fake provider reads."""
 
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import patch
 import unittest
@@ -259,7 +261,11 @@ class TestingVerificationTests(TestingVerificationScenario):
             ),
             self.production_before,
         )
-        self.assertTrue(self.store.list_release_tuple_records())
+        release_tuple = self.store.read_release_tuple_record(
+            context_name=self.fixture.context, channel_name="testing"
+        )
+        self.assertEqual(release_tuple.deployment_record_id, published.record_id)
+        self.assertEqual(release_tuple.artifact_id, self.artifact.artifact_id)
         self.assertTrue(self.verification().readback()["public_health_verified"])
         self.assertEqual(
             self.store.read_native_testing_copy_capture(generation_binding(before)),
@@ -390,6 +396,67 @@ class TestingVerificationTests(TestingVerificationScenario):
 
 
 class TestingVerificationHttpTests(TestingVerificationScenario, unittest.IsolatedAsyncioTestCase):
+    async def test_lost_executor_connection_keeps_bounded_refusal_code(self) -> None:
+        from sqlalchemy.exc import SQLAlchemyError
+
+        def lost() -> None:
+            raise SQLAlchemyError("fixture executor database transport")
+
+        @contextmanager
+        def executor(_: str) -> Iterator[Any]:
+            yield lost
+
+        with patch.object(self.store, "testing_replacement_execution_lock", side_effect=executor):
+            result = await request(
+                self.fixture.app,
+                "POST",
+                ROUTE.format(product=self.profile.product),
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload=self.verification_request.model_dump(mode="json"),
+            )
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(result.json()["error"]["code"], "testing_verification_unverified")
+        self.assertEqual(
+            self.store.read_deployment_record(self.deployment.record_id), self.deployment
+        )
+
+    async def test_provider_denial_preserves_authorization_refusal(self) -> None:
+        from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
+
+        with patch(
+            "control_plane.testing_verification.inspect_native_testing_receiver",
+            side_effect=NativeSourceAuthorizationDenied("fixture denied"),
+        ):
+            result = await request(
+                self.fixture.app,
+                "POST",
+                ROUTE.format(product=self.profile.product),
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload=self.verification_request.model_dump(mode="json"),
+            )
+        self.assertEqual(result.status_code, 403, result.text)
+        self.assertEqual(result.json()["error"]["code"], "authorization_denied")
+        self.assertEqual(
+            self.store.read_deployment_record(self.deployment.record_id), self.deployment
+        )
+
+    async def test_active_original_executor_reports_in_progress_before_reads(self) -> None:
+        @contextmanager
+        def busy(_: str) -> Iterator[None]:
+            yield None
+
+        with patch.object(self.store, "testing_replacement_execution_lock", side_effect=busy):
+            result = await request(
+                self.fixture.app,
+                "POST",
+                ROUTE.format(product=self.profile.product),
+                headers={"Authorization": "Bearer local-operator-token"},
+                payload=self.verification_request.model_dump(mode="json"),
+            )
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(result.json()["error"]["code"], "testing_verification_in_progress")
+        self.receiver.assert_not_called()
+
     async def test_lost_postgres_lane_reservation_refuses_publication(self) -> None:
         if self.store.database_dialect_name != "postgresql":
             self.skipTest("PostgreSQL is required for connection-loss fencing")
@@ -490,6 +557,7 @@ class TestingVerificationHttpTests(TestingVerificationScenario, unittest.Isolate
         payload = self.verification_request.model_dump(mode="json")
         response = await post(payload)
         self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue(response.json()["result"]["public_health_verified"])
         with scoped_agent_transport():
             denied = await post(payload)
         self.assertEqual(denied.status_code, 403)

@@ -857,8 +857,10 @@ operation requests, keys, terminal results, retry budgets, capture receipts,
 retained custody and the restored password are unchanged. The new deployment's
 `testing_verification_previous_record_id` links the preserved failure.
 
-Recovery uses the exact reviewed request and original key. A lost response
-replays the atomic receipt without another provider effect; `readback` separately
+Recovery uses the exact reviewed request and original key. Once the original
+request commits, a lost response replays its atomic receipt without another
+provider effect. An active original executor reports `testing_verification_in_progress`;
+observe its completion before same-key recovery. `readback` separately
 checks current records and live evidence. A failure before commit publishes
 nothing. Preserve evidence and record a refusal with its trace; never change
 records by hand, reset attempt budgets or restore again. If authority changed,

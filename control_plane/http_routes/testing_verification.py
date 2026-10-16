@@ -6,6 +6,9 @@ from typing import Annotated, NoReturn
 
 import click
 from fastapi import Depends, Header, Path
+from sqlalchemy.exc import SQLAlchemyError
+
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.http_routes.mutation_support import (
@@ -82,14 +85,23 @@ def register_testing_verification_routes(
         try:
             with record_store.testing_replacement_execution_lock(body.operation_id) as check:
                 if check is None:
-                    raise ValueError("The original generation executor is active.")
+                    refuse(
+                        409,
+                        "testing_verification_in_progress",
+                        "The original generation is active. Preserve its plan and key; observe completion before same-key recovery.",
+                    )
                 with record_store.testing_verification_lane_guard(
                     product=product, context=body.context
                 ) as check_lane:
 
                     def checkpoint() -> None:
-                        check()
-                        check_lane()
+                        try:
+                            check()
+                            check_lane()
+                        except SQLAlchemyError as error:
+                            raise RuntimeError(
+                                "Testing verification lost execution exclusion."
+                            ) from error
 
                     if body.mode == "readback":
                         result = verification.readback()
@@ -107,7 +119,7 @@ def register_testing_verification_routes(
                         if canonical_json_sha256(verification.snapshot()) != plan["plan_sha256"]:
                             raise ValueError("Testing authority changed during verification.")
                         result = (
-                            plan
+                            {**plan, "public_health_verified": True}
                             if body.mode == "dry-run"
                             else verification.receipt(body.reviewed_plan_sha256, applied=True)
                         )
@@ -147,7 +159,19 @@ def register_testing_verification_routes(
                                 )
                             return response
             return accepted_evidence_response(trace_id=trace, records={}, result=result)
-        except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
+        except DurableOperationAuthorizationDeniedError:
+            refuse(
+                403,
+                "authorization_denied",
+                "The existing provider transport refused complete_testing_verification. Preserve the trace and original request; do not change identity or credentials.",
+            )
+        except (
+            ValueError,
+            FileNotFoundError,
+            RuntimeError,
+            OSError,
+            click.ClickException,
+        ):
             refuse(
                 409,
                 "testing_verification_unverified",
