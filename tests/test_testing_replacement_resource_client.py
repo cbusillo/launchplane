@@ -27,6 +27,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
         wrong_review: bool = False,
         verified: bool = True,
         initial_generation: bool = False,
+        released: bool = False,
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(
@@ -56,7 +57,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
             applied=False,
         )
         binding = canonical_json_sha256({"fixture": "allocation"})
-        if mode == "release":
+        if mode == "release" or released:
             result = TestingInitialPreparationRelease(
                 product=plan.product, context=plan.context, operation_id=plan.operation_id
             ).model_dump(mode="json")
@@ -189,3 +190,10 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
                 self.assertEqual(output["operation_id"], "service-initial-preparation")
                 self.assertTrue(post.call_args.kwargs["body"]["initial_generation"])
                 self.assertTrue(post.call_args.kwargs["idempotency_key"])
+
+    def test_replayed_apply_of_a_released_intent_reports_released(self) -> None:
+        status, result, post = self.call(initial_generation=True, released=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(result["status"], "released")
+        self.assertFalse(result["resources_verified"])
+        post.assert_called_once()

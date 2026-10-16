@@ -110,6 +110,35 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await self.post()).status_code, 403)
         self.assertEqual((await self.post(key="")).status_code, 409)
 
+    async def test_unactivated_plan_does_not_reserve_the_original_hostname(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        target = target.model_copy(update={"domains": ("original-testing.example.invalid",)})
+        self.store.write_dokploy_target_record(target)
+        planned = await self.post()
+        self.assertEqual(planned.status_code, 202, planned.text)
+        held = target.model_copy(
+            update={
+                "policies": target.policies.model_copy(
+                    update={
+                        "staff_testing_hold": DokployTargetStaffTestingHold(
+                            reason="staff using original testing"
+                        )
+                    }
+                )
+            }
+        )
+        self.store.write_dokploy_target_record(held)
+        self.assertEqual(
+            self.store.read_dokploy_target_record(
+                context_name=self.fixture.context, instance_name="testing"
+            ),
+            held,
+        )
+
     async def test_missing_copy_prerequisite_refuses_before_allocation_effects(self) -> None:
         self.credentials.side_effect = ValueError("fixture unavailable local credentials")
         response = await self.post()

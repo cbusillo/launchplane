@@ -11147,6 +11147,18 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
                     )
                 )
 
+                original_target = fixture.store.read_dokploy_target_record(
+                    context_name=fixture.context, instance_name="testing"
+                )
+                fixture.store.write_dokploy_target_record(
+                    original_target.model_copy(
+                        update={
+                            "domains": ("original-testing.example.invalid",),
+                            "public_hosts": ("original-public.example.invalid",),
+                        }
+                    )
+                )
+
                 async def scenario() -> None:
                     async def post(**changes: object) -> Any:
                         return await fixture.post(
@@ -11160,6 +11172,30 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
                         planned = await post()
                         self.assertEqual(planned.status_code, 202, planned.text)
                         result = planned.json()["result"]
+
+                        def hold_and_restore_original() -> None:
+                            from control_plane.contracts.dokploy_target_record import (
+                                DokployTargetStaffTestingHold,
+                            )
+
+                            target = fixture.store.read_dokploy_target_record(
+                                context_name=fixture.context, instance_name="testing"
+                            )
+                            held = target.model_copy(
+                                update={
+                                    "policies": target.policies.model_copy(
+                                        update={
+                                            "staff_testing_hold": DokployTargetStaffTestingHold(
+                                                reason="staff using original testing"
+                                            )
+                                        }
+                                    )
+                                }
+                            )
+                            fixture.store.write_dokploy_target_record(held)
+                            fixture.store.write_dokploy_target_record(target)
+
+                        hold_and_restore_original()
 
                         def pre_effect(adapter: Any, namespace: str) -> tuple[str, str, str]:
                             target = fixture.store.read_dokploy_target_record(
@@ -11237,7 +11273,8 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
 
                             original = session.scalar(
                                 select(LaunchplaneIdempotencyRow).where(
-                                    LaunchplaneIdempotencyRow.idempotency_key == "resource-fixture"
+                                    LaunchplaneIdempotencyRow.idempotency_key
+                                    == fixture.idempotency_key
                                 )
                             )
                             assert original is not None
@@ -11251,6 +11288,7 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
                             self.assertTrue(
                                 original.payload["response_payload"]["result"]["released"]
                             )
+                        hold_and_restore_original()
                         next_reservation = fixture.store.reserve_mutation(
                             scope=original_record.scope,
                             route_path=original_record.route_path,

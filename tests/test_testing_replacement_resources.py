@@ -26,6 +26,7 @@ from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 
 class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
     database_url = ""
+    idempotency_key = "resource-fixture"
 
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
@@ -82,7 +83,7 @@ class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
             ROUTE.format(product=self.profile.product),
             headers={
                 "Authorization": "Bearer local-operator-token",
-                "Idempotency-Key": "resource-fixture",
+                "Idempotency-Key": self.idempotency_key,
             },
             payload={
                 "context": self.context,

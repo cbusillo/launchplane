@@ -1507,7 +1507,9 @@ uv run python scripts/prepare-testing-replacement-resources.py dry-run \
 The service derives the preparation ID from the exact product, context,
 authenticated principal and original stable key; the receipt returns it as
 `operation_id`. Preserve that ID and key. Repeating the same dry run returns the
-same preparation; a changed intent with that key refuses. Planning writes only
+same preparation while its recorded snapshot is unchanged; a changed intent or
+configuration requires a new key and new review. A refused, unactivated plan
+reserves neither an executor nor its original hostnames. Planning writes only
 its own custody/allocation evidence and reserves no executor. Before review it
 checks the existing bootstrap restore policy, distinct managed credentials and
 selected production source, then current original-lane usage through the existing
@@ -1530,7 +1532,8 @@ reads that its named provider placement is absent, and atomically verifies no
 dispatch checkpoint, captured target, resource receipt or generation exists.
 It atomically records terminal release for both the lane fence and original
 provider reservation, without deleting custody or rewriting the original request.
-Repeated release is idempotent; that released intent can never apply.
+Repeated release is idempotent; that released intent can never apply. The client
+reports `released` explicitly if the original apply is replayed after release.
 The lane can continue normally, or a new initial intent can be reviewed with a
 new key. Any partial placement, recorded dispatch or unknown provider read keeps
 the original fence; use original-key reconciliation, never release to bypass it.

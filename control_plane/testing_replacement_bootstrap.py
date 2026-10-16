@@ -63,6 +63,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.testing_replacement_resources import (
     TestingReplacementResourcesRequest,
     resource_context,
+    resource_preparation_payload,
     run_resource_schedule,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -334,7 +335,7 @@ def bootstrap_plan(
         {
             "request": bootstrap_request_payload(request),
             "profile": profile.model_dump(mode="json"),
-            "allocation": allocation.model_dump(mode="json"),
+            "allocation": resource_preparation_payload(allocation),
             "configuration": [
                 item.model_dump(mode="json")
                 for item in disposable_lane_configuration(store, request.context, "testing")

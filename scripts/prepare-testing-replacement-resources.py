@@ -116,6 +116,23 @@ def main() -> int:
             else args.operation_id,
         ):
             raise ValueError("The receipt belongs to another lane or operation.")
+        if args.mode == "apply" and result.get("released") is True:
+            if not args.initial_generation or result["operation_id"] != plan.operation_id:
+                raise ValueError("The released receipt belongs to another reviewed intent.")
+            TestingInitialPreparationRelease.model_validate(result)
+            print(
+                json.dumps(
+                    {
+                        "status": "released",
+                        "mode": args.mode,
+                        "trace_id": trace,
+                        "operation_id": result["operation_id"],
+                        "resources_verified": False,
+                        "released": True,
+                    }
+                )
+            )
+            return 1
         if args.mode == "dry-run":
             plan = TestingReplacementResourcesPlan.model_validate(result)
             if plan.applied:

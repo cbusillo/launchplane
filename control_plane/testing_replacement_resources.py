@@ -139,6 +139,17 @@ class TestingInitialPreparationRelease(BaseModel):
     retained_target_preserved: Literal[True] = True
 
 
+def resource_preparation_payload(
+    preparation: DisposableTestingResourcePreparation,
+) -> dict[str, object]:
+    payload = preparation.model_dump(mode="json")
+    if not preparation.initial_request_sha256:
+        for field in tuple(payload):
+            if field.startswith("initial_"):
+                payload.pop(field)
+    return payload
+
+
 def resource_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
     payload = request.model_dump(mode="json")
     if request.source_mode == "ssh":
@@ -283,7 +294,7 @@ def resource_plan(
             "product": product,
             "request": resource_request_payload(request),
             "binding": binding,
-            "preparation": preparation.model_dump(mode="json"),
+            "preparation": resource_preparation_payload(preparation),
             "operation": operation.model_dump(mode="json"),
         }
     )

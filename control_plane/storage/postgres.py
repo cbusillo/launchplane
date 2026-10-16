@@ -12331,12 +12331,45 @@ class PostgresRecordStore(HumanSessionStore):
                         # A new ID in this same bundle must never inherit that host.
                         continue
             hosts.add(generation.domain_host)
-        for payload in session.scalars(
-            select(LaunchplaneDisposableTestingResourceAllocationRow.payload)
+        for allocation, custody in session.execute(
+            select(
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                LaunchplaneDisposableReplacementPreparationRow,
+            ).outerjoin(
+                LaunchplaneDisposableReplacementPreparationRow,
+                LaunchplaneDisposableTestingResourceAllocationRow.operation_id
+                == LaunchplaneDisposableReplacementPreparationRow.operation_id,
+            )
         ):
+            payload = allocation.payload
+            if payload.get("initial_request_sha256") and (
+                not payload.get("initial_apply_started_at") or payload.get("initial_released_at")
+            ):
+                continue
             snapshot = payload.get("retained_target_record")
             if snapshot is not None:
                 retained = DokployTargetRecord.model_validate(snapshot)
+                if (
+                    custody is not None
+                    and current_target is not None
+                    and (
+                        current_target.context,
+                        current_target.instance,
+                    )
+                    == (retained.context, retained.instance)
+                ):
+                    current_identity = session.get(
+                        LaunchplaneDokployTargetIdRow, (retained.context, retained.instance)
+                    )
+                    retained_id = custody.payload.get("retained_target_id")
+                    if (
+                        current_identity is not None
+                        and current_identity.target_id == retained_id
+                        and target_id in (None, retained_id)
+                    ):
+                        # Writing a hold or metadata on the unchanged original
+                        # recipient cannot transfer its hostname to a fresh target.
+                        continue
                 hosts.update(
                     (
                         *retained.domains,
