@@ -3,6 +3,7 @@ import { afterEach, test } from "node:test";
 
 import {
   approvePrivilegedOperation,
+  cancelPrivilegedOperation,
   prepareAuthorizationCandidate,
   readPrivilegedOperationRawDetail,
   readPrivilegedOperationPlans,
@@ -14,6 +15,25 @@ const originalFetch = globalThis.fetch;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
+});
+
+test("cancellation uses browser CSRF and preserves the source event for replay", async () => {
+  const calls = [];
+  globalThis.fetch = async (input, init = {}) => {
+    calls.push({ input: String(input), init });
+    return new Response(JSON.stringify(String(input) === "/v1/auth/session"
+      ? { csrf_token: "cancel-csrf" }
+      : { status: "ok", record: { status: "cancelled" }, events: [] }), {
+      headers: { "Content-Type": "application/json" }, status: 200,
+    });
+  };
+  const result = await cancelPrivilegedOperation("operation-1", "Superseded", "ui:cancel:retry");
+  assert.equal(result.record.status, "cancelled");
+  assert.equal(calls[0].input, "/v1/auth/session");
+  assert.equal(calls[1].input, "/v1/privileged-operations/plans/operation-1/cancel");
+  assert.equal(calls[1].init.method, "POST");
+  assert.equal(calls[1].init.headers["X-CSRF-Token"], "cancel-csrf");
+  assert.deepEqual(JSON.parse(calls[1].init.body), { reason: "Superseded", source_event_id: "ui:cancel:retry" });
 });
 
 test("privileged-operation UI performs one read-only list request", async () => {

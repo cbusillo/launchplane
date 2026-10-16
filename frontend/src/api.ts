@@ -28,6 +28,8 @@ import type {
   ApplyProductOwnerResponse,
   ApproveHumanPrivilegedOperationData,
   ApproveHumanPrivilegedOperationResponse,
+  CancelHumanPrivilegedOperationData,
+  CancelHumanPrivilegedOperationResponse,
   DispatchProductPromotionWorkflowData,
   DispatchProductPromotionWorkflowResponse,
   DryRunProductPromotionData,
@@ -926,6 +928,7 @@ export function retryProductReviewFeedback(
 
 
 export type {
+  PrivilegedOperationHumanResponse,
   PrivilegedOperationListResponse,
   PrivilegedOperationRecord,
   PrivilegedOperationSemanticReview,
@@ -1032,6 +1035,25 @@ export function approvePrivilegedOperation(
   };
   return requestJson<ApproveHumanPrivilegedOperationResponse>(
     `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/approve`,
+    "POST",
+    request.body,
+    signal,
+  );
+}
+
+export function cancelPrivilegedOperation(
+  operationId: string,
+  reason: string,
+  sourceEventId: string,
+  signal?: AbortSignal,
+): Promise<PrivilegedOperationHumanResponse> {
+  const request: CancelHumanPrivilegedOperationData = {
+    url: BROWSER_WRITE_ROUTES.privilegedOperationCancel,
+    path: { operation_id: operationId },
+    body: { source_event_id: sourceEventId, reason },
+  };
+  return requestJson<CancelHumanPrivilegedOperationResponse>(
+    `/v1/privileged-operations/plans/${encodeURIComponent(request.path.operation_id)}/cancel`,
     "POST",
     request.body,
     signal,

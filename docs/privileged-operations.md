@@ -126,12 +126,34 @@ route, execute action, static execution credential, or agent execution path.
   retain optional preparation context that fences the original baseline and
   permits only the one target addition. Generic historical requests omit this
   context, preserving their request digests and execution fingerprints.
-- The Engineering UI lists redacted human evidence and may offer browser-human
-  approve/revoke controls. Policy proposals include an explicit exact-policy
+- The Engineering UI lists redacted human evidence and offers browser-human
+  approve, Reject / Cancel, and revoke controls for the applicable lifecycle state. Policy proposals include an explicit exact-policy
   review disclosure. The UI never offers an execute control.
 
 The registry is not an arbitrary route, command, SQL, or payload proxy. New
 descriptors require code, schemas, tests, documentation, and review.
+
+### Rejecting a pending plan
+
+While signed in as the Director, open the operation's review link at
+`/ui/engineering/privileged-operations?operation_id=<id>`. For a pending
+(`planned`), unapproved operation, enter a **Reason for cancellation** and
+choose **Reject / Cancel plan**. Cancellation remains available even when
+approval is blocked or the proposed policy details cannot be loaded.
+
+The browser uses `POST /v1/privileged-operations/plans/{operation_id}/cancel`
+with the same single-use CSRF protection as approval. The service requires the
+descriptor's existing managed cancellation authority; this control grants no
+new access. It records the signed-in human's immutable GitHub ID, login,
+timestamp, and reason in the operation event ledger and atomically makes the
+operation terminal (`cancelled`). It can never be approved or executed.
+
+The page reads back the saved record and shows the cancellation reason and
+actor. Approve and Reject / Cancel disappear; refreshing the review retains
+the terminal state. If refreshed readback fails after cancellation was
+recorded, the page says so and keeps approval disabled; use **Refresh plans**
+to check the saved state. An already approved operation uses **Revoke approval**
+instead. Agents cannot cancel, approve, or revoke, including their own proposals.
 
 ## Admin Confirmation Contract Seam
 
