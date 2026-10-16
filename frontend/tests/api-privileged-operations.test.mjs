@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
+import { BROWSER_WRITE_ROUTES } from "../src/browser-write-contract.ts";
 
 import {
   approvePrivilegedOperation,
@@ -30,7 +31,7 @@ test("cancellation uses browser CSRF and preserves the source event for replay",
   const result = await cancelPrivilegedOperation("operation-1", "Superseded", "ui:cancel:retry");
   assert.equal(result.record.status, "cancelled");
   assert.equal(calls[0].input, "/v1/auth/session");
-  assert.equal(calls[1].input, "/v1/privileged-operations/plans/operation-1/cancel");
+  assert.equal(calls[1].input, BROWSER_WRITE_ROUTES.privilegedOperationCancel.replace("{operation_id}", "operation-1"));
   assert.equal(calls[1].init.method, "POST");
   assert.equal(calls[1].init.headers["X-CSRF-Token"], "cancel-csrf");
   assert.deepEqual(JSON.parse(calls[1].init.body), { reason: "Superseded", source_event_id: "ui:cancel:retry" });

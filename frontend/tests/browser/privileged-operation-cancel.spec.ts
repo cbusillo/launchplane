@@ -2,6 +2,7 @@ import { expect, test, waitForState, type Page } from "./state";
 
 const operationId = "privileged-operation-abcdef0123456789abcdef0123456789";
 const operationPath = `/v1/privileged-operations/plans/${operationId}`;
+const cancellingActor = { identity_type: "github_human", github_id: 123, login: "fixture-director" };
 
 async function fixture(page: Page, options: {
   status?: string;
@@ -10,6 +11,9 @@ async function fixture(page: Page, options: {
   unavailableReadback?: boolean;
   hold?: Promise<void>;
   readOnly?: boolean;
+  retired?: boolean;
+  loseFirstResponse?: boolean;
+  concurrentApproval?: boolean;
 } = {}) {
   await page.goto("/ui/?fixture=products");
   const identity = await page.evaluate(async () => (await import("/ui/src/dev-fixtures.ts")).fixtureIdentity);
@@ -19,7 +23,7 @@ async function fixture(page: Page, options: {
   let readbacks = 0;
   const mutations: { path: string; body: { reason: string; source_event_id: string }; csrf: string | undefined }[] = [];
   const unexpected: string[] = [];
-  const event = () => ({ event_id: "cancel-event", action: "cancelled", occurred_at: "2026-10-16T12:00:00Z", actor: { identity_type: "github_human", github_id: 123, login: "fixture-director" }, reason });
+  const event = () => ({ event_id: "cancel-event", action: "cancelled", occurred_at: "2026-10-16T12:00:00Z", actor: cancellingActor, reason });
   await page.route("**/v1/**", async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -29,7 +33,7 @@ async function fixture(page: Page, options: {
       await route.fulfill({ json: { status: "ok", products: [] } });
     } else if (path === `${operationPath}/review` && request.method() === "GET") {
       await route.fulfill({ json: { status: "ok", trace_id: "fixture-review", review: {
-        operation_id: operationId, descriptor_id: "managed-merge-train-policy-import", operation_class: "managed_merge_train_policy_import",
+        operation_id: operationId, descriptor_id: options.retired ? "ordinary-agent-delivery-activation" : "managed-merge-train-policy-import", operation_class: "managed_merge_train_policy_import",
         title: "Review agent policy proposal", requested_by_kind: "local_operator",
         lifecycle: { status, created_at: "2026-10-16T10:00:00Z", updated_at: "2026-10-16T12:00:00Z", expires_at: "", expiry_state: "active", approval_recorded: status === "approved", execution_recorded: false, terminal_reason_available: status === "cancelled" },
         blockers: { state: options.unavailableDetails ? "blocked" : "clear" },
@@ -49,7 +53,12 @@ async function fixture(page: Page, options: {
       const body = request.postDataJSON();
       mutations.push({ path, body, csrf: request.headers()["x-csrf-token"] });
       if (options.hold) await options.hold;
-      if (options.deny) {
+      if (options.loseFirstResponse && mutations.length === 1) {
+        await route.abort("failed");
+      } else if (options.concurrentApproval) {
+        status = "approved";
+        await route.fulfill({ status: 409, json: { error: { message: "Plan was already approved." } } });
+      } else if (options.deny) {
         await route.fulfill({ status: 403, json: { trace_id: "fixture-denial", error: { code: "authorization_denied", message: "This identity cannot cancel this plan." } } });
       } else {
         status = "cancelled";
@@ -79,8 +88,9 @@ test("Director cancels a pending plan with a reason and reads the terminal resul
   await page.screenshot({ path: testInfo.outputPath("pending-cancel-control.png"), fullPage: true });
   await cancel.click();
   await expect(page.getByRole("region", { name: "Cancellation result" })).toContainText("Superseded by the replacement plan");
-  await expect(page.getByRole("region", { name: "Cancellation result" })).toContainText("fixture-director (GitHub ID 123)");
-  await expect(page.getByText("Plan cancelled. It can no longer be approved or executed.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Cancellation result" })).toContainText(cancellingActor.login);
+  await expect(page.getByRole("region", { name: "Cancellation result" })).toContainText(String(cancellingActor.github_id));
+  await expect(page.getByRole("status", { name: "Operation update" })).not.toBeEmpty();
   await expect(approve).toHaveCount(0);
   await expect(cancel).toHaveCount(0);
   expect(state.readbacks()).toBeGreaterThan(0);
@@ -138,7 +148,7 @@ test("failed refreshed readback cannot restore approval after cancellation", asy
   const state = await fixture(page, { unavailableReadback: true });
   await page.getByLabel("Reason for cancellation").fill("Superseded");
   await page.getByRole("button", { name: "Reject / Cancel plan", exact: true }).click();
-  await expect(page.getByText("Cancellation recorded, but the refreshed result could not be read. Refresh plans to check it.", { exact: true })).toBeVisible();
+  await expect(page.getByRole("status", { name: "Operation update" })).not.toBeEmpty();
   await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(0);
   expect(state.readbacks()).toBeGreaterThan(0);
@@ -157,4 +167,37 @@ test("a read-only browser session has no cancellation control", async ({ page })
   await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(0);
   await expect(page.getByLabel("Reason for cancellation")).toHaveCount(0);
   expect(state.mutations).toEqual([]);
+});
+
+test("an uncertain cancellation preserves its reason and source event for retry", async ({ page }) => {
+  const state = await fixture(page, { loseFirstResponse: true });
+  const reason = page.getByLabel("Reason for cancellation");
+  await reason.fill("Superseded plan");
+  const cancel = page.getByRole("button", { name: "Reject / Cancel plan", exact: true });
+  await cancel.click();
+  await expect(page.getByRole("status", { name: "Operation update" })).not.toBeEmpty();
+  await expect(reason).toBeDisabled();
+  await expect(cancel).toBeEnabled();
+  await cancel.click();
+  await expect(page.locator(".privileged-operation-status")).toHaveText("cancelled");
+  expect(state.mutations).toHaveLength(2);
+  expect(state.mutations[1].body).toEqual(state.mutations[0].body);
+});
+
+test("a retired plan has no cancellation control", async ({ page }) => {
+  const state = await fixture(page, { retired: true });
+  await expect(page.locator(".privileged-operation-status")).toHaveText("planned");
+  await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(0);
+  expect(state.mutations).toEqual([]);
+});
+
+test("a concurrent approval refreshes to the approved lifecycle after cancellation conflicts", async ({ page }) => {
+  const state = await fixture(page, { concurrentApproval: true });
+  await page.getByLabel("Reason for cancellation").fill("Superseded");
+  await page.getByRole("button", { name: "Reject / Cancel plan", exact: true }).click();
+  await expect(page.locator(".privileged-operation-status")).toHaveText("approved");
+  await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Revoke approval", exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Cancellation result" })).toHaveCount(0);
+  expect(state.mutations).toHaveLength(1);
 });

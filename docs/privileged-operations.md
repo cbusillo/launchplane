@@ -72,7 +72,7 @@ Before first use, the Director prepares **agent proposal access** in the Access
 policy tab and approves that separate managed authorization plan. See
 [the proposer grant](authorization-authority.md#preparing-agent-proposal-access).
 Code landing does not install it. Removing proposer access does not cancel
-already pending plans; those still need separate Director approval.
+already pending plans; those still need separate Director approval or cancellation.
 After the first `local_operator` requester record is persisted, rollback must
 retain a reader that supports that requester type. Older records remain readable.
 Stage 2 scheduler activation remains a separate
@@ -127,7 +127,8 @@ route, execute action, static execution credential, or agent execution path.
   permits only the one target addition. Generic historical requests omit this
   context, preserving their request digests and execution fingerprints.
 - The Engineering UI lists redacted human evidence and offers browser-human
-  approve, Reject / Cancel, and revoke controls for the applicable lifecycle state. Policy proposals include an explicit exact-policy
+  approve, Reject / Cancel, and revoke controls for the applicable lifecycle
+  state. Policy proposals include an explicit exact-policy
   review disclosure. The UI never offers an execute control.
 
 The registry is not an arbitrary route, command, SQL, or payload proxy. New
@@ -154,6 +155,9 @@ the terminal state. If refreshed readback fails after cancellation was
 recorded, the page says so and keeps approval disabled; use **Refresh plans**
 to check the saved state. An already approved operation uses **Revoke approval**
 instead. Agents cannot cancel, approve, or revoke, including their own proposals.
+After an uncertain response the reason stays locked for a retry with the same
+source event; refresh the plan to check its state. Retired operation types have
+no cancellation control.
 
 ## Admin Confirmation Contract Seam
 

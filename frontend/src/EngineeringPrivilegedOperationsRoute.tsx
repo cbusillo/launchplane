@@ -618,6 +618,7 @@ function PrivilegedOperationPlanCard({
   const [cancellation, setCancellation] = useState<PrivilegedOperationHumanResponse | null>(null);
   const cancelled = cancellation?.record.status === "cancelled" || review.lifecycle.status === "cancelled";
   const canCancel = admin && !cancelled && review.lifecycle.status === "planned"
+    && selectedPlanType(review.descriptor_id) !== null
     && !review.lifecycle.approval_recorded && !review.lifecycle.execution_recorded;
   const isAgentPolicyProposal = review.requested_by_kind === "local_operator";
   const proposalLoader = useCallback(async (signal: AbortSignal) => {
@@ -687,6 +688,10 @@ function PrivilegedOperationPlanCard({
       setRawDetail(JSON.stringify(detail, null, 2));
       setMutationMessage("Plan cancelled. It can no longer be approved or executed.");
     } catch (error) {
+      if (!recorded && error instanceof LaunchplaneApiError
+        && [400, 403, 410, 422].includes(error.statusCode)) {
+        cancelEventId.current = null;
+      }
       setMutationMessage(recorded
         ? "Cancellation recorded, but the refreshed result could not be read. Refresh plans to check it."
         : error instanceof LaunchplaneApiError
@@ -876,7 +881,7 @@ function PrivilegedOperationPlanCard({
         }}>
           <label>
             Reason for cancellation
-            <textarea required maxLength={4000} value={cancelReason} disabled={pendingMutation}
+            <textarea required maxLength={4000} value={cancelReason} disabled={pendingMutation || cancelEventId.current !== null}
               onChange={event => setCancelReason(event.target.value)} />
           </label>
           <p>Reject this pending plan permanently. It cannot be approved or executed afterwards.</p>
@@ -914,7 +919,7 @@ function PrivilegedOperationPlanCard({
       ) : null}
 
       {mutationMessage ? (
-        <p className="privileged-operation-terminal-reason" role="status">
+        <p className="privileged-operation-terminal-reason" role="status" aria-label="Operation update">
           {mutationMessage}
         </p>
       ) : null}
