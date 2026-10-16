@@ -575,6 +575,14 @@ def recover_stranded_testing_replacements(
                 )
                 if current != operation or current.recovery_journal is None:
                     continue
+                retained_generation = getattr(store, "read_retained_testing_generation", None)
+                if (
+                    callable(retained_generation)
+                    and retained_generation(operation.operation_id) is not None
+                ):
+                    # Check under executor exclusion: retirement may have committed
+                    # after the sweep read. Only an isolated successor supersedes it.
+                    continue
                 authorization = current.authorization
                 assert authorization is not None
                 if not launchplane_reconcile_authorization_allows(

@@ -147,6 +147,10 @@ from control_plane.http_routes.lane_service_restart import (
     ServiceRestartDependencies,
     register_service_restart_route,
 )
+from control_plane.http_routes.odoo_walkthrough import (
+    WalkthroughDependencies,
+    register_walkthrough_route,
+)
 from control_plane.repository_evidence import (
     GitHubRepositoryEvidenceProvider,
 )
@@ -948,6 +952,9 @@ from control_plane.http_routes.testing_replacement_resources import (
 )
 from control_plane.http_routes.testing_replacement_bootstrap import (
     register_testing_replacement_bootstrap_routes,
+)
+from control_plane.http_routes.testing_generation_retirement import (
+    register_testing_generation_retirement_routes,
 )
 from control_plane.http_routes.product_website_cleanup import (
     register_product_website_cleanup_routes,
@@ -29437,6 +29444,18 @@ def create_launchplane_fastapi_app(
             error_response_model=LaunchplaneErrorResponse,
         ),
     )
+    register_walkthrough_route(
+        app,
+        dependencies=WalkthroughDependencies(
+            read_identity=read_operator_mutation_identity,
+            get_record_store=get_record_store,
+            next_trace_id=next_trace_id,
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            http_error=_launchplane_http_error,
+            control_plane_root=resolved_control_plane_root,
+            error_response_model=LaunchplaneErrorResponse,
+        ),
+    )
     register_managed_secret_read_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
@@ -29566,6 +29585,11 @@ def create_launchplane_fastapi_app(
         mutation_identity=read_browser_mutation_identity,
         root=resolved_control_plane_root,
         run_provider_mutation=run_provider_mutation,
+    )
+    register_testing_generation_retirement_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
     )
 
     register_product_website_cleanup_routes(

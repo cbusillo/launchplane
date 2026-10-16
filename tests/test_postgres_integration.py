@@ -960,6 +960,154 @@ def _owner_acceptance_system_event(
     )
 
 
+class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
+    def test_native_probe_requires_quiescence_and_reads_actual_staff_activity(self) -> None:
+        from contextlib import redirect_stdout
+        import io
+        import sys
+        from types import SimpleNamespace
+
+        import psycopg
+
+        from control_plane.contracts.odoo_walkthrough import (
+            WALKTHROUGH_ACTIVE_STATE,
+            WALKTHROUGH_CLOSED_STATE,
+            WALKTHROUGH_LOCK_PREFIX,
+            WALKTHROUGH_LOGIN_PREFIX,
+            WALKTHROUGH_MARKER_PREFIX,
+        )
+        from control_plane.dokploy.odoo_walkthrough import ACCOUNT_DATABASE_PROBE
+        from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
+
+        with _isolated_postgres_database() as database_url:
+            url = database_url.replace("postgresql+psycopg://", "postgresql://")
+            spec = {
+                "mode": "quiescence",
+                "binding": "fixture-binding",
+                "copy_binding": "fixture-copy",
+                "task_id": "1" * 32,
+                "usage_since": datetime.now(timezone.utc).isoformat(),
+            }
+            with psycopg.connect(url) as owner:
+                owner.execute("CREATE TABLE ir_config_parameter (key text, value text)")
+                owner.execute("CREATE TABLE res_users (id int, login text, active bool)")
+                owner.execute("CREATE TABLE res_users_log (create_uid int, create_date timestamp)")
+                owner.execute(
+                    "INSERT INTO ir_config_parameter VALUES (%s,%s)",
+                    ("web.base.url", "https://fixture.invalid"),
+                )
+                owner.execute(
+                    "INSERT INTO ir_config_parameter VALUES (%s,%s),(%s,%s)",
+                    (
+                        TESTING_COPY_COMPLETION_PARAMETER,
+                        spec["copy_binding"],
+                        WALKTHROUGH_MARKER_PREFIX + spec["task_id"],
+                        json.dumps(
+                            {
+                                "binding": spec["binding"],
+                                "copy_binding": spec["copy_binding"],
+                                "account_id": 17,
+                                "state": WALKTHROUGH_ACTIVE_STATE,
+                            }
+                        ),
+                    ),
+                )
+                owner.execute(
+                    "INSERT INTO res_users VALUES (%s,%s,%s)",
+                    (17, WALKTHROUGH_LOGIN_PREFIX + spec["task_id"], True),
+                )
+                owner.commit()
+
+                def connect(**kwargs: object) -> SimpleNamespace:
+                    connection = psycopg.connect(url)
+
+                    def set_session(*, readonly: bool, autocommit: bool) -> None:
+                        connection.read_only = readonly
+                        connection.autocommit = autocommit
+
+                    return SimpleNamespace(
+                        set_session=set_session,
+                        cursor=connection.cursor,
+                        rollback=connection.rollback,
+                        close=connection.close,
+                    )
+
+                def probe() -> bool:
+                    output = io.StringIO()
+                    with (
+                        patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=connect)}),
+                        patch.dict(
+                            os.environ,
+                            {
+                                "ODOO_DB_HOST": "unused-fixture",
+                                "ODOO_DB_NAME": "unused-fixture",
+                                "ODOO_DB_USER": "unused-fixture",
+                                "ODOO_DB_PASSWORD": "unused-fixture",
+                            },
+                        ),
+                        patch.object(sys, "stdin", io.StringIO(json.dumps(spec))),
+                        redirect_stdout(output),
+                    ):
+                        exec(compile(ACCOUNT_DATABASE_PROBE, "native-database-probe", "exec"), {})
+                    return json.loads(output.getvalue())["clear"] is True
+
+                owner.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    (WALKTHROUGH_LOCK_PREFIX + spec["binding"],),
+                )
+                self.assertFalse(probe())
+                owner.commit()
+                self.assertTrue(probe())
+                spec["mode"] = "usage"
+                self.assertTrue(probe())
+                owner.execute(
+                    "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (17,)
+                )
+                owner.commit()
+                self.assertTrue(probe())
+                # A completed task's history does not masquerade as staff use
+                # when a new task is admitted on this same isolated copy.
+                owner.execute("UPDATE res_users SET active=false WHERE id=17")
+                owner.execute(
+                    "UPDATE ir_config_parameter SET value=%s WHERE key=%s",
+                    (
+                        json.dumps(
+                            {
+                                "binding": spec["binding"],
+                                "copy_binding": spec["copy_binding"],
+                                "account_id": 17,
+                                "state": WALKTHROUGH_CLOSED_STATE,
+                            }
+                        ),
+                        WALKTHROUGH_MARKER_PREFIX + spec["task_id"],
+                    ),
+                )
+                owner.commit()
+                spec.update(mode="lane_usage", task_id="2" * 32)
+                self.assertTrue(probe())
+                owner.execute(
+                    "UPDATE ir_config_parameter SET value=%s WHERE key=%s",
+                    (
+                        json.dumps(
+                            {
+                                "copy_binding": "a-different-copy",
+                                "account_id": 17,
+                                "state": WALKTHROUGH_CLOSED_STATE,
+                            }
+                        ),
+                        WALKTHROUGH_MARKER_PREFIX + "1" * 32,
+                    ),
+                )
+                owner.commit()
+                self.assertFalse(probe())
+                owner.execute("DELETE FROM res_users_log")
+                owner.execute(
+                    "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (23,)
+                )
+                owner.commit()
+                self.assertFalse(probe())
+
+
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
 )
@@ -11586,3 +11734,221 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                 scenario.profile.product, scenario.context
             )
         )
+
+
+class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
+    def test_retirement_replay_rollback_and_scope_on_real_postgres(self) -> None:
+        from tests.test_testing_generation_retirement import TestingGenerationRetirementTests
+
+        for name in unittest.defaultTestLoader.getTestCaseNames(TestingGenerationRetirementTests):
+            with self.subTest(scenario=name), _head_postgres_database() as url:
+                fixture = TestingGenerationRetirementTests(name)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, name)()
+                finally:
+                    fixture.doCleanups()
+
+    def test_retirement_excludes_configuration_writers_through_atomic_commit(self) -> None:
+        from tests.test_testing_generation_retirement import TestingGenerationRetirementTests
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        with _head_postgres_database() as url:
+            fixture = TestingGenerationRetirementTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            second = PostgresRecordStore(database_url=url)
+            self.addCleanup(second.close)
+            before_commit = threading.Event()
+            writer_at_lock = threading.Event()
+            permit_commit = threading.Event()
+            original_lock = second._lock_product_authority_bundle_write
+
+            def observe_lock(session: Any) -> None:
+                writer_at_lock.set()
+                original_lock(session)
+
+            def hold_commit(_step: str) -> None:
+                before_commit.set()
+                if not permit_commit.wait(10):
+                    raise RuntimeError("Fixture did not release commit.")
+
+            with (
+                ThreadPoolExecutor(max_workers=2) as pool,
+                patch.object(
+                    fixture.store, "_after_product_authority_bundle_step", side_effect=hold_commit
+                ),
+                patch.object(
+                    second, "_lock_product_authority_bundle_write", side_effect=observe_lock
+                ),
+            ):
+                retirement = pool.submit(fixture.apply)
+                try:
+                    self.assertTrue(before_commit.wait(10))
+                    writer = pool.submit(
+                        second.write_runtime_environment_record,
+                        RuntimeEnvironmentRecord(
+                            scope="global",
+                            env={"FIXTURE_GLOBAL": "new"},
+                            updated_at=datetime.now(timezone.utc).isoformat(),
+                        ),
+                    )
+                    self.assertTrue(writer_at_lock.wait(10))
+                    self.assertFalse(writer.done())
+                    self.assertIsNotNone(
+                        second.read_fresh_odoo_testing_generation(fixture.product, fixture.context)
+                    )
+                    self.assertIsNone(
+                        second.read_retained_testing_generation(fixture.operation.operation_id)
+                    )
+                finally:
+                    permit_commit.set()
+                self.assertEqual(retirement.result(timeout=10)[0], "written")
+                writer.result(timeout=10)
+            self.assertIsNone(
+                second.read_fresh_odoo_testing_generation(fixture.product, fixture.context)
+            )
+            retained = second.read_retained_testing_generation(fixture.operation.operation_id)
+            assert retained is not None
+            self.assertEqual(retained.operation, fixture.operation)
+
+    def test_retired_generation_can_only_continue_as_a_distinct_qualified_successor(self) -> None:
+        from tests.test_testing_generation_retirement import TestingGenerationRetirementTests
+        from control_plane.odoo_testing_resources import OdooTestingResources
+        from control_plane.testing_replacement_resources import (
+            TestingReplacementResourceAdapter,
+            TestingReplacementResourcesRequest,
+        )
+        from control_plane.testing_replacement_bootstrap import TestingReplacementBootstrapRequest
+        from control_plane.storage.product_authority_bundle import (
+            ProductAuthorityBundle,
+            ProviderTargetWrite,
+        )
+
+        with _head_postgres_database() as url:
+            fixture = TestingGenerationRetirementTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            store = fixture.store
+            self.assertEqual(fixture.apply()[0], "written")
+            self.assertTrue(
+                store.prepare_disposable_testing_replacement(fixture.operation, "fixture-director")
+            )
+            allocation = store.read_disposable_resource_preparation(fixture.operation.operation_id)
+            assert allocation is not None
+            assigned = allocation.model_copy(
+                update={"resource_namespace": "lp-testing-" + "b" * 32}
+            )
+            store.compare_and_write_disposable_resource_preparation(
+                expected=allocation, replacement=assigned
+            )
+            target = DokployTargetRecord(
+                context=fixture.context,
+                instance="testing",
+                target_name=assigned.resource_namespace,
+                updated_at=fixture.gen.prepared_at,
+            )
+            target_id = DokployTargetIdRecord(
+                context=fixture.context,
+                instance="testing",
+                target_id="successor-compose",
+                updated_at=target.updated_at,
+            )
+            provider = ProviderTargetRecord.from_dokploy_records(
+                target_record=target, target_id_record=target_id
+            )
+            with store.capture_disposable_resource_adoption(assigned, checkpoint=lambda: None):
+                store.write_product_authority_bundle(
+                    ProductAuthorityBundle(
+                        dokploy_targets=(target,),
+                        dokploy_target_ids=(target_id,),
+                        provider_target_writes=(
+                            ProviderTargetWrite(
+                                record=provider,
+                                expected_record=store.read_provider_target_record(
+                                    context_name=fixture.context, instance_name="testing"
+                                ),
+                            ),
+                        ),
+                    )
+                )
+            resources = OdooTestingResources(
+                product=fixture.product,
+                context=fixture.context,
+                operation_id=fixture.operation.operation_id,
+                target_id=target_id.target_id,
+                namespace=assigned.resource_namespace,
+            )
+            adapter = TestingReplacementResourceAdapter(
+                fixture.fixture.fixture.root,
+                store,
+                fixture.product,
+                TestingReplacementResourcesRequest(
+                    context=fixture.context,
+                    operation_id=fixture.operation.operation_id,
+                    reason="Qualify independent successor",
+                ),
+                "fixture-trace",
+            )
+            adapter.publish(resources, "successor-resource-inspection")
+            scenario = fixture.fixture
+            scenario.request = TestingReplacementBootstrapRequest(
+                context=fixture.context,
+                operation_id=fixture.operation.operation_id,
+                domain_host=fixture.gen.domain_host,
+                reason="Separate successor bootstrap",
+            )
+            # Even an exact qualified allocation cannot take the retained hostname.
+            with self.assertRaises(ValueError):
+                scenario.review()
+            scenario.request = scenario.request.model_copy(
+                update={"domain_host": "successor.example.invalid"}
+            )
+            scenario.resources = resources
+            scenario.patches()
+            scenario.review()
+            scenario.apply()
+            current = store.read_fresh_odoo_testing_generation(fixture.product, fixture.context)
+            assert current is not None
+            self.assertNotEqual(current.target_id, fixture.gen.target_id)
+            self.assertNotEqual(current.namespace, fixture.gen.namespace)
+            retired = store.read_retained_testing_generation(fixture.operation.operation_id)
+            assert retired is not None
+            self.assertEqual(retired.generation, fixture.gen)
+            self.assertEqual(retired.operation, fixture.operation)
+            superseded = store.read_odoo_stable_target_replacement_operation_record(
+                fixture.operation.operation_id
+            )
+            self.assertEqual(superseded.status, "superseded")
+            self.assertEqual(superseded.recovery_journal, fixture.operation.recovery_journal)
+            self.assertIsNone(superseded.cancellation)
+            self.assertTrue(current.reconcile_requested_at)
+
+    def test_retirement_custody_survives_schema_downgrade_and_reupgrade(self) -> None:
+        from tests.test_testing_generation_retirement import TestingGenerationRetirementTests
+        from control_plane.storage.migrations.versions import (
+            cd192c59f009_retained_testing_generations as migration,
+        )
+
+        with _head_postgres_database() as url:
+            fixture = TestingGenerationRetirementTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            fixture.apply()
+            before = fixture.store.read_retained_testing_generation(fixture.operation.operation_id)
+            config = _alembic_config(url)
+            alembic_command.downgrade(config, migration.down_revision)
+            self.assertEqual(
+                fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
+                before,
+            )
+            alembic_command.upgrade(config, "head")
+            fixture.store.verify_schema()
+            self.assertEqual(
+                fixture.store.read_retained_testing_generation(fixture.operation.operation_id),
+                before,
+            )

@@ -48,6 +48,65 @@
       {
         "idempotency": "apply",
         "identity_dependencies": [
+          "read_operator_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
+        "operation_id": "odoo_testing_walkthrough",
+        "path": "/v1/drivers/odoo/testing-walkthrough",
+        "purpose": "Provision or revoke a testing-only Odoo task account, or run its browser inside Launchplane; return only redacted receipts and masked screenshots.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "3963867c5c058922f309d9303f21605cd0e7cb6f9e139d18a4ae8440f634ae8b",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "retire_incomplete_testing_generation",
+        "path": "/v1/products/{product}/testing-generation-retirement",
+        "purpose": "Retain an incomplete legacy testing generation and its unknown history without releasing the operation; an isolated successor remains separately qualified.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "a647fa4ac57158aebdfc4fecde23df3299549aea436c09259b8c1ab0746e0e81",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
           "read_browser_mutation_identity"
         ],
         "method": "POST",
@@ -626,8 +685,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "220fadc40d80b7eb4dbfe2229a2506c9d731409a"
+    "source_commit_sha": "cfbc118dda420b9af6782113e7fd58bcb47de121"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "47d51593c1aa8850a76acc2960805fb1a9bf596913fc246380619165d53bcec8"
+  "semantic_digest_sha256": "6df40a49d8b56ded7544b84d9ed584dbfa2d167117d94e82ef704e4cf9de2b77"
 }

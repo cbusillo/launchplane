@@ -108,6 +108,10 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 
 if TYPE_CHECKING:
     from control_plane.stored_record_snapshot import SnapshotAuthorization
+    from control_plane.testing_generation_retirement import (
+        RetainedTestingGeneration,
+        TestingGenerationRetirementRequest,
+    )
     from control_plane.legacy_preview_reconciliation import LegacyPreviewReconciliationRequest
     from control_plane.product_retirement import BoundProductRetirement
     from control_plane.contracts.merge_train_historical_completion import (
@@ -3736,6 +3740,13 @@ class LaunchplaneFreshOdooTestingGenerationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneRetainedTestingGenerationRow(Base):
+    __tablename__ = "launchplane_retained_testing_generations"
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    generation_binding_sha256: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneNativeTestingCopyCaptureRow(Base):
     __tablename__ = "launchplane_native_testing_copy_captures"
     generation_binding_sha256: Mapped[str] = mapped_column(String, primary_key=True)
@@ -6053,6 +6064,16 @@ class PostgresRecordStore(HumanSessionStore):
                     self._assert_unreserved_disposable_hosts(
                         session, DokployTargetRecord.model_validate(row.payload)
                     )
+                elif isinstance(row, LaunchplaneDokployTargetIdRow):
+                    previous_target = session.get(
+                        LaunchplaneDokployTargetRow, (row.context, row.instance)
+                    )
+                    if previous_target is not None:
+                        self._assert_unreserved_disposable_hosts(
+                            session,
+                            DokployTargetRecord.model_validate(previous_target.payload),
+                            target_id=row.target_id,
+                        )
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -6490,7 +6511,28 @@ class PostgresRecordStore(HumanSessionStore):
                 self._disposable_authority_context, "adoption_checkpoint", None
             )
             for target in bundle.dokploy_targets:
-                self._assert_unreserved_disposable_hosts(session, target)
+                next_identities: list[str | None] = [
+                    item.target_id
+                    for item in bundle.dokploy_target_ids
+                    if (item.context, item.instance) == (target.context, target.instance)
+                ]
+                for next_id in next_identities or [None]:
+                    self._assert_unreserved_disposable_hosts(session, target, target_id=next_id)
+            for identity in bundle.dokploy_target_ids:
+                if any(
+                    (item.context, item.instance) == (identity.context, identity.instance)
+                    for item in bundle.dokploy_targets
+                ):
+                    continue
+                previous_target = session.get(
+                    LaunchplaneDokployTargetRow, (identity.context, identity.instance)
+                )
+                if previous_target is not None:
+                    self._assert_unreserved_disposable_hosts(
+                        session,
+                        DokployTargetRecord.model_validate(previous_target.payload),
+                        target_id=identity.target_id,
+                    )
             if adoption_checkpoint is not None:
                 outer = getattr(self._disposable_authority_context, "session", None)
                 self._disposable_authority_context.session = session
@@ -10354,7 +10396,13 @@ class PostgresRecordStore(HumanSessionStore):
             if (
                 current_record.status == "reconciliation_required"
                 and service_testing_operation(current_record)
-                and expected_record is None
+                and (
+                    expected_record is None
+                    or session.get(
+                        LaunchplaneRetainedTestingGenerationRow, current_record.operation_id
+                    )
+                    is not None
+                )
             ):
                 return False
             if expected_record is not None:
@@ -10458,6 +10506,103 @@ class PostgresRecordStore(HumanSessionStore):
         with self._session_factory() as session:
             row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
             return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
+
+    def read_retained_testing_generation(
+        self, operation_id: str
+    ) -> RetainedTestingGeneration | None:
+        from control_plane.testing_generation_retirement import RetainedTestingGeneration
+
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneRetainedTestingGenerationRow, operation_id)
+            return RetainedTestingGeneration.model_validate(row.payload) if row else None
+
+    def retire_testing_generation(
+        self,
+        *,
+        product: str,
+        request: TestingGenerationRetirementRequest,
+        mutation: DbOnlyMutationRequest,
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Archive and receipt atomically, with the original held operation untouched."""
+        from control_plane.testing_generation_retirement import retirement_snapshot
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session,
+                mutation=mutation,
+            )
+            if status != "acquired":
+                return status, reservation
+            assert reservation_row is not None
+            with self.testing_replacement_execution_lock(request.operation_id) as check:
+                if check is None:
+                    raise ValueError("The original testing executor cannot be excluded.")
+                if self.database_dialect_name == "postgresql":
+                    self._lock_odoo_stable_lane(
+                        session, product=product, context=request.context, instance="testing"
+                    )
+                self._lock_product_authority_bundle_write(session)
+                operation_row = session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow,
+                    request.operation_id,
+                    with_for_update=True,
+                )
+                generation_row = session.get(
+                    LaunchplaneFreshOdooTestingGenerationRow,
+                    (product, request.context),
+                    with_for_update=True,
+                )
+                if operation_row is None or generation_row is None:
+                    raise ValueError("The original testing custody changed.")
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    snapshot = retirement_snapshot(self, product, request)
+                finally:
+                    self._disposable_authority_context.session = outer
+                if (
+                    snapshot.plan.plan_sha256 != request.reviewed_plan_sha256
+                    or snapshot.operation
+                    != OdooStableTargetReplacementOperationRecord.model_validate(
+                        operation_row.payload
+                    )
+                    or snapshot.generation
+                    != FreshOdooTestingGeneration.model_validate(generation_row.payload)
+                ):
+                    raise ValueError("The reviewed testing retirement changed.")
+                if (
+                    session.get(LaunchplaneRetainedTestingGenerationRow, request.operation_id)
+                    is not None
+                ):
+                    raise ValueError("Retirement custody is immutable; use the original key.")
+                retained = snapshot.model_copy(
+                    update={
+                        "retired_at": self._database_mutation_timestamp(session),
+                        "retired_by": mutation.scope,
+                        "plan": snapshot.plan.model_copy(update={"applied": True}),
+                    }
+                )
+                session.add(
+                    LaunchplaneRetainedTestingGenerationRow(
+                        operation_id=request.operation_id,
+                        generation_binding_sha256=retained.plan.generation_binding_sha256,
+                        payload=self._payload_dict(retained),
+                    )
+                )
+                session.delete(generation_row)
+                self._after_product_authority_bundle_step("retain_testing_generation")
+                completion = complete_launchplane_mutation_reservation(
+                    reservation,
+                    response_status_code=mutation.response_status_code,
+                    response_trace_id=mutation.response_trace_id,
+                    completed_at=self._database_mutation_timestamp(session),
+                    response_payload=mutation.response_payload,
+                )
+                self._sync_idempotency_row(reservation_row, completion)
+                check()
+                session.commit()
+                return "written", completion
 
     def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
         with self._session_factory() as session:
@@ -11077,9 +11222,21 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:
+        from control_plane.odoo_testing_restore import generation_binding
+
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            if (
+                session.scalar(
+                    select(LaunchplaneRetainedTestingGenerationRow.operation_id).where(
+                        LaunchplaneRetainedTestingGenerationRow.generation_binding_sha256
+                        == generation_binding(record)
+                    )
+                )
+                is not None
+            ):
+                raise ValueError("A retired generation cannot be reactivated.")
             row = session.get(
                 LaunchplaneFreshOdooTestingGenerationRow,
                 (record.product, record.context),
@@ -11155,8 +11312,40 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
 
-    def _retained_disposable_hostnames(self, session: Session) -> frozenset[str]:
+    def _retained_disposable_hostnames(
+        self,
+        session: Session,
+        *,
+        current_target: DokployTargetRecord | None = None,
+        target_id: str | None = None,
+    ) -> frozenset[str]:
         hosts: set[str] = set()
+        from control_plane.testing_generation_retirement import RetainedTestingGeneration
+
+        for payload in session.scalars(select(LaunchplaneRetainedTestingGenerationRow.payload)):
+            retained_generation = RetainedTestingGeneration.model_validate(payload)
+            generation = retained_generation.generation
+            if current_target is not None and (current_target.context, current_target.instance) == (
+                generation.context,
+                "testing",
+            ):
+                current_identity = session.get(
+                    LaunchplaneDokployTargetIdRow, (generation.context, "testing")
+                )
+                current_record = session.get(
+                    LaunchplaneDokployTargetRow, (generation.context, "testing")
+                )
+                if current_identity is not None and current_record is not None:
+                    existing = DokployTargetRecord.model_validate(current_record.payload)
+                    if (
+                        current_identity.target_id == generation.target_id
+                        and target_id in (None, generation.target_id)
+                        and generation.domain_host in {*existing.domains, *existing.public_hosts}
+                    ):
+                        # Preserve an existing route on its exact original recipient.
+                        # A new ID in this same bundle must never inherit that host.
+                        continue
+            hosts.add(generation.domain_host)
         for payload in session.scalars(
             select(LaunchplaneDisposableTestingResourceAllocationRow.payload)
         ):
@@ -11177,14 +11366,20 @@ class PostgresRecordStore(HumanSessionStore):
             return self._retained_disposable_hostnames(session)
 
     def _assert_unreserved_disposable_hosts(
-        self, session: Session, target: DokployTargetRecord
+        self,
+        session: Session,
+        target: DokployTargetRecord,
+        *,
+        target_id: str | None = None,
     ) -> None:
         requested = {
             *target.domains,
             *target.public_hosts,
             *(effect.host for effect in target.pending_public_host_effects),
         }
-        if requested.intersection(self._retained_disposable_hostnames(session)):
+        if requested.intersection(
+            self._retained_disposable_hostnames(session, current_target=target, target_id=target_id)
+        ):
             raise DokployTargetRecordChanged(
                 "A hostname remains reserved by retained testing custody."
             )

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
 from control_plane.contracts.disposable_lane import (
     DISPOSABLE_LANE_OBSERVATION_ROUTE,
     TESTING_REPLACEMENT_RESOURCES_ROUTE,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
+from control_plane.testing_generation_retirement import ROUTE as TESTING_GENERATION_RETIREMENT_ROUTE
 
 import hashlib
 import json
@@ -90,6 +92,24 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        WALKTHROUGH_ROUTE,
+        "Provision or revoke a testing-only Odoo task account, or run its browser inside Launchplane; return only redacted receipts and masked screenshots.",
+        ("service_api",),
+        ("dry-run", "apply"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "POST",
+        TESTING_GENERATION_RETIREMENT_ROUTE,
+        "Retain an incomplete legacy testing generation and its unknown history without releasing the operation; an isolated successor remains separately qualified.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,

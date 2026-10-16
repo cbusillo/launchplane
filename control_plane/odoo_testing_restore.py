@@ -813,6 +813,11 @@ def restore_main():
             if marker!=spec['copy_binding_sha256']:
                 raise RuntimeError('Existing testing database lacks its generation witness')
         prefix=sys.argv[2]
+        if spec.get('task_account_cleanup') is True:
+            if present != '1':
+                raise RuntimeError('Testing cleanup database is unavailable')
+            print(prefix+json.dumps({'type':'complete','cleanup_qualified':True}),flush=True)
+            return
         if spec.get('usage_only'):
             if present != '1':
                 raise RuntimeError('Testing login history is unavailable')
@@ -1023,6 +1028,7 @@ def read_current_testing_generation(
     context: str,
     instance: str,
     bootstrap_preparation: bool = False,
+    task_account_cleanup: bool = False,
 ) -> FreshOdooTestingGeneration | None:
     if instance != "testing":
         return None
@@ -1060,7 +1066,9 @@ def read_current_testing_generation(
     target = getattr(store, "read_dokploy_target_record")(
         context_name=context, instance_name="testing"
     )
-    if target.policies.staff_testing_hold is not None or target.pending_public_host_effects:
+    if (
+        target.policies.staff_testing_hold is not None and not task_account_cleanup
+    ) or target.pending_public_host_effects:
         raise ValueError("Fresh testing generation has a use or route hold.")
     values: dict[str, object] = {}
     for scope in ("context", "instance"):

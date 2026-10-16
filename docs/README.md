@@ -47,6 +47,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   including owned previews, disposable-lane eligibility, and resumable execution.
 - [disposable-lanes.md](disposable-lanes.md) — usage/data/isolation facts, safe
   testing writes and replacement of stranded testing operations.
+- [odoo-testing-walkthrough.md](odoo-testing-walkthrough.md) — testing task
+  accounts, opaque service-owned browser sign-in, receipts and cleanup.
 - [legacy-preview-reconciliation.md](legacy-preview-reconciliation.md) — reviewed
   reconciliation of provider-absent generic-web preview history.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
