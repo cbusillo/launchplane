@@ -103,6 +103,12 @@ Treat this file as the launch checklist for each engineering session in
 
 - Use `.github/github.json` for the current test, lint,
   typecheck, build, inspection, and docs-freshness gates.
+- During the [Q326 trial](docs/style/testing.md#local-test-loop), routine
+  changes use focused local tests plus lint, type checks, and IDE inspection.
+  The full sharded suite runs in CI and must be green before the checked
+  `gh-pr.py ready` handoff. Run the full local suite for the trial's excluded
+  change kinds or when the affected boundary or observed risk requires it;
+  testing style owns that selection.
 - Changes to agent instructions, execution guidance, approval or safety rules,
   credential handling, or destructive helpers need review by another model
   before delivery. Use the `model-review` skill and its finding-disposition
