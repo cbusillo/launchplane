@@ -866,6 +866,7 @@ from control_plane.storage.product_authority_bundle import (
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
+from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -4281,6 +4282,7 @@ def create_launchplane_fastapi_app(
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
+    preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4361,6 +4363,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(health_monitor_scheduler.start)
             if testing_drill_scheduler is not None:
                 await run_in_threadpool(testing_drill_scheduler.start)
+            if preview_lifecycle_scheduler is not None:
+                await run_in_threadpool(preview_lifecycle_scheduler.start)
             startup_record_store = (
                 record_store_factory() if record_store_factory is not None else shared_record_store
             )
@@ -4370,6 +4374,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
+            if preview_lifecycle_scheduler is not None:
+                await run_in_threadpool(preview_lifecycle_scheduler.stop)
             if testing_drill_scheduler is not None:
                 await run_in_threadpool(testing_drill_scheduler.stop)
             if health_monitor_scheduler is not None:
