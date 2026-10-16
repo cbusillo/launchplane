@@ -25,6 +25,7 @@ from control_plane.local_consumer_contract import (
     VERIFY_ROUTE,
     ConsumerPackage,
     ConsumerRequest,
+    ConsumerVerificationResponse,
     canonical,
     digest,
     https_origin,
@@ -366,7 +367,7 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.app, "POST", VERIFY_ROUTE, payload=response.json()["package"]
         )
         self.assertEqual(verified.status_code, 200, verified.text)
-        self.assertEqual(set(verified.json()), {"status", "package_digest"})
+        self.assertEqual(set(verified.json()), set(ConsumerVerificationResponse.model_fields))
 
     async def test_read_only_human_and_missing_csrf_cannot_issue(self) -> None:
         body = {"request": self.request.model_dump(mode="json")}
@@ -652,6 +653,14 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((self.directory / "bridge.token").read_text(), FAKE_VALUE)
             self.assertFalse(messages)
             self.assertFalse(any("Authorization" in headers for headers in control_headers))
+            # The default HTTPS trust bundle must also work for WSS, even when
+            # the interpreter's own CA paths don't include this fixture issuer.
+            with patch("requests.utils.DEFAULT_CA_BUNDLE_PATH", str(cert_file)):
+                del os.environ["SSL_CERT_FILE"]
+                try:
+                    receive_consumer(self.directory, downloaded)
+                finally:
+                    os.environ["SSL_CERT_FILE"] = str(cert_file)
             control_state["redirect"] = True
             control_paths.clear()
             with self.assertRaises(ValueError):

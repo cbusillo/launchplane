@@ -78,5 +78,5 @@ test("testing recipient review preserves its original encrypted delivery after a
 test("production has no local consumer delivery control", async ({ page }) => {
   await page.goto("/ui/products/atlas-commerce/environments/prod/managed-secrets?fixture=products");
   await page.getByRole("heading", { name: "Managed secrets", level: 1, exact: true }).waitFor();
-  await expect(page.getByRole("heading", { name: "Deliver to a testing client" })).toHaveCount(0);
+  await expect(page.locator(".local-consumer-panel")).toHaveCount(0);
 });

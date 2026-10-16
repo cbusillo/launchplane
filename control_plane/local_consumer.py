@@ -138,6 +138,10 @@ def prepare_consumer(
     return request
 
 
+def _ca_bundle() -> str:
+    return os.environ.get("SSL_CERT_FILE") or requests.utils.DEFAULT_CA_BUNDLE_PATH
+
+
 def _verify_service(package: ConsumerPackage) -> None:
     with requests.Session() as session:
         session.trust_env = False
@@ -146,7 +150,7 @@ def _verify_service(package: ConsumerPackage) -> None:
             json=package.model_dump(mode="json"),
             timeout=15,
             allow_redirects=False,
-            verify=os.environ.get("SSL_CERT_FILE") or True,
+            verify=_ca_bundle(),
         )
         if response.status_code != 200 or len(response.content) > 4096:
             raise ValueError("The original service could not verify the delivery.")
@@ -192,7 +196,7 @@ def _verify_bridge(request: ConsumerRequest, token: str) -> None:
             health_url,
             timeout=15,
             allow_redirects=False,
-            verify=os.environ.get("SSL_CERT_FILE") or True,
+            verify=_ca_bundle(),
         )
         if response.status_code != 200 or len(response.content) > 65536:
             raise ValueError("The testing runtime is not ready.")
@@ -212,7 +216,7 @@ def _verify_bridge(request: ConsumerRequest, token: str) -> None:
     assert server.hostname is not None
     transport_logger = logging.Logger("launchplane.local-consumer.transport")
     transport_logger.disabled = True
-    tls = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE"))
+    tls = ssl.create_default_context(cafile=_ca_bundle())
 
     # A preconnected socket makes websockets refuse *all* redirects, including
     # same-origin redirects to another lane or an unauthenticated endpoint.

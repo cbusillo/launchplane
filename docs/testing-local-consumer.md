@@ -104,7 +104,8 @@ There is no offline-install fallback.
 For a private certificate issuer, Chris can select an already reviewed CA bundle
 with `SSL_CERT_FILE=/absolute/path/to/ca-bundle.pem` for both the receiver and the
 testing bridge process. The bundle must cover the Launchplane HTTPS service and
-testing HTTPS/WSS issuer. Both HTTP and WebSocket verification stay enabled;
+testing HTTPS/WSS issuer. Both HTTP and WebSocket verification use the same CA
+bundle (the Requests bundle when no override is selected) and stay enabled;
 the helper does not install a CA or offer an insecure mode.
 
 After decrypting in memory, the receiver verifies healthy testing runtime
