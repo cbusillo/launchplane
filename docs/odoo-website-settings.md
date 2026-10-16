@@ -105,4 +105,4 @@ Compose readback recovers the inventory before retrying; zero or multiple
 containers remain uncertain and require the installed host's recovery procedure.
 The host transport must qualify interruption/convergence and fresh inventory
 reconstruction on restart before activation (#3268). Source support does not
-supply a live operator repair path or treat removed IDs as a successful receipt.
+supply a live admin repair path or treat removed IDs as a successful receipt.
