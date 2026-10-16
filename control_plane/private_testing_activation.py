@@ -227,6 +227,8 @@ class PrivateTestingActivationAdapter:
                 ):
                     raise PrivateTestingTransportRefused("Original operation intent differs.")
                 return cls(root, store, product, request, scope, trace_id, intent)
+        if request.mode == "readback":
+            raise PrivateTestingTransportRefused("Original source operation is unavailable.")
         records = _bind(store, product, request.context, request.instance)
         profile, target, target_id, provider = records
         if (

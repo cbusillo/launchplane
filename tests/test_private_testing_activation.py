@@ -228,6 +228,25 @@ class PrivateTestingActivationTests(unittest.TestCase):
                 listener_port=9553,
             )
 
+    def test_unknown_readback_key_or_actor_refuses_without_external_reads(self) -> None:
+        plan = self.prepare()
+        self.execute(plan)
+        self.reader.side_effect = AssertionError("Readback must not read source")
+        self.image.side_effect = AssertionError("Readback must not read provenance")
+        self.fixture.provider.side_effect = AssertionError("Unknown key must not read provider")
+        request = PrivateTestingActivationRequest.model_validate(
+            {
+                **self.payload,
+                "mode": "readback",
+                "expected_plan_sha256": plan.reconciliation_key(),
+            }
+        )
+        for key, scope in (("typo", "fixture-actor"), ("install", "other-actor")):
+            with self.subTest(key=key, scope=scope), self.assertRaises(ValueError):
+                PrivateTestingActivationAdapter.prepare(
+                    self.root, self.store, "example-site", request, scope, "fixture-trace", key
+                )
+
     def test_unknown_or_foreign_source_stays_uncertain_and_blocks_a_new_key(self) -> None:
         plan = self.prepare()
         self.lose_response = True
