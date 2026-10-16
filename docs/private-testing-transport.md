@@ -67,9 +67,12 @@ lifts a hold or claims that a workload is healthy.
 Initial tracked/provider Git source must agree on the product's repository,
 exact forty-character commit and Compose path, with automatic deployment off.
 The existing source reader fetches that immutable tree and the existing build
-verifier proves its artifact provenance; SHA-shaped branch acceptance is not
+verifier proves its artifact provenance at plan time; later deployments still
+verify/select their own artifact through the existing driver; SHA-shaped branch acceptance is not
 source delivery. Only the narrow isolated source shape above is supported.
-The runtime image consumes `DOCKER_IMAGE_REFERENCE`; auxiliary images are also
+The runtime image consumes `DOCKER_IMAGE_REFERENCE` or the matching
+`LAUNCHPLANE_IMAGE_REFERENCE` projection supplied by the existing Compose deploy
+driver; auxiliary images are also
 immutable. Structural interpolation and credential literals/default values
 refuse. Managed inputs stay template references, so source planning needs no real
 token and never persists converted secret-bearing env into raw Compose.
@@ -90,14 +93,17 @@ use that returned directory for the Chris-only file step. No secret
 value, certificate private key or recipient file is accepted. Review references
 attest to the exact host/port, private routing, issuer and custody review; they
 are not measured file/host evidence. The source plan binds those references,
-public CA/leaf digests, immutable source, placement, provider options and current
-runtime-input digest. Its `plan_sha256` is distinct from the inert overlay digest.
+public CA/leaf digests, immutable source, placement, provider options, the actual isolation/ownership binding and current
+runtime-input digest. Adding a health check or changing unrelated profile/display
+metadata does not invalidate original recovery/removal; changing the private
+listener facts or physical ownership still refuses. Its `plan_sha256` is distinct from the inert overlay digest.
 
 Retain and review that complete plan. Set `mode=apply`, its
 `expected_plan_sha256`, and supply the original `--idempotency-key`. Apply requires
 the authenticated Director agent, as existing independent testing activation
-does; other callers retain exact-lane `product_config.plan` for inert planning
-and readback. PostgreSQL, the physical-target reservation, existing testing
+does. Exact-lane `product_config.plan` callers may prepare an initial inert
+installation plan. Continuation plans, readback and recovery require the original
+Director identity/key; records are never borrowed across caller scopes. PostgreSQL, the physical-target reservation, existing testing
 executor lock and complete quiescent provider deployment/queue/schedule evidence
 protect execution. No grant or workflow is added.
 
@@ -122,7 +128,7 @@ For source maintenance, plan `operation=refresh` with `original_activation_key`
 naming the completed install/refresh. It first matches that operation's current
 source and placement, then fetches/verifies the newly selected immutable source.
 Review and apply with a new operation key. Ordinary image upgrades already use
-the existing deployment driver: it updates `DOCKER_IMAGE_REFERENCE` and runtime
+the existing deployment driver: it updates both supported image references and runtime
 identity without rewriting the installed template/overlay. Host/certificate/trust
 changes still need fresh operational qualification and review. Preserve testing
 holds; use the existing supported hold operation if one must be lifted.
@@ -162,7 +168,7 @@ qualifies these facts independently. Source installation does not prove them:
    dry-run/apply path. Its authority digest includes those bytes. The schema
    refuses private keys, server-leaf-only trust, HTTP and production records.
    The monitor creates a fresh normal-verification TLS context for this probe,
-   adds that CA and follows no redirects using it. Other probes retain their own
+   trusts only that CA bundle and follows no redirects using it. Other probes retain their own
    trust; no CA store, process env or restart changes. Compare the public CA digest
    with the source review before registration.
 5. The receiver separately selects an Director-reviewed private CA bundle covering

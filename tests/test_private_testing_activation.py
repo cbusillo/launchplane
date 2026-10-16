@@ -4,11 +4,20 @@ import asyncio
 from copy import deepcopy
 import json
 import os
+from pathlib import Path
+import re
 from typing import Any
 import unittest
 from unittest.mock import patch
 from click.testing import CliRunner
+import yaml
 from control_plane.cli import main
+from control_plane.dokploy.api import parse_dokploy_env_text
+from control_plane.contracts.product_profile_record import (
+    ProductLaneHealthCheck,
+    ProductLaneHealthMonitoringPolicy,
+)
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -178,8 +187,9 @@ class PrivateTestingActivationTests(unittest.TestCase):
             artifact_id=plan.intent["image"],
         )
         self.assertEqual(self.fixture.placement["composeFile"], composed)
-        self.assertIn(
-            "DOCKER_IMAGE_REFERENCE=" + plan.intent["image"], str(self.fixture.placement["env"])
+        self.assertEqual(
+            parse_dokploy_env_text(str(self.fixture.placement["env"]))["DOCKER_IMAGE_REFERENCE"],
+            plan.intent["image"],
         )
         self.assertTrue(plan.readback()["configuration_matches"])
         self.assertFalse(plan.readback()["runtime_inputs_match_review"])
@@ -375,3 +385,113 @@ class PrivateTestingActivationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.prepare()
         self.assertFalse(self.calls)
+
+    def test_committed_product_template_consumes_the_actual_deployment_image_projection(
+        self,
+    ) -> None:
+        fixture = Path(__file__).parent / "fixtures/private-testing/product-runtime.yml"
+        self.template = yaml.safe_load(fixture.read_text())
+        service = next(iter(self.template["services"]))
+        plan = self.prepare(runtime_service=service)
+        self.assertEqual(self.execute(plan).status, "completed")
+        identity = RuntimeIdentity(
+            context="example-site",
+            instance="testing",
+            deployment_record_id="fixture-deployment",
+            artifact_id=plan.intent["image"],
+            image_reference=plan.intent["image"],
+            source_git_ref=self.commit,
+        )
+        update_dokploy_target_artifact(
+            host="https://provider.test",
+            token="fixture",
+            target_type="compose",
+            target_id="fixture-testing",
+            artifact_id=plan.intent["image"],
+            runtime_identity=identity,
+        )
+        environment = parse_dokploy_env_text(str(self.fixture.placement["env"]))
+        expression = self.template["services"][service]["image"]
+        match = re.match(r"\$\{([A-Z_]+)", expression)
+        assert match is not None
+        self.assertEqual(environment[match.group(1)], plan.intent["image"])
+        self.assertEqual(
+            self.template["services"][service],
+            json.loads(str(self.fixture.placement["composeFile"]))["services"][service],
+        )
+
+    def test_monitoring_profile_edits_preserve_original_recovery_refresh_and_removal(self) -> None:
+        plan = self.prepare()
+        self.lose_response = True
+        self.assertEqual(self.execute(plan).status, "reconcile_required")
+        profile = self.fixture.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(
+                        update={
+                            "health_monitoring": ProductLaneHealthMonitoringPolicy(
+                                monitoring_intent="private",
+                                checks=(
+                                    ProductLaneHealthCheck(
+                                        name="private-runtime",
+                                        kind="private_http",
+                                        private_endpoint_key="testing-bridge",
+                                        require_runtime_identity=True,
+                                    ),
+                                ),
+                            )
+                        }
+                    )
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in self.fixture.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(profile)
+        self.assertEqual(self.execute(plan).status, "adopted")
+        self.assertTrue(plan.readback()["configuration_matches"])
+        self.lose_response = False
+        refresh = self.prepare(operation="refresh", original_activation_key="install")
+        self.assertEqual(self.execute(refresh, "refresh").status, "completed")
+        removal = self.prepare(operation="remove", original_activation_key="refresh")
+        self.assertEqual(self.execute(removal, "remove").status, "completed")
+
+    def test_provider_read_cannot_hide_a_changed_isolation_binding(self) -> None:
+        plan = self.prepare()
+
+        def drift(**_kwargs: Any) -> dict[str, Any]:
+            self.store.write_product_profile_record(
+                self.fixture.profile.model_copy(
+                    update={"runtime_port": int(self.fixture.profile.runtime_port or 0) + 1}
+                )
+            )
+            return deepcopy(self.fixture.placement)
+
+        self.fixture.provider.side_effect = drift
+        with self.assertRaises(ValueError):
+            self.execute(plan)
+        self.assertFalse(self.calls)
+
+    def test_removal_cannot_report_foreign_transport_and_refresh_needs_fresh_review(self) -> None:
+        plan = self.prepare()
+        self.execute(plan)
+        for change in (
+            {"private_ip": "10.77.0.10"},
+            {"listener_port": 9553},
+            {"endpoint_key": "foreign"},
+            {"ca_bundle_sha256": "f" * 64},
+        ):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                self.prepare(operation="remove", original_activation_key="install", **change)
+        fresh = self.prepare(
+            operation="refresh", original_activation_key="install", private_ip="10.77.0.10"
+        )
+        with self.assertRaises(ValueError):
+            self.prepare(
+                operation="refresh",
+                original_activation_key="install",
+                private_ip="10.77.0.10",
+                expected_plan_sha256=plan.reconciliation_key(),
+            )
+        self.assertNotEqual(fresh.reconciliation_key(), plan.reconciliation_key())

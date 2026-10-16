@@ -2,10 +2,11 @@
 
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 import click
 from fastapi import Depends, Header, Path as PathParameter
+from control_plane.build_provenance import BuildProvenanceError
 
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -24,7 +25,10 @@ from control_plane.private_testing_activation import (
     PrivateTestingActivationRequest,
 )
 from control_plane.private_testing_transport import PRODUCT_PATTERN
-from control_plane.provider_operations import run_durable_provider_operation
+from control_plane.provider_operations import (
+    DurableProviderOperationResult,
+    run_durable_provider_operation,
+)
 from control_plane.service_auth import (
     AuthorizationTarget,
     LaunchplaneIdentity,
@@ -99,16 +103,20 @@ def register_private_testing_activation_routes(
                     trace_id=trace, records={}, result=adapter.result(matches=False)
                 )
             if body.mode == "readback":
-                row = store.read_idempotency_record(
-                    scope=scope,
-                    route_path=ROUTE.format(product=product),
-                    idempotency_key=idempotency_key.strip(),
-                )
-                if row is None:
-                    raise ValueError("Original source operation is unavailable.")
-                result = await run_in_worker_thread(adapter.readback)
+
+                def readback() -> tuple[str, dict[str, object]]:
+                    row = store.read_idempotency_record(
+                        scope=scope,
+                        route_path=ROUTE.format(product=product),
+                        idempotency_key=idempotency_key.strip(),
+                    )
+                    if row is None:
+                        raise ValueError("Original source operation is unavailable.")
+                    return row.record_id, adapter.readback()
+
+                record_id, result = await run_in_worker_thread(readback)
                 return accepted_evidence_response(
-                    trace_id=trace, records={"operation": row.record_id}, result=result
+                    trace_id=trace, records={"operation": record_id}, result=result
                 )
             if store.database_dialect_name != "postgresql":
                 raise dependencies.http_error(
@@ -118,7 +126,7 @@ def register_private_testing_activation_routes(
                     message="Provider execution requires PostgreSQL fences.",
                 )
 
-            def operation(record_store: PostgresRecordStore) -> Any:
+            def operation(record_store: PostgresRecordStore) -> DurableProviderOperationResult:
                 return run_durable_provider_operation(
                     store=record_store,
                     scope=scope,
@@ -152,7 +160,7 @@ def register_private_testing_activation_routes(
                 code="private_testing_activation_unqualified",
                 message="Testing source, isolation, custody review or original operation is unqualified.",
             ) from error
-        except (click.ClickException, OSError) as error:
+        except (click.ClickException, OSError, BuildProvenanceError) as error:
             raise dependencies.http_error(
                 status_code=503,
                 trace_id=trace,

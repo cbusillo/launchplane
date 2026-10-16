@@ -189,10 +189,12 @@ def qualify(binary: Path) -> None:
                             endpoint_key="fixture-testing",
                             server_url=origin.replace("https:", "wss:") + "/agent-session/connect",
                         )
+                        monitor = fetch_private_health_url(
+                            origin + "/health", 5, tls_ca_pem=ca_file.read_text()
+                        )
+                        if monitor.status_code != 200:
+                            raise AssertionError("Private monitor did not reach the runtime.")
                         with patch.dict(os.environ, {"SSL_CERT_FILE": str(ca_file)}):
-                            monitor = fetch_private_health_url(origin + "/health", 5)
-                            if monitor.status_code != 200:
-                                raise AssertionError("Private monitor did not reach the runtime.")
                             _verify_bridge(consumer, fake_value)
                             try:
                                 _verify_bridge(consumer, "wrong-fictional-value")

@@ -4,11 +4,13 @@ from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 from pathlib import Path
+import os
 import ssl
 from tempfile import TemporaryDirectory
 from threading import Thread
 from typing import Any
 import unittest
+from unittest.mock import patch
 
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
@@ -157,12 +159,21 @@ class PrivateTestingTrustTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(ssl.SSLError):
                 fetch_private_health_url(url, 3, tls_ca_pem=ca)
         self.assertEqual(roots, ssl.create_default_context().get_ca_certs(binary_form=True))
+        inherited = self.root / "inherited-ca.pem"
+        inherited.write_text(self.ca)
+        with (
+            patch.dict(os.environ, {"SSL_CERT_FILE": str(inherited)}),
+            self.assertRaises(ssl.SSLError),
+        ):
+            fetch_private_health_url(self.url, 3, tls_ca_pem=certificate_fixture()[0])
         with self.assertRaises(RuntimeError):
             fetch_private_health_url(
                 self.url.removesuffix("/health") + "/redirect", 3, tls_ca_pem=self.ca
             )
 
-    def test_monitor_uses_the_exact_endpoint_ca_and_refuses_an_untrusted_second_lane(self) -> None:
+    def test_monitor_uses_the_exact_endpoint_ca_and_refuses_after_its_trust_is_cleared(
+        self,
+    ) -> None:
         lane = ProductLaneProfile(
             instance="testing",
             context="example-site",

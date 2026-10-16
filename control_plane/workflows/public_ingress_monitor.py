@@ -2467,7 +2467,7 @@ def fetch_private_health_url(
 ) -> HttpObservation:
     tls_context = None
     if tls_ca_pem:
-        tls_context = ssl.create_default_context()
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         tls_context.load_verify_locations(cadata=tls_ca_pem)
     response = request_private_http(
         url,

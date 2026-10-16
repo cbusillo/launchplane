@@ -37,6 +37,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_activation import read_product_compose, verified_product_image
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
 from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
+from control_plane.workflows.dokploy_deploy import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 
 ROUTE = "/v1/products/{product}/private-testing-transport/activation"
 _SOURCE_FIELDS = (
@@ -90,16 +91,21 @@ def _source_settings(payload: dict[str, Any]) -> dict[str, Any]:
 
 def _qualify_template(document: dict[str, Any], runtime_service: str) -> None:
     _validate_compose(document, runtime_service)
-    if not str(document["services"][runtime_service].get("image", "")).startswith(
-        "${DOCKER_IMAGE_REFERENCE"
-    ):
+
+    def managed_image(image: object) -> bool:
+        return isinstance(image, str) and any(
+            re.fullmatch(r"\$\{" + re.escape(key) + r"(?::?\?[^}]*)?\}", image)
+            for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS
+        )
+
+    if not managed_image(document["services"][runtime_service].get("image")):
         raise PrivateTestingTransportRefused(
             "Runtime must consume the deployment driver's immutable image."
         )
     for service in document["services"].values():
         image = service.get("image", "")
         if not isinstance(image, str) or not (
-            re.fullmatch(r"\$\{DOCKER_IMAGE_REFERENCE(?::?\?[^}]*)?\}", image)
+            managed_image(image)
             or re.fullmatch(r"[a-z0-9][a-z0-9./:_-]+@sha256:[a-f0-9]{64}", image)
         ):
             raise PrivateTestingTransportRefused(
@@ -122,6 +128,38 @@ def _qualify_template(document: dict[str, Any], runtime_service: str) -> None:
             raise PrivateTestingTransportRefused("Structural Compose interpolation is unsupported.")
     if "$" in json.dumps(document.get("volumes", {})):
         raise PrivateTestingTransportRefused("Storage interpolation is unsupported.")
+
+
+def record_binding(records: tuple[Any, ...]) -> str:
+    """Retain actual isolation/ownership, not unrelated profile or display revisions."""
+    profile, target, target_id, provider = records
+    return canonical_json_sha256(
+        {
+            "product": profile.product,
+            "repository": profile.repository,
+            "driver": profile.driver_id,
+            "active": profile.is_active,
+            "public_website": profile.public_website,
+            "runtime_port": profile.runtime_port,
+            "health_path": profile.health_path,
+            "image_repository": profile.image.repository,
+            "target": target.model_dump(
+                mode="json",
+                include={
+                    "context",
+                    "instance",
+                    "target_type",
+                    "domains",
+                    "public_hosts",
+                    "pending_public_host_effects",
+                },
+            ),
+            "target_id": target_id.target_id,
+            "provider": provider.model_dump(
+                mode="json", exclude={"updated_at", "source_label", "display_name"}
+            ),
+        }
+    )
 
 
 def _placement(payload: dict[str, Any], target_id: str) -> dict[str, Any]:
@@ -227,8 +265,7 @@ class PrivateTestingActivationAdapter:
             installed = store.read_original_mutation_intent(original)
             if (
                 installed.get("request", {}).get("operation") not in {"install", "refresh"}
-                or installed.get("records_sha256")
-                != canonical_json_sha256([r.model_dump(mode="json") for r in records])
+                or installed.get("records_sha256") != record_binding(records)
                 or installed.get("placement") != placement
                 or installed.get("after") != before
             ):
@@ -236,12 +273,15 @@ class PrivateTestingActivationAdapter:
                     "Removal cannot overwrite changed or foreign source."
                 )
         if request.operation == "remove":
-            if (request.source_commit, request.source_path) != (
-                installed["request"]["source_commit"],
-                installed["request"]["source_path"],
-            ):
+            fields = (
+                *PrivateTestingTransportIntent.model_fields,
+                "source_commit",
+                "source_path",
+                "certificate_root",
+            )
+            if any(normalized[name] != installed["request"][name] for name in fields):
                 raise PrivateTestingTransportRefused(
-                    "Removal must reference the original immutable source."
+                    "Removal must reference the original transport and immutable source."
                 )
             after = installed["before"]
             source_digest = installed["source_sha256"]
@@ -304,7 +344,7 @@ class PrivateTestingActivationAdapter:
                 target_type="compose",
                 target_id=target_id.target_id,
             ),
-            "records_sha256": canonical_json_sha256([r.model_dump(mode="json") for r in records]),
+            "records_sha256": record_binding(records),
             "placement": placement,
             "before": before,
             "after": after,
@@ -326,8 +366,8 @@ class PrivateTestingActivationAdapter:
             "instance": "testing",
             "operation": self.request.operation,
             "plan_sha256": self.intent["plan_sha256"],
-            "source_sha256": self.intent["source_sha256"],
-            "source_commit": self.request.source_commit,
+            "reviewed_source_sha256": self.intent["source_sha256"],
+            "reviewed_source_commit": self.request.source_commit,
             "configuration_matches": matches,
             "deployment_performed": False,
             "transport_verified": False,
@@ -356,10 +396,7 @@ class PrivateTestingActivationAdapter:
 
     def current(self, *, require_environment: bool = False) -> dict[str, Any]:
         records = _bind(self.store, self.product, self.request.context, self.request.instance)
-        if (
-            canonical_json_sha256([r.model_dump(mode="json") for r in records])
-            != self.intent["records_sha256"]
-        ):
+        if record_binding(records) != self.intent["records_sha256"]:
             raise PrivateTestingTransportRefused(
                 "Lane records changed; preserve the original operation."
             )
@@ -374,6 +411,10 @@ class PrivateTestingActivationAdapter:
             and canonical_json_sha256(payload.get("env")) != self.intent["environment_sha256"]
         ):
             raise PrivateTestingTransportRefused("Provider placement or runtime input changed.")
+        if record_binding(
+            _bind(self.store, self.product, self.request.context, self.request.instance)
+        ) != record_binding(records):
+            raise PrivateTestingTransportRefused("Lane binding changed during provider evidence.")
         return payload
 
     def readback(self) -> dict[str, object]:
