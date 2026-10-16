@@ -51,6 +51,7 @@ from control_plane.contracts.updater_proposal import (
 from control_plane.http_routes.updater_proposal import register_updater_proposal_route
 from control_plane.http_route_preparation import PreparedAPIRoute
 from control_plane.http_routes.support import run_in_worker_thread
+from control_plane.http_routes.health_alert_drill import register_health_alert_drill_routes
 from fastapi.exceptions import RequestValidationError
 from control_plane.github_request_timing import github_request_tally
 from control_plane.http_routes.owner_secret_inputs import (
@@ -865,6 +866,7 @@ from control_plane.storage.product_authority_bundle import (
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
+from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -4280,6 +4282,7 @@ def create_launchplane_fastapi_app(
     owner_review_status_publisher: OwnerReviewStatusPublisher | None = None,
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
+    preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4360,6 +4363,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(health_monitor_scheduler.start)
             if testing_drill_scheduler is not None:
                 await run_in_threadpool(testing_drill_scheduler.start)
+            if preview_lifecycle_scheduler is not None:
+                await run_in_threadpool(preview_lifecycle_scheduler.start)
             startup_record_store = (
                 record_store_factory() if record_store_factory is not None else shared_record_store
             )
@@ -4369,6 +4374,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
+            if preview_lifecycle_scheduler is not None:
+                await run_in_threadpool(preview_lifecycle_scheduler.stop)
             if testing_drill_scheduler is not None:
                 await run_in_threadpool(testing_drill_scheduler.stop)
             if health_monitor_scheduler is not None:
@@ -5432,6 +5439,9 @@ def create_launchplane_fastapi_app(
         read_role_products=resolved_authz_policy_runtime.read_role_products,
         http_error=_launchplane_http_error,
         error_response_model=LaunchplaneErrorResponse,
+    )
+    register_health_alert_drill_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_write_identity
     )
     privileged_operation_route_dependencies = PrivilegedOperationRouteDependencies(
         common=read_route_dependencies,

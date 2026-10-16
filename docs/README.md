@@ -106,6 +106,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
 - [change-impact-policy.md](change-impact-policy.md) — retired classifier history and the
   independent repository-evidence boundary.
 - [operations.md](operations.md) — admin workflows and runtime boundary rules.
+- [health-alert-drills.md](health-alert-drills.md) — isolated routing reads and
+  explicitly marked, rate-limited Discord test alerts for existing lane checks.
 - [production-recipient.md](production-recipient.md) — inert generic-web production
   recipient preparation, retained serving custody and remaining activation gates.
 - [testing-activation.md](testing-activation.md) — qualified generic-web testing

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import hashlib
 import logging
 import re
@@ -20,12 +20,13 @@ from control_plane.contracts.product_profile_record import (
     product_profile_record_sha256,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
     build_public_ingress_observation_id,
 )
 from control_plane.product_reconcile import resolve_build_provenance_transport
-from control_plane.source_control_change import read_branch_revision, revision_contains
+from control_plane.source_control_change import read_branch_revision
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.delivery_evidence import DeliveryEvidenceIndex, DeliveryEvidenceWork
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -33,9 +34,7 @@ from control_plane.workflows.public_ingress_monitor import _store_monitor_observ
 from control_plane.workflows.ship import utc_now_timestamp
 
 Store = PostgresRecordStore | FilesystemRecordStore
-PRODUCTION_DELIVERY_LAG_SECONDS = 3600
 DELIVERY_CHECK_PREFIX = "production-delivery-"
-DELIVERY_LAG_CHECK = DELIVERY_CHECK_PREFIX + "lag"
 DELIVERY_EVIDENCE_PAGE_SIZE = 100
 _SCOPE = "launchplane:production-delivery-monitor"
 _ROUTE = "service:production-delivery-monitor"
@@ -116,7 +115,7 @@ def _observe(
         incident_eligible=not retired,
         expected_profile_sha256=product_profile_record_sha256(profile),
         recovery_observation_threshold=1,
-        notify=True,
+        notify=not (retired and check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK),
         notification_drivers=None,
     )
     if result.authority_changed:
@@ -287,7 +286,6 @@ def monitor_production_delivery_once(
     transport_factory: Callable[
         [object, LaunchplaneProductProfileRecord], BuildProvenanceTransport
     ] = resolve_build_provenance_transport,
-    max_age_seconds: int = PRODUCTION_DELIVERY_LAG_SECONDS,
     should_stop: Callable[[], bool] = lambda: False,
 ) -> None:
     now = observed_at or utc_now_timestamp()
@@ -297,6 +295,27 @@ def monitor_production_delivery_once(
                 return
             if lane.instance != "prod":
                 continue
+            try:
+                for incident in store.list_public_ingress_incident_records(
+                    product=profile.product,
+                    context_name=lane.context,
+                    instance_name="prod",
+                    check_name=RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
+                    status="open",
+                ):
+                    _observe(
+                        store,
+                        profile,
+                        lane,
+                        check_name=incident.check_name,
+                        failed=False,
+                        summary="Merged source waiting for release is not a production failure.",
+                        observed_at=now,
+                        retired=True,
+                    )
+            except Exception:
+                # Retirement is maintenance; it must not interrupt real failure scanning.
+                _LOGGER.exception("Could not retire source-age attention for %s", profile.product)
             if not profile.is_active or profile.production_use != "live":
                 for incident in store.list_public_ingress_incident_records(
                     product=profile.product,
@@ -305,7 +324,6 @@ def monitor_production_delivery_once(
                     status="open",
                 ):
                     if incident.check_name in {
-                        DELIVERY_LAG_CHECK,
                         DELIVERY_CHECK_PREFIX + _candidate_key("monitor:source"),
                         DELIVERY_CHECK_PREFIX + _candidate_key("monitor:evidence"),
                     } or (
@@ -325,7 +343,7 @@ def monitor_production_delivery_once(
                 if not profile.is_active:
                     continue
             try:
-                _monitor_lane(store, profile, lane, now, transport_factory, max_age_seconds)
+                _monitor_lane(store, profile, lane, now, transport_factory)
             except Exception:
                 # A failed source read is unknown, never recovery; other products still run.
                 _LOGGER.exception("Production delivery monitor failed for %s", profile.product)
@@ -342,10 +360,7 @@ def _monitor_lane(
     transport_factory: Callable[
         [object, LaunchplaneProductProfileRecord], BuildProvenanceTransport
     ],
-    max_age_seconds: int,
 ) -> None:
-    with store.delivery_evidence_index() as index:
-        latest = _latest_deployment(store, index, lane.context)
     try:
         _scan_failures(store, profile, lane, now)
     except Exception:
@@ -364,106 +379,7 @@ def _monitor_lane(
     )
     if source is None:
         raise ValueError("Source head is unavailable")
-    head = source.commit
-    source_seen_at = now
-    if source.committed_at:
-        try:
-            if _time(source.committed_at) <= _time(now):
-                source_seen_at = source.committed_at
-        except ValueError:
-            pass
-    current = (
-        latest.source_git_ref if latest is not None and deployment_record_passed(latest) else ""
-    )
-    if not current:
-        try:
-            inventory = store.read_environment_inventory(
-                context_name=lane.context, instance_name="prod"
-            )
-        except FileNotFoundError:
-            pass
-        else:
-            if inventory.runtime_identity is not None:
-                current = inventory.runtime_identity.source_git_ref
-    receipt = store.read_idempotency_record(
-        scope=_SCOPE, route_path=_ROUTE, idempotency_key=profile.product
-    )
-    pending = str(receipt.response_payload.get("pending_commit", "")) if receipt else ""
-    since = str(receipt.response_payload.get("pending_since", "")) if receipt else ""
-    reached_pending = bool(pending and pending == current)
-    source_available = True
-    if pending and current and pending != current:
-        try:
-            comparison = revision_contains(
-                repository=profile.repository,
-                ancestor=pending,
-                head=current,
-                read=transport.get_json,
-            )
-            reached_pending = comparison is True
-            source_available = comparison is not None
-        except Exception:
-            # Unknown comparison cannot resolve attention or stop the overdue check.
-            _LOGGER.warning("Production source comparison unavailable for %s", profile.product)
-            source_available = False
-    if reached_pending or current == head:
-        pending, since = "", ""
-    if current != head and not pending:
-        pending, since = head, source_seen_at
-    _monitor_availability(store, profile, lane, now, component="source", available=source_available)
-    if not source_available:
-        return
-    _write_receipt(
-        store,
-        key=profile.product,
-        now=now,
-        payload={"pending_commit": pending, "pending_since": since},
-    )
-    overdue = bool(pending and _time(now) >= _time(since) + timedelta(seconds=max_age_seconds))
-    open_lag = store.list_public_ingress_incident_records(
-        product=profile.product,
-        context_name=lane.context,
-        instance_name="prod",
-        check_name=DELIVERY_LAG_CHECK,
-        status="open",
-    )
-    if overdue or ((not pending or reached_pending) and open_lag):
-        _observe(
-            store,
-            profile,
-            lane,
-            check_name=DELIVERY_LAG_CHECK,
-            failed=overdue,
-            summary=(
-                f"Merged default branch has not reached production within {max_age_seconds} "
-                f"seconds; source: {pending}; trace: production-delivery-monitor:"
-                f"{_candidate_key(profile.product)}. Check build, testing, acceptance, "
-                "backup and promotion evidence."
-                if overdue
-                else "Production has reached the observed default-branch source."
-            ),
-            observed_at=now,
-        )
-
-
-def _latest_deployment(
-    store: Store, index: DeliveryEvidenceIndex, context: str
-) -> DeploymentRecord | None:
-    for _ in range(DELIVERY_EVIDENCE_PAGE_SIZE):
-        latest_id = index.latest_deployment_id(context)
-        if not latest_id:
-            return None
-        try:
-            return store.read_deployment_record(latest_id)
-        except FileNotFoundError:
-            if not isinstance(store, FilesystemRecordStore):
-                raise
-            # A file writer may have crashed after publishing pending work but
-            # before publishing a new source file. The missing file owns no outcome.
-            with store._product_authority_bundle_lock():
-                if not store._record_path("deployments", latest_id).exists():
-                    index.forget_missing("deployment:" + latest_id)
-    raise RuntimeError("Interrupted filesystem writes still need index reconciliation")
+    _monitor_availability(store, profile, lane, now, component="source", available=True)
 
 
 def _release_dependencies(
@@ -696,7 +612,7 @@ def _recover_delivery_failures(
     ):
         if (
             not incident.check_name.startswith(DELIVERY_CHECK_PREFIX)
-            or incident.check_name == DELIVERY_LAG_CHECK
+            or incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK
             or incident.check_name
             in {
                 DELIVERY_CHECK_PREFIX + _candidate_key("monitor:source"),
