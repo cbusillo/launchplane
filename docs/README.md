@@ -138,6 +138,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   supply-chain pinning, source classification, provenance, and update policy.
 - [dependency-health-contract.md](dependency-health-contract.md) — causal
   pull-request dependency comparisons and absolute health evidence.
+- [runtime-dependency-health.md](runtime-dependency-health.md) — derived lane
+  dependencies, public health results, shared web helper and individual adoption.
 - [advisory-governance-checks.md](advisory-governance-checks.md) — dedicated
   GitHub App identity, stable advisory engineering/Client check runs, replay,
   drift, and authority self-exclusion.

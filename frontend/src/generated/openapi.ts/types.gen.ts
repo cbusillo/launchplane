@@ -3222,6 +3222,7 @@ export type ProductGenericWebTransitionRequest = {
 };
 
 export type ProductHealthMonitoringCheckSummary = {
+    dependency_health?: RuntimeDependencyHealthEvidence | null;
     enabled: boolean;
     failure_code: string;
     incident_eligible: boolean;
@@ -3252,6 +3253,7 @@ export type ProductHealthMonitoringPlan = {
     check_name: string;
     context: string;
     current_check_kind: 'public_http' | 'private_http' | 'provider' | null;
+    current_dependency_health: RuntimeDependencyHealthPolicy;
     current_enabled: boolean | null;
     current_expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     current_monitoring_intent: 'public' | 'private' | 'prelaunch';
@@ -3268,6 +3270,7 @@ export type ProductHealthMonitoringPlan = {
     profile_updated_at_before: string;
     reason: string;
     requested_check_kind: 'public_http' | 'private_http';
+    requested_dependency_health: RuntimeDependencyHealthPolicy;
     requested_enabled: boolean;
     requested_expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     requested_monitoring_intent: 'public' | 'private' | 'prelaunch';
@@ -3290,6 +3293,8 @@ export type ProductHealthMonitoringResponse = {
 
 export type ProductHealthMonitoringSummary = {
     checks: Array<ProductHealthMonitoringCheckSummary>;
+    dependency_expectations?: RuntimeDependencyExpectations | null;
+    dependency_policy?: RuntimeDependencyHealthPolicy | null;
     monitoring_intent: 'public' | 'private' | 'prelaunch';
     open_incidents: Array<ProductIncidentSummary>;
     provenance: DataProvenance;
@@ -3330,7 +3335,7 @@ export type ProductIncidentEventSummary = {
 export type ProductIncidentMaterialEvidence = {
     affected_targets: Array<'base_url' | 'health_url' | 'private_health_url' | 'monitoring_intent' | 'provider' | 'tls_domain'>;
     check_kind: 'public_http' | 'private_http' | 'provider' | 'tls';
-    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'dependency_failed' | 'dependency_not_covered' | 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     route_authority_kind: string;
     runtime_identity_mismatched_fields: Array<string>;
@@ -3353,7 +3358,7 @@ export type ProductIncidentNotificationAttemptSummary = {
 };
 
 export type ProductIncidentObservationSummary = {
-    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
+    failure_code: 'dependency_failed' | 'dependency_not_covered' | 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
     incident_event_id: string;
     material_fingerprint_sha256: string;
     notification_sent: boolean;
@@ -3395,7 +3400,7 @@ export type ProductIncidentSummary = {
     context: string;
     display_name: string;
     environment: string;
-    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'dependency_failed' | 'dependency_not_covered' | 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     incident_id: string;
     instance: string;
@@ -3437,6 +3442,7 @@ export type ProductLaneHealthCheck = {
 
 export type ProductLaneHealthMonitoringPolicy = {
     checks: Array<ProductLaneHealthCheck>;
+    dependency_health?: RuntimeDependencyHealthPolicy;
     monitoring_intent: 'public' | 'private' | 'prelaunch';
 };
 
@@ -4734,6 +4740,30 @@ export type RollbackExecutionEvidence = {
     target_deployment_record_id: string;
     target_promoted_from_instance?: string;
     target_promotion_record_id?: string;
+};
+
+export type RuntimeDependencyExpectations = {
+    dependencies: Array<'database' | 'email' | 'cache'>;
+    source: 'derived' | 'override' | 'unavailable';
+};
+
+export type RuntimeDependencyHealthEvidence = {
+    mode: 'informational' | 'required';
+    results: {
+        [key: string]: 'pass' | 'fail' | 'not_covered';
+    };
+    source: 'derived' | 'override' | 'unavailable';
+    status: 'pass' | 'fail' | 'not_covered' | 'none';
+};
+
+export type RuntimeDependencyHealthPolicy = {
+    mode: 'informational' | 'required';
+    override: RuntimeDependencyOverride | null;
+};
+
+export type RuntimeDependencyOverride = {
+    dependencies: Array<'database' | 'email' | 'cache'>;
+    reason: string;
 };
 
 export type RuntimeEnvironmentRecord = {
@@ -6806,6 +6836,7 @@ export type ApplyProductHealthMonitoringData = {
         check_kind?: 'public_http' | 'private_http';
         check_name: string;
         context: string;
+        dependency_health?: RuntimeDependencyHealthPolicy | null;
         enabled?: boolean;
         expected_dns_targets?: Array<PublicDnsExpectedTarget> | null;
         instance: string;

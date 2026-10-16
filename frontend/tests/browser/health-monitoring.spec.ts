@@ -11,7 +11,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     const lane = {
       context: fixtures.environment.context, instance: "testing",
       health_url: "https://testing.example.com/health", base_url: "https://testing.example.com",
-      health_monitoring: { monitoring_intent: "prelaunch", checks: [{ name: "public-ingress", kind: "public_http",
+      health_monitoring: { monitoring_intent: "prelaunch", dependency_health: { mode: "informational", override: null }, checks: [{ name: "public-ingress", kind: "public_http",
         enabled: false, require_runtime_identity: false, url: "", private_endpoint_key: "" }] },
     };
     if (["private", "endpoint-changed"].includes(outcome)) Object.assign(lane.health_monitoring.checks[0], { kind: "private_http", private_endpoint_key: "registered-private-health" });
@@ -52,7 +52,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
           error: { code: "stale", message: "Stored profile changed after review." } } });
         if (outcome === "stale" && applies.length === 1) return route.fulfill({ status: 409, json: {
           error: { code: "stale", message: "Stored profile changed after review." } } });
-        lane.health_monitoring = { monitoring_intent: body.monitoring_intent, checks: [{ ...lane.health_monitoring.checks[0],
+        lane.health_monitoring = { monitoring_intent: body.monitoring_intent, dependency_health: body.dependency_health, checks: [{ ...lane.health_monitoring.checks[0],
           enabled: body.enabled, require_runtime_identity: body.require_runtime_identity }] };
         if (outcome === "private") lane.health_monitoring.checks.unshift({ ...lane.health_monitoring.checks[0], name: "background-health" });
       } else plans.push(body);
@@ -62,6 +62,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
           current_private_endpoint_key: outcome === "endpoint-changed" ? "new-registered-private-health" : body.private_endpoint_key,
           operation: outcome === "removed-check" ? "create" : "update", current_check_kind: outcome === "removed-check" ? null : body.check_kind,
           current_monitoring_intent: "prelaunch", requested_monitoring_intent: body.monitoring_intent,
+          current_dependency_health: { mode: "informational", override: null }, requested_dependency_health: body.dependency_health,
           current_enabled: false, requested_enabled: body.enabled,
           current_require_runtime_identity: false, requested_require_runtime_identity: body.require_runtime_identity,
           resolved_url: body.check_kind === "private_http" ? "" : lane.health_url, changed: true, applied: body.mode === "apply", reason: body.reason,
@@ -92,6 +93,7 @@ for (const outcome of ["saved", "uncertain", "uncertain-stale", "leftover", "pri
     await panel.getByRole("combobox", { name: "Monitoring intent", exact: true }).selectOption(["private", "endpoint-changed"].includes(outcome) ? "private" : "public");
     await panel.getByLabel("Check enabled", { exact: true }).check();
     await panel.getByLabel("Require runtime identity", { exact: true }).check();
+    await panel.getByLabel("Require dependency coverage", { exact: true }).check();
     await panel.getByLabel("Reason", { exact: true }).fill("Enable the approved testing monitor.");
     await review.click();
     if (outcome === "refresh-during-review") {
