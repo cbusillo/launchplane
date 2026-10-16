@@ -100,6 +100,9 @@ the slot's immutable image and requires the authoritative `.env` last in its
 `env_file` list, without an explicit payload override. An interpolated/mutable
 image or a later env-file override refuses before writes; install the admitted
 immutable definition before qualification. Recreation always reads the new
-container identities, even after a lost reply. An unavailable identity readback
-keeps the release held and its observed Compose coordinates available for retry;
-it never treats removed container IDs as a successful receipt.
+container identities, even after a lost reply. An unavailable identity readback keeps the release held. A later unique
+Compose readback recovers the inventory before retrying; zero or multiple
+containers remain uncertain and require the installed host's recovery procedure.
+The host transport must qualify interruption/convergence and fresh inventory
+reconstruction on restart before activation (#3268). Source support does not
+supply a live operator repair path or treat removed IDs as a successful receipt.
