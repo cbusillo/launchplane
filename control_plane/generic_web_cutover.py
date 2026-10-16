@@ -112,6 +112,7 @@ def compile_web_cutover(
         raise ValueError("lane lacks independently seeded serving slot identity")
     production = store.read_artifact_manifest(identity.artifact_id)
     candidate = store.read_artifact_manifest(artifact_id)
+    require_web_artifact_scope(store.read_product_profile_record(product), candidate)
     if candidate.source_commit != source_git_ref:
         raise ValueError("candidate source differs from the verified manifest")
     old_coordinate = next((slot for slot in config.slots if slot.slot_id == identity.slot), None)
@@ -347,6 +348,7 @@ def resolve_web_cutover_target(
         raise ValueError("two-slot traffic authority changed before reservation")
     config = active.generic_web_cutover
     manifest = store.read_artifact_manifest(artifact_id)
+    require_web_artifact_scope(current, manifest)
     if manifest.source_commit != source_git_ref:
         raise ValueError("candidate source differs from its verified artifact")
     target_type = config.slots[0].target_type
@@ -373,3 +375,16 @@ def resolve_web_cutover_target(
         deployed_target=target.to_deployed_target_reference(provider_id=provider_id),
         deploy_timeout_seconds=timeout_seconds or 300,
     )
+
+
+def require_web_artifact_scope(
+    profile: LaunchplaneProductProfileRecord, manifest: ArtifactIdentityManifest
+) -> None:
+    build = manifest.source_build
+    if (
+        manifest.image.repository.rstrip("/") != profile.image.repository.rstrip("/")
+        or build is None
+        or build.repository.casefold() != profile.repository.casefold()
+        or (profile.repository_id and build.repository_id != profile.repository_id)
+    ):
+        raise ValueError("candidate artifact does not belong to the product repository/image")

@@ -109,6 +109,9 @@ def plan(target: str = "compose", incompatible: bool = False) -> GenericWebCutov
 class Provider:
     def __init__(self, intent: GenericWebCutoverPlan):
         self.plan, self.slot = intent, intent.old
+        self.writer_slot = intent.old
+        self.published_slot = intent.old
+        self.delay_apply = False
         self.actions: list[str] = []
         self.fail_ready = False
         self.switch_uncertain = False
@@ -141,7 +144,8 @@ class Provider:
             warmed=True,
             first_request_ms=0,
             warmed_request_ms=0,
-            background_workers_fenced=not intent.lane.writers or slot.slot_id != self.slot.slot_id,
+            background_workers_fenced=not intent.lane.writers
+            or slot.slot_id != self.writer_slot.slot_id,
             retained_previous_assets=True,
         )
 
@@ -166,7 +170,15 @@ class Provider:
         )
 
     def switch(self, intent: GenericWebCutoverPlan, slot: WebSlot) -> WebRouteObservation:
-        self.actions.append("switch-" + slot.slot_id)
+        if (
+            self.published_slot.private_url != slot.private_url
+            or self.slot.private_url != slot.private_url
+        ):
+            self.actions.append("switch-" + slot.slot_id)
+        self.published_slot = slot
+        if self.delay_apply:
+            self.delay_apply = False
+            raise TimeoutError("published file not yet applied")
         self.slot = slot
         if self.switch_uncertain:
             self.switch_uncertain = False
@@ -175,6 +187,7 @@ class Provider:
 
     def handoff_writers(self, _intent: Any, slot: WebSlot) -> None:
         self.actions.append("writers-" + slot.slot_id)
+        self.writer_slot = slot
 
     def drain(self, _intent: Any, slot: WebSlot) -> bool:
         self.actions.append("drain-" + slot.slot_id)
@@ -708,7 +721,7 @@ class WebCutoverCallerRegressionTests(unittest.TestCase):
                     reconciliation_key=key,
                 )
                 self.assertTrue(inspection.retry_safe)
-                self.assertEqual(inspection.provider_evidence, "cutover_checkpoint_recoverable")
+                self.assertEqual(inspection.observation.outcome, "absent")
                 outcome = adapter.apply("fixture-operation", lease)
                 self.assertTrue(outcome.durable)
                 observed = adapter.observe("fixture-operation", "records_commit", key)
@@ -740,3 +753,215 @@ class WebCutoverUnhealthyRecoveryTests(unittest.TestCase):
             rolled = rollback_web_cutover(store, provider, "release")
             self.assertEqual(rolled.step, "rolled_back")
             self.assertEqual(provider.slot, intent.old)
+
+
+class WebCutoverReviewRecoveryTests(unittest.TestCase):
+    def test_public_failure_before_writer_handoff_keeps_old_owner_and_can_switch_back(self) -> None:
+        for bad_identity in (False, True):
+            with self.subTest(bad_identity=bad_identity), TemporaryDirectory() as folder:
+                intent = plan()
+                provider = Provider(intent)
+                store = WebDeploymentCutoverStore(
+                    FilesystemRecordStore(Path(folder)), deployment(intent)
+                )
+                original = provider.current_route
+
+                def failed(intent: GenericWebCutoverPlan) -> WebRouteObservation:
+                    route = original(intent)
+                    if provider.slot.slot_id == intent.new.slot_id:
+                        health = HealthcheckEvidence(status="fail")
+                        if bad_identity:
+                            health = route.public_health.model_copy(
+                                update={"observed_runtime_identity": intent.old.runtime_identity}
+                            )
+                        return route.model_copy(update={"public_health": health})
+                    return route
+
+                with patch.object(provider, "current_route", side_effect=failed):
+                    with self.assertRaises(ValueError):
+                        execute_web_cutover(intent, store, provider, record_id="release")
+                    self.assertEqual(store.load("release").step, "switching")
+                    self.assertEqual(provider.writer_slot.slot_id, intent.old.slot_id)
+                    self.assertFalse(
+                        provider.readiness(intent, intent.old).background_workers_fenced
+                    )
+                    rolled = rollback_web_cutover(store, provider, "release")
+                self.assertEqual(rolled.step, "rolled_back")
+                self.assertEqual(provider.writer_slot.slot_id, intent.old.slot_id)
+                self.assertNotIn("writers-new", provider.actions)
+
+    def test_abort_cancels_unapplied_forward_intent_before_a_delayed_event(self) -> None:
+        with TemporaryDirectory() as folder:
+            intent = plan()
+            provider = Provider(intent)
+            store = WebDeploymentCutoverStore(
+                FilesystemRecordStore(Path(folder)), deployment(intent)
+            )
+            provider.delay_apply = True
+            with self.assertRaises(TimeoutError):
+                execute_web_cutover(intent, store, provider, record_id="release")
+            self.assertEqual(provider.slot.slot_id, intent.old.slot_id)
+            self.assertEqual(provider.published_slot.slot_id, intent.new.slot_id)
+            rollback_web_cutover(store, provider, "release")
+            # Simulate a delayed watch event or proxy restart consuming disk.
+            provider.slot = provider.published_slot
+            self.assertEqual(provider.slot.slot_id, intent.old.slot_id)
+            self.assertEqual(store.load("release").step, "rolled_back")
+
+    def test_candidate_from_another_image_repository_cannot_reserve_a_route(self) -> None:
+        from control_plane.generic_web_cutover import resolve_web_cutover_target
+
+        with TemporaryDirectory() as folder:
+            store, intent, _ = WebCutoverDeploymentTests().seed(Path(folder), "compose")
+            candidate = intent.candidate.model_copy(deep=True)
+            candidate.image.repository = "ghcr.io/example/foreign"
+            store.write_artifact_manifest(candidate)
+            profile = store.read_product_profile_record("fixture")
+            with self.assertRaises(ValueError):
+                resolve_web_cutover_target(
+                    store,
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    artifact_id=candidate.artifact_id,
+                    source_git_ref=candidate.source_commit,
+                    deploy_reference="",
+                    provider_id="dokploy",
+                    timeout_seconds=None,
+                )
+
+    def test_promotion_failure_after_switch_runs_automatic_switch_back_and_finalizes(self) -> None:
+        from control_plane.workflows.generic_web_promotion import (
+            GenericWebProdPromotionRequest,
+            execute_generic_web_prod_promotion,
+        )
+        from tests.support.promotion_backup import stub_verified_promotion_backup
+
+        stub_verified_promotion_backup(self, "control_plane.workflows.generic_web_promotion")
+        for failure in ("handoff", "drain"):
+            with self.subTest(failure=failure), TemporaryDirectory() as folder:
+                root = Path(folder)
+                store, intent, provider = WebCutoverDeploymentTests().seed(root, "application")
+                profile = store.read_product_profile_record("fixture")
+                profile.lanes = (
+                    ProductLaneProfile(context="fixture", instance="testing"),
+                    *profile.lanes,
+                )
+                store.write_product_profile_record(profile)
+                old_inventory = store.read_environment_inventory(
+                    context_name="fixture", instance_name="prod"
+                )
+                testing = old_inventory.model_copy(
+                    update={
+                        "instance": "testing",
+                        "artifact_identity": ArtifactIdentityReference(
+                            artifact_id=intent.candidate.artifact_id
+                        ),
+                        "source_git_ref": intent.candidate.source_commit,
+                    }
+                )
+                store.write_environment_inventory(testing)
+                original_handoff = provider.handoff_writers
+
+                def handoff(p: GenericWebCutoverPlan, slot: WebSlot) -> None:
+                    if failure == "handoff" and slot.slot_id == p.new.slot_id:
+                        raise ValueError("injected candidate worker handoff failure")
+                    original_handoff(p, slot)
+
+                def drain(p: GenericWebCutoverPlan, slot: WebSlot) -> bool:
+                    return not (failure == "drain" and slot.slot_id == p.old.slot_id)
+
+                selected = DokployGenericWebDeployProvider(
+                    cutover_provider_factory=lambda _p: provider
+                )
+                with (
+                    patch.object(provider, "handoff_writers", side_effect=handoff),
+                    patch.object(provider, "drain", side_effect=drain),
+                    patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"),
+                    patch(
+                        "control_plane.workflows.generic_web_promotion.require_release_approval"
+                    ) as approval,
+                ):
+                    result = execute_generic_web_prod_promotion(
+                        control_plane_root=root,
+                        record_store=store,
+                        request=GenericWebProdPromotionRequest(
+                            product="fixture",
+                            artifact_id=intent.candidate.artifact_id,
+                            deploy_reference=intent.new.deploy_reference,
+                            source_git_ref=intent.candidate.source_commit,
+                            backup_record_id="infrastructure-example",
+                            verify_health=False,
+                        ),
+                        deploy_provider=selected,
+                        deployment_record_id="promotion-attempt",
+                    )
+                approval.assert_called_once()
+                self.assertEqual(result.promotion_status, "fail")
+                self.assertEqual(result.rollback_status, "pass")
+                self.assertEqual(provider.slot.slot_id, intent.old.slot_id)
+                self.assertEqual(provider.writer_slot.slot_id, intent.old.slot_id)
+                attempt = store.read_deployment_record("promotion-attempt")
+                self.assertEqual(attempt.generic_web_cutover.step, "rolled_back")
+                self.assertEqual(attempt.deploy.status, "fail")
+                self.assertEqual(
+                    store.read_promotion_record(result.promotion_record_id).deploy.status, "fail"
+                )
+                self.assertEqual(
+                    store.read_environment_inventory(
+                        context_name="fixture", instance_name="prod"
+                    ).runtime_identity.slot,
+                    intent.old.slot_id,
+                )
+
+
+class WebCutoverRefusalObservationTests(unittest.TestCase):
+    def test_refusal_checkpoint_and_empty_effect_journal_allow_pre_effect_recovery(self) -> None:
+        from control_plane.generic_web_deploy_provider_adapter import (
+            GenericWebDeployProviderMutationAdapter,
+        )
+        from control_plane.generic_web_deploy_http import GenericWebDeployEnvelope
+        from control_plane.provider_operations import ProviderMutationRejectedError
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            store, intent, _ = WebCutoverDeploymentTests().seed(root, "compose")
+            candidate = intent.candidate.model_copy(update={"release_compatibility": None})
+            store.write_artifact_manifest(candidate)
+            profile = store.read_product_profile_record("fixture")
+            adapter = GenericWebDeployProviderMutationAdapter(
+                control_plane_root=root,
+                record_store=store,
+                deploy_request=GenericWebDeployEnvelope(
+                    product="fixture",
+                    deploy=GenericWebDeployRequest(
+                        product="fixture",
+                        instance="prod",
+                        artifact_id=candidate.artifact_id,
+                        source_git_ref=candidate.source_commit,
+                    ),
+                ),
+                profile=profile,
+                lane=profile.lanes[0],
+                trace_id="fixture",
+            )
+            lease: Any = type(
+                "Lease",
+                (),
+                {"checkpoint_effect": lambda _s, _phase: self.fail("refusal performed an effect")},
+            )()
+            with patch("control_plane.workflows.generic_web_deploy.require_forward_lane_build"):
+                key = adapter.reconciliation_key()
+                with self.assertRaises(ProviderMutationRejectedError):
+                    adapter.apply("refused", lease)
+            inspection = adapter.inspect(
+                provider_operation_key="refused", provider_effect_phase="", reconciliation_key=key
+            )
+            self.assertEqual(inspection.observation.outcome, "absent")
+            self.assertTrue(inspection.retry_safe)
+            contradictory = adapter.inspect(
+                provider_operation_key="refused",
+                provider_effect_phase="atomic_switch",
+                reconciliation_key=key,
+            )
+            self.assertEqual(contradictory.observation.outcome, "unknown")
+            self.assertFalse(contradictory.retry_safe)

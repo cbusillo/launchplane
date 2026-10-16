@@ -357,6 +357,7 @@ def rollback_compatible_cutover(
                 plan.rollback_website_settings if record.website_settings_attempted else None,
             )
             _require_route(provider.current_route(plan), plan, plan.old)
+            _require_route(provider.switch(plan, plan.old), plan, plan.old)
             return record
         if record.step != "rolling_back":
             route = provider.current_route(plan)
@@ -429,7 +430,7 @@ def rollback_compatible_cutover(
             ):
                 _require_route(route, plan, plan.new)
             _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
-            route = provider.switch(plan, plan.old)
+        route = provider.switch(plan, plan.old)
         _require_route(route, plan, plan.old)
         _require_ready(provider.readiness(plan, plan.old), plan, plan.old, clock())
         if intent is not None:

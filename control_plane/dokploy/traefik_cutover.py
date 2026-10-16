@@ -149,17 +149,20 @@ class TraefikFileRoute:
 
     def publish(self, backend: str, *, expected: tuple[str, ...]) -> str:
         observed = self.observed_target()
-        if observed == backend:
-            return observed
-        if observed not in expected:
+        if observed != backend and observed not in expected:
             raise ValueError("route authority changed; refusing a stale traffic switch")
         # A watched file belongs to this route alone. Never replace a shared
         # dynamic configuration and silently retire its other routers/services.
         owned = yaml.safe_load(self.target.route_file.read_text())
         intended = json.loads(json.dumps(route_payload(self.target, backend)))
-        previous = json.loads(json.dumps(route_payload(self.target, observed)))
-        if owned not in (previous, intended):
+        admitted = [
+            json.loads(json.dumps(route_payload(self.target, target)))
+            for target in {observed, backend, *expected}
+        ]
+        if owned not in admitted:
             raise ValueError("route file is not the exact single-route owned configuration")
+        if owned == intended and observed == backend:
+            return observed
         if owned == intended:
             try:
                 return self._wait_applied(backend, expected)

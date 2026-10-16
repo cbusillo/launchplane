@@ -110,3 +110,19 @@ the old runtime and verifies its public identity after restoring that route.
 Blocked and aborted attempts finish as failed deployment events rather than
 remaining pending. Readiness persists first/warmed request timings alongside
 its render/asset and identity evidence.
+
+Writer ownership is independent of traffic authority. Old workers may still be
+running after the new route applies and before handoff finishes. Switch-back
+therefore verifies old renders/identity without demanding that those old workers
+be fenced; the reverse handoff then drains the successor before confirming old
+ownership. An inverse publication reconciles the owned file even when the proxy
+still serves old, cancelling a pending candidate intent before a delayed watch
+event or proxy restart. The common publisher requires both durable intent and
+applied authority to agree for an idempotent success. Odoo's compatible inverse
+uses this same correction.
+
+Promotion consumes bounded cutover failures through its existing automatic
+rollback/finalization path. A rollback's newer checkpoint cannot be overwritten
+by the promotion's earlier deployment snapshot. New candidates must belong to
+the product's configured image and source repository. These checks grant no
+access and leave installed-provider/actual release qualification on #3268.

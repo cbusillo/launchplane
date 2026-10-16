@@ -132,7 +132,7 @@ class DokployWebCutoverProvider:
             plan,
             slot,
             datetime.now(UTC),
-            require_fenced=slot != plan.old or self.route.observed_target() != slot.private_url,
+            require_fenced=slot != plan.old,
         )
         health = self.driver.private_health(plan, slot)
         if (

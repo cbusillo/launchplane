@@ -1384,6 +1384,8 @@ def cutover_deploy_result(
             deployment.generic_web_cutover is not None
             and deployment.generic_web_cutover.step != "blocked"
         ),
-        image_effect_attempted=not rollback,
+        image_effect_attempted=not rollback
+        and deployment.generic_web_cutover is not None
+        and deployment.generic_web_cutover.step != "blocked",
         post_deploy_status="pass" if deployment.deploy.status == "pass" else "fail",
     )

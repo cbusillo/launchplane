@@ -283,7 +283,7 @@ class WebCutoverRehearsalTests(unittest.TestCase):
                 public = "http://127.0.0.1:" + ports["80/tcp"][0]["HostPort"]
                 api = "http://127.0.0.1:" + ports["8080/tcp"][0]["HostPort"]
                 route = TraefikFileRoute(
-                    target.model_copy(update={"api_url": api}), apply_timeout_seconds=3
+                    target.model_copy(update={"api_url": api}), apply_timeout_seconds=10
                 )
                 opener = build_opener(ProxyHandler({}))
 
@@ -323,6 +323,7 @@ class WebCutoverRehearsalTests(unittest.TestCase):
                 thread.start()
                 fixture = Provider(intent)
                 fail_ready = False
+                wrong_digest = False
 
                 def ready(p: GenericWebCutoverPlan, slot: WebSlot) -> Any:
                     if fail_ready:
@@ -356,6 +357,7 @@ class WebCutoverRehearsalTests(unittest.TestCase):
                         self.assertIn(slot.runtime_identity.source_git_ref, body)
                     return fixture.readiness(p, slot).model_copy(
                         update={
+                            "image": intent.old.image if wrong_digest else slot.image,
                             "first_request_ms": durations[0],
                             "warmed_request_ms": durations[-1],
                         }
@@ -423,6 +425,17 @@ class WebCutoverRehearsalTests(unittest.TestCase):
                         execute_web_cutover(intent, store, provider, record_id="release")
                     self.assertEqual(route.observed_target(), intent.old.private_url)
                     fail_ready = False
+                    wrong_digest = True
+                    with self.assertRaises(ValueError):
+                        execute_web_cutover(intent, store, provider, record_id="release")
+                    self.assertEqual(route.observed_target(), intent.old.private_url)
+                    wrong_digest = False
+                    with patch.object(
+                        route, "observed_target", return_value="http://foreign.invalid:9999"
+                    ):
+                        with self.assertRaises(ValueError):
+                            execute_web_cutover(intent, store, provider, record_id="release")
+                    self.assertEqual(route.observed_target(), intent.old.private_url)
                     original_publish = route.publish
 
                     def uncertain(backend: str, *, expected: tuple[str, ...]) -> str:
@@ -437,7 +450,18 @@ class WebCutoverRehearsalTests(unittest.TestCase):
                     store = WebDeploymentCutoverStore(
                         FilesystemRecordStore(root / "records"), deployment(intent)
                     )
-                    result = execute_web_cutover(intent, store, provider, record_id="release")
+                    # Desktop bind-mount events can be coalesced. Exercise bounded
+                    # restart recovery; each attempt must retain its checkpoint.
+                    for attempt in range(3):
+                        try:
+                            result = execute_web_cutover(
+                                intent, store, provider, record_id="release"
+                            )
+                            break
+                        except TimeoutError:
+                            self.assertEqual(store.load("release").step, "switching")
+                            if attempt == 2:
+                                raise
                     self.assertEqual(result.step, "complete")
                     self.assertEqual(
                         json.loads(read("/health")[1]),

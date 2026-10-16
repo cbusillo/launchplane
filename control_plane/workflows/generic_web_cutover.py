@@ -176,6 +176,7 @@ def rollback_web_cutover(
         provider.preflight(plan)
         if record.step == "rolled_back":
             require_route(provider.current_route(plan), plan, plan.old)
+            require_route(provider.switch(plan, plan.old), plan, plan.old)
             return record
         route = provider.current_route(plan)
         current = plan.old if route.slot_id == plan.old.slot_id else plan.new
@@ -187,7 +188,10 @@ def rollback_web_cutover(
             slot_id=current.slot_id,
         )
         observed_identity = route.public_health.observed_runtime_identity
-        if observed_identity is not None and observed_identity != current.runtime_identity:
+        if observed_identity is not None and observed_identity not in (
+            plan.old.runtime_identity,
+            plan.new.runtime_identity,
+        ):
             raise ValueError("public runtime differs from the admitted rollback authority")
         if record.step != "rolling_back":
             record = record.model_copy(
@@ -200,11 +204,12 @@ def rollback_web_cutover(
                 plan,
                 plan.old,
                 clock(),
-                require_fenced=current != plan.old,
+                require_fenced=False,
             )
-            if current != plan.old:
-                checkpoint("rollback_atomic_switch")
-                route = provider.switch(plan, plan.old)
+            # Reconcile durable file intent even when the applied route stayed
+            # old after a lost forward notification. A later event must not flip it.
+            checkpoint("rollback_atomic_switch")
+            route = provider.switch(plan, plan.old)
             require_route(route, plan, plan.old)
             checkpoint("rollback_resume_writers")
             provider.handoff_writers(plan, plan.old)

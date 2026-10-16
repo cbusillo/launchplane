@@ -658,6 +658,13 @@ class GenericWebDeployProviderMutationAdapter:
                 deploy_reference=deploy.deploy_reference,
                 record_id=record.record_id,
             )
+            if cutover.step == "blocked" and not effect_phase:
+                return _GenericWebDeployProviderInspection(
+                    observation=GenericWebProviderDeploymentObservation(outcome="absent"),
+                    retry_safe=True,
+                    resolved_deploy_target=target,
+                    provider_evidence="deployment_absent_before_effect",
+                )
             factory = cast(
                 Callable[[GenericWebCutoverPlan], WebCutoverProvider] | None,
                 getattr(self._deploy_provider, "cutover_provider_factory", None),
@@ -775,7 +782,7 @@ class GenericWebDeployProviderMutationAdapter:
             else:
                 effect_started = (
                     previous.generic_web_cutover is not None
-                    and previous.generic_web_cutover.step not in {"preparing", "blocked"}
+                    and previous.generic_web_cutover.step != "blocked"
                 )
 
         def checkpoint(phase: str) -> None:
