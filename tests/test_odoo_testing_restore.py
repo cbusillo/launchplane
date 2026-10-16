@@ -468,6 +468,25 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         status, output = self.run_program()
         self.assertNotEqual(status, 0)
 
+    def test_down_lane_resource_qualification_does_not_need_login_database(self) -> None:
+        from control_plane.odoo_testing_drill_usage import parse_drill_usage_result
+
+        self.spec.update(inspection_only=True, usage_only=True, usage_required=False)
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertIsNone(parse_drill_usage_result(frames, usage_required=False))
+        self.assertFalse(
+            any(call[:2] in (["docker", "stop"], ["docker", "start"]) for call in self.calls)
+        )
+        self.containers["web"]["HostConfig"]["PortBindings"] = {"8069/tcp": [{}]}
+        status, _ = self.run_program()
+        self.assertNotEqual(status, 0)
+
     def test_task_cleanup_qualifies_physical_copy_without_reading_login_history(self) -> None:
         self.spec.update(inspection_only=True, usage_only=True, task_account_cleanup=True)
         self.existing_database = True

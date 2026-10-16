@@ -71,7 +71,16 @@ def separation_binding(
             "The testing target aliases another lane; shared targets cannot be changed."
         )
     evidence = store.read_disposable_lane_safety(request.product, request.context, request.instance)
-    if evidence is not None and evidence.usage == "in_use":
+    from control_plane.lane_usage import lane_usage_protected
+
+    if evidence is not None and lane_usage_protected(
+        store,
+        product=request.product,
+        context=request.context,
+        instance=request.instance,
+        usage=evidence.usage,
+        require_unused=False,
+    ):
         raise ValueError(
             "Recorded person use must be resolved before changing testing configuration."
         )
