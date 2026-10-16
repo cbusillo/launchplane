@@ -20,10 +20,10 @@ context cannot be substituted. This is separate from product-config's merge
 writer and does not change its ownership or global-target refusal.
 
 The authenticated Director agent can prepare previews and read back results.
-An existing policy administrator can review with `secret.list`. Apply requires
+An existing admin can review with `secret.list`. Apply requires
 the signed-in immutable-ID administrator and existing `product_config.apply`
-authority for the exact selected scope, product and context. A local-admin,
-workflow, operator or terminal token cannot apply, even with a matching preview.
+authority for the exact selected scope, product and context. A `local_admin`,
+workflow, `local_operator` or terminal token cannot apply, even with a matching preview.
 Browser origin/fetch metadata/CSRF checks still apply. No new grant is installed.
 
 Dry-run saves a service-owned review containing the complete original record,
