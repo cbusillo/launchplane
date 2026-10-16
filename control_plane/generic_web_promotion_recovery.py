@@ -312,7 +312,7 @@ def inspect_promotion(
             )
         ):
             return inspection
-        provider = default_generic_web_deploy_provider()
+        provider = default_generic_web_deploy_provider(record_store=store, control_plane_root=root)
         if not isinstance(provider, GenericWebDeployRuntimeArtifactProvider):
             return inspection
         effective_target = target.model_copy(
@@ -604,7 +604,7 @@ def inspect_rollback_drill(
             )
         ):
             return inspection
-        provider = default_generic_web_deploy_provider()
+        provider = default_generic_web_deploy_provider(record_store=store, control_plane_root=root)
         if not isinstance(provider, GenericWebDeployRuntimeArtifactProvider):
             return inspection
         runtime = provider.observe_runtime_artifact(
