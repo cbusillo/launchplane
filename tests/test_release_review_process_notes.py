@@ -129,3 +129,13 @@ class ReleaseProcessNotesTests(unittest.TestCase):
     def test_process_examples_in_fences_are_data(self) -> None:
         notes = "```text\nAccept the release in Launchplane after cleanup is recorded.\n```"
         self.assertEqual(release_test_notes(notes), (notes, False))
+
+    def test_dotted_handoff_locations_and_test_evidence_leave_no_fake_instruction(self) -> None:
+        for condition in (
+            "cleanup evidence is recorded in docs/release-review.md",
+            "cleanup evidence is recorded at launchplane.example.com",
+            "cleanup and test evidence is recorded",
+        ):
+            with self.subTest(condition=condition):
+                notes = "Accept the release in Launchplane after " + condition + "."
+                self.assertEqual(release_test_notes(notes), ("", True))

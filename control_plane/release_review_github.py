@@ -36,7 +36,7 @@ _NOTE_LINK = re.compile(
 _RELEASE_PROCESS_INSTRUCTION = re.compile(
     r"(?P<join>,[ \t]*then[ \t]+|(?<=[.!?])[ \t]+(?:then[ \t]+)?"
     r"|^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:then[ \t]+)?)"
-    r"(?P<instruction>(?:accept|approve)\b(?:https?://[^\s]*[^\s.!?)]|[^.!?\n])*[.!?]?)",
+    r"(?P<instruction>(?:accept|approve)\b[^\n]*?(?:[.!?](?=[ \t]|$)|$))",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -85,10 +85,14 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
         ):
             return match[0]
         changed = True
+        condition_end = max(
+            match.end()
+            for match in re.finditer(r"\b(?:recorded|completed?)\b", instruction, re.IGNORECASE)
+        )
         following_check = re.search(
             r"\s+(?:then|and)(?:\s+then)?\s+"
             r"(?P<check>(?:check|confirm|verify|open|try|repeat|inspect|look|test)\b.*)",
-            instruction,
+            instruction[condition_end:],
             re.IGNORECASE,
         )
         retained = "." if match["join"].startswith(",") else ""
@@ -115,10 +119,10 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
             and (number := re.match(r"#([1-9][0-9]*)\b", heading[2]))
         ]
         for position in range(len(members) - 1, -1, -1):
-            start, number = members[position]
+            start, member_number = members[position]
             end = members[position + 1][0] if position + 1 < len(members) else len(lines)
             if not _note_content("\n".join(lines[start + 1 : end])):
-                lines.insert(start + 1, missing_owner_test_notes(number))
+                lines.insert(start + 1, missing_owner_test_notes(member_number))
         if not _note_content("\n".join(lines)):
             lines = []
         displayed = "\n".join(lines)
