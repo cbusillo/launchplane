@@ -1983,18 +1983,12 @@ GitHub runs scheduled workflows on a best-effort basis and fired the
 five-minute workflow schedule only about every six hours, which is why the
 clock moved into Launchplane.
 
-Until it is removed, the GitHub Actions schedule in
-`.github/workflows/merge-train-runner.yml` still reads
-authorized policy targets from the native FastAPI
-`GET /v1/work-graph/merge-train/policy-targets` route on every scheduled run.
-Each target with `scheduler.enabled = true` gets its own run job in that pass
-(at most four run at once), using that target's `runner_mode` and `mutate`.
-Trains are independent per repository and base branch, so one target's failure
-does not stop the others. Zero enabled targets make the scheduled pass a
-successful no-op. Each run job uses the admission route before its worker call
-and writes at most one Launchplane worker result per pass; the five-minute
-schedule is the retry loop. Manual dispatch remains explicit and uses workflow inputs for
-repository, base branch, runner mode, mutation, and phase-specific commands.
+The GitHub Actions workflow `.github/workflows/merge-train-runner.yml` is
+manual-only. It runs one explicit target using workflow inputs for repository,
+base branch, runner mode, mutation, and phase-specific commands. Each dispatch
+reads admission before its worker call. Automatic cadence and timed recovery
+belong to the service worker; the workflow has no schedule or policy-target
+fan-out.
 Controller-mode mutate runs and manually dispatched batch-candidate,
 stack-collapse, or batch-landing phases render conservative PR feedback payloads
 from their worker responses and post them through the managed feedback endpoint,
@@ -2016,8 +2010,7 @@ render these payloads for inspection but do not deliver feedback comments.
 
 Roll out controller-mode scheduling as an admin-controlled lane. The service
 must already have an active merge-train policy for the target repository/base
-branch, the deployed authz grants must allow `.github/workflows/merge-train-runner.yml`
-to read admission and run the selected worker route, and the target repository
+branch, the service scheduler worker must be running, and the target repository
 should have low-risk candidate pull requests whose checks and labels make the
 expected train behavior easy to inspect.
 
@@ -2032,13 +2025,14 @@ mutate = false
 ```
 
 Scheduled runs resolve the repository, base branch, runner mode, and mutation
-flag from that DB-backed policy target through the deployed Launchplane API.
+flag from that DB-backed policy target in the service worker.
 Manual workflow dispatches use explicit workflow inputs. Missing manual
 repository or base branch input fails closed before any worker request.
 
 Observe at least two scheduled dry-run passes before enabling mutation. A healthy
-observation pass has a successful GitHub Actions run, an admitted or explicitly
-deferred admission response, `runner_mode=controller`, `mutate=false`, and a
+observation pass has retained worker summary logs with scheduler trace IDs and
+matching merge-train run or controller records, an admitted or explicitly
+deferred admission decision, `runner_mode=controller`, `mutate=false`, and a
 controller result whose mode is `dry-run`. Dry-run controller passes may render
 feedback payloads for inspection, but they must report zero delivered feedback
 comments and must not create or update Launchplane-managed PR comments. The
@@ -2049,18 +2043,19 @@ controller action without requiring a GitHub read.
 Enable mutation only after the Director explicitly chooses to promote the dry-run
 lane. Import a replacement active policy record with `scheduler.mutate = true`
 for that promotion and confirm that service deploy health, required checks,
-runner capacity, and target PR heads are still current. A mutate run still
-performs at most one controller action per scheduled pass. Managed PR feedback
+runner capacity, and target PR heads are still current. A mutate pass uses the normal admission and controller lease for every action
+and makes bounded progress as described in [merge-train events](merge-train-events.md).
+Managed PR feedback
 comments are allowed in mutate mode and should summarize whether a PR is queued,
 blocked, waiting, stale, or completed.
 
 For rollback, use the operational policy endpoint to set `scheduler.mutate =
 false`. To disarm the scheduled lane entirely, set `scheduler.enabled = false`; scheduled runs without an enabled DB target complete as no-ops before
-the admission call. Changing `scheduler.runner_mode` to `level1` returns the
-workflow to the Level 1 baseline after the next scheduled pass.
+the admission call. Changing `scheduler.runner_mode` to `level1` selects the
+Level 1 worker for the next scheduled pass.
 
 Every rollout or rollback should leave evidence in the planning issue: the
-target repository/base branch, the scheduler policy settings, the relevant run
+target repository/base branch, the scheduler policy settings, the relevant worker trace
 IDs, the latest controller/admission state, whether PR feedback was delivered,
 and the post-merge Launchplane CI, Security, CodeQL, and deploy status that
 carried
