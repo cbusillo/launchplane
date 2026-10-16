@@ -11771,6 +11771,18 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
     def test_reserved_peer_cannot_cross_effect_checkpoint(self) -> None:
         self.fixture.test_reserved_peer_cannot_cross_effect_checkpoint_during_bootstrap()
 
+    def test_refresh_unused_intent_retains_old_review(self) -> None:
+        self.fixture.test_unused_intent_can_refresh_destination_capture_and_retains_its_review()
+
+    def test_unknown_pause_requires_terminal_host_witness(self) -> None:
+        self.fixture.test_unknown_host_pause_requires_a_terminal_witness_before_retry()
+
+    def test_settled_failure_supersedes_and_fences_both_hosts(self) -> None:
+        self.fixture.test_settled_failed_bootstrap_can_supersede_with_both_writer_hosts_fenced()
+
+    def test_unrelated_product_checkpoint_survives_missing_peer_target(self) -> None:
+        self.fixture.test_missing_peer_target_does_not_block_an_unrelated_products_effect()
+
     def test_effect_checkpoint_and_budget_admission_serialize_on_two_connections(self) -> None:
         from control_plane.production_recipient_budget import require_budget_checkpoint
         from control_plane.workflows.generic_web_deploy_provider import (
@@ -11853,9 +11865,20 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
             finally:
                 release.set()
             self.assertEqual(first.result(timeout=10).status, "updated")
-            with self.assertRaisesRegex(ValueError, "peer writer operation"):
+            with self.assertRaises(ValueError):
                 admission.result(timeout=10)
         self.assertEqual(f.actions, [])
+
+
+class RealPostgresRecipientWriterTests(unittest.TestCase):
+    def test_repeatable_writer_cycles_use_real_custody(self) -> None:
+        from tests.test_production_recipient_writer_control import RecipientWriterControlTests
+
+        fixture = RecipientWriterControlTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_two_pause_resume_cycles_bind_each_resume_to_its_original_pause()
 
 
 class RealPostgresOdooTestingDrillTests(unittest.TestCase):

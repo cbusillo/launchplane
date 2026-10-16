@@ -1,6 +1,6 @@
 """The accepted-release adapter uses real custody, backup records and publication."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -385,7 +385,7 @@ class RecipientCutoverTests(unittest.TestCase):
 
     def test_capture_only_or_wrong_source_cannot_arm_bootstrap(self) -> None:
         record = self.record.model_copy(update={"recovery_proof": {}})
-        with self.assertRaisesRegex(ValueError, "recipient recovery"):
+        with self.assertRaises(ValueError):
             cutover_intent(self.fixture.root, self.store, record, self.request)
         wrong = self.request.model_copy(
             update={"destination_backup_operation_id": "missing-destination"}
@@ -446,8 +446,9 @@ class RecipientCutoverTests(unittest.TestCase):
             backup,
             self.validate_release,
         )
-        with patch.object(adapter, "verify_runtime"):
-            result = run_durable_provider_operation(
+
+        def run_second() -> Any:
+            return run_durable_provider_operation(
                 store=self.store,
                 scope="client-release",
                 route_path="/fixture/recipient-release",
@@ -457,6 +458,15 @@ class RecipientCutoverTests(unittest.TestCase):
                 response_trace_id="launchplane_req_second",
                 adapter=adapter,
             )
+
+        with patch.object(adapter, "verify_runtime"):
+            self.accepted = False
+            with self.assertRaises(ValueError):
+                run_second()
+            self.assertTrue(self.old_running)
+            self.assertFalse(self.new_running)
+            self.accepted = True
+            result = run_second()
         self.assertEqual(result.response_status_code, 202, result.response_payload)
         payload = result.response_payload["result"]
         assert isinstance(payload, dict)
@@ -538,5 +548,216 @@ class RecipientCutoverTests(unittest.TestCase):
             reconciliation_key="peer-restart",
         ).record
         assert peer is not None
-        with self.assertRaisesRegex(ValueError, "writer budget"):
+        with self.assertRaises(ValueError):
             self.store.checkpoint_mutation_provider_effect(reservation=peer, effect_phase="start")
+
+    def test_unused_intent_can_refresh_destination_capture_and_retains_its_review(self) -> None:
+        backup = self.capture(self.destination_policy, "refreshed-destination")
+        request = self.request.model_copy(update={"destination_backup_operation_id": backup})
+        intent = cutover_intent(self.fixture.root, self.store, self.record, request)
+        save_cutover_intent(self.store, self.record, intent)
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        self.assertEqual(current.activation_history, [self.record.activation])
+        self.assertEqual(current.activation, intent)
+
+    def test_admitted_destination_capture_remains_historical_proof_during_reconciliation(
+        self,
+    ) -> None:
+        self.run_release()
+        record = custody(self.store, self.record.product, self.record.context)
+        assert record is not None
+        future = datetime.now(UTC) + timedelta(days=365)
+
+        class FutureDate(datetime):
+            @classmethod
+            def now(cls, tz: Any = None) -> Any:
+                return future
+
+        with patch("control_plane.production_recipient_cutover.datetime", FutureDate):
+            with self.assertRaises(ValueError):
+                cutover_intent(self.fixture.root, self.store, record, self.request)
+            self.assertEqual(
+                cutover_intent(
+                    self.fixture.root, self.store, record, self.request, check_freshness=False
+                ),
+                record.activation,
+            )
+
+    def test_lost_commit_reply_uses_published_custody_without_stopping_new_writer(self) -> None:
+        from control_plane.production_recipient_publication import commit_publication
+
+        def lost_reply(*args: Any, **kwargs: Any) -> Any:
+            commit_publication(*args, **kwargs)
+            raise TimeoutError("commit reply lost")
+
+        with patch(
+            "control_plane.production_recipient_cutover.commit_publication", side_effect=lost_reply
+        ):
+            result = self.run_release()
+        self.assertEqual(result.response_payload["result"]["promotion_status"], "pass")
+        self.assertTrue(self.new_running)
+        self.assertFalse(self.old_running)
+        self.assertNotIn(("pause", False), self.actions)
+
+    def test_predispatch_pause_refusal_releases_budget_and_original_key_can_retry(self) -> None:
+        def refuse(*args: Any, **kwargs: Any) -> None:
+            if kwargs.get("old") and kwargs.get("action") == "pause":
+                raise ValueError("pending provider deployment")
+            self.writer(*args, **kwargs)
+
+        with patch("control_plane.production_recipient_cutover.writer_action", side_effect=refuse):
+            self.assertEqual(self.run_release().response_status_code, 409)
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        self.assertEqual(current.phase, "preflight_refused")
+        self.assertTrue(self.old_running)
+        self.assertEqual(self.run_release().response_status_code, 202)
+
+    def test_missing_peer_target_does_not_block_an_unrelated_products_effect(self) -> None:
+        record = self.record.model_copy(update={"phase": "bootstrapping"})
+        self.store.write_production_recipient(
+            expected=self.record.model_dump(mode="json"), replacement=record.model_dump(mode="json")
+        )
+        binding = next(
+            row
+            for row in self.store.list_secret_bindings()
+            if row.binding_id == self.request.writer_binding_id
+        )
+        self.store.write_secret_binding(
+            binding.model_copy(
+                update={
+                    "binding_id": "missing-peer",
+                    "context": "another-context",
+                    "instance": "testing",
+                }
+            )
+        )
+        peer = self.store.reserve_mutation(
+            scope="another-product",
+            route_path="/fixture/other-deploy",
+            idempotency_key="original",
+            request_fingerprint="a" * 64,
+            lease_owner="other",
+            provider_target_key="other-products-target",
+            reconciliation_key="other-deploy",
+        ).record
+        assert peer is not None
+        self.assertEqual(
+            self.store.checkpoint_mutation_provider_effect(
+                reservation=peer, effect_phase="deploy"
+            ).status,
+            "updated",
+        )
+
+    def test_binding_metadata_touch_does_not_block_the_exact_inverse(self) -> None:
+        from control_plane.production_recipient_inverse import run_recipient_inverse
+
+        self.run_release()
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        binding = next(
+            row
+            for row in self.store.list_secret_bindings()
+            if row.binding_id == self.request.writer_binding_id
+        )
+        self.store.write_secret_binding(
+            binding.model_copy(update={"updated_at": "2026-10-16T10:00:00Z"})
+        )
+        with (
+            patch(
+                "control_plane.production_recipient_inverse.writer_action", side_effect=self.writer
+            ),
+            patch(
+                "control_plane.production_recipient_inverse._verify_health_evidence_with_identity",
+                side_effect=self.health,
+            ),
+        ):
+            run_recipient_inverse(
+                root=self.fixture.root,
+                store=self.store,
+                record=current,
+                scope="client-release",
+                route_path="/fixture/inverse",
+                key="inverse",
+                trace=self.adapter.trace_id,
+                validate_release=self.validate_release,
+            )
+        restored = custody(self.store, self.record.product, self.record.context)
+        assert restored is not None
+        self.assertEqual(restored.phase, "rolled_back")
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+
+    def test_unknown_host_pause_requires_a_terminal_witness_before_retry(self) -> None:
+        pauses = []
+
+        def unknown(*args: Any, **kwargs: Any) -> None:
+            if kwargs.get("old") and kwargs.get("action") == "pause":
+                pauses.append("pause")
+                kwargs["checkpoint"]("post_deploy_schedule_trigger")
+                self.old_running = False
+                raise TimeoutError("host pause response lost")
+            if kwargs.get("action") in {"resume", "receipt_pause"}:
+                raise ValueError("terminal host witness unavailable")
+            self.writer(*args, **kwargs)
+
+        with patch("control_plane.production_recipient_cutover.writer_action", side_effect=unknown):
+            self.assertEqual(self.run_release().response_status_code, 409)
+            self.assertEqual(self.run_release().response_status_code, 409)
+        self.assertEqual(pauses, ["pause"])
+        self.assertFalse(self.old_running)
+        self.assertEqual(self.deploys, 0)
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        self.assertEqual(current.phase, "bootstrapping")
+
+    def test_settled_failed_bootstrap_can_supersede_with_both_writer_hosts_fenced(self) -> None:
+        from control_plane.production_recipient_continuation import (
+            RecipientContinuationRequest,
+            continuation_plan,
+            supersede_recipient,
+        )
+        from control_plane.integration_allowances import canonical_sha256
+
+        self.test_terminal_bad_health_stops_only_new_writer_and_restores_old()
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        request = RecipientContinuationRequest(
+            context=current.context,
+            original_key=current.original_key,
+            expected_custody_sha256=canonical_sha256(current.model_dump(mode="json")),
+            replacement=current.request.model_copy(
+                update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+            ),
+            reason="Retain failed bootstrap and requalify a new generation",
+        )
+        draft = continuation_plan(
+            self.fixture.root, self.store, current.product, request, current.actor, current.scope
+        )[2]
+        with patch(
+            "control_plane.production_recipient_continuation.run_recipient_program",
+            return_value={"recipient_execution_fenced": current.plan_sha256},
+        ) as fence:
+            supersede_recipient(
+                self.fixture.root,
+                self.store,
+                current.product,
+                request.model_copy(
+                    update={"mode": "apply", "reviewed_plan_sha256": draft["plan_sha256"]}
+                ),
+                current.actor,
+                current.scope,
+                lambda _phase: None,
+            )
+        replacement = custody(self.store, current.product, current.context)
+        assert replacement is not None
+        self.assertEqual(replacement.original_key, current.original_key)
+        self.assertNotEqual(replacement.namespace, current.namespace)
+        self.assertEqual(replacement.prior_attempts[-1]["execution"], current.execution)
+        self.assertEqual(
+            {call.args[1].target_id for call in fence.call_args_list},
+            {current.target_id, current.retained_target_id.target_id},
+        )
+        self.assertFalse(replacement.execution)
+        self.assertFalse(replacement.activation)

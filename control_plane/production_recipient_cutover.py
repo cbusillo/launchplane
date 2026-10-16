@@ -95,6 +95,8 @@ def cutover_intent(
     store: PostgresRecordStore,
     record: ProductionRecipientRecord,
     request: RecipientCutoverRequest,
+    *,
+    check_freshness: bool = True,
 ) -> dict[str, Any]:
     if request.preparation_plan_sha256 != record.plan_sha256 or request.context != record.context:
         raise ValueError("Cutover belongs to a different preparation.")
@@ -105,6 +107,13 @@ def cutover_intent(
     ):
         raise ValueError("Bootstrap requires recipient recovery and retained production inventory.")
     before = record.authority_snapshot
+    retained_identity = RuntimeIdentity.model_validate(before["inventory"].get("runtime_identity"))
+    if (retained_identity.product, retained_identity.context, retained_identity.instance) != (
+        record.product,
+        record.context,
+        "prod",
+    ):
+        raise ValueError("The retained production writer requires exact runtime identity.")
     endpoints = [
         PrivateHealthEndpointRecord.model_validate(row) for row in before["health_endpoints"]
     ]
@@ -131,8 +140,11 @@ def cutover_intent(
         if (
             len(rows) != 1
             or rows[0].destination_kind != "proxmox_guest"
-            or datetime.fromisoformat(rows[0].review_after.replace("Z", "+00:00"))
-            <= datetime.now(UTC)
+            or (
+                check_freshness
+                and datetime.fromisoformat(rows[0].review_after.replace("Z", "+00:00"))
+                <= datetime.now(UTC)
+            )
         ):
             raise ValueError("An existing current destination backup source is required.")
         source_records.append(rows[0].model_dump(mode="json"))
@@ -174,7 +186,7 @@ def cutover_intent(
         ),
     ):
         observed = datetime.fromisoformat(capture.evidence.get(key, "").replace("Z", "+00:00"))
-        if not 0 <= (now - observed).total_seconds() <= maximum:
+        if check_freshness and not 0 <= (now - observed).total_seconds() <= maximum:
             raise ValueError("Destination capture is stale or has a future observation.")
     binding = next(
         (
@@ -223,7 +235,14 @@ def cutover_intent(
                 "request": intent,
                 "preparation": record.model_dump(
                     mode="json",
-                    exclude={"activation", "execution", "phase", "writer_custody", "publication"},
+                    exclude={
+                        "activation",
+                        "activation_history",
+                        "execution",
+                        "phase",
+                        "writer_custody",
+                        "publication",
+                    },
                 ),
                 "sources": source_records,
                 "destination_backup": operation.model_dump(mode="json"),
@@ -238,11 +257,19 @@ def cutover_intent(
 def save_cutover_intent(
     store: PostgresRecordStore, record: ProductionRecipientRecord, intent: dict[str, Any]
 ) -> None:
-    if record.activation and record.activation != intent:
-        raise ValueError("Retain the original armed cutover; supersede custody for changed intent.")
+    if record.execution and record.activation != intent:
+        raise ValueError("An executed cutover must retain its admitted intent.")
     store.write_production_recipient(
         expected=record.model_dump(mode="json"),
-        replacement=record.model_copy(update={"activation": intent}).model_dump(mode="json"),
+        replacement=record.model_copy(
+            update={
+                "activation": intent,
+                "activation_history": record.activation_history
+                + (
+                    [record.activation] if record.activation and record.activation != intent else []
+                ),
+            }
+        ).model_dump(mode="json"),
     )
 
 
@@ -346,99 +373,105 @@ def writer_action(
         raise ValueError("Writer coordination was not verified.")
 
 
-WRITER_PROGRAM = r"""
+WRITER_LIBRARY = r"""
 import base64,hashlib,json,os,re,subprocess,sys,uuid
 from pathlib import Path
-spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
-requested=spec['action']
-receipt=requested.startswith('receipt_')
-action=requested.removeprefix('receipt_')
-if not re.fullmatch(r'[A-Za-z0-9_-]+',spec['project']) or not re.fullmatch(r'[A-Za-z0-9_-]+',spec['service']) or requested not in ('pause','resume','inspect','parked','receipt_pause','receipt_resume') or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
-    raise ValueError('invalid writer identity')
-def docker(*args):
-    result=subprocess.run(['docker',*args],capture_output=True,text=True,timeout=60)
-    if result.returncode or len(result.stdout)>1024*1024:
-        raise ValueError('writer operation failed')
-    return result.stdout
-ids=docker('ps','-aq','--filter','label=com.docker.compose.project='+spec['project'],'--filter','label=com.docker.compose.service='+spec['service']).splitlines()
-if not ids and action=='parked':
-    print('recipient_writer_action=parked')
-    print('recipient_writer_binding='+spec['binding'])
-    sys.exit(0)
-if len(ids)!=1:
-    raise ValueError('writer identity is absent or ambiguous')
-rows=json.loads(docker('inspect',ids[0]))
-if len(rows)!=1 or rows[0].get('Config',{}).get('Labels',{}).get('com.docker.compose.project')!=spec['project'] or rows[0].get('Config',{}).get('Labels',{}).get('com.docker.compose.service')!=spec['service']:
-    raise ValueError('writer identity changed')
-row=rows[0]
-if action not in ('parked','inspect'):
-    expected_identity=spec.get('expected_identity')
-    environment=dict(item.split('=',1) for item in row.get('Config',{}).get('Env',[]) if '=' in item)
-    observed=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
-    if not isinstance(expected_identity,dict) or observed!=expected_identity:
-        if not (spec.get('owned_replacement') and observed is None and row.get('Config',{}).get('Image')==spec['image']):
-            raise ValueError('writer runtime identity changed')
-expected={'id':ids[0],'image':row['Image'],'project':spec['project'],'service':spec['service']}
-witness=None
-def persist():
-    temporary=path.with_name('witness-'+uuid.uuid4().hex+'.json')
-    with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w') as output:
-        json.dump(witness,output)
-        output.flush()
-        os.fsync(output.fileno())
-    os.replace(temporary,path)
-    descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-if action not in ('inspect','parked'):
-    writer=hashlib.sha256(json.dumps([spec['project'],spec['service']]).encode()).hexdigest()
-    directory=Path('/var/lib/launchplane/recipient-writers')/spec['binding']/writer
-    if directory.is_symlink() or any(item.is_symlink() for item in directory.parents):
-        raise ValueError('invalid writer custody')
-    if not receipt:
-        directory.mkdir(parents=True,exist_ok=True,mode=0o700)
-    path=directory/'before.json'
-    if path.exists():
-        if path.is_symlink():
-            raise ValueError('invalid writer witness')
-        witness=json.loads(path.read_text())
-        if any(witness.get(key)!=value for key,value in expected.items()) or type(witness.get('was_running')) is not bool:
-            raise ValueError('retained writer changed')
-    elif action=='pause' and not receipt:
-        witness={**expected,'was_running':row.get('State',{}).get('Running') is True}
-        persist()
-    else:
-        raise ValueError('the original writer state was not witnessed')
-if not receipt:
-    if action=='pause':
-        if witness.get('released'):
-            raise ValueError('this writer pause was permanently released')
-        docker('stop','--time','30',ids[0])
-    elif action=='resume':
-        if not witness.get('paused'):
-            raise ValueError('the original stop did not complete')
-        if not witness.get('released'):
-            witness['released']=True
+def coordinate_writer(spec, *, base=None):
+    base=base or Path('/var/lib/launchplane/recipient-writers')
+    requested=spec['action']
+    receipt=requested.startswith('receipt_')
+    action=requested.removeprefix('receipt_')
+    if not re.fullmatch(r'[A-Za-z0-9_-]+',spec['project']) or not re.fullmatch(r'[A-Za-z0-9_-]+',spec['service']) or requested not in ('pause','resume','inspect','parked','receipt_pause','receipt_resume') or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
+        raise ValueError('invalid writer identity')
+    def docker(*args):
+        result=subprocess.run(['docker',*args],capture_output=True,text=True,timeout=60)
+        if result.returncode or len(result.stdout)>1024*1024:
+            raise ValueError('writer operation failed')
+        return result.stdout
+    ids=docker('ps','-aq','--filter','label=com.docker.compose.project='+spec['project'],'--filter','label=com.docker.compose.service='+spec['service']).splitlines()
+    if not ids and action=='parked':
+        print('recipient_writer_action=parked')
+        print('recipient_writer_binding='+spec['binding'])
+        sys.exit(0)
+    if len(ids)!=1:
+        raise ValueError('writer identity is absent or ambiguous')
+    rows=json.loads(docker('inspect',ids[0]))
+    if len(rows)!=1 or rows[0].get('Config',{}).get('Labels',{}).get('com.docker.compose.project')!=spec['project'] or rows[0].get('Config',{}).get('Labels',{}).get('com.docker.compose.service')!=spec['service']:
+        raise ValueError('writer identity changed')
+    row=rows[0]
+    if action not in ('parked','inspect'):
+        expected_identity=spec.get('expected_identity')
+        environment=dict(item.split('=',1) for item in row.get('Config',{}).get('Env',[]) if '=' in item)
+        observed=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
+        if not isinstance(expected_identity,dict) or observed!=expected_identity:
+            if not (spec.get('owned_replacement') and observed is None and row.get('Config',{}).get('Image')==spec['image']):
+                raise ValueError('writer runtime identity changed')
+    expected={'id':ids[0],'image':row['Image'],'project':spec['project'],'service':spec['service']}
+    witness=None
+    def persist():
+        temporary=path.with_name('witness-'+uuid.uuid4().hex+'.json')
+        with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w') as output:
+            json.dump(witness,output)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary,path)
+        descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    if action not in ('inspect','parked'):
+        writer=hashlib.sha256(json.dumps([spec['project'],spec['service']]).encode()).hexdigest()
+        directory=base/spec['binding']/writer
+        if directory.is_symlink() or any(item.is_symlink() for item in directory.parents):
+            raise ValueError('invalid writer custody')
+        if not receipt:
+            directory.mkdir(parents=True,exist_ok=True,mode=0o700)
+        path=directory/'before.json'
+        if path.exists():
+            if path.is_symlink():
+                raise ValueError('invalid writer witness')
+            witness=json.loads(path.read_text())
+            if any(witness.get(key)!=value for key,value in expected.items()) or type(witness.get('was_running')) is not bool:
+                raise ValueError('retained writer changed')
+        elif action=='pause' and not receipt:
+            witness={**expected,'was_running':row.get('State',{}).get('Running') is True}
             persist()
-        if witness['was_running']:
-            docker('start',ids[0])
-state=json.loads(docker('inspect',ids[0]))[0]
-wanted=action=='inspect' or action=='resume' and witness['was_running']
-if state.get('State',{}).get('Running') is not wanted or state.get('Image')!=expected['image']:
-    raise ValueError('writer state is unverified')
-if action in ('pause','resume'):
-    terminal='paused' if action=='pause' else 'resumed'
-    if receipt:
-        if not witness.get(terminal) or action=='pause' and witness.get('released'):
-            raise ValueError('no terminal witness for the requested action')
-    else:
-        witness[terminal]=True
-        persist()
-print('recipient_writer_action='+requested)
-print('recipient_writer_binding='+spec['binding'])
+        else:
+            raise ValueError('the original writer state was not witnessed')
+    if not receipt:
+        if action=='pause':
+            if witness.get('released'):
+                raise ValueError('this writer pause was permanently released')
+            docker('stop','--time','30',ids[0])
+        elif action=='resume':
+            if not witness.get('paused'):
+                raise ValueError('the original stop did not complete')
+            if not witness.get('released'):
+                witness['released']=True
+                persist()
+            if witness['was_running']:
+                docker('start',ids[0])
+    state=json.loads(docker('inspect',ids[0]))[0]
+    wanted=action=='inspect' or action=='resume' and witness['was_running']
+    if state.get('State',{}).get('Running') is not wanted or state.get('Image')!=expected['image']:
+        raise ValueError('writer state is unverified')
+    if action in ('pause','resume'):
+        terminal='paused' if action=='pause' else 'resumed'
+        if receipt:
+            if not witness.get(terminal) or action=='pause' and witness.get('released'):
+                raise ValueError('no terminal witness for the requested action')
+        else:
+            witness[terminal]=True
+            persist()
+    print('recipient_writer_action='+requested)
+    print('recipient_writer_binding='+spec['binding'])
 """
+
+WRITER_PROGRAM = (
+    WRITER_LIBRARY
+    + "\ncoordinate_writer(json.loads(base64.b64decode(sys.argv[1],validate=True)))\n"
+)
 
 
 @dataclass
@@ -489,6 +522,33 @@ class RecipientCutoverAdapter:
                     response_payload=self.result("fail", rollback_status="pass").response_payload,
                 )
             if current.execution:
+                attempt = canonical_sha256(provider_operation_key)
+                if current.execution.get(attempt + ":old_pause_dispatched_at"):
+                    try:
+                        writer_action(
+                            self.root,
+                            current,
+                            old=True,
+                            action="receipt_pause",
+                            checkpoint=lambda _phase: None,
+                            binding=canonical_sha256(
+                                {
+                                    "preparation": current.plan_sha256,
+                                    "operation": provider_operation_key,
+                                }
+                            ),
+                        )
+                        if current.execution.get("writer_binding:" + attempt):
+                            writer_action(
+                                self.root,
+                                current,
+                                old=False,
+                                action="receipt_resume",
+                                checkpoint=lambda _phase: None,
+                                binding=current.publication.get("writer_binding") or None,
+                            )
+                    except Exception:
+                        return ProviderObservation("unknown")
                 if (
                     not current.execution.get("trigger_requested_at")
                     or self.terminal_deployment(
@@ -541,15 +601,18 @@ class RecipientCutoverAdapter:
         backup_check: Callable[[], BackupGateEvidence],
     ) -> ProviderMutationOutcome:
         record = self.record
-        repromote = record.phase == "rolled_back" and bool(
-            record.publication.get("inverse_backup_policies")
-        )
+        repromote = bool(record.publication.get("inverse_backup_policies")) and record.phase in {
+            "rolled_back",
+            "preflight_refused",
+            "bootstrapping",
+        }
         baseline = (
             republication_snapshot(self.store, record) if repromote else record.authority_snapshot
         )
         writer_binding = canonical_sha256(
             {"preparation": record.plan_sha256, "operation": provider_operation_key}
         )
+        attempt_prefix = canonical_sha256(provider_operation_key) + ":"
         started = False
         terminal_deployment = False
         old_paused = False
@@ -613,6 +676,7 @@ class RecipientCutoverAdapter:
                     self.store,
                     record,
                     RecipientCutoverRequest.model_validate(record.activation["request"]),
+                    check_freshness=not bool(record.execution.get("old_pause_dispatched_at")),
                 )
                 != record.activation
             ):
@@ -628,6 +692,8 @@ class RecipientCutoverAdapter:
                 ):
                     raise ValueError("The saved release execution belongs to another operation.")
                 deployment_id = identity.deployment_record_id
+                if not repromote and record.phase != "bootstrapping":
+                    save(phase="bootstrapping")
                 if repromote:
                     save(
                         phase="bootstrapping",
@@ -656,7 +722,19 @@ class RecipientCutoverAdapter:
                         "promotion_record_id": promotion_id,
                         "writer_binding": writer_binding,
                         "release_trace": self.trace_id,
+                        "original_reservation": lease.evidence_reservation().model_dump(
+                            mode="json"
+                        ),
                     },
+                )
+            reservation = lease.evidence_reservation()
+            reservation_key = "reservation:" + reservation.record_id
+            if reservation_key not in record.execution:
+                save(
+                    execution={
+                        **record.execution,
+                        reservation_key: reservation.model_dump(mode="json"),
+                    }
                 )
             pending = PromotionRecord(
                 record_id=promotion_id,
@@ -676,15 +754,55 @@ class RecipientCutoverAdapter:
             )
             self.store.write_promotion_record(pending)
             preparation.verify(record.model_copy(update={"authority_snapshot": baseline}))
+            self.verify_upstreams(record, checkpoint, lease)
             require_peers_parked(self.root, self.store, record, checkpoint)
             host, token = source.read_dokploy_config(control_plane_root=self.root)
+
+            if not record.execution.get("writer_hosts"):
+                retained = api.fetch_dokploy_target_payload(
+                    host=host,
+                    token=token,
+                    target_type="compose",
+                    target_id=record.retained_target_id.target_id,
+                )
+                save(
+                    execution={
+                        **record.execution,
+                        "writer_hosts": [
+                            {
+                                "target_id": record.retained_target_id.target_id,
+                                "server_id": str(retained.get("serverId") or ""),
+                                "app_name": str(retained.get("appName") or ""),
+                            }
+                        ],
+                    }
+                )
+
+            def pause_old_checkpoint(phase: str) -> None:
+                from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
+
+                checkpoint(phase)
+                if phase == ODOO_POST_DEPLOY_SCHEDULE_TRIGGER and not record.execution.get(
+                    attempt_prefix + "old_pause_dispatched_at"
+                ):
+                    save(
+                        execution={
+                            **record.execution,
+                            attempt_prefix + "old_pause_dispatched_at": utc_now_timestamp(),
+                            "old_pause_dispatched_at": record.execution.get(
+                                "old_pause_dispatched_at"
+                            )
+                            or utc_now_timestamp(),
+                        }
+                    )
+
             if repromote:
                 writer_action(
                     self.root,
                     record,
                     old=True,
                     action="pause",
-                    checkpoint=checkpoint,
+                    checkpoint=pause_old_checkpoint,
                     binding=writer_binding,
                 )
                 old_paused = True
@@ -714,19 +832,12 @@ class RecipientCutoverAdapter:
                     raise ValueError("The original recipient deployment failed.")
             else:
                 inspect_resources(self.root, record, prepare=False, checkpoint=checkpoint)
-                if not record.execution.get("old_pause_requested_at"):
-                    save(
-                        execution={
-                            **record.execution,
-                            "old_pause_requested_at": utc_now_timestamp(),
-                        }
-                    )
                 writer_action(
                     self.root,
                     record,
                     old=True,
                     action="pause",
-                    checkpoint=checkpoint,
+                    checkpoint=pause_old_checkpoint,
                     binding=writer_binding,
                 )
                 old_paused = True
@@ -838,6 +949,20 @@ class RecipientCutoverAdapter:
                 and error.deployment is not None
             )
             try:
+                committed = custody(self.store, record.product, record.context)
+                if (
+                    committed is not None
+                    and committed.phase == "published"
+                    and committed.plan_sha256 == record.plan_sha256
+                ):
+                    return self.result("pass")
+                if not old_paused and not record.execution.get(
+                    attempt_prefix + "old_pause_dispatched_at"
+                ):
+                    save(phase="preflight_refused")
+                    raise ProviderMutationRejectedError(
+                        ValueError("Cutover refused before any writer dispatch.")
+                    ) from error
                 if record.execution.get("trigger_requested_at") and not terminal_deployment:
                     terminal_deployment = (
                         self.terminal_deployment(
@@ -845,10 +970,9 @@ class RecipientCutoverAdapter:
                         )
                         is not None
                     )
-                if not record.execution.get("old_pause_requested_at"):
-                    save(phase="rolled_back")
-                    return self.result("fail", rollback_status="skipped")
-                old_paused = old_paused or bool(record.execution.get("old_pause_requested_at"))
+                old_paused = old_paused or bool(
+                    record.execution.get(attempt_prefix + "old_pause_dispatched_at")
+                )
                 if old_paused and (
                     terminal_deployment or not record.execution.get("trigger_requested_at")
                 ):
@@ -896,6 +1020,8 @@ class RecipientCutoverAdapter:
                             )
                         )
                     return self.result("fail", rollback_status="pass")
+            except ProviderMutationRejectedError:
+                raise
             except Exception:
                 pass
             raise ProviderMutationUnknownError(
@@ -946,6 +1072,46 @@ class RecipientCutoverAdapter:
         }:
             return None
         return rows[0]
+
+    def verify_upstreams(
+        self,
+        record: ProductionRecipientRecord,
+        checkpoint: Callable[[str], None],
+        lease: ProviderOperationLease,
+    ) -> None:
+        if not record.request.upstreams:
+            return
+        from control_plane.production_recipient_host import upstream_program
+        from control_plane.production_recipient_upstreams import (
+            upstream_connections,
+            upstream_binding,
+        )
+
+        values = runtime_values(self.store, self.root, record)
+        rendered = qualified_render(record, values)
+        binding = upstream_binding(record)
+        evidence = run_recipient_program(
+            self.root,
+            record,
+            {
+                "connections": upstream_connections(record, rendered, values),
+                "image": rendered["services"][record.request.database_service]["image"],
+                "binding": binding,
+                "project": record.app_name,
+                "allow_services": [
+                    record.request.application_service,
+                    record.request.database_service,
+                ],
+            },
+            upstream_program(),
+            checkpoint,
+            scrub_guard=lambda: lease.checkpoint_effect("scrub_recipient_upstream_probe"),
+        )
+        if (
+            evidence.get("recipient_upstreams_ok") != "true"
+            or evidence.get("recipient_upstreams_binding") != binding
+        ):
+            raise ValueError("Actual upstream privileges are not read-only at bootstrap.")
 
     def verify_runtime(
         self, record: ProductionRecipientRecord, checkpoint: Callable[[str], None]

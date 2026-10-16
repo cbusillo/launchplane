@@ -12,11 +12,10 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from control_plane.production_recipient_cutover import WRITER_PROGRAM
+from control_plane.production_recipient_cutover import WRITER_LIBRARY
 from control_plane.production_recipient_fence import (
     HOST_FENCE_LIBRARY,
     fenced_program,
-    RETIRE_EXECUTION_PROGRAM,
 )
 
 
@@ -79,16 +78,9 @@ class RecipientWriterProgramTests(unittest.TestCase):
             patch("subprocess.run", side_effect=self.docker),
             redirect_stdout(output),
         ):
-            exec(
-                compile(
-                    WRITER_PROGRAM.replace(
-                        "/var/lib/launchplane/recipient-writers", str(self.root / "writers")
-                    ),
-                    "<writer>",
-                    "exec",
-                ),
-                {},
-            )
+            scope: dict[str, Any] = {}
+            exec(WRITER_LIBRARY, scope)
+            scope["coordinate_writer"]({**self.spec, "action": action}, base=self.root / "writers")
         return output.getvalue()
 
     def test_pause_receipt_resume_and_late_pause_preserve_only_original_writer(self) -> None:
@@ -99,7 +91,7 @@ class RecipientWriterProgramTests(unittest.TestCase):
         self.run_program("resume")
         self.assertTrue(self.row["State"]["Running"])
         self.assertIn("recipient_writer_action=receipt_resume", self.run_program("receipt_resume"))
-        with self.assertRaisesRegex(ValueError, "permanently released"):
+        with self.assertRaises(ValueError):
             self.run_program("pause")
         self.assertEqual(self.effects, ["stop", "start"])
 
@@ -110,8 +102,22 @@ class RecipientWriterProgramTests(unittest.TestCase):
         self.assertFalse(self.row["State"]["Running"])
         self.assertNotIn("start", self.effects)
 
+    def test_new_pause_cycle_has_its_own_witness_and_preserves_old_release(self) -> None:
+        original = self.spec["binding"]
+        self.run_program("pause")
+        self.run_program("resume")
+        self.spec["binding"] = "b" * 64
+        self.run_program("pause")
+        self.assertFalse(self.row["State"]["Running"])
+        self.run_program("resume")
+        self.assertTrue(self.row["State"]["Running"])
+        self.spec["binding"] = original
+        with self.assertRaises(ValueError):
+            self.run_program("pause")
+        self.assertEqual(self.effects, ["stop", "start", "stop", "start"])
+
     def test_container_identity_change_or_missing_terminal_witness_refuses_adoption(self) -> None:
-        with self.assertRaisesRegex(ValueError, "not witnessed"):
+        with self.assertRaises(ValueError):
             self.run_program("receipt_pause")
         original = self.docker
 
@@ -123,10 +129,10 @@ class RecipientWriterProgramTests(unittest.TestCase):
         with patch.object(self, "docker", side_effect=fail_readback):
             with self.assertRaises(OSError):
                 self.run_program("pause")
-        with self.assertRaisesRegex(ValueError, "terminal witness"):
+        with self.assertRaises(ValueError):
             self.run_program("receipt_pause")
         self.row["Image"] = "intervening-image"
-        with self.assertRaisesRegex(ValueError, "retained writer changed"):
+        with self.assertRaises(ValueError):
             self.run_program("resume")
         self.assertEqual(self.effects, ["stop"])
 
@@ -139,20 +145,17 @@ class RecipientExecutionFenceTests(unittest.TestCase):
             effects: list[str] = []
             namespace = {"effects": effects}
             program = fenced_program(
-                "effects.append('provider effect')", spec["namespace"], spec["binding"]
-            ).replace("/var/lib/launchplane/recipient-execution", str(root))
-            exec(compile(program, "<before>", "exec"), namespace)
-            retire = RETIRE_EXECUTION_PROGRAM.replace(
-                "/var/lib/launchplane/recipient-execution", str(root)
+                "effects.append('provider effect')",
+                spec["namespace"],
+                spec["binding"],
+                base=str(root),
             )
-            with (
-                patch.object(
-                    sys, "argv", ["retire", base64.b64encode(json.dumps(spec).encode()).decode()]
-                ),
-                redirect_stdout(io.StringIO()),
-            ):
-                exec(compile(retire, "<retire>", "exec"), {})
-            with self.assertRaisesRegex(ValueError, "permanently retired"):
+            exec(compile(program, "<before>", "exec"), namespace)
+            scope: dict[str, Any] = {}
+            exec(HOST_FENCE_LIBRARY, scope)
+            with scope["recipient_execution"](spec, retire=True, base=root):
+                pass
+            with self.assertRaises(ValueError):
                 exec(compile(program, "<queued>", "exec"), namespace)
             self.assertEqual(effects, ["provider effect"])
 

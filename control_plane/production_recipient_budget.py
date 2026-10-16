@@ -23,9 +23,13 @@ def writer_bindings(
         for row in store.list_secret_bindings()
         if row.secret_id == record.activation["writer_secret_id"]
     ]
-    if any(
-        row.context != record.context or row.instance not in {"prod", "testing"} for row in rows
-    ):
+    profile = store.read_product_profile_record(record.product)
+    lanes = {
+        (lane.context, lane.instance)
+        for lane in profile.lanes
+        if lane.instance in {"prod", "testing"}
+    }
+    if any((row.context, row.instance) not in lanes for row in rows):
         raise ValueError(
             "API writer consumers outside the declared product lanes require coordination."
         )
@@ -54,10 +58,21 @@ def guarded_targets(
                     target_id=target_id,
                 )
             )
-    for binding in writer_bindings(store, record):
-        target = store.read_provider_target_record(
-            context_name=binding["context"], instance_name=binding["instance"]
-        )
+    consumers = [
+        *record.activation["writer_bindings"],
+        *(
+            row.model_dump(mode="json")
+            for row in store.list_secret_bindings()
+            if row.secret_id == record.activation["writer_secret_id"]
+        ),
+    ]
+    for binding in consumers:
+        try:
+            target = store.read_provider_target_record(
+                context_name=binding["context"], instance_name=binding["instance"]
+            )
+        except FileNotFoundError:
+            continue
         targets.add((binding["context"], binding["instance"], target.target_id))
         keys.add(
             generic_web_provider_target_key(
@@ -95,12 +110,24 @@ def conflicts(
     )
 
 
+def binding_identities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return sorted(
+        (
+            {key: value for key, value in row.items() if key not in {"created_at", "updated_at"}}
+            for row in rows
+        ),
+        key=lambda row: row["binding_id"],
+    )
+
+
 def require_budget_admission(
     store: PostgresRecordStore, session: Any, record: ProductionRecipientRecord
 ) -> None:
     if not record.activation:
         raise ValueError("A reviewed API budget is required before bootstrap.")
-    if writer_bindings(store, record) != record.activation["writer_bindings"]:
+    if binding_identities(writer_bindings(store, record)) != binding_identities(
+        record.activation["writer_bindings"]
+    ):
         raise ValueError("API writer consumers changed after review.")
     for row in session.scalars(
         select(LaunchplaneIdempotencyRow).where(LaunchplaneIdempotencyRow.state != "completed")

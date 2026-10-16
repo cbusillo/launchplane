@@ -127,6 +127,7 @@ class ProductionRecipientRecord(BaseModel):
     publication: dict[str, Any] = Field(default_factory=dict)
     continuation: dict[str, Any] = Field(default_factory=dict)
     activation: dict[str, Any] = Field(default_factory=dict)
+    activation_history: list[dict[str, Any]] = Field(default_factory=list)
     execution: dict[str, Any] = Field(default_factory=dict)
     writer_custody: list[dict[str, Any]] = Field(default_factory=list)
     execution_fence_version: int = 0

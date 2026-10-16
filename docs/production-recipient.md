@@ -213,7 +213,11 @@ every active backup policy's replacement source target, the existing managed
 application API writer binding, and a completed service-owned destination backup
 operation. Use `--cutover` with the terminal consumer, separate private request
 and evidence files, dry-run, then reviewed apply under a stable key. The saved
-intent binds all current authority, consumer bindings and managed versions.
+intent binds all current authority, consumer bindings and managed versions. Before
+execution, a fresh reviewed intent can replace an expired destination capture;
+every earlier intent stays in custody history. Once execution begins its admitted
+intent stays fixed, and recovery does not expire the already-admitted destination
+capture while resolving that execution.
 Source backup and destination capture must be current; the isolated recipient
 recovery proof is also required. Capture alone does not qualify recovery.
 
@@ -239,7 +243,11 @@ A shared testing writer can be coordinated through
 `POST /v1/products/{product}/production-recipient/testing-writer`, using
 `--writer-control`. This uses existing testing deploy authority, requires positive
 disposable-lane evidence and names the exact armed preparation and testing secret
-binding. Review separate pause/resume requests and retain each original key.
+binding. Review separate pause/resume requests and retain each original key. Each pause
+receipt returns `pause_operation_id`; pass that exact ID on its resume request.
+A later pause uses a new operation key and witness, so cycles remain repeatable
+without reopening an earlier released pause. Testing authorization uses the
+product profile's actual testing context, including when it differs from prod.
 Only the recorded application container is stopped or restored; the database and
 unrelated containers remain untouched. A resume restores the witnessed original
 running state. A stopped writer stays stopped. Host terminal witnesses support
@@ -276,6 +284,11 @@ late job refuses the tombstone. An unknown create before any possible host job
 can be retained and superseded without claiming provider absence. Legacy
 unwitnessed host effects remain fenced until positive terminal evidence exists.
 An active or uncertain cutover cannot use preparation supersession as recovery.
+A settled inverse or a refusal before writer dispatch can be reviewed for a new
+generation, retaining its original execution records and fencing every recorded
+recipient or peer host before supersession. Missing writer completion evidence
+never proves that a queued pause cannot still run. The original release recovery
+keeps that fence until positive terminal evidence exists.
 
 Host custody lives under `/var/lib/launchplane/recipient-execution/<namespace>/`
 and `/var/lib/launchplane/recipient-writers/<binding>/`. Execution tombstones and

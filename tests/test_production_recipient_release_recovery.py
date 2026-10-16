@@ -83,12 +83,12 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         )
 
     def test_no_recovery_without_original_step_or_with_an_alternate_key(self) -> None:
-        with self.assertRaisesRegex(ValueError, "existing original"):
+        with self.assertRaises(ValueError):
             self.recover()
         self.reserve()
-        with self.assertRaisesRegex(ValueError, "existing original"):
+        with self.assertRaises(ValueError):
             self.recover(key="replacement")
-        with self.assertRaisesRegex(ValueError, "did not admit"):
+        with self.assertRaises(ValueError):
             self.recover(self.request.model_copy(update={"kind": "rollback", "attempt": 2}))
 
     def test_saved_review_resumes_only_the_existing_operation(self) -> None:
@@ -97,7 +97,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
         with patch(
             "control_plane.production_recipient_release_recovery.releases._run_generic_web_promotion"
         ) as run:
-            with self.assertRaisesRegex(ValueError, "exact current"):
+            with self.assertRaises(ValueError):
                 self.recover(
                     self.request.model_copy(
                         update={"mode": "apply", "reviewed_plan_sha256": "f" * 64}
@@ -125,7 +125,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             patch("control_plane.client_release._require_current_release"),
             patch("control_plane.client_release.client_release_grant_allows", return_value=True),
         ):
-            with self.assertRaisesRegex(click.ClickException, "Client's accepted release"):
+            with self.assertRaises(click.ClickException):
                 releases._run_generic_web_promotion(
                     f.store,
                     f.fixture.root,

@@ -41512,6 +41512,11 @@
             "title": "Mode",
             "type": "string"
           },
+          "pause_operation_id": {
+            "default": "",
+            "title": "Pause Operation Id",
+            "type": "string"
+          },
           "preparation_plan_sha256": {
             "pattern": "^[a-f0-9]{64}$",
             "title": "Preparation Plan Sha256",

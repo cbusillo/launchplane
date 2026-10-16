@@ -94,7 +94,18 @@ class RecipientInverseAdapter:
             if record.phase in {"published", "reverting"}:
                 self.validate_release()
                 if record.phase == "published":
-                    replacement = record.model_copy(update={"phase": "reverting"})
+                    reservation = lease.evidence_reservation()
+                    replacement = record.model_copy(
+                        update={
+                            "phase": "reverting",
+                            "execution": {
+                                **record.execution,
+                                "reservation:" + reservation.record_id: reservation.model_dump(
+                                    mode="json"
+                                ),
+                            },
+                        }
+                    )
                     self.store.write_production_recipient(
                         expected=record.model_dump(mode="json"),
                         replacement=replacement.model_dump(mode="json"),

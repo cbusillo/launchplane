@@ -45,12 +45,13 @@ def recipient_execution(spec, *, retire=False, base=None):
 """
 
 
-def fenced_program(program: str, namespace: str, binding: str) -> str:
+def fenced_program(program: str, namespace: str, binding: str, *, base: str | None = None) -> str:
     # Keep the lock across the entire fixed program, including its subprocesses.
     return (
         HOST_FENCE_LIBRARY
         + "\nwith recipient_execution("
         + repr({"namespace": namespace, "binding": binding})
+        + (",base=Path(" + repr(base) + ")" if base is not None else "")
         + "):\n    exec("
         + repr(program)
         + ")\n"

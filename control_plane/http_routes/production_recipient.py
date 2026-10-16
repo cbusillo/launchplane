@@ -502,11 +502,23 @@ def register_production_recipient_routes(
         apply = body.mode == "apply"
 
         def authorize() -> None:
+            context = body.context
+            if apply and isinstance(record_store, PostgresRecordStore):
+                binding = next(
+                    (
+                        row
+                        for row in record_store.list_secret_bindings()
+                        if row.binding_id == body.binding_id
+                    ),
+                    None,
+                )
+                if binding is not None:
+                    context = binding.context
             if not dependencies.authorization_allows(
                 identity=identity,
                 action="generic_web_deploy.execute" if apply else "product_profile.read",
                 product=product,
-                context=body.context,
+                context=context,
                 target=AuthorizationTarget(scope="instance", instances=("testing",)),
             ):
                 raise dependencies.http_error(
@@ -577,7 +589,23 @@ def register_production_recipient_routes(
                     adapter.request = body.model_copy(
                         update={"reviewed_plan_sha256": result.plan_sha256}
                     )
-                    observed = adapter.observe("", "", result.plan_sha256)
+                    from control_plane.provider_operations import build_provider_operation_key
+
+                    row = record_store.read_idempotency_record(
+                        scope=idempotency_scope(identity),
+                        route_path=WRITER_ROUTE.format(product=product),
+                        idempotency_key=idempotency_key.strip(),
+                    )
+                    if row is None:
+                        raise ValueError("Readback requires the original writer-control key.")
+                    original = build_provider_operation_key(
+                        scope=row.scope,
+                        route_path=row.route_path,
+                        idempotency_key=row.idempotency_key,
+                        request_fingerprint=row.request_fingerprint,
+                        reconciliation_key=row.reconciliation_key,
+                    )
+                    observed = adapter.observe(original, "", result.plan_sha256)
                     if observed.outcome != "present":
                         raise ValueError("No terminal writer witness is available.")
                     return RecipientWriterPlan.model_validate(

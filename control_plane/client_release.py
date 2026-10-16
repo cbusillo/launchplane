@@ -993,10 +993,6 @@ def _run_generic_web_promotion(
         and recipient.activation
         and recipient.phase != "retired"
         and (
-            recipient.phase != "rolled_back"
-            or bool(recipient.publication.get("inverse_backup_policies"))
-        )
-        and (
             recipient.phase != "published"
             or decision.checklist.candidate.source_commit == recipient.request.source_commit
         )
@@ -1658,7 +1654,7 @@ def _queue_recipient_inverse(
     if (
         before is None
         or before["source_git_ref"] != decision.checklist.production.source_commit
-        or before.get("runtime_identity", {}).get("artifact_id")
+        or (before.get("runtime_identity") or {}).get("artifact_id")
         != decision.checklist.production.artifact_id
     ):
         raise ClientReleaseNotReady("recipient_inverse_target_changed")

@@ -10815,6 +10815,7 @@ class PostgresRecordStore(HumanSessionStore):
                     "upstream_proof",
                     "recovery_proof",
                     "activation",
+                    "activation_history",
                     "execution",
                     "writer_custody",
                 }
@@ -10832,8 +10833,22 @@ class PostgresRecordStore(HumanSessionStore):
                     != previous.writer_custody
                 ):
                     raise ValueError("Peer writer custody is append-only.")
+                if not superseding and record.activation_history != previous.activation_history + (
+                    [previous.activation]
+                    if previous.activation
+                    and previous.activation != record.activation
+                    and not previous.execution
+                    else []
+                ):
+                    raise ValueError("Armed intent history must retain each reviewed revision.")
                 for key in (
-                    (mutable - {"phase", "execution", "writer_custody"}) if not superseding else ()
+                    (
+                        mutable
+                        - {"phase", "execution", "writer_custody", "activation_history"}
+                        - ({"activation"} if not previous.execution else set())
+                    )
+                    if not superseding
+                    else ()
                 ):
                     if getattr(previous, key) and getattr(previous, key) != getattr(record, key):
                         raise ValueError(

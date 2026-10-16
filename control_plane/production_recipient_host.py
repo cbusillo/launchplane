@@ -59,7 +59,9 @@ def run_recipient_program(
         else "Launchplane isolated recipient qualification"
     )
     schedule_app_name = (
-        "lp-recipient-job-"
+        "lp-rjob-"
+        + record.namespace.rsplit("-", 1)[-1]
+        + "-"
         + hashlib.sha256(
             json.dumps(
                 [
@@ -67,9 +69,12 @@ def run_recipient_program(
                     record.target_id,
                     "inspect" if spec.get("inspect") else "apply",
                     "retire" if retire_execution else "qualify",
+                    hashlib.sha256(program.encode()).hexdigest(),
+                    spec.get("action", ""),
+                    spec.get("binding", ""),
                 ]
             ).encode()
-        ).hexdigest()[:32]
+        ).hexdigest()[:16]
     )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
@@ -93,7 +98,7 @@ def run_recipient_program(
         "timezone": "UTC",
     }
     try:
-        return post_deploy.run_manual_data_schedule(
+        evidence = post_deploy.run_manual_data_schedule(
             host=host,
             token=token,
             target_definition=source.DokployTargetDefinition(
@@ -107,6 +112,38 @@ def run_recipient_program(
             resolved_schedule_execution_timeout_seconds=300,
             before_provider_mutation=checkpoint,
         )
+        if retire_execution and evidence.get("recipient_execution_fenced") == record.plan_sha256:
+            for old in api.list_dokploy_schedules(
+                host=host, token=token, target_id=lookup, schedule_type=kind
+            ):
+                old_app = str(old.get("appName") or "")
+                prefix = "lp-rjob-" + record.namespace.rsplit("-", 1)[-1] + "-"
+                if not old_app.startswith(prefix) or old_app == schedule_app_name:
+                    continue
+                checkpoint("scrub_retained_recipient_program")
+                old_name = str(old.get("name") or "")
+                if not old_name or not api.schedule_key(old):
+                    raise RecipientProbeCleanupError("Retained program identity is unavailable.")
+                scrub_script = "#!/bin/sh\nexit 1\n"
+                scrubbed = api.upsert_dokploy_schedule(
+                    host=host,
+                    token=token,
+                    target_id=lookup,
+                    schedule_type=kind,
+                    schedule_name=old_name,
+                    app_name=old_app,
+                    schedule_payload={
+                        **schedule_payload,
+                        "name": old_name,
+                        "appName": old_app,
+                        "script": scrub_script,
+                    },
+                )
+                if scrubbed.get("script") != scrub_script or scrubbed.get("enabled") is not False:
+                    raise RecipientProbeCleanupError(
+                        "Retained recipient program scrub is unverified."
+                    )
+        return evidence
     finally:
         if spec.get("connections"):
             # A manual-only schedule must not retain a second copy of its
@@ -174,8 +211,12 @@ try:
             args.extend(["--label",key+"="+value])
         docker(*args,network)
     observed=json.loads(docker("network","inspect",network))
-    if len(observed)!=1 or observed[0].get("Driver")!="bridge" or observed[0].get("EnableIPv6") is not False or observed[0].get("Options") or observed[0].get("Containers") or any((observed[0].get("Labels") or {}).get(k)!=v for k,v in labels.items()):
+    if len(observed)!=1 or observed[0].get("Driver")!="bridge" or observed[0].get("EnableIPv6") is not False or observed[0].get("Options") or any((observed[0].get("Labels") or {}).get(k)!=v for k,v in labels.items()):
         raise ValueError("recipient network unqualified")
+    for container in (observed[0].get("Containers") or {}):
+        rows=json.loads(docker("inspect",container))
+        if len(rows)!=1 or rows[0].get("Config",{}).get("Labels",{}).get("com.docker.compose.project")!=spec["project"] or rows[0].get("Config",{}).get("Labels",{}).get("com.docker.compose.service") not in spec.get("allow_services",[]):
+            raise ValueError("recipient network has an unqualified consumer")
     for connection in spec["connections"]:
         settings=connection["settings"]
         name="lp-upstream-"+uuid.uuid4().hex

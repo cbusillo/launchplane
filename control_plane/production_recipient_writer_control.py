@@ -35,6 +35,7 @@ class RecipientWriterRequest(BaseModel):
     preparation_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     binding_id: str = Field(min_length=1)
     action: Literal["pause", "resume"]
+    pause_operation_id: str = ""
     mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
@@ -48,6 +49,7 @@ class RecipientWriterPlan(BaseModel):
     action: Literal["pause", "resume"]
     preparation_plan_sha256: str
     binding_id: str
+    pause_operation_id: str = ""
     completed: bool = False
 
 
@@ -80,18 +82,23 @@ class RecipientWriterAdapter:
         )
         if (
             binding is None
-            or binding.context != record.context
+            or (binding.context, binding.instance)
+            not in {
+                (lane.context, lane.instance)
+                for lane in self.store.read_product_profile_record(self.product).lanes
+                if lane.instance == "testing"
+            }
             or binding.instance != "testing"
             or binding.secret_id != record.activation["writer_secret_id"]
         ):
             raise ValueError("Only a recorded testing peer of this exact API budget is eligible.")
         target = self.store.read_provider_target_record(
-            context_name=record.context, instance_name="testing"
+            context_name=binding.context, instance_name="testing"
         )
         if target.provider_id != "dokploy" or target.target_category != "compose":
             raise ValueError("Testing writer control requires exact Compose authority.")
         inventory = self.store.read_environment_inventory(
-            context_name=record.context, instance_name="testing"
+            context_name=binding.context, instance_name="testing"
         )
         if inventory.runtime_identity is None:
             raise ValueError("The testing writer requires recorded exact runtime identity.")
@@ -103,11 +110,44 @@ class RecipientWriterAdapter:
             update={
                 "target_id": target.target_id,
                 "app_name": str(payload.get("appName") or ""),
+                "request": record.request.model_copy(
+                    update={"destination_server_id": str(payload.get("serverId") or "")}
+                ),
                 "execution": {
                     "runtime_identity": inventory.runtime_identity.model_dump(mode="json")
                 },
             }
         )
+        if self.request.action == "resume":
+            pauses = [
+                entry
+                for entry in record.writer_custody
+                if entry.get("record_id") == self.request.pause_operation_id
+                and entry["request"]["action"] == "pause"
+                and entry["request"]["binding_id"] == self.request.binding_id
+            ]
+            if (
+                len(pauses) != 1
+                or {
+                    key: value
+                    for key, value in pauses[0]["provider"].items()
+                    if key != "updated_at"
+                }
+                != target.model_dump(mode="json", exclude={"updated_at"})
+                or pauses[0]["runtime_identity"]
+                != inventory.runtime_identity.model_dump(mode="json")
+            ):
+                raise ValueError("Resume must name the exact recorded pause operation and writer.")
+            projected = projected.model_copy(
+                update={
+                    "execution": {
+                        **projected.execution,
+                        "writer_binding": pauses[0]["witness_binding"],
+                    }
+                }
+            )
+        elif self.request.pause_operation_id:
+            raise ValueError("A new pause receives its own operation witness.")
         digest = canonical_sha256(
             {
                 "request": self.request.model_dump(
@@ -149,9 +189,24 @@ class RecipientWriterAdapter:
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
         try:
-            record, _, plan = self.current()
+            record, target, plan = self.current()
             if plan.plan_sha256 != reconciliation_key:
                 return ProviderObservation("unknown")
+            entries = [
+                entry
+                for entry in record.writer_custody
+                if entry["operation"] == provider_operation_key
+            ]
+            if len(entries) != 1:
+                return ProviderObservation("unknown")
+            record = record.model_copy(
+                update={
+                    "execution": {
+                        **record.execution,
+                        "writer_binding": entries[0]["witness_binding"],
+                    }
+                }
+            )
             # Host receipts require the completed stop/start response and readback,
             # not just a currently stopped/running container or an idle lock.
             writer_action(
@@ -166,7 +221,14 @@ class RecipientWriterAdapter:
                 response_payload=provider_operation_response_payload(
                     trace_id=self.trace_id,
                     records={},
-                    result=plan.model_copy(update={"completed": True}).model_dump(mode="json"),
+                    result=plan.model_copy(
+                        update={
+                            "completed": True,
+                            "pause_operation_id": entries[0]["record_id"]
+                            if self.request.action == "pause"
+                            else self.request.pause_operation_id,
+                        }
+                    ).model_dump(mode="json"),
                 ),
             )
         except Exception:
@@ -179,11 +241,17 @@ class RecipientWriterAdapter:
         try:
             if not isinstance(lease, ProviderEvidenceLease):
                 raise ValueError("Writer custody requires an evidence-bound lease.")
-            record, _, plan = self.current()
+            record, target, plan = self.current()
             if plan.plan_sha256 != self.request.reviewed_plan_sha256:
                 raise ValueError("Review the exact testing writer plan.")
             current = custody(self.store, self.product, record.context)
             assert current is not None
+            witness_binding = record.execution.get("writer_binding") or canonical_sha256(
+                provider_operation_key
+            )
+            record = record.model_copy(
+                update={"execution": {**record.execution, "writer_binding": witness_binding}}
+            )
             if not any(
                 entry["operation"] == provider_operation_key for entry in current.writer_custody
             ):
@@ -193,6 +261,13 @@ class RecipientWriterAdapter:
                             *current.writer_custody,
                             {
                                 "operation": provider_operation_key,
+                                "record_id": lease.evidence_reservation().record_id,
+                                "witness_binding": witness_binding,
+                                "host": {
+                                    "target_id": record.target_id,
+                                    "server_id": record.request.destination_server_id,
+                                    "app_name": record.app_name,
+                                },
                                 "request": self.request.model_dump(mode="json"),
                                 "provider": self.current()[1].model_dump(mode="json"),
                                 "runtime_identity": record.execution["runtime_identity"],
@@ -206,7 +281,7 @@ class RecipientWriterAdapter:
                     reservation=lease.evidence_reservation(),
                 )
             require_disposable_lane(
-                self.store, product=self.product, context=record.context, instance="testing"
+                self.store, product=self.product, context=target.context, instance="testing"
             )
 
             def checkpoint(phase: str) -> None:
@@ -216,7 +291,7 @@ class RecipientWriterAdapter:
                 if self.current()[2].plan_sha256 != plan.plan_sha256:
                     raise ValueError("Testing writer authority changed.")
                 require_disposable_lane(
-                    self.store, product=self.product, context=record.context, instance="testing"
+                    self.store, product=self.product, context=target.context, instance="testing"
                 )
                 lease.checkpoint_effect(phase)
                 started = True
@@ -233,7 +308,14 @@ class RecipientWriterAdapter:
                 provider_operation_response_payload(
                     trace_id=self.trace_id,
                     records={},
-                    result=plan.model_copy(update={"completed": True}).model_dump(mode="json"),
+                    result=plan.model_copy(
+                        update={
+                            "completed": True,
+                            "pause_operation_id": lease.evidence_reservation().record_id
+                            if self.request.action == "pause"
+                            else self.request.pause_operation_id,
+                        }
+                    ).model_dump(mode="json"),
                 ),
             )
         except Exception as error:

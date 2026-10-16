@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import select, or_
 
 from control_plane.contracts.production_recipient import (
     ProductionRecipientRequest,
@@ -62,8 +62,27 @@ def reservations(
                 LaunchplaneIdempotencyRecord.model_validate(row.payload)
                 for row in session.scalars(
                     select(LaunchplaneIdempotencyRow).where(
-                        LaunchplaneIdempotencyRow.provider_target_key
-                        == "production-recipient:" + record.product + ":" + record.context
+                        or_(
+                            LaunchplaneIdempotencyRow.provider_target_key
+                            == "production-recipient:" + record.product + ":" + record.context,
+                            LaunchplaneIdempotencyRow.record_id.in_(
+                                [
+                                    row["record_id"]
+                                    for row in record.writer_custody
+                                    if row.get("record_id")
+                                ]
+                                + [
+                                    value["record_id"]
+                                    for key, value in record.execution.items()
+                                    if key.startswith("reservation:")
+                                ]
+                                + (
+                                    [record.execution["original_reservation"]["record_id"]]
+                                    if record.execution.get("original_reservation")
+                                    else []
+                                )
+                            ),
+                        )
                     )
                 ).all()
             ],
@@ -99,8 +118,8 @@ def continuation_plan(
         or request.replacement.context != request.context
         or request.replacement.mode != "dry-run"
         or request.replacement.reviewed_plan_sha256
-        or current.publication
-        or current.execution
+        or (current.publication and current.phase != "rolled_back")
+        or (current.execution and current.phase not in {"rolled_back", "preflight_refused"})
     ):
         raise ValueError("Review exact original-key custody before continuation.")
     replacement = build_recipient(
@@ -178,17 +197,40 @@ def supersede_recipient(
             raise ValueError(
                 "Legacy host execution requires a terminal witnessed recovery before supersession."
             )
-        checkpoint("fence_retained_recipient")
-        evidence = run_recipient_program(
-            root,
-            current,
-            {"namespace": current.namespace, "binding": current.plan_sha256},
-            RETIRE_EXECUTION_PROGRAM,
-            checkpoint,
-            retire_execution=True,
-        )
-        if evidence.get("recipient_execution_fenced") != current.plan_sha256:
-            raise ValueError("Late host execution was not fenced.")
+        hosts = [
+            {
+                "target_id": current.target_id,
+                "server_id": current.request.destination_server_id,
+                "app_name": current.app_name,
+            },
+            *current.execution.get("writer_hosts", []),
+            *(entry["host"] for entry in current.writer_custody if entry.get("host")),
+        ]
+        seen = set()
+        for host in hosts:
+            if (host["target_id"], host["server_id"]) in seen:
+                continue
+            seen.add((host["target_id"], host["server_id"]))
+            projected = current.model_copy(
+                update={
+                    "target_id": host["target_id"],
+                    "app_name": host["app_name"],
+                    "request": current.request.model_copy(
+                        update={"destination_server_id": host["server_id"]}
+                    ),
+                }
+            )
+            checkpoint("fence_retained_recipient")
+            evidence = run_recipient_program(
+                root,
+                projected,
+                {"namespace": current.namespace, "binding": current.plan_sha256},
+                RETIRE_EXECUTION_PROGRAM,
+                checkpoint,
+                retire_execution=True,
+            )
+            if evidence.get("recipient_execution_fenced") != current.plan_sha256:
+                raise ValueError("Late host execution was not fenced.")
         host_fenced = True
     with store._session_factory() as session:
         store._begin_serialized_write(session)
@@ -203,8 +245,11 @@ def supersede_recipient(
         locked = session.scalars(
             select(LaunchplaneIdempotencyRow)
             .where(
-                LaunchplaneIdempotencyRow.provider_target_key
-                == "production-recipient:" + product + ":" + request.context
+                or_(
+                    LaunchplaneIdempotencyRow.provider_target_key
+                    == "production-recipient:" + product + ":" + request.context,
+                    LaunchplaneIdempotencyRow.record_id.in_([row.record_id for row in observed]),
+                )
             )
             .with_for_update()
         ).all()

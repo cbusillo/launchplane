@@ -203,6 +203,7 @@ def main() -> int:
                 or args.mode in {"receipt", "custody"}
                 or args.continuation
                 or args.release_recovery
+                or args.writer_control
                 else {}
             ),
         )
