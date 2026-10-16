@@ -208,7 +208,8 @@ class IsolatedCutoverProvider(WebsiteFixture):
         )
 
     def switch(self, plan: OdooCutoverPlan, slot: OdooSlot) -> OdooRouteObservation:
-        self.actions.append("switch")
+        if self.target != slot:
+            self.actions.append("switch")
         self.target = slot
         if self.uncertain_switch:
             self.uncertain_switch = False

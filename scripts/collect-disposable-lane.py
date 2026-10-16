@@ -5,6 +5,7 @@ import http.client
 import json
 from pathlib import Path
 import runpy
+import re
 import sys
 import urllib.error
 
@@ -13,6 +14,7 @@ from control_plane.contracts.disposable_lane import (
     DisposableLaneObservationRequest,
 )
 from control_plane.disposable_lane_collection import disposable_collection_coverage
+from control_plane.odoo_testing_usage import ODOO_USAGE_REASON_CODES
 
 
 def main() -> int:
@@ -85,16 +87,44 @@ def main() -> int:
         if not isinstance(usage, dict):
             raise ValueError("Invalid Odoo usage evidence.")
         usage_facts = {key: usage.get(key) for key in ("recent_signins", "authenticated_sessions")}
+        reason_code = usage.get("reason_code", "diagnostics_unavailable")
+        if not isinstance(reason_code, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", reason_code
+        ):
+            raise ValueError("Invalid Odoo usage diagnostic.")
+        if reason_code not in ODOO_USAGE_REASON_CODES:
+            reason_code = "diagnostics_unrecognized"
+        if "reason_code" in usage and (
+            (facts["usage"] == "unused" and reason_code not in {"complete", "never_served"})
+            or (facts["usage"] == "unknown" and reason_code in {"complete", "never_served"})
+        ):
+            raise ValueError("Odoo usage and diagnostic disagree.")
         if any(value is not None and type(value) is not bool for value in usage_facts.values()):
             raise ValueError("Invalid Odoo usage evidence.")
-        if facts["usage"] == "unused" and any(value is not False for value in usage_facts.values()):
+        if facts["usage"] == "unused" and any(
+            value is not (None if reason_code == "never_served" else False)
+            for value in usage_facts.values()
+        ):
             raise ValueError("Unused requires complete Odoo usage evidence.")
+        qualification = result.get(
+            "never_served_qualification", "never_served_diagnostics_unavailable"
+        )
+        if qualification not in {
+            "never_served",
+            "never_served_records_incomplete",
+            "never_served_protection_seen",
+            "never_served_not_attempted",
+        }:
+            qualification = "never_served_diagnostics_unavailable"
+        if (reason_code == "never_served") != (qualification == "never_served"):
+            raise ValueError("Never-served qualification and usage disagree.")
         print(
             json.dumps(
                 {
                     "mode": args.mode,
                     "facts": facts,
-                    "odoo_usage": usage_facts,
+                    "odoo_usage": {**usage_facts, "reason_code": reason_code},
+                    "never_served_qualification": qualification,
                     "source_coverage": coverage,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
                 }

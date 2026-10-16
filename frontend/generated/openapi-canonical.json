@@ -4760,6 +4760,17 @@
               }
             ]
           },
+          "generic_web_cutover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenericWebCutoverRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "instance": {
             "title": "Instance",
             "type": "string"
@@ -4904,6 +4915,17 @@
                 "type": "null"
               }
             ]
+          },
+          "generic_web_cutover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenericWebCutoverRecord"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "instance": {
             "title": "Instance",
@@ -9385,6 +9407,206 @@
         "title": "GenericWebApplicationSchedule",
         "type": "object"
       },
+      "GenericWebCutoverLane": {
+        "additionalProperties": false,
+        "properties": {
+          "host": {
+            "pattern": "^[a-zA-Z0-9.-]+$",
+            "title": "Host",
+            "type": "string"
+          },
+          "route_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Route Id",
+            "type": "string"
+          },
+          "runtime_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Runtime Settings Sha256",
+            "type": "string"
+          },
+          "slots": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "$ref": "#/components/schemas/WebSlotCoordinates"
+              },
+              {
+                "$ref": "#/components/schemas/WebSlotCoordinates"
+              }
+            ],
+            "title": "Slots",
+            "type": "array"
+          },
+          "writers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Writers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "route_id",
+          "host",
+          "slots",
+          "runtime_settings_sha256",
+          "writers"
+        ],
+        "title": "GenericWebCutoverLane",
+        "type": "object"
+      },
+      "GenericWebCutoverPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "candidate": {
+            "$ref": "#/components/schemas/ArtifactIdentityManifest"
+          },
+          "compatibility": {
+            "$ref": "#/components/schemas/ReleaseDatabaseCompatibility"
+          },
+          "lane": {
+            "$ref": "#/components/schemas/GenericWebCutoverLane"
+          },
+          "new": {
+            "$ref": "#/components/schemas/WebSlot"
+          },
+          "old": {
+            "$ref": "#/components/schemas/WebSlot"
+          },
+          "production": {
+            "$ref": "#/components/schemas/ArtifactIdentityManifest"
+          },
+          "release_id": {
+            "minLength": 1,
+            "title": "Release Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "release_id",
+          "lane",
+          "production",
+          "candidate",
+          "compatibility",
+          "old",
+          "new"
+        ],
+        "title": "GenericWebCutoverPlan",
+        "type": "object"
+      },
+      "GenericWebCutoverRecord": {
+        "additionalProperties": false,
+        "properties": {
+          "began_at": {
+            "format": "date-time",
+            "title": "Began At",
+            "type": "string"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "error": {
+            "default": "",
+            "title": "Error",
+            "type": "string"
+          },
+          "old_connections_drained": {
+            "default": false,
+            "title": "Old Connections Drained",
+            "type": "boolean"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/GenericWebCutoverPlan"
+          },
+          "previous_slot_retained": {
+            "const": true,
+            "default": true,
+            "title": "Previous Slot Retained",
+            "type": "boolean"
+          },
+          "readiness": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WebSlotReadiness"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "record_id": {
+            "title": "Record Id",
+            "type": "string"
+          },
+          "records_committed": {
+            "default": false,
+            "title": "Records Committed",
+            "type": "boolean"
+          },
+          "rollback_started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rollback Started At"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WebRouteObservation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "step": {
+            "default": "preparing",
+            "enum": [
+              "preparing",
+              "ready",
+              "switching",
+              "resuming",
+              "draining",
+              "complete",
+              "rolling_back",
+              "rolled_back",
+              "blocked"
+            ],
+            "title": "Step",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "record_id",
+          "plan",
+          "began_at",
+          "updated_at"
+        ],
+        "title": "GenericWebCutoverRecord",
+        "type": "object"
+      },
       "GenericWebDeployEnvelope": {
         "additionalProperties": false,
         "properties": {
@@ -9746,6 +9968,7 @@
           "provider_evidence": {
             "enum": [
               "deployment_present",
+              "cutover_checkpoint_recoverable",
               "deployment_correlated_legacy",
               "deployment_absent_before_effect",
               "deployment_absent_after_effect",
@@ -34011,6 +34234,17 @@
             "title": "Context",
             "type": "string"
           },
+          "generic_web_cutover": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenericWebCutoverLane"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "generic_web_extensions": {
             "$ref": "#/components/schemas/GenericWebLaneExtensions",
             "x-launchplane-optional-response": true
@@ -50585,6 +50819,229 @@
           "action"
         ],
         "title": "WalkthroughStep",
+        "type": "object"
+      },
+      "WebRouteObservation": {
+        "additionalProperties": false,
+        "properties": {
+          "applied": {
+            "const": true,
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "authoritative_router_count": {
+            "const": 1,
+            "title": "Authoritative Router Count",
+            "type": "integer"
+          },
+          "evidence_id": {
+            "minLength": 1,
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "public_health": {
+            "$ref": "#/components/schemas/HealthcheckEvidence"
+          },
+          "route_id": {
+            "title": "Route Id",
+            "type": "string"
+          },
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "string"
+          },
+          "target_url": {
+            "title": "Target Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "route_id",
+          "host",
+          "target_url",
+          "slot_id",
+          "evidence_id",
+          "applied",
+          "authoritative_router_count",
+          "public_health"
+        ],
+        "title": "WebRouteObservation",
+        "type": "object"
+      },
+      "WebSlot": {
+        "additionalProperties": false,
+        "properties": {
+          "deploy_reference": {
+            "default": "",
+            "title": "Deploy Reference",
+            "type": "string"
+          },
+          "image": {
+            "pattern": "^.+@sha256:[0-9a-f]{64}$",
+            "title": "Image",
+            "type": "string"
+          },
+          "private_url": {
+            "title": "Private Url",
+            "type": "string"
+          },
+          "runtime_identity": {
+            "$ref": "#/components/schemas/RuntimeIdentity"
+          },
+          "slot_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Slot Id",
+            "type": "string"
+          },
+          "target_id": {
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_type": {
+            "enum": [
+              "application",
+              "compose"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_id",
+          "target_id",
+          "target_type",
+          "private_url",
+          "image",
+          "runtime_identity"
+        ],
+        "title": "WebSlot",
+        "type": "object"
+      },
+      "WebSlotCoordinates": {
+        "additionalProperties": false,
+        "properties": {
+          "private_url": {
+            "title": "Private Url",
+            "type": "string"
+          },
+          "slot_id": {
+            "pattern": "^[a-zA-Z0-9_-]+$",
+            "title": "Slot Id",
+            "type": "string"
+          },
+          "target_id": {
+            "minLength": 1,
+            "title": "Target Id",
+            "type": "string"
+          },
+          "target_type": {
+            "enum": [
+              "application",
+              "compose"
+            ],
+            "title": "Target Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot_id",
+          "target_id",
+          "target_type",
+          "private_url"
+        ],
+        "title": "WebSlotCoordinates",
+        "type": "object"
+      },
+      "WebSlotReadiness": {
+        "additionalProperties": false,
+        "properties": {
+          "assets": {
+            "const": true,
+            "title": "Assets",
+            "type": "boolean"
+          },
+          "background_workers_fenced": {
+            "title": "Background Workers Fenced",
+            "type": "boolean"
+          },
+          "evidence_id": {
+            "minLength": 1,
+            "title": "Evidence Id",
+            "type": "string"
+          },
+          "first_request_ms": {
+            "minimum": 0.0,
+            "title": "First Request Ms",
+            "type": "number"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "image": {
+            "title": "Image",
+            "type": "string"
+          },
+          "observed_at": {
+            "format": "date-time",
+            "title": "Observed At",
+            "type": "string"
+          },
+          "render": {
+            "const": true,
+            "title": "Render",
+            "type": "boolean"
+          },
+          "retained_previous_assets": {
+            "const": true,
+            "title": "Retained Previous Assets",
+            "type": "boolean"
+          },
+          "runtime_identity": {
+            "$ref": "#/components/schemas/RuntimeIdentity"
+          },
+          "runtime_settings_sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "title": "Runtime Settings Sha256",
+            "type": "string"
+          },
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "string"
+          },
+          "warmed": {
+            "const": true,
+            "title": "Warmed",
+            "type": "boolean"
+          },
+          "warmed_request_ms": {
+            "minimum": 0.0,
+            "title": "Warmed Request Ms",
+            "type": "number"
+          }
+        },
+        "required": [
+          "slot_id",
+          "runtime_identity",
+          "image",
+          "host",
+          "runtime_settings_sha256",
+          "observed_at",
+          "evidence_id",
+          "render",
+          "assets",
+          "warmed",
+          "first_request_ms",
+          "warmed_request_ms",
+          "background_workers_fenced",
+          "retained_previous_assets"
+        ],
+        "title": "WebSlotReadiness",
         "type": "object"
       },
       "WorkGraphIssueInboxReconcileResponse": {

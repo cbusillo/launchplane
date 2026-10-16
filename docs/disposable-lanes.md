@@ -32,7 +32,7 @@ conservatively count as use. Any authenticated
 or partially authenticated session for that database counts regardless of age;
 device-log rows and old login timestamps cannot prove that a browser session has
 ended. Session contents, identifiers, account names and credentials never leave
-the container. The result exposes only two booleans. The filesystem check follows
+the container. The result exposes only two booleans and a bounded `reason_code`. The filesystem check follows
 [Odoo's session storage contract](https://github.com/odoo/odoo/blob/19.0/odoo/http.py),
 without calling methods that create, refresh, migrate or delete session files.
 
@@ -43,9 +43,47 @@ complete single-web/database inventory and unchanged container/placement snapsho
 must agree. Missing databases or session directories, unreadable or malformed
 files, replicas, custom startup, oversized inventories and incomplete/provider
 failures leave usage unknown. A provider authorization denial returns its service
-trace and is never retried with another identity. Only complete negative login
-and session reads can produce `unused`; staff holds still protect the lane.
+trace and is never retried with another identity. Complete negative login
+and session reads can produce `unused`. The separate
+[never-served rule](#never-served-testing-generations) can also qualify non-use
+from complete durable generation records; staff holds protect both paths.
 Other drivers and previews retain their existing collection behavior.
+
+Collection returns the first failed checkpoint as an allowlisted code, never
+exception text, command lines, session identifiers, account names or topology.
+The bounded client preserves that code and rejects malformed diagnostics.
+A code introduced by a newer service is mapped to `diagnostics_unrecognized`
+without echoing it, preserving validated facts and the trace. Such a code cannot
+qualify non-use: when diagnostics are present, `unused` requires `complete`
+for runtime reads or `never_served` for the durable generation proof. A
+service image predating diagnostics is reported as `diagnostics_unavailable`;
+that means deploy the compatible collector before diagnosing the lane, not that
+any particular runtime checkpoint failed. Inspecting only the binding does not
+run the probe.
+
+An unhealthy web container can qualify if the supported Odoo process still
+serves the matching configuration and both login and session reads complete
+negative, with unchanged container and provider snapshots. Health alone proves
+neither use nor non-use. `serving_process_absent` means the running container has
+no qualifying Odoo process (for example, it is waiting at a startup gate);
+`serving_configuration_mismatch` means the observed process arguments do not
+qualify the configured session store. Neither permits treating an empty or
+unreadable store as historical non-use. `web_configuration_unavailable`,
+`session_store_unavailable`, `session_file_unreadable`,
+`database_connection_unavailable` and `login_history_unavailable` identify the
+missing read. Provider transport, ambiguous/stopped services and changed runtime
+snapshots have separate codes. All these failures leave usage UNKNOWN with null
+booleans; `complete` accompanies the qualified positive or negative read.
+
+For a stranded runtime, deliver the diagnostics image through the normal service
+deploy and collect again through the same client, without starting, restarting or
+repairing that lane to obtain evidence. Record its code and service trace. If it
+cannot read the original served configuration/database/session store, that exact
+prerequisite remains unsupported: a stopped process, missing database or absent
+staff hold is not a substitute. Preserve the original lane and custody and leave
+its rebuild blocked. No alternative credential, direct database qualification or
+new grant is needed for diagnosis. The service read is the proof of the concrete
+failed checkpoint; a fixture qualification or an old generic UNKNOWN is not.
 
 This is a bounded snapshot of browser/authenticate-login use, not a reservation
 against a future login or proof about anonymous browsing, unsaved work or
@@ -875,6 +913,76 @@ continue this route or enforce its guarantees; keep a compatible image or
 forward-fix. There is no production rollback or cleanup step in this testing-only
 procedure. Retained old targets, storage, partial-copy evidence and hostnames stay
 in custody until separately authorized disposition.
+
+## Never-served testing generations
+
+Before consulting records, the service must observe no serving Odoo process, or
+two unchanged complete inventories with no containers for the exact project, and
+read a complete empty provider deployment history for that exact target. The
+empty-inventory path supports fresh bootstrap resources before the first container
+exists; unreadable or changing inventories never qualify. Process
+inventory is read before the serving configuration, so a closed startup gate can
+be inspected without creating a configuration. A running process with an unreadable
+configuration/session/login store, an incomplete history, or any provider deployment
+cannot be overridden by this rule. These are collection-time checks, not a reservation
+against someone starting a lane afterward; collect immediately before apply.
+
+The service collector can qualify non-use without reading a serving configuration
+only for a generation with a complete lifetime witness, created by the supported
+fresh-resource bootstrap. It requires all of the following:
+
+- The exact current target has one current generation,
+  its original bootstrap operation and its matching fresh-resource allocation.
+- Lifetime tracking began when that generation was prepared. The bootstrap has
+  not completed, no drill database was selected, and the witness has never been
+  revoked. Legacy records have no witness and stay UNKNOWN; there is no backfill.
+- Complete public and private HTTP histories since preparation both contain
+  failed public checks whose base, health and probed URLs bind to the generation's
+  hostname, and failed private checks
+  bound to its active, lane-owned private endpoint authority. Private observations
+  have no public base URL. Neither history may contain a successful or skipped
+  check or target. Missing either history or private endpoint authority stays UNKNOWN.
+- No deployment record since preparation exists, even a failed deployment, and
+  no current inventory publication since preparation exists. This includes
+  uncertain serving attempts, not just successful final health checks.
+- No current hold or recorded use exists. Setting a hold permanently revokes
+  the generation's witness, even if the hold is later lifted. Known use also
+  revokes it even when a delayed positive-use observation is rejected by ordering.
+  A hold already present at generation creation also revokes it. Retired custody
+  is immutable and supplies no current-generation proof. A testing deployment
+  record revokes it atomically when written, before provider dispatch, covering
+  both service and other replacement routes. The guarded
+  replacement worker also revokes it before its first provider dispatch, including
+  a dispatch that times out; that revocation covers all later chunks in the
+  attempt. This deliberately excludes more states than only an acknowledged web
+  start; an incomplete restore is not assumed safe.
+
+Only their conjunction produces `usage=unused`, reason `never_served`. Session
+and login booleans remain null: this is a separate proof, not an empty-session
+claim. Source reads are complete DB queries, without a history limit. Pure collection
+reads do not hold the global authority write lock; revoked generations return
+early. Publication and consumption use their existing locked transaction. The proof
+binds to the generation rather than a growing list of failed checks. Failed checks
+against an earlier route do not count toward coverage. The predicate is rechecked
+under the shared authority lock before publication and again when
+consumed, including through the supersession snapshot adapter. Dispatch/hold
+revocation removes an already-published never-served
+observation; a delayed collector cannot republish it. Data custody, physical
+isolation, backup gates and retained-operation fences remain independent.
+
+Use the existing evidence-only `scripts/collect-disposable-lane.py collect`
+procedure. When runtime occupancy is unavailable, the service tries this rule
+and returns a bounded `never_served_qualification` result. Skipped qualification
+is `never_served_not_attempted`; an older response without the field is
+`never_served_diagnostics_unavailable` in the client. The client cross-checks a
+positive qualification against the matching usage reason. A missing source,
+legacy witness, uncertain dispatch, served-once record or incomplete history
+stays UNKNOWN. Never start or repair a lane to manufacture negative evidence.
+A newer client rejects an older service's different coverage; deliver compatible
+API and Odoo workers together before using this path. After tracked generations
+exist, retain a compatible image and forward-fix: older images cannot read the
+new generation fields or enforce lifetime revocation. No migration, grant or
+production change enables the rule.
 
 ## Scheduled Odoo testing rebuild drill
 

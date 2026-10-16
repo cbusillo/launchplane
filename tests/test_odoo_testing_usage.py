@@ -59,8 +59,8 @@ class SessionInventoryTests(unittest.TestCase):
         self.path = Path(self.directory)
         self.driver = ModuleType("psycopg2")
         self.namespace: dict[str, Any] = {"__name__": "fixture"}
-        with patch.dict("sys.modules", {"psycopg2": self.driver}):
-            exec(ODOO_TESTING_USAGE_CONTAINER_PROGRAM, self.namespace)
+        self.enterContext(patch.dict("sys.modules", {"psycopg2": self.driver}))
+        exec(ODOO_TESTING_USAGE_CONTAINER_PROGRAM, self.namespace)
 
     def sessions(self) -> bool:
         return bool(self.namespace["read_sessions"](self.path, "testing_db"))
@@ -165,6 +165,113 @@ class SessionInventoryTests(unittest.TestCase):
         ):
             self.namespace["probe"]()
 
+    def probe_result(self, failure: str = "", *, recent: bool = False) -> dict[str, Any]:
+        """Execute the emitted container probe, including its bounded exception handler."""
+        config = MagicMock()
+        config.read.return_value = [] if failure == "config" else [ODOO_WEB_CONFIG_PATH]
+        options = {
+            "db_name": "testing_db",
+            "db_host": "database",
+            "data_dir": self.directory,
+            "db_user": "fixture",
+            "db_password": "private-fixture",
+        }
+        config.__getitem__.return_value = options
+        if failure == "config_user_missing":
+            del options["db_user"]
+        if failure == "database_identity":
+            options["db_name"] = "another_db"
+        connection = MagicMock()
+        connection.cursor.return_value.__enter__.return_value.fetchone.return_value = (recent,)
+        if failure == "sql":
+            connection.cursor.return_value.__enter__.return_value.execute.side_effect = (
+                RuntimeError("private-fixture database topology")
+            )
+        self.driver.connect = Mock(return_value=connection)  # type: ignore[attr-defined]
+        if failure == "connection":
+            self.driver.connect.side_effect = OSError("private-fixture credentials")
+        argv = supported_odoo_argv()
+        if failure == "process_config":
+            argv += [b"--data-dir=/private-fixture"]
+        process = SimpleNamespace(read_bytes=lambda: b"\0".join(argv) + b"\0")
+        processes = [] if failure == "process_absent" else [process]
+        if failure == "process_inventory":
+            process.read_bytes = Mock(side_effect=OSError("private-fixture process"))
+        sessions = self.path / "sessions"
+        if failure != "sessions_missing":
+            sessions.mkdir(exist_ok=True)
+        if failure == "sessions_corrupt":
+            (sessions / "private-fixture-session").write_text("private-fixture unfinished JSON")
+        if failure == "sessions_used":
+            (sessions / "private-fixture-session").write_text(
+                json.dumps({"db": "testing_db", "uid": 42})
+            )
+        output = io.StringIO()
+        with (
+            patch.dict(
+                "os.environ",
+                {"PLATFORM_INSTANCE": "testing", "ODOO_DB_NAME": "testing_db"},
+                clear=True,
+            ),
+            patch("configparser.ConfigParser", return_value=config),
+            patch.object(Path, "glob", return_value=processes),
+            redirect_stdout(output),
+        ):
+            exec(ODOO_TESTING_USAGE_CONTAINER_PROGRAM, {"__name__": "__main__"})
+        self.assertNotIn("private-fixture", output.getvalue())
+        value = json.loads(output.getvalue())
+        assert isinstance(value, dict)
+        return value
+
+    def test_absent_process_is_readable_before_a_missing_serving_configuration(self) -> None:
+        self.driver.connect = Mock()  # type: ignore[attr-defined]
+        config = MagicMock()
+        config.read.return_value = []
+        with (
+            patch.dict("os.environ", {"PLATFORM_INSTANCE": "testing", "ODOO_DB_NAME": "fixture"}),
+            patch("configparser.ConfigParser", return_value=config),
+            patch.object(Path, "glob", return_value=[]),
+            self.assertRaisesRegex(ValueError, "serving_process_absent"),
+        ):
+            self.namespace["probe"]()
+        config.read.assert_not_called()
+        self.driver.connect.assert_not_called()
+
+    def test_failed_container_checkpoint_is_bounded_and_never_negative_evidence(self) -> None:
+        failures = {
+            "config": "web_configuration_unavailable",
+            "config_user_missing": "web_configuration_unavailable",
+            "database_identity": "web_database_mismatch",
+            "process_absent": "serving_process_absent",
+            "process_config": "serving_configuration_mismatch",
+            "process_inventory": "process_inventory_unavailable",
+            "sessions_missing": "session_store_unavailable",
+            "sessions_corrupt": "session_file_unreadable",
+            "connection": "database_connection_unavailable",
+            "sql": "login_history_unavailable",
+        }
+        for failure, reason in failures.items():
+            with self.subTest(failure=failure), TemporaryDirectory() as directory:
+                self.path = Path(directory)
+                self.directory = directory
+                result = self.probe_result(failure)
+                self.assertTrue(result["unavailable"])
+                self.assertEqual(result["reason_code"], reason)
+                self.assertNotIn("recent_signins", result)
+                self.assertNotIn("authenticated_sessions", result)
+
+    def test_complete_container_probe_distinguishes_non_use_and_use(self) -> None:
+        for failure, recent, sessions in (
+            ("", False, False),
+            ("", True, False),
+            ("sessions_used", False, True),
+        ):
+            with self.subTest(failure=failure, recent=recent):
+                result = self.probe_result(failure, recent=recent)
+                self.assertEqual(result["recent_signins"], recent)
+                self.assertEqual(result["authenticated_sessions"], sessions)
+                self.assertNotIn("unavailable", result)
+
     def test_real_startup_allows_database_flags_but_rejects_session_or_config_overrides(
         self,
     ) -> None:
@@ -213,6 +320,9 @@ class UsageReaderTests(unittest.TestCase):
             "appName": "fixture-project",
             "serverId": "remote",
         }
+        self.history = self.enterContext(
+            patch(module + "api.list_deployments_for_target", return_value=[])
+        )
         self.remote = self.enterContext(patch(module + "_read_remote"))
 
     def read(self) -> Any:
@@ -250,6 +360,69 @@ class UsageReaderTests(unittest.TestCase):
                 self.assertEqual(self.read().usage, "unknown")
         self.remote.side_effect = TimeoutError("private-provider-error")
         self.assertEqual(self.read().usage, "unknown")
+
+    def test_remote_reasons_are_allowlisted_and_cannot_establish_non_use(self) -> None:
+        for reason, expected in (
+            ("serving_process_absent", "serving_process_absent"),
+            ("session_store_unavailable", "session_store_unavailable"),
+            ("login_history_unavailable", "login_history_unavailable"),
+            ("private-fixture server password", "probe_result_invalid"),
+            ("complete", "probe_result_invalid"),
+            ("staff_testing_hold", "probe_result_invalid"),
+            ("provider_target_changed", "probe_result_invalid"),
+            (["private-fixture"], "probe_result_invalid"),
+        ):
+            with self.subTest(reason=reason):
+                self.remote.side_effect = lambda **kw: kw["receive"](
+                    {"type": "complete", "unavailable": True, "reason_code": reason}
+                )
+                result = self.read()
+                self.assertEqual(result.usage, "unknown")
+                self.assertEqual(result.reason_code, expected)
+                self.assertIsNone(result.recent_signins)
+                self.assertIsNone(result.authenticated_sessions)
+                self.assertNotIn("private-fixture", json.dumps(result.payload()))
+
+    def test_never_served_candidate_requires_absent_process_and_complete_empty_provider_history(
+        self,
+    ) -> None:
+        self.remote.side_effect = lambda **kw: kw["receive"](
+            {"type": "complete", "unavailable": True, "reason_code": "serving_process_absent"}
+        )
+        result = self.read()
+        self.assertTrue(result.never_served_candidate)
+        self.assertEqual(result.usage, "unknown")
+        self.assertIs(self.history.call_args.kwargs["require_complete"], True)
+        self.history.return_value = [{"deploymentId": "earlier-serve"}]
+        result = self.read()
+        self.assertFalse(result.never_served_candidate)
+        self.assertEqual(result.reason_code, "serving_history_present")
+        self.history.side_effect = ValueError("incomplete fixture history")
+        result = self.read()
+        self.assertFalse(result.never_served_candidate)
+        self.assertEqual(result.reason_code, "provider_history_unavailable")
+
+    def test_complete_empty_container_inventory_is_only_a_candidate_with_empty_provider_history(
+        self,
+    ) -> None:
+        self.remote.side_effect = lambda **kw: kw["receive"](
+            {"type": "complete", "unavailable": True, "reason_code": "serving_container_absent"}
+        )
+        self.assertTrue(self.read().never_served_candidate)
+        self.history.return_value = [{"deploymentId": "served-once"}]
+        self.assertFalse(self.read().never_served_candidate)
+
+    def test_configuration_provider_and_transport_failures_report_the_failed_checkpoint(
+        self,
+    ) -> None:
+        module = "control_plane.odoo_testing_usage."
+        with patch(module + "source.read_dokploy_config", side_effect=OSError("private-fixture")):
+            self.assertEqual(self.read().reason_code, "provider_config_unavailable")
+        self.provider.side_effect = OSError("private-fixture")
+        self.assertEqual(self.read().reason_code, "provider_target_unavailable")
+        self.provider.side_effect = None
+        self.remote.side_effect = TimeoutError("private-fixture")
+        self.assertEqual(self.read().reason_code, "provider_transport_unavailable")
 
     def test_denial_is_not_swallowed_or_retried(self) -> None:
         self.remote.side_effect = NativeSourceAuthorizationDenied("fixture denial")
@@ -306,6 +479,10 @@ class HostProbeTests(unittest.TestCase):
         changed: bool = False,
         wrong_context: bool = False,
         custom_command: bool = False,
+        stopped: bool = False,
+        empty: bool = False,
+        inventory_fails: bool = False,
+        probe_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         def container(service: str) -> dict[str, Any]:
             return {
@@ -332,6 +509,11 @@ class HostProbeTests(unittest.TestCase):
             }
 
         web, database = container("web"), container("database")
+        # An unhealthy container is not proof of non-use and does not block a
+        # complete read of its running Odoo process, session store and database.
+        web["State"]["Health"] = {"Status": "unhealthy"}
+        if stopped:
+            web["State"]["Running"] = False
         if wrong_context:
             web["Config"]["Env"][0] = "PLATFORM_CONTEXT=other"
         if custom_command:
@@ -341,7 +523,16 @@ class HostProbeTests(unittest.TestCase):
         def run(command: list[str], **kwargs: Any) -> Any:
             calls.append(command)
             if command[1] == "ps":
-                output = b"web database web2" if duplicate else b"web database"
+                if inventory_fails:
+                    raise OSError("fixture unreadable inventory")
+                first = sum(c[1] == "ps" for c in calls) == 1
+                output = (
+                    b""
+                    if empty and (first or not changed)
+                    else b"web database web2"
+                    if duplicate
+                    else b"web database"
+                )
             elif command[1] == "inspect":
                 values = [web, database, {**web, "Id": "web2"}] if duplicate else [web, database]
                 if changed and len(calls) > 3:
@@ -349,7 +540,12 @@ class HostProbeTests(unittest.TestCase):
                 output = json.dumps(values).encode()
             elif command[1] == "exec":
                 output = json.dumps(
-                    {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
+                    probe_result
+                    or {
+                        "type": "complete",
+                        "recent_signins": False,
+                        "authenticated_sessions": False,
+                    }
                 ).encode()
             else:
                 raise AssertionError("Unexpected provider mutation")
@@ -375,6 +571,18 @@ class HostProbeTests(unittest.TestCase):
         assert isinstance(result, dict)
         return result
 
+    def test_complete_empty_bootstrap_inventory_is_distinct_from_unavailable_or_changed(
+        self,
+    ) -> None:
+        result = self.run_probe(empty=True)
+        self.assertEqual(result["reason_code"], "serving_container_absent")
+        self.assertIs(result["unavailable"], True)
+        self.assertEqual(
+            self.run_probe(empty=True, inventory_fails=True)["reason_code"],
+            "container_inventory_unavailable",
+        )
+        self.assertEqual(self.run_probe(empty=True, changed=True)["reason_code"], "runtime_changed")
+
     def test_fixed_host_read_collects_without_provider_mutations(self) -> None:
         self.assertFalse(self.run_probe()["authenticated_sessions"])
 
@@ -383,3 +591,27 @@ class HostProbeTests(unittest.TestCase):
         self.assertTrue(self.run_probe(changed=True)["unavailable"])
         self.assertTrue(self.run_probe(wrong_context=True)["unavailable"])
         self.assertTrue(self.run_probe(custom_command=True)["unavailable"])
+
+    def test_host_reports_the_actual_failed_checkpoint_without_private_values(self) -> None:
+        for options, reason in (
+            ({"duplicate": True}, "service_ambiguous_or_stopped"),
+            ({"stopped": True}, "service_ambiguous_or_stopped"),
+            ({"changed": True}, "runtime_changed"),
+            ({"wrong_context": True}, "testing_identity_mismatch"),
+            ({"custom_command": True}, "web_command_unsupported"),
+            (
+                {
+                    "probe_result": {
+                        "type": "complete",
+                        "unavailable": True,
+                        "reason_code": "serving_process_absent",
+                    }
+                },
+                "serving_process_absent",
+            ),
+        ):
+            with self.subTest(options=options):
+                result = self.run_probe(**options)
+                self.assertTrue(result["unavailable"])
+                self.assertEqual(result["reason_code"], reason)
+                self.assertNotIn("authenticated_sessions", result)

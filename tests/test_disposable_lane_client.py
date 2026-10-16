@@ -23,6 +23,9 @@ class DisposableLaneClientTests(unittest.TestCase):
         provider_mutation: bool = False,
         binding_sha256: str = "a" * 64,
         usage: str = "unknown",
+        reason_code: object = None,
+        runtime_facts: bool | None = False,
+        qualification: str | None = None,
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
@@ -37,9 +40,18 @@ class DisposableLaneClientTests(unittest.TestCase):
             "source_coverage": disposable_collection_coverage(),
             "binding_sha256": binding_sha256,
             "provider_mutation": provider_mutation,
-            "odoo_usage": {"recent_signins": False, "authenticated_sessions": False},
+            "odoo_usage": {
+                "recent_signins": runtime_facts,
+                "authenticated_sessions": runtime_facts,
+            },
             **facts,
         }
+        if qualification is not None:
+            collected_result["never_served_qualification"] = qualification
+        if reason_code is not None:
+            odoo_usage = collected_result["odoo_usage"]
+            assert isinstance(odoo_usage, dict)
+            odoo_usage["reason_code"] = reason_code
         collected = {
             "trace_id": "fixture-trace",
             "private_debug": "private-fixture",
@@ -111,6 +123,37 @@ class DisposableLaneClientTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(json.loads(output)["facts"]["usage"], "unused")
 
+    def test_never_served_uses_no_invented_session_or_login_boolean(self) -> None:
+        status, output, _ = self.call_client(
+            usage="unused",
+            reason_code="never_served",
+            runtime_facts=None,
+            qualification="never_served",
+        )
+        self.assertEqual(status, 0)
+        result = json.loads(output)
+        self.assertIsNone(result["odoo_usage"]["recent_signins"])
+        self.assertIsNone(result["odoo_usage"]["authenticated_sessions"])
+        status, _, _ = self.call_client(usage="unused", reason_code="never_served")
+        self.assertEqual(status, 1)
+
+    def test_never_served_receipt_requires_matching_qualification_and_marks_old_diagnostics_missing(
+        self,
+    ) -> None:
+        status, output, _ = self.call_client()
+        self.assertEqual(status, 0)
+        self.assertEqual(
+            json.loads(output)["never_served_qualification"], "never_served_diagnostics_unavailable"
+        )
+        for reason, qualification in (("never_served", None), ("complete", "never_served")):
+            status, _, _ = self.call_client(
+                usage="unused",
+                reason_code=reason,
+                qualification=qualification,
+                runtime_facts=None if reason == "never_served" else False,
+            )
+            self.assertEqual(status, 1)
+
     def test_truncated_or_mismatched_receipt_stays_unverified(self) -> None:
         for truncated, mutation, digest in (
             (True, False, "a" * 64),
@@ -123,3 +166,50 @@ class DisposableLaneClientTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 1)
                 self.assertEqual(json.loads(output)["status"], "unverified")
+
+    def test_client_reports_bounded_reason_and_marks_older_service_diagnostics_unavailable(
+        self,
+    ) -> None:
+        for reason in (None, "serving_process_absent", "session_store_unavailable"):
+            with self.subTest(reason=reason):
+                status, output, _ = self.call_client(reason_code=reason)
+                self.assertEqual(status, 0)
+                self.assertEqual(json.loads(output)["facts"]["usage"], "unknown")
+                self.assertEqual(
+                    json.loads(output)["odoo_usage"]["reason_code"],
+                    reason or "diagnostics_unavailable",
+                )
+        for invalid_reason in (
+            "private-fixture topology",
+            ["private-fixture"],
+            {"private-fixture": True},
+        ):
+            with self.subTest(reason=invalid_reason):
+                status, output, _ = self.call_client(reason_code=invalid_reason)
+                self.assertEqual(status, 1)
+                self.assertNotIn("private-fixture", output)
+
+    def test_future_diagnostic_keeps_safe_facts_and_trace_without_echoing_unknown_text(
+        self,
+    ) -> None:
+        for usage in ("unknown", "in_use"):
+            with self.subTest(usage=usage):
+                status, output, _ = self.call_client(usage=usage, reason_code="future_checkpoint")
+                self.assertEqual(status, 0)
+                result = json.loads(output)
+                self.assertEqual(result["odoo_usage"]["reason_code"], "diagnostics_unrecognized")
+                self.assertEqual(result["facts"]["usage"], usage)
+                self.assertTrue(result["trace_id"])
+                self.assertNotIn("future_checkpoint", output)
+
+    def test_negative_usage_requires_consistent_diagnostic_when_service_supplies_one(self) -> None:
+        for usage, reason, expected_status in (
+            ("unused", "complete", 0),
+            ("unused", None, 0),  # Older services have complete booleans but no diagnostic.
+            ("unused", "not_collected", 1),
+            ("unused", "future_checkpoint", 1),
+            ("unknown", "complete", 1),
+        ):
+            with self.subTest(usage=usage, reason=reason):
+                status, _, _ = self.call_client(usage=usage, reason_code=reason)
+                self.assertEqual(status, expected_status)

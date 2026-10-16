@@ -23,6 +23,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -57,6 +58,12 @@ class OdooRuntimeReadError(ValueError):
 
 
 class OdooRuntimeReadStore(OdooDiagnosticIdentityStore, Protocol):
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
+
     def read_preview_record(self, preview_id: str) -> PreviewRecord: ...
 
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord: ...
@@ -81,6 +88,8 @@ class OdooRuntimeSelection:
     identity: RuntimeIdentity
     base_url: str
     preview: PreviewRecord | None = None
+    slot_target_id: str = ""
+    route_host: str = ""
 
 
 def select_preview_runtime(
@@ -148,12 +157,68 @@ def select_stable_runtime(
         or identity.environment_kind != "stable"
         or identity.preview_id
         or identity.preview_generation_id
-        or identity.deployment_record_id != inventory.deployment_record_id
     ):
         raise OdooRuntimeReadError(
             "runtime_identity_mismatch", "The environment has no matching stable runtime identity."
         )
-    return OdooRuntimeSelection(identity, lane.base_url)
+    if identity.deployment_record_id != inventory.deployment_record_id:
+        try:
+            event = store.read_deployment_record(inventory.deployment_record_id)
+        except FileNotFoundError:
+            event = None
+        if (
+            event is None
+            or event.deploy.status != "pass"
+            or event.context != lane.context
+            or event.instance != lane.instance
+            or event.deploy.deploy_mode != "atomic-switch-back"
+            or event.runtime_identity != identity
+            or event.runtime_source.get("retained_deployment_record_id")
+            != identity.deployment_record_id
+        ):
+            raise OdooRuntimeReadError(
+                "runtime_identity_mismatch",
+                "The serving deployment does not prove the retained runtime identity.",
+            )
+    if lane.odoo_cutover is None and not identity.slot:
+        return OdooRuntimeSelection(identity, lane.base_url)
+    config = lane.odoo_cutover
+    coordinate = (
+        next((item for item in config.slots if item.slot_id == identity.slot), None)
+        if config
+        else None
+    )
+    origin = urlsplit(lane.base_url)
+    if (
+        config is None
+        or coordinate is None
+        or identity.database_uuid != config.database_uuid
+        or origin.scheme != "https"
+        or origin.hostname != config.host
+        or origin.username
+        or origin.password
+        or origin.path not in {"", "/"}
+        or origin.query
+        or origin.fragment
+    ):
+        raise OdooRuntimeReadError(
+            "cutover_runtime_unverified",
+            "The serving slot, database and public origin must match current lane authority.",
+        )
+    if any(
+        record.odoo_cutover is not None
+        and record.odoo_cutover.step not in {"complete", "rolled_back"}
+        for record in store.list_deployment_records(
+            context_name=lane.context, instance_name=lane.instance
+        )
+    ):
+        raise OdooRuntimeReadError(
+            "runtime_transition_pending",
+            "The active slot is unverified during unfinished cutover recovery.",
+        )
+    return OdooRuntimeSelection(
+        identity, lane.base_url, slot_target_id=coordinate.compose_id, route_host=config.host
+    )
 
 
 def assert_selection_current(store: OdooRuntimeReadStore, selection: OdooRuntimeSelection) -> None:
@@ -164,7 +229,12 @@ def assert_selection_current(store: OdooRuntimeReadStore, selection: OdooRuntime
     else:
         profile = store.read_product_profile_record(selection.identity.product)
         current = select_stable_runtime(store, profile, selection.identity.instance)
-    if current.identity != selection.identity or current.base_url != selection.base_url:
+    if (
+        current.identity != selection.identity
+        or current.base_url != selection.base_url
+        or current.slot_target_id != selection.slot_target_id
+        or current.route_host != selection.route_host
+    ):
         raise OdooRuntimeReadError(
             "runtime_changed",
             "The runtime changed during the read; retry against its current generation.",
@@ -201,6 +271,7 @@ def connect_runtime(
     database_url: str | None,
     diagnostics: bool = False,
 ) -> OdooRuntimeConnection:
+    assert_selection_current(store, selection)
     identity = selection.identity
     host, token = source.read_dokploy_config(
         control_plane_root=control_plane_root, database_url=database_url
@@ -223,6 +294,8 @@ def connect_runtime(
                 503,
             )
         target_id, target_name = target.target_id, target.target_name
+    elif selection.slot_target_id:
+        target_id, target_name = selection.slot_target_id, ""
     else:
         target_record = store.read_dokploy_target_record(
             context_name=identity.context, instance_name=identity.instance
@@ -240,7 +313,9 @@ def connect_runtime(
     )
     app_name = str(payload.get("appName") or "")
     server_id = str(payload.get("serverId") or "")
-    if not app_name or str(payload.get("name") or "") != target_name:
+    if selection.slot_target_id:
+        target_name = str(payload.get("name") or "")
+    if not app_name or not target_name or str(payload.get("name") or "") != target_name:
         raise OdooRuntimeReadError(
             "provider_target_mismatch",
             "The provider target identity does not match the selected runtime.",
@@ -610,12 +685,16 @@ def read_outgoing_email(
         )
     credentials = connection.credentials
     authentication = diagnostic_authentication(connection)
-    if not odoo_compose_has_domain(
-        host=connection.host,
-        token=connection.token,
-        compose_id=connection.evidence.target_id,
-        domain_host=url.hostname,
-    ):
+    if connection.selection.route_host:
+        domain_matches = url.hostname == connection.selection.route_host
+    else:
+        domain_matches = odoo_compose_has_domain(
+            host=connection.host,
+            token=connection.token,
+            compose_id=connection.evidence.target_id,
+            domain_host=url.hostname,
+        )
+    if not domain_matches:
         raise OdooRuntimeReadError(
             "runtime_domain_mismatch",
             "The recorded origin is not bound to the selected Odoo deployment.",

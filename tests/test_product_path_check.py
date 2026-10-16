@@ -8,6 +8,7 @@ from pydantic import BaseModel, JsonValue
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from contextlib import ExitStack
+from datetime import UTC, datetime
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -733,6 +734,73 @@ class ProductRollbackPathCheckTests(unittest.TestCase):
             self.store, "read_artifact_manifest", side_effect=FileNotFoundError("private")
         ):
             self.assertEqual(_steps(self.check())["rollback_target"][1], "rollback_not_ready")
+
+    def test_cutover_projection_and_target_resolution_share_database_compatibility(self) -> None:
+        from control_plane.contracts.odoo_cutover import OdooCutoverPlan, OdooCutoverRecord
+        from control_plane.odoo_cutover_plan import cutover_record_id
+        from control_plane.workflows.odoo_prod_rollback import (
+            OdooCutoverCoherentRestoreRequiredError,
+            OdooProdRollbackRequest,
+            resolve_odoo_prod_rollback_target,
+        )
+        from tests.test_odoo_cutover import IsolatedCutoverProvider
+
+        self.profile = self.profile.model_copy(update={"driver_id": "odoo"})
+        self.store.write_product_profile_record(self.profile)
+        for database_changing in (False, True):
+            with self.subTest(database_changing=database_changing):
+                provider = IsolatedCutoverProvider(
+                    Path(self.directory.name) / str(database_changing),
+                    database_changing=database_changing,
+                )
+                self.addCleanup(provider.engine.dispose)
+                raw = provider.cutover.model_dump()
+                for name in ("old", "new"):
+                    raw[name]["binding"].update(
+                        product_id=self.profile.product, environment_id="prod"
+                    )
+                    raw[name]["runtime_identity"].update(
+                        product=self.profile.product, context="example-site", instance="prod"
+                    )
+                plan = OdooCutoverPlan.model_validate(raw)
+                now = datetime.now(UTC)
+                record = self.current.model_copy(
+                    update={
+                        "odoo_cutover": OdooCutoverRecord(
+                            record_id=cutover_record_id(plan),
+                            plan=plan,
+                            step="complete",
+                            began_at=now,
+                            updated_at=now,
+                        )
+                    }
+                )
+                self.store.write_deployment_record(record)
+                self.store.write_artifact_manifest(plan.production)
+                promotion = self.promotion.model_copy(
+                    update={"record_id": "promotion-cutover-" + cutover_record_id(plan)}
+                )
+                self.store.write_promotion_record(promotion)
+                check = self.check()
+                if database_changing:
+                    self.assertEqual(
+                        _steps(check)["rollback_target"],
+                        ("blocked", OdooCutoverCoherentRestoreRequiredError.code, "by_hand"),
+                    )
+                    with self.assertRaises(OdooCutoverCoherentRestoreRequiredError):
+                        resolve_odoo_prod_rollback_target(
+                            record_store=self.store,
+                            request=OdooProdRollbackRequest(
+                                context="example-site", artifact_id=plan.production.artifact_id
+                            ),
+                        )
+                else:
+                    self.assertEqual(_steps(check)["rollback_target"][0], "clear")
+                    target = resolve_odoo_prod_rollback_target(
+                        record_store=self.store,
+                        request=OdooProdRollbackRequest(context="example-site"),
+                    )
+                    self.assertEqual(target.artifact_id, plan.production.artifact_id)
 
 
 class ProductPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):

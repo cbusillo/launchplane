@@ -46,6 +46,10 @@ from control_plane.dokploy import runtime_evidence as dokploy_runtime_evidence
 from control_plane.dokploy import source as dokploy_source
 
 
+from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
+from control_plane.workflows.generic_web_cutover import WebCutoverProvider
+
+
 class GenericWebResolvedDeployTarget(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -507,6 +511,14 @@ class TestingEventDeployRecoveryRefused(ValueError):
 
 
 class DokployGenericWebDeployProvider:
+    def __init__(
+        self,
+        *,
+        cutover_provider_factory: Callable[[GenericWebCutoverPlan], WebCutoverProvider]
+        | None = None,
+    ):
+        self.cutover_provider_factory = cutover_provider_factory
+
     provider_id = "dokploy"
     delegated_executor = "control-plane.dokploy"
 

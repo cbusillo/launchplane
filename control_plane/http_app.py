@@ -828,6 +828,7 @@ from control_plane.disposable_lane_collection import (
     disposable_collection_coverage,
 )
 from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
+from control_plane.testing_never_served import read_never_served_testing_usage
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
@@ -23892,19 +23893,19 @@ def create_launchplane_fastapi_app(
                 if observation.replaces_operation_id:
                     raise ValueError("This collector does not qualify replacement resources.")
                 observed_at = store.disposable_lane_observation_time()
-                odoo_usage = OdooTestingUsage()
-                if (
-                    profile.driver_id == "odoo"
-                    and observation.instance == "testing"
-                    and target is not None
-                    and target_id is not None
-                    and target.policies.staff_testing_hold is None
-                    and not any(
-                        item.target_id == target_id.target_id
-                        and (item.context, item.instance) != (target.context, target.instance)
-                        for item in store.list_dokploy_target_id_records()
-                    )
+                if profile.driver_id != "odoo" or observation.instance != "testing":
+                    odoo_usage = OdooTestingUsage(reason_code="unsupported_lane")
+                elif target is None or target_id is None:
+                    odoo_usage = OdooTestingUsage(reason_code="target_unavailable")
+                elif target.policies.staff_testing_hold is not None:
+                    odoo_usage = OdooTestingUsage(reason_code="staff_testing_hold")
+                elif any(
+                    item.target_id == target_id.target_id
+                    and (item.context, item.instance) != (target.context, target.instance)
+                    for item in store.list_dokploy_target_id_records()
                 ):
+                    odoo_usage = OdooTestingUsage(reason_code="target_alias")
+                else:
                     try:
                         odoo_usage = await run_in_threadpool(
                             read_odoo_testing_usage,
@@ -23937,6 +23938,25 @@ def create_launchplane_fastapi_app(
                         ),
                     ):
                         raise ValueError("The lane changed during usage collection; collect again.")
+                never_served = OdooTestingUsage(reason_code="never_served_not_attempted")
+                if (
+                    profile.driver_id == "odoo"
+                    and observation.instance == "testing"
+                    and target is not None
+                    and target_id is not None
+                    and odoo_usage.usage == "unknown"
+                    and odoo_usage.reason_code
+                    in {"serving_process_absent", "serving_container_absent"}
+                    and odoo_usage.never_served_candidate
+                ):
+                    never_served = read_never_served_testing_usage(
+                        store,
+                        product=profile.product,
+                        context=observation.context,
+                        target_id=target_id.target_id,
+                    )
+                    if never_served.usage == "unused":
+                        odoo_usage = never_served
                 facts = collect_disposable_lane_facts(
                     store,
                     context=observation.context,
@@ -23980,6 +24000,7 @@ def create_launchplane_fastapi_app(
                         **facts.payload(),
                         "observed_at": evidence.observed_at.isoformat(),
                         "odoo_usage": odoo_usage.payload(),
+                        "never_served_qualification": never_served.reason_code,
                         "expires_at": evidence.expires_at.isoformat(),
                         "provider_mutation": False,
                         "automatic_fact_collection": "limited_service_records",
