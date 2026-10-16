@@ -7,9 +7,13 @@ import unittest
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.product_profile_record import (
+    ProductLaneHealthCheck,
+    ProductLaneHealthMonitoringPolicy,
+)
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
-    PublicIngressTargetObservation,
 )
 from control_plane.odoo_testing_usage import OdooTestingUsage
 from control_plane.odoo_testing_restore import generation_binding
@@ -23,6 +27,11 @@ from control_plane.testing_never_served import (
 from tests.support.disposable_lanes import record_safety
 from tests.test_odoo_testing_restore import generation
 from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenario
+from control_plane.workflows.public_ingress_monitor import (
+    HttpObservation,
+    check_public_ingress_target,
+    effective_health_check_monitor_target,
+)
 
 
 class NeverServedTestingTests(unittest.TestCase):
@@ -49,33 +58,115 @@ class NeverServedTestingTests(unittest.TestCase):
             }
         )
         self.store.write_fresh_odoo_testing_generation(self.gen)
+        self.profile = self.fixture.profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(
+                        update={
+                            "base_url": f"https://{self.gen.domain_host}",
+                            "health_monitoring": ProductLaneHealthMonitoringPolicy(
+                                monitoring_intent="public",
+                                checks=(
+                                    ProductLaneHealthCheck(
+                                        name="public",
+                                        kind="public_http",
+                                        require_runtime_identity=False,
+                                    ),
+                                    ProductLaneHealthCheck(
+                                        name="private",
+                                        kind="private_http",
+                                        private_endpoint_key="testing-private",
+                                        require_runtime_identity=False,
+                                    ),
+                                ),
+                            ),
+                        }
+                    )
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in self.fixture.profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.store.write_private_health_endpoint_record(
+            PrivateHealthEndpointRecord(
+                endpoint_key="testing-private",
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                url="http://127.0.0.1:8069/health",
+                updated_at=self.at.isoformat(),
+            )
+        )
         for kind in ("public_http", "private_http"):
             self.store.write_public_ingress_observation_record(self.check(kind))
 
     def check(self, kind: str, *, passed: bool = False) -> PublicIngressObservationRecord:
-        return PublicIngressObservationRecord.model_validate(
-            {
-                "record_id": f"{kind}-{'pass' if passed else 'fail'}",
-                "product": self.product,
-                "context": self.context,
-                "instance": "testing",
-                "check_kind": kind,
-                "base_url": f"https://{self.gen.domain_host}",
-                "observed_at": (self.at + timedelta(seconds=1)).isoformat(),
-                "status": "pass" if passed else "fail",
-                "failure_code": None if passed else "connection_timeout",
-                "targets": [
-                    PublicIngressTargetObservation(
-                        target="base_url",
-                        url=f"https://{self.gen.domain_host}",
-                        status="pass" if passed else "fail",
-                        failure_code=None if passed else "connection_timeout",
-                        summary="fixture check",
-                    )
-                ],
-                "summary": "fixture check",
-            }
+        lane = next(lane for lane in self.profile.lanes if lane.instance == "testing")
+        check = next(check for check in lane.health_monitoring.checks if check.kind == kind)
+        target = effective_health_check_monitor_target(
+            profile=self.profile, lane=lane, check=check, record_store=self.store
         )
+        assert target is not None
+
+        def http_get(url: str, _timeout: int) -> HttpObservation:
+            if not passed:
+                raise TimeoutError("fixture unavailable")
+            return HttpObservation(status_code=200, final_url=url, redirect_count=0)
+
+        return check_public_ingress_target(
+            target=target,
+            checked_at=(self.at + timedelta(seconds=1)).isoformat(),
+            timeout_seconds=1,
+            http_get=http_get,
+            tls_get=lambda *_: self.fail("HTTP monitoring does not probe TLS independently"),
+        ).model_copy(update={"record_id": f"{kind}-{'pass' if passed else 'fail'}"})
+
+    def test_private_checks_bind_to_endpoint_authority_without_a_public_hostname(self) -> None:
+        private = self.check("private_http")
+        self.assertFalse(private.base_url)
+        self.assertEqual(self.read().usage, "unused")
+        records = self.snapshot()
+        self.assertEqual(qualify_never_served(replace(records, private_checks=())).usage, "unknown")
+        self.assertEqual(
+            read_never_served_testing_usage(
+                object(), product=self.product, context=self.context, target_id=self.gen.target_id
+            ).usage,
+            "unknown",
+        )
+
+    def test_pending_testing_deployment_permanently_revokes_a_published_proof(self) -> None:
+        proof = self.read()
+        record_safety(
+            self.store,
+            self.product,
+            self.context,
+            "testing",
+            usage_evidence=NON_USE_EVIDENCE_PREFIX + proof.proof_sha256,
+        )
+        self.store.write_deployment_record(
+            DeploymentRecord(
+                record_id="pending-before-provider",
+                context=self.context,
+                instance="testing",
+                source_git_ref="fixture",
+                deploy=DeploymentEvidence(
+                    target_name="fixture",
+                    target_type="compose",
+                    deploy_mode="compose",
+                    status="pending",
+                    started_at=self.at.isoformat(),
+                ),
+            )
+        )
+        current = self.store.read_fresh_odoo_testing_generation(self.product, self.context)
+        assert current is not None
+        self.assertTrue(current.non_use_invalidated)
+        self.assertIsNone(
+            self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        )
+        self.assertEqual(self.read().usage, "unknown")
 
     def read(self) -> OdooTestingUsage:
         return read_never_served_testing_usage(

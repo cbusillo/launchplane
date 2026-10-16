@@ -29,6 +29,7 @@ class NeverServedRecords:
     checks: tuple[PublicIngressObservationRecord, ...]
     protected_use: bool
     inventory: EnvironmentInventory | None = None
+    private_checks: tuple[tuple[str, str], ...] = ()
 
 
 def qualify_never_served(records: NeverServedRecords) -> OdooTestingUsage:
@@ -90,14 +91,23 @@ def qualify_never_served(records: NeverServedRecords) -> OdooTestingUsage:
                 return unknown
             if check.check_kind not in {"public_http", "private_http"}:
                 continue
-            if urlsplit(check.base_url).hostname != gen.domain_host:
+            bound = (
+                urlsplit(check.base_url).hostname == gen.domain_host
+                if check.check_kind == "public_http"
+                else (check.check_name, check.health_url) in records.private_checks
+                and all(
+                    t.target == "private_health_url" and t.url == check.health_url
+                    for t in check.targets
+                )
+            )
+            if not bound:
                 # A failed pre-route check says nothing about this generation.
                 if check.status == "fail" and all(t.status == "fail" for t in check.targets):
                     continue
                 return unknown
             # A mixed result can contain a successful public/private target even
             # when the aggregate check failed. It also defeats lifetime non-use.
-            if check.status != "fail" or any(t.status == "pass" for t in check.targets):
+            if check.status != "fail" or any(t.status != "fail" for t in check.targets):
                 return unknown
             kinds.add(check.check_kind)
         if kinds != {"public_http", "private_http"}:
@@ -116,7 +126,8 @@ def read_never_served_testing_usage(
     store: object, *, product: str, context: str, target_id: str
 ) -> OdooTestingUsage:
     try:
-        records = getattr(store, "read_testing_non_use_records")(product, context, target_id)
+        reader = getattr(store, "read_testing_non_use_records", None)
+        records = reader(product, context, target_id) if callable(reader) else None
     except (ValueError, TypeError, FileNotFoundError):
         records = None
     return (

@@ -6079,6 +6079,9 @@ class PostgresRecordStore(HumanSessionStore):
                 | LaunchplaneInventoryRow
                 | LaunchplanePrivateHealthEndpointRow,
             )
+            authority_row = authority_row or (
+                isinstance(row, LaunchplaneDeploymentRow) and row.instance == "testing"
+            )
             if authority_row:
                 self._begin_serialized_write(session)
                 self._lock_product_authority_bundle_write(session)
@@ -6106,6 +6109,10 @@ class PostgresRecordStore(HumanSessionStore):
                             DokployTargetRecord.model_validate(previous_target.payload),
                             target_id=row.target_id,
                         )
+                elif isinstance(row, LaunchplaneDeploymentRow):
+                    # Every testing deploy publishes its pending record before dispatch,
+                    # including non-reconcile replacements. Revoke in that transaction.
+                    self._invalidate_testing_non_use_in_session(session, context=row.context)
             reservation_reader = getattr(
                 self._provider_evidence_context, "reservation_reader", None
             )
@@ -10655,13 +10662,35 @@ class PostgresRecordStore(HumanSessionStore):
 
         existing = shared_session or getattr(self._disposable_authority_context, "session", None)
         with nullcontext(existing) if existing is not None else self._session_factory() as session:
-            self._lock_product_authority_bundle_write(session)
             current = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
             if current is None:
                 return None
             generation = FreshOdooTestingGeneration.model_validate(current.payload)
-            if generation.target_id != target_id:
+            if generation.target_id != target_id or generation.non_use_invalidated:
                 return None
+            profile_row = session.get(LaunchplaneProductProfileRow, product)
+            if profile_row is None:
+                return None
+            profile = LaunchplaneProductProfileRecord.model_validate(profile_row.payload)
+            private_checks = []
+            for lane in profile.lanes:
+                if (lane.context, lane.instance) != (context, "testing"):
+                    continue
+                for check in lane.health_monitoring.checks:
+                    if not profile.is_active or check.kind != "private_http" or not check.enabled:
+                        continue
+                    endpoint_row = session.get(
+                        LaunchplanePrivateHealthEndpointRow, check.private_endpoint_key
+                    )
+                    if endpoint_row is None:
+                        continue
+                    endpoint = PrivateHealthEndpointRecord.model_validate(endpoint_row.payload)
+                    if endpoint.status == "active" and (
+                        endpoint.product,
+                        endpoint.context,
+                        endpoint.instance,
+                    ) == (product, context, "testing"):
+                        private_checks.append((check.name, endpoint.url))
             target = session.get(LaunchplaneDokployTargetRow, (context, "testing"))
             identity = session.get(LaunchplaneDokployTargetIdRow, (context, "testing"))
             custody = session.get(
@@ -10695,6 +10724,7 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
                 target=DokployTargetRecord.model_validate(target.payload),
                 protected_use=bool(evidence and evidence.payload.get("usage") == "in_use"),
+                private_checks=tuple(private_checks),
                 inventory=(
                     EnvironmentInventory.model_validate(inventory.payload)
                     if (inventory := session.get(LaunchplaneInventoryRow, (context, "testing")))
@@ -11517,7 +11547,9 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise ValueError("Fresh testing generation is unavailable.")
             current = FreshOdooTestingGeneration.model_validate(row.payload)
-            if current != generation:
+            if current.model_dump(exclude={"non_use_invalidated"}) != generation.model_dump(
+                exclude={"non_use_invalidated"}
+            ):
                 raise ValueError("Fresh testing generation changed before queueing.")
             operation = session.get(
                 LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id

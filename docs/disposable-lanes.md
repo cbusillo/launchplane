@@ -937,9 +937,10 @@ fresh-resource bootstrap. It requires all of the following:
   not completed, no drill database was selected, and the witness has never been
   revoked. Legacy records have no witness and stay UNKNOWN; there is no backfill.
 - Complete public and private HTTP histories since preparation both contain
-  failed checks bound to that generation's hostname, with no successful or skipped
-  check and no successful target inside a failed aggregate check. Missing either
-  history stays UNKNOWN.
+  failed public checks bound to the generation's hostname and failed private checks
+  bound to its active, lane-owned private endpoint authority. Private observations
+  have no public base URL. Neither history may contain a successful or skipped
+  check or target. Missing either history or private endpoint authority stays UNKNOWN.
 - No deployment record since preparation exists, even a failed deployment, and
   no current inventory publication since preparation exists. This includes
   uncertain serving attempts, not just successful final health checks.
@@ -947,13 +948,19 @@ fresh-resource bootstrap. It requires all of the following:
   the generation's witness, even if the hold is later lifted. Known use also
   revokes it even when a delayed positive-use observation is rejected by ordering.
   A hold already present at generation creation also revokes it. Retired custody
-  is immutable and supplies no current-generation proof. The replacement worker revokes it **before every provider dispatch**,
-  including a dispatch that times out. This deliberately excludes more states
-  than only an acknowledged web start; an incomplete restore is not assumed safe.
+  is immutable and supplies no current-generation proof. A testing deployment
+  record revokes it atomically when written, before provider dispatch, covering
+  both service and other replacement routes. The guarded
+  replacement worker also revokes it before its first provider dispatch, including
+  a dispatch that times out; that revocation covers all later chunks in the
+  attempt. This deliberately excludes more states than only an acknowledged web
+  start; an incomplete restore is not assumed safe.
 
 Only their conjunction produces `usage=unused`, reason `never_served`. Session
 and login booleans remain null: this is a separate proof, not an empty-session
-claim. Source reads are complete DB queries, without a history limit. The proof
+claim. Source reads are complete DB queries, without a history limit. Pure collection
+reads do not hold the global authority write lock; revoked generations return
+early. Publication and consumption use their existing locked transaction. The proof
 binds to the generation rather than a growing list of failed checks. Failed checks
 against an earlier route do not count toward coverage. The predicate is rechecked
 under the shared authority lock before publication and again when

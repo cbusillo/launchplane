@@ -170,6 +170,7 @@ def guard_testing_replacement(
         if check_lock is None:
             raise RuntimeError("The testing replacement still has an execution owner.")
         journal: TestingReplacementRecoveryJournal | None = None
+        non_use_revoked = False
 
         def initialize() -> TestingReplacementRecoveryJournal:
             nonlocal journal
@@ -235,12 +236,13 @@ def guard_testing_replacement(
         def observe(
             host: str, path: str, payload: api.JsonObject, dispatch: Callable[[], api.JsonValue]
         ) -> api.JsonValue:
-            nonlocal journal
+            nonlocal journal, non_use_revoked
             authorization_checkpoint(path)
             # Revoke lifetime non-use before any dispatch, including lost replies.
             invalidate = getattr(store, "invalidate_testing_non_use", None)
-            if callable(invalidate):
+            if callable(invalidate) and not non_use_revoked:
                 invalidate(operation.product, operation.context)
+                non_use_revoked = True
             # Filesystem rehearsals have no generation-lifetime proof producer.
             journal = initialize()
             provider_fingerprint = recovery_binding_fingerprint([host.rstrip("/")])

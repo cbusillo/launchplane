@@ -171,12 +171,12 @@ def collect_drill_admission(
 ) -> DisposableLaneSafety:
     """Q347 evidence belongs to this drill, never the universal observation API."""
     require_drill_use_unprotected(store, generation.product, generation.context)
-    if (
-        read_current_testing_generation(
-            store, product=generation.product, context=generation.context, instance="testing"
-        )
-        != generation
-    ):
+    current = read_current_testing_generation(
+        store, product=generation.product, context=generation.context, instance="testing"
+    )
+    if current is None or current.model_dump(
+        exclude={"non_use_invalidated"}
+    ) != generation.model_dump(exclude={"non_use_invalidated"}):
         raise DrillSkipped("drill_admission_snapshot_changed")
     try:
         used = read_drill_recent_signins(

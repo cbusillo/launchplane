@@ -10910,6 +10910,26 @@ class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteSc
     def setUp(self) -> None:
         self.seed(self.enterContext(_head_postgres_database()))
 
+    def test_revocation_does_not_change_the_prepared_queue_snapshot(self) -> None:
+        self.patches()
+        self.review()
+        original = self.store.request_fresh_testing_reconcile
+
+        def revoke_then_queue(generation: Any) -> None:
+            self.store.invalidate_testing_non_use(generation.product, generation.context)
+            original(generation)
+
+        with patch.object(
+            self.store, "request_fresh_testing_reconcile", side_effect=revoke_then_queue
+        ):
+            self.apply()
+        current = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        assert current is not None
+        self.assertTrue(current.non_use_invalidated)
+        self.assertTrue(current.reconcile_requested_at)
+
     def test_fresh_bootstrap_supersedes_only_old_fence_and_queues_once(self) -> None:
         self.scenario("normal")
 
@@ -12487,7 +12507,6 @@ class RealPostgresNeverServedTests(unittest.TestCase):
                         second.invalidate_testing_non_use, fixture.product, fixture.context
                     )
                     self.assertTrue(writing.wait(10))
-                    self.assertFalse(revoke.done())
                 finally:
                     release.set()
                 self.assertTrue(publish.result(timeout=10))
