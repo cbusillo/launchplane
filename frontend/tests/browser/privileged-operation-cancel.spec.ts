@@ -32,15 +32,16 @@ async function fixture(page: Page, options: {
     } else if (path === "/v1/products") {
       await route.fulfill({ json: { status: "ok", products: [] } });
     } else if (path === `${operationPath}/review` && request.method() === "GET") {
+      const reviewStatus = options.unavailableReadback && status === "cancelled" ? "planned" : status;
       await route.fulfill({ json: { status: "ok", trace_id: "fixture-review", review: {
-        operation_id: operationId, descriptor_id: options.retired ? "ordinary-agent-delivery-activation" : "managed-merge-train-policy-import", operation_class: "managed_merge_train_policy_import",
+        operation_id: operationId, descriptor_id: options.retired ? "ordinary-agent-delivery-activation" : "managed-merge-train-policy-import", operation_class: options.retired ? "ordinary_agent_delivery_activation" : "managed_merge_train_policy_import",
         title: "Review agent policy proposal", requested_by_kind: "local_operator",
-        lifecycle: { status, created_at: "2026-10-16T10:00:00Z", updated_at: "2026-10-16T12:00:00Z", expires_at: "", expiry_state: "active", approval_recorded: status === "approved", execution_recorded: false, terminal_reason_available: status === "cancelled" },
+        lifecycle: { status: reviewStatus, created_at: "2026-10-16T10:00:00Z", updated_at: "2026-10-16T12:00:00Z", expires_at: "", expiry_state: "active", approval_recorded: reviewStatus === "approved", execution_recorded: false, terminal_reason_available: reviewStatus === "cancelled" },
         blockers: { state: options.unavailableDetails ? "blocked" : "clear" },
         change: { summary: "Fixture scheduler policy proposal.", metrics: [] },
         blast_radius: { summary: "Fixture policy only." }, rollback: { summary: "Separate reversal." },
         evidence: { result_status: "ok", digests: [], raw_detail_available: true }, activity: [],
-        can_approve: status === "planned" && !options.unavailableDetails, can_revoke: status === "approved",
+        can_approve: reviewStatus === "planned" && !options.unavailableDetails, can_revoke: reviewStatus === "approved",
       } } });
     } else if (path === operationPath && request.method() === "GET") {
       if (status === "cancelled") readbacks += 1;
@@ -102,6 +103,8 @@ test("Director cancels a pending plan with a reason and reads the terminal resul
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await page.reload();
   await expect(page.locator(".privileged-operation-status")).toHaveText("cancelled");
+  await expect(page.getByRole("region", { name: "Cancellation result" })).toContainText(cancellingActor.login);
+  await expect(page.getByRole("region", { name: "Cancellation result" })).toContainText("Superseded by the replacement plan");
   await expect(approve).toHaveCount(0);
   await expect(cancel).toHaveCount(0);
   expect(state.unexpected).toEqual([]);
@@ -149,6 +152,8 @@ test("failed refreshed readback cannot restore approval after cancellation", asy
   await page.getByLabel("Reason for cancellation").fill("Superseded");
   await page.getByRole("button", { name: "Reject / Cancel plan", exact: true }).click();
   await expect(page.getByRole("status", { name: "Operation update" })).not.toBeEmpty();
+  await page.getByRole("button", { name: "Refresh plans", exact: true }).click();
+  await expect(page.locator(".privileged-operation-status")).toHaveText("cancelled");
   await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Reject / Cancel plan", exact: true })).toHaveCount(0);
   expect(state.readbacks()).toBeGreaterThan(0);
@@ -177,6 +182,7 @@ test("an uncertain cancellation preserves its reason and source event for retry"
   await cancel.click();
   await expect(page.getByRole("status", { name: "Operation update" })).not.toBeEmpty();
   await expect(reason).toBeDisabled();
+  await expect(page.getByRole("button", { name: "Approve plan", exact: true })).toBeDisabled();
   await expect(cancel).toBeEnabled();
   await cancel.click();
   await expect(page.locator(".privileged-operation-status")).toHaveText("cancelled");

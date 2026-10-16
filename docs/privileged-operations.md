@@ -478,8 +478,9 @@ Agent route:
 - `GET /v1/agent/privileged-operations/plans/{operation_id}`
 
 The UI is at `/ui/engineering/privileged-operations`. It exposes bounded
-browser-human approve/revoke controls and clearly states that the service worker
-executes approved work internally; it has no execute control.
+browser-human approve, Reject / Cancel, and revoke controls and clearly states
+that the service worker executes approved work internally; it has no execute
+control.
 
 Approval may make an operation immediately claimable by the worker. A browser
 human can revoke only before that claim; after claim, the worker owns terminal

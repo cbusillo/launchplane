@@ -616,23 +616,28 @@ function PrivilegedOperationPlanCard({
   const mutationInFlight = useRef(false);
   const cancelEventId = useRef<string | null>(null);
   const [cancellation, setCancellation] = useState<PrivilegedOperationHumanResponse | null>(null);
-  const cancelled = cancellation?.record.status === "cancelled" || review.lifecycle.status === "cancelled";
-  const canCancel = admin && !cancelled && review.lifecycle.status === "planned"
-    && selectedPlanType(review.descriptor_id) !== null
-    && !review.lifecycle.approval_recorded && !review.lifecycle.execution_recorded;
   const isAgentPolicyProposal = review.requested_by_kind === "local_operator";
+  const needsDetail = isAgentPolicyProposal || review.lifecycle.status === "cancelled";
   const proposalLoader = useCallback(async (signal: AbortSignal) => {
-    if (!isAgentPolicyProposal) return null;
+    if (!needsDetail) return null;
     return readPrivilegedOperationRawDetail(review.operation_id, signal);
-  }, [review.operation_id, isAgentPolicyProposal]);
-  const proposalResource = useEngineeringResource(proposalLoader, `proposal:${review.operation_id}:${isAgentPolicyProposal}`);
+  }, [review.operation_id, needsDetail]);
+  const proposalResource = useEngineeringResource(proposalLoader, `proposal:${review.operation_id}:${review.lifecycle.status}:${needsDetail}`);
   const proposal = proposalResource.state.data;
   const proposalMatches = proposalResource.state.phase === "ready"
     && !proposalResource.state.stale
     && proposal?.record.operation_id === review.operation_id;
+  const cancellationResult = cancellation ?? (proposalMatches && proposal?.record.status === "cancelled" ? proposal : null);
+  const cancelled = cancellationResult?.record.status === "cancelled" || review.lifecycle.status === "cancelled";
+  const canCancel = admin && !cancelled && review.lifecycle.status === "planned"
+    && review.descriptor_id !== "ordinary-agent-delivery-activation"
+    && !review.lifecycle.approval_recorded && !review.lifecycle.execution_recorded;
+  const updateMessage = !cancellation && cancellationResult
+    ? "Plan cancelled. It can no longer be approved or executed."
+    : mutationMessage;
 
   async function mutate(action: "approve" | "revoke") {
-    if (mutationInFlight.current || cancelled) return;
+    if (mutationInFlight.current || cancelled || cancelEventId.current !== null) return;
     mutationInFlight.current = true;
     setPendingMutation(true);
     const reason =
@@ -689,7 +694,7 @@ function PrivilegedOperationPlanCard({
       setMutationMessage("Plan cancelled. It can no longer be approved or executed.");
     } catch (error) {
       if (!recorded && error instanceof LaunchplaneApiError
-        && [400, 403, 410, 422].includes(error.statusCode)) {
+        && [400, 403, 409, 410, 422].includes(error.statusCode)) {
         cancelEventId.current = null;
       }
       setMutationMessage(recorded
@@ -862,7 +867,7 @@ function PrivilegedOperationPlanCard({
       {!cancelled && (review.can_approve || review.can_revoke) ? (
         <div className="privileged-operation-actions">
           {review.can_approve ? (
-            <button type="button" disabled={pendingMutation || (isAgentPolicyProposal && !proposalMatches)} onClick={() => void mutate("approve")}>
+            <button type="button" disabled={pendingMutation || cancelEventId.current !== null || (isAgentPolicyProposal && !proposalMatches)} onClick={() => void mutate("approve")}>
               Approve plan
             </button>
           ) : null}
@@ -891,10 +896,10 @@ function PrivilegedOperationPlanCard({
         </form>
       ) : null}
 
-      {cancellation ? (
+      {cancellationResult ? (
         <section aria-label="Cancellation result" className="privileged-operation-terminal-reason">
-          <p>{cancellation.record.terminal_reason}</p>
-          {cancellation.events.filter(event => event.action === "cancelled").map(event => event.actor.identity_type === "github_human" ? (
+          <p>{cancellationResult.record.terminal_reason}</p>
+          {cancellationResult.events.filter(event => event.action === "cancelled").map(event => event.actor.identity_type === "github_human" ? (
             <p key={event.event_id}>Cancelled by {event.actor.login} (GitHub ID {event.actor.github_id}) · {formatTime(event.occurred_at)}</p>
           ) : null)}
         </section>
@@ -918,13 +923,13 @@ function PrivilegedOperationPlanCard({
         </details>
       ) : null}
 
-      {mutationMessage ? (
+      {updateMessage ? (
         <p className="privileged-operation-terminal-reason" role="status" aria-label="Operation update">
-          {mutationMessage}
+          {updateMessage}
         </p>
       ) : null}
 
-      {review.lifecycle.terminal_reason_available ? (
+      {review.lifecycle.terminal_reason_available && !cancellationResult ? (
         <p className="privileged-operation-terminal-reason">
           Terminal reason is available in the authorized detail response.
         </p>
