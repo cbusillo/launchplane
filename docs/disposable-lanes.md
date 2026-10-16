@@ -407,9 +407,9 @@ An older image cannot continue the new resource route. After activation, retain
 the qualifying image and forward-fix rather than erasing custody or restoring
 an old database to clear the fence.
 
-## First service collector
+## Service collection
 
-`collect` on the observation API resolves two existing service sources itself:
+`collect` on the observation API resolves existing service sources itself:
 an exact lane's staff-testing hold establishes protected usage, and the same
 Dokploy target ID and target kind bound to a `prod` lane establishes a shared
 production target. The source references bind the lane snapshot and a digest
@@ -417,11 +417,13 @@ of any matched production records. The authenticated agent requests collection;
 its supplied facts and references cannot affect the result. The existing stored
 actor kind and observation schema remain compatible with the previous image.
 
-This producer publishes only `in_use` and `shared`. Every fact permitting an
-apply stays unknown. Missing holds, distinct target IDs and old preview-generation
+For Odoo testing, the read-only login/session probe described above can also
+publish `unused`. Custody and physical isolation remain unknown. Missing holds,
+distinct target IDs and old preview-generation
 states do not establish occupancy, custody, physical isolation or executor
-exclusion. The response and bounded client name these coverage limits. Collection calls no provider,
-changes only lane evidence and uses its existing expiry cap. It does not qualify
+exclusion. The response and bounded client name these coverage limits. Collection
+changes only lane evidence, performs no provider mutation and uses its existing
+expiry cap. It does not qualify
 replacement resources or change production/Client permissions. Refresh preserves
 any existing retained-operation linkage, but keeps replacement eligibility unknown.
 
@@ -444,8 +446,8 @@ client supports only `inspect` and `collect`. Catalog-helper integration is
 coordinated on codex-skills#1308; that consumer must refresh its vendored
 projection before advertising its own support.
 
-**Remaining producer gap:** Launchplane has a positive staff-testing hold, but no
-complete authoritative occupancy or only-copy inventory and no supported
+**Remaining producer gap:** bounded Odoo authenticated-use evidence does not supply
+a universal occupancy or only-copy inventory, or a general
 inspection that proves every writable mount/backing store, live database,
 published port and credential relation. The schema does not pretend to supply
 that inspection. There is no universal producer of positive occupancy/custody facts permitting a
