@@ -28,7 +28,9 @@ Browser origin/fetch metadata/CSRF checks still apply. No new grant is installed
 
 Dry-run saves a service-owned review containing the complete original record,
 request, reviewer and active authority binding. Its wire response contains only
-scope, selected/surviving key names, counts, timestamps and digests. It returns
+scope, selected/surviving key names, counts, timestamps and opaque digests.
+A private per-review random nonce protects value-derived digests against
+offline guessing of low-entropy values; it stays only in service custody. It returns
 `review_id` and `plan_sha256`; apply must repeat the same intent with those
 values as `review_id` and `reviewed_plan_sha256`, plus a stable
 `Idempotency-Key`. Every selected key must exist. The complete record, active
@@ -41,6 +43,17 @@ types, source label and retirement intent remain unchanged. Removing the last
 value deletes a record only when it has no provider-retirement intent; its
 append-only delete event links the review. A lane record containing retirement
 intent survives with an empty value map so provider cleanup intent is retained.
+Before applying a last-value removal that retains retirement intent, complete
+its `requires_compatible_readers_and_rollback` prerequisite: deploy readers
+that accept retirement-only records to every consumer/replica and retain a
+rollback build with that reader support. Earlier builds reject empty value
+maps, so rolling back to an older incompatible image after such a write is
+unsupported without separately governed data restoration. Source delivery is
+not that rollout qualification. The operational retirement issue must establish
+those prerequisites before any apply; the flag reports the requirement and
+does not attest deployment or approve it. Ordinary partial removals and
+last-value deletions without retirement intent keep the previous record format.
+
 Managed-secret records and bindings are untouched. An inherited value can
 become visible after a stored override is removed; the preview is not a claim
 that a key is absent across all layers or from the provider.

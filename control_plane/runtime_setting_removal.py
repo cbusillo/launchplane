@@ -71,6 +71,7 @@ def removal_plan(
     request: RuntimeSettingRemovalRequest,
     *,
     authority_sha256: str,
+    private_nonce: str,
 ) -> dict[str, object]:
     if (record.scope, record.context, record.instance) != (
         request.scope,
@@ -78,7 +79,9 @@ def removal_plan(
         request.instance,
     ) or not set(request.keys).issubset(record.env):
         raise ValueError("The selected record or keys are unavailable; refresh the inventory.")
-    before_sha256 = request_fingerprint(record.model_dump(mode="json"))
+    before_sha256 = request_fingerprint(
+        {"nonce": private_nonce, "record": record.model_dump(mode="json")}
+    )
     survivor_keys = sorted(set(record.env) - set(request.keys))
     plan: dict[str, object] = {
         "product": request.product,
@@ -93,6 +96,8 @@ def removal_plan(
         "surviving_value_count": len(survivor_keys),
         "retirement_intent_count": len(record.retired_provider_keys),
         "record_deleted": not survivor_keys and not record.retired_provider_keys,
+        "requires_compatible_readers_and_rollback": not survivor_keys
+        and bool(record.retired_provider_keys),
         "authority_sha256": authority_sha256,
         "applied": False,
     }

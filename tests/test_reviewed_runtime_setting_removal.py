@@ -127,6 +127,14 @@ class RuntimeRemovalTests(unittest.TestCase):
             self.call(body.model_copy(update={"mode": "readback"}))["readback_matches"]
         )
 
+    def test_previews_use_private_nonces_instead_of_a_value_guessing_digest(self) -> None:
+        first = self.call(request())
+        second = self.call(request())
+        self.assertNotEqual(first["record_sha256"], second["record_sha256"])
+        self.assertNotEqual(first["plan_sha256"], second["plan_sha256"])
+        self.assertNotIn("private_nonce", json.dumps(first))
+        self.assertEqual(self.store.list_runtime_environment_records(), (self.before,))
+
     def test_last_key_removes_record_and_keeps_delete_event_and_preimage(self) -> None:
         self.before = runtime(env={"REMOVE": "private-value"})
         self.store.write_runtime_environment_record(self.before)
@@ -152,7 +160,7 @@ class RuntimeRemovalTests(unittest.TestCase):
             {
                 "github_ids": [101],
                 "roles": ["admin"],
-                "products": ["site", "launchplane"],
+                "products": ["site"],
                 "contexts": ["cm"],
                 "instances": ["testing"],
                 "actions": ["product_config.apply", "secret.list"],

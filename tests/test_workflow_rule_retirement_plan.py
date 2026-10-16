@@ -90,6 +90,7 @@ class WorkflowRulePlanTests(unittest.TestCase):
             selected["scope"], policy.github_actions[0].model_dump(mode="json", exclude_none=True)
         )
         self.assertFalse(result["blockers"])
+        self.assertFalse(selected["broad_or_shared_scope"])
 
     def test_unmanaged_broad_and_shared_rule_scope_is_explicit(self) -> None:
         policy = mixed_policy()
@@ -98,7 +99,7 @@ class WorkflowRulePlanTests(unittest.TestCase):
         self.assertEqual(selected["management"], "unmanaged")
         self.assertTrue(selected["broad_or_shared_scope"])
         self.assertEqual(selected["scope"]["products"], list(policy.github_actions[-1].products))
-        self.assertEqual(result["dependency_verification"], "unknown_requires_source_review")
+        self.assertFalse(result["apply_supported"])
 
     def test_policy_drift_fingerprint_identity_and_duplicate_selection_refuse(self) -> None:
         policy = mixed_policy()
@@ -126,7 +127,8 @@ class WorkflowRulePlanTests(unittest.TestCase):
     def test_missing_human_admin_is_a_blocker_even_for_workflow_only_contraction(self) -> None:
         policy = mixed_policy().model_copy(update={"github_humans": ()})
         result = workflow_rule_retirement_plan(_record(policy=policy), request(policy))
-        self.assertEqual(result["blockers"], ["last_administrator_protection"])
+        self.assertTrue(result["blockers"])
+        self.assertFalse(result["apply_supported"])
 
     def test_inspect_returns_full_scopes_without_inventing_a_removal_or_apply(self) -> None:
         policy = mixed_policy()

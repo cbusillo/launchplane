@@ -51,10 +51,20 @@ def shared_scope(rule: GitHubActionsPolicyRule) -> bool:
         rule.job_workflow_refs,
         rule.products,
         rule.contexts,
-        rule.actions,
         rule.instances,
+        rule.refs,
+        rule.event_names,
+        rule.environments,
     )
-    return any(len(values) != 1 or any(c in values[0] for c in "*?[") for values in selectors)
+    return (
+        not (rule.workflow_refs or rule.job_workflow_refs)
+        or not rule.products
+        or not rule.contexts
+        or any(
+            len(values) > 1 or any(any(c in value for c in "*?[") for value in values)
+            for values in selectors
+        )
+    )
 
 
 def workflow_rule_retirement_plan(

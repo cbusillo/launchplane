@@ -6518,6 +6518,7 @@ class PostgresRecordStore(HumanSessionStore):
         write_session: Session | None = None,
         commit: bool = True,
         validate_only: bool = False,
+        write_transaction_started: bool = False,
     ) -> None:
         if not bundle.requires_write():
             return
@@ -6526,7 +6527,7 @@ class PostgresRecordStore(HumanSessionStore):
             if write_session is not None
             else self._session_factory() as session
         ):
-            if write_session is None:
+            if not write_transaction_started:
                 self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
             adoption_checkpoint = getattr(
@@ -27281,7 +27282,7 @@ class PostgresRecordStore(HumanSessionStore):
                 and active.policy.allows(
                     identity=identity,
                     action="secret.list",
-                    product="launchplane",
+                    product=request.product,
                     context=request.context or "launchplane",
                     target=target,
                 )
@@ -27331,7 +27332,10 @@ class PostgresRecordStore(HumanSessionStore):
             if request.mode == "dry-run":
                 if current is None:
                     raise ValueError("The selected runtime record is absent.")
-                plan = removal_plan(current, request, authority_sha256=authority_sha256)
+                private_nonce = secrets.token_hex(32)
+                plan = removal_plan(
+                    current, request, authority_sha256=authority_sha256, private_nonce=private_nonce
+                )
                 review_id = str(plan["review_id"])
                 existing = session.scalar(
                     self._idempotency_statement(
@@ -27354,6 +27358,7 @@ class PostgresRecordStore(HumanSessionStore):
                         recorded_at=now,
                         response_payload={
                             "plan": plan,
+                            "private_nonce": private_nonce,
                             "intent": request.intent(),
                             "before": current.model_dump(mode="json"),
                             "reviewed_by": idempotency_scope(identity),
@@ -27436,7 +27441,15 @@ class PostgresRecordStore(HumanSessionStore):
             if current_row is None:
                 raise ValueError("Reviewed runtime record disappeared.")
             current = RuntimeEnvironmentRecord.model_validate(current_row.payload)
-            if removal_plan(current, request, authority_sha256=authority_sha256) != plan:
+            if (
+                removal_plan(
+                    current,
+                    request,
+                    authority_sha256=authority_sha256,
+                    private_nonce=str(review.response_payload["private_nonce"]),
+                )
+                != plan
+            ):
                 raise ValueError("Reviewed runtime record or authority changed.")
             replacement = None
             if not plan["record_deleted"]:
@@ -27480,7 +27493,9 @@ class PostgresRecordStore(HumanSessionStore):
                 if replacement is None
                 else (),
             )
-            self._write_product_authority_bundle(bundle, write_session=session, commit=False)
+            self._write_product_authority_bundle(
+                bundle, write_session=session, commit=False, write_transaction_started=True
+            )
             session.flush()
             written_row = session.scalar(
                 self._runtime_environment_statement(
