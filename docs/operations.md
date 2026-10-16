@@ -4847,14 +4847,18 @@ business data, and invokes no importer, deployment or synchronization.
 
 ### Daily waiting-release digest
 
-The service's daily release-digest scheduler lists source changes ahead of each
+The service's daily release-digest scheduler (UTC calendar days) lists source changes ahead of each
 active product's recorded production version. It does not create incidents,
 change product colors, send Client invitations, or start or approve a release.
-The list includes an immutable source comparison, a short list of changes, source
-age, testing/review blockers, and the Launchplane promotion or invitation step.
-The digest stays quiet when production already contains the current source.
+The list includes an immutable source comparison, a short list of changes, time
+on the default branch, testing/review blockers, and the Launchplane promotion or invitation step.
+Shared-addon, website-settings and updated-artifact changes in testing are also
+listed when the product repository itself has not moved. The digest stays quiet
+when production already contains the current source and release components.
 Unavailable or diverged evidence records a partial scheduler result rather than
-inventing a waiting release. Source age is informational, never a failure signal.
+inventing a waiting release. Waiting time uses default-branch first-parent landing dates; incomplete history
+or component-only changes show age unavailable rather than guessing. Age is
+informational, never a failure signal.
 
 A signed-in admin can opt a Director-owned Discord destination into this digest
 through the existing notification-policy plan/apply service surface by setting
@@ -4869,7 +4873,9 @@ Daily receipts use the existing idempotency store; per-product, policy,
 destination and message-part outbox keys deduplicate restarts and replicas.
 The existing outbox worker delivers the separate `release_digest` kind. It
 rechecks current policy and product scope and drops expired daily messages.
-Failures before sending remain recorded; a Discord timeout or interrupted send
+Failures before sending and explicit rate-limit refusals retry through the existing
+outbox backoff, within the current daily slot and attempt budget. Invalid or rejected
+destinations remain recorded; a Discord timeout or interrupted send
 retains its provider marker and uncertain outcome, and is not blindly repeated.
 Evidence failures wait for the next daily slot. Outbox records and scheduler
 receipts are the maintenance/diagnostic path. Disable the policy's digest flag
