@@ -21,7 +21,13 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     execute_odoo_stable_target_replacement_apply,
 )
 from tests.test_product_onboarding import _manifest_payload
-from tests.test_odoo_stable_target_replacement import _Store, _inventory, _profile
+from tests.test_odoo_stable_target_replacement import (
+    _Store,
+    _inventory,
+    _profile,
+    _target_record,
+    _target_id_record,
+)
 
 
 def lane_authority() -> OdooCutoverLane:
@@ -81,7 +87,12 @@ class OdooLaneAuthorityTests(unittest.TestCase):
                         image_reference="example.invalid/fixture@sha256:" + "a" * 64,
                         slot="green",
                     )
-                store = _Store(profile=profile, inventory=inventory)
+                store = _Store(
+                    profile=profile,
+                    inventory=inventory,
+                    target_record=_target_record(),
+                    target_id_record=_target_id_record(),
+                )
                 provider = Mock(side_effect=AssertionError("provider must remain untouched"))
                 checkpoint = Mock()
                 with patch(
@@ -97,7 +108,8 @@ class OdooLaneAuthorityTests(unittest.TestCase):
                         dokploy_request=provider,
                     )
                     self.assertEqual(plan.plan_status, "blocked")
-                    with self.assertRaises(OdooTargetReplacementStageError):
+                    self.assertEqual(plan.blocker_codes, ("two_slot_cutover_required",))
+                    with self.assertRaises(OdooTargetReplacementStageError) as refused:
                         execute_odoo_stable_target_replacement_apply(
                             control_plane_root=Path("."),
                             record_store=store,
@@ -107,42 +119,65 @@ class OdooLaneAuthorityTests(unittest.TestCase):
                             dokploy_request=provider,
                             provider_effect_checkpoint=checkpoint,
                         )
+                    self.assertEqual(
+                        refused.exception.code, "plan_not_ready.two_slot_cutover_required"
+                    )
                 provider.assert_not_called()
                 checkpoint.assert_not_called()
                 self.assertFalse(store.deployment_records)
                 self.assertFalse(store.environment_inventories)
 
     def test_apply_rechecks_lane_after_planning(self) -> None:
-        profile = _profile()
-        store = _Store(profile=profile)
-        ready = OdooStableTargetReplacementPlan(
-            plan_status="ready",
-            product=profile.product,
-            context=profile.lanes[0].context,
-            instance=profile.lanes[0].instance,
-            strategy="recreate-in-place",
-            target_record_found=True,
-            target_id_record_found=True,
-            inventory_found=True,
-            expected_next_target_name="fixture",
-            current_target=OdooStableTargetRuntimeSnapshot(
-                target_type="compose", target_id="fixture", target_name="fixture"
-            ),
-        )
-        profile.lanes[0].odoo_cutover = lane_authority()
-        provider = Mock()
-        with patch(
-            "control_plane.workflows.odoo_stable_target_replacement.build_odoo_stable_target_replacement_plan",
-            return_value=ready,
-        ):
-            with self.assertRaises(OdooTargetReplacementStageError):
-                execute_odoo_stable_target_replacement_apply(
-                    control_plane_root=Path("."),
-                    record_store=store,
-                    request=OdooStableTargetReplacementApplyRequest(
-                        product=profile.product, instance=profile.lanes[0].instance
-                    ),
-                    dokploy_request=provider,
+        for configured in (True, False):
+            with self.subTest(configured=configured):
+                profile = _profile()
+                inventory = _inventory()
+                store = _Store(
+                    profile=profile,
+                    inventory=inventory,
+                    target_record=_target_record(),
+                    target_id_record=_target_id_record(),
                 )
-        provider.assert_not_called()
-        self.assertFalse(store.deployment_records)
+                ready = OdooStableTargetReplacementPlan(
+                    plan_status="ready",
+                    product=profile.product,
+                    context=profile.lanes[0].context,
+                    instance=profile.lanes[0].instance,
+                    strategy="recreate-in-place",
+                    target_record_found=True,
+                    target_id_record_found=True,
+                    inventory_found=True,
+                    expected_next_target_name="fixture",
+                    current_target=OdooStableTargetRuntimeSnapshot(
+                        target_type="compose", target_id="fixture", target_name="fixture"
+                    ),
+                )
+                if configured:
+                    profile.lanes[0].odoo_cutover = lane_authority()
+                else:
+                    inventory.runtime_identity = RuntimeIdentity(
+                        context=inventory.context,
+                        instance=inventory.instance,
+                        deployment_record_id=inventory.deployment_record_id,
+                        artifact_id="fixture",
+                        source_git_ref=inventory.source_git_ref,
+                        image_reference="example.invalid/fixture@sha256:" + "a" * 64,
+                        slot="green",
+                    )
+                provider = Mock()
+                with patch(
+                    "control_plane.workflows.odoo_stable_target_replacement.build_odoo_stable_target_replacement_plan",
+                    return_value=ready,
+                ):
+                    with self.assertRaises(OdooTargetReplacementStageError) as refused:
+                        execute_odoo_stable_target_replacement_apply(
+                            control_plane_root=Path("."),
+                            record_store=store,
+                            request=OdooStableTargetReplacementApplyRequest(
+                                product=profile.product, instance=profile.lanes[0].instance
+                            ),
+                            dokploy_request=provider,
+                        )
+                self.assertEqual(refused.exception.code, "plan_not_ready.two_slot_cutover_required")
+                provider.assert_not_called()
+                self.assertFalse(store.deployment_records)
