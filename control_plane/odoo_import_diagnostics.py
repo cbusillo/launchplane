@@ -17,6 +17,7 @@ from urllib.request import HTTPCookieProcessor, Request, build_opener
 from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
+from control_plane.odoo_diagnostic_identity import DIAGNOSTIC_IDENTITY_UNAVAILABLE
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -455,7 +456,7 @@ def diagnose_imports(
         reads.assert_selection_current(store, selection)
         return ImportDiagnosticResult(runtime="verified", sources=tuple(results))
     except reads.OdooRuntimeReadError as error:
-        if error.code == "odoo_diagnostic_identity_unavailable":
+        if error.code == DIAGNOSTIC_IDENTITY_UNAVAILABLE:
             raise
         return unknown_result()
     except Exception:

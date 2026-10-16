@@ -29,6 +29,7 @@ from control_plane.odoo_runtime_reads import _NoRedirects
 from control_plane.odoo_diagnostic_identity import (
     DIAGNOSTIC_SECRET_INTEGRATION,
     DIAGNOSTIC_IDENTITY_KEY,
+    diagnostic_preview_secret_name,
 )
 from control_plane.secrets import SecretWriteStore, write_secret_value
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -49,7 +50,11 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         self.root = Path(self.temp.name)
         self.store = FilesystemRecordStore(state_dir=self.root / "state")
         encryption = patch.dict(
-            os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": Fernet.generate_key().decode()}
+            os.environ,
+            {
+                "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+                "LAUNCHPLANE_SECRET_KEYS_JSON": "",
+            },
         )
         encryption.start()
         self.addCleanup(encryption.stop)
@@ -106,12 +111,14 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
         for identity in (self.preview_identity, self.stable_identity):
             write_secret_value(
                 record_store=cast(SecretWriteStore, self.store),
-                scope="context_instance",
+                scope="context" if identity.environment_kind == "preview" else "context_instance",
                 integration=DIAGNOSTIC_SECRET_INTEGRATION,
-                name="diagnostic-reader",
+                name=diagnostic_preview_secret_name(identity.instance)
+                if identity.environment_kind == "preview"
+                else "diagnostic-reader",
                 binding_key=DIAGNOSTIC_IDENTITY_KEY,
                 context_name=identity.context,
-                instance_name=identity.instance,
+                instance_name="" if identity.environment_kind == "preview" else identity.instance,
                 plaintext_value=json.dumps(
                     {
                         "product": identity.product,

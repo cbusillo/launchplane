@@ -394,9 +394,7 @@ class DiagnosticTests(unittest.TestCase):
                 mocked.side_effect = old
 
     def test_missing_diagnostic_identity_remains_an_explicit_unavailable_error(self) -> None:
-        self.mocks[0].side_effect = reads.OdooRuntimeReadError(
-            "odoo_diagnostic_identity_unavailable", "Diagnostic identity unavailable", 503
-        )
+        self.mocks[0].side_effect = reads._diagnostic_unavailable()
         with self.assertRaises(reads.OdooRuntimeReadError) as caught:
             self.run_diagnostic()
         self.assertEqual(caught.exception.status_code, 503)

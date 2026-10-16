@@ -10,6 +10,7 @@ from control_plane import live_target_runtime
 from control_plane import product_config as control_plane_product_config
 from control_plane import provider_key_adoption
 from control_plane import secrets as control_plane_secrets
+from control_plane.odoo_diagnostic_identity import diagnostic_preview_context_owned
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.dokploy import api as dokploy_api
@@ -56,6 +57,7 @@ def resolve_product_config_profile(
     context: str,
     instance: str,
     context_wide: bool = False,
+    diagnostic_preview: bool = False,
 ) -> LaunchplaneProductProfileRecord:
     """Bind a config target to its stored product, independent of the driver."""
     try:
@@ -65,6 +67,14 @@ def resolve_product_config_profile(
             "Product config target is not owned by the named product.",
             code="product_config_lane_not_owned",
         ) from error
+    if (
+        diagnostic_preview
+        and not instance
+        and diagnostic_preview_context_owned(
+            record_store.list_product_profile_records(), product, context
+        )
+    ):
+        return profile
     if not context or not any(
         lane.context.strip() == context and (not instance or lane.instance.strip() == instance)
         for lane in profile.lanes

@@ -1,6 +1,7 @@
 import json
 import os
 import unittest
+from copy import deepcopy
 from contextlib import ExitStack
 from dataclasses import replace
 from datetime import datetime, UTC
@@ -10,6 +11,7 @@ from typing import cast
 from unittest.mock import patch
 
 from cryptography.fernet import Fernet
+from typing import Any
 
 from control_plane import odoo_diagnostic_identity as diagnostic
 from control_plane import odoo_runtime_reads as reads
@@ -18,6 +20,13 @@ from control_plane import odoo_import_diagnostics as imports
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.secrets import SecretWriteStore, write_secret_value
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.service_auth import LaunchplaneAuthzPolicy
+from tests.support.auth import _identity, _StubVerifier
+from tests.http_app_test_support import _post_product_config_apply
+from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 
 
 class DiagnosticIdentityTests(unittest.TestCase):
@@ -26,7 +35,11 @@ class DiagnosticIdentityTests(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         self.store = FilesystemRecordStore(state_dir=Path(temp.name))
         encryption = patch.dict(
-            os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": Fernet.generate_key().decode()}
+            os.environ,
+            {
+                "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+                "LAUNCHPLANE_SECRET_KEYS_JSON": "",
+            },
         )
         encryption.start()
         self.addCleanup(encryption.stop)
@@ -270,3 +283,171 @@ class DiagnosticIdentityTests(unittest.TestCase):
         production.credentials["ODOO_ADMIN_LOGIN"] = ""
         self.assertEqual(reads.diagnostic_authentication(production)["login"], "admin")
         reads.require_diagnostic_user(production, {"uid": 2})
+        with self.assertRaises(reads.OdooRuntimeReadError) as rejected:
+            reads.require_diagnostic_user(production, {"uid": False})
+        self.assertEqual(rejected.exception.code, "odoo_authentication_failed")
+        production.credentials["ODOO_ADMIN_PASSWORD"] = ""
+        with self.assertRaises(reads.OdooRuntimeReadError) as missing:
+            reads.diagnostic_authentication(production)
+        self.assertEqual(missing.exception.code, "odoo_credentials_missing")
+
+
+class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
+    async def test_supported_preview_secret_write_readback_and_ownership_fence(self) -> None:
+        with (
+            TemporaryDirectory() as temp,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+                    "LAUNCHPLANE_SECRET_KEYS_JSON": "",
+                },
+            ),
+        ):
+            store = PostgresRecordStore(database_url=f"sqlite+pysqlite:///{temp}/records.sqlite")
+            store.ensure_schema()
+            self.addCleanup(store.close)
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                {
+                    "product": "example-site",
+                    "display_name": "Example",
+                    "repository": "every/example",
+                    "driver_id": "odoo",
+                    "image": {"repository": "ghcr.io/example/site"},
+                    "runtime_port": 8069,
+                    "health_path": "/launchplane/health",
+                    "preview": {
+                        "enabled": True,
+                        "context": "preview-context",
+                        "app_name_prefix": "example",
+                    },
+                    "lanes": [
+                        {
+                            "context": "stable-context",
+                            "instance": "testing",
+                            "base_url": "https://testing.example.invalid",
+                        }
+                    ],
+                    "updated_at": "2026-10-16T00:00:00Z",
+                    "source": "test",
+                }
+            )
+            store.write_product_profile_record(profile)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": [profile.product],
+                            "contexts": [profile.preview.context],
+                            "actions": ["product_config.plan", "product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                record_store_factory=lambda: store,
+            )
+            runtime = RuntimeIdentity(
+                product=profile.product,
+                context=profile.preview.context,
+                instance="example-pr-42",
+                environment_kind="preview",
+                deployment_record_id="deployment",
+                artifact_id="artifact",
+                source_git_ref="source",
+                preview_id="preview42",
+                preview_generation_id="generation42",
+            )
+            identity: dict[str, Any] = dict(
+                product=runtime.product,
+                context=runtime.context,
+                instance=runtime.instance,
+                database="preview_db",
+                login="service-reader",
+                password="synthetic-preview-password",
+                user_id=17,
+            )
+            payload: dict[str, Any] = {
+                "mode": "dry-run",
+                "product": profile.product,
+                "context": runtime.context,
+                "secrets": [
+                    {
+                        "scope": "context",
+                        "integration": diagnostic.DIAGNOSTIC_SECRET_INTEGRATION,
+                        "name": diagnostic.diagnostic_preview_secret_name(runtime.instance),
+                        "binding_key": diagnostic.DIAGNOSTIC_IDENTITY_KEY,
+                        "value": json.dumps(identity),
+                    }
+                ],
+            }
+
+            async def send(body: dict[str, Any], key: str) -> Any:
+                return await _post_product_config_apply(app, body, idempotency_key=key)
+
+            planned = await send(payload, "preview-plan")
+            self.assertEqual(planned.status_code, 202, planned.text)
+            applied = await send({**payload, "mode": "apply"}, "preview-apply")
+            self.assertEqual(applied.status_code, 202, applied.text)
+            selected = diagnostic.read_diagnostic_identity(store, runtime, identity["database"])
+            self.assertEqual(selected.password.get_secret_value(), identity["password"])
+            self.assertNotIn(identity["password"], planned.text + applied.text)
+            self.assertEqual(store.list_runtime_environment_records(), ())
+            with self.assertRaises(ValueError):
+                diagnostic.read_diagnostic_identity(
+                    store,
+                    runtime.model_copy(update={"instance": "example-pr-43"}),
+                    identity["database"],
+                )
+
+            for kind in ("runtime", "integration", "name", "copy", "foreign_product"):
+                unsafe = deepcopy(payload)
+                if kind == "runtime":
+                    unsafe["runtime_env"] = {"env": {"EXAMPLE_SETTING": "test"}}
+                elif kind == "integration":
+                    unsafe["secrets"][0]["integration"] = "runtime_environment"
+                elif kind == "name":
+                    unsafe["secrets"][0]["name"] = "arbitrary"
+                elif kind == "copy":
+                    unsafe["secrets"][0].pop("value")
+                    unsafe["secrets"][0]["copy_from"] = {
+                        "context": "stable-context",
+                        "instance": "prod",
+                        "version_id": "inert",
+                    }
+                else:
+                    unsafe["product"] = "foreign-product"
+                response = await send(unsafe, "preview-refuse-" + kind)
+                self.assertGreaterEqual(response.status_code, 400, response.text)
+                self.assertEqual(store.list_runtime_environment_records(), ())
+
+            original = store.write_product_authority_bundle
+
+            def changed_context(bundle: ProductAuthorityBundle) -> None:
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "preview": profile.preview.model_copy(
+                                update={"context": "moved-context"}
+                            )
+                        }
+                    )
+                )
+                original(bundle)
+
+            identity["password"] = "rotated-synthetic-password"
+            changed = deepcopy(payload)
+            changed["mode"] = "apply"
+            changed["secrets"][0]["value"] = json.dumps(identity)
+            before = tuple(store.list_secret_records())
+            with patch.object(store, "write_product_authority_bundle", side_effect=changed_context):
+                refused = await send(changed, "preview-race")
+            self.assertEqual(refused.status_code, 409, refused.text)
+            self.assertEqual(tuple(store.list_secret_records()), before)

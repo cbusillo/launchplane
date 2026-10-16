@@ -1,16 +1,84 @@
 """Service-only diagnostic credentials, selected from one exact lane's secret store."""
 
 from typing import Protocol
+from collections.abc import Iterable
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.secret_record import SecretVersion
 from control_plane.secrets import SecretBindingSelectionStore, _decrypt_secret_value
 
 DIAGNOSTIC_SECRET_INTEGRATION = "odoo_diagnostics"
 DIAGNOSTIC_IDENTITY_KEY = "ODOO_DIAGNOSTIC_IDENTITY"
+DIAGNOSTIC_IDENTITY_UNAVAILABLE = "odoo_diagnostic_identity_unavailable"
+
+
+def diagnostic_preview_secret_name(instance: str) -> str:
+    return "preview-" + instance
+
+
+def diagnostic_preview_context_owned(
+    profiles: Iterable[LaunchplaneProductProfileRecord], product: str, context: str
+) -> bool:
+    profiles = tuple(profiles)
+    return any(
+        profile.product == product
+        and profile.is_active
+        and profile.driver_id == "odoo"
+        and profile.preview.enabled
+        and profile.preview.context == context
+        for profile in profiles
+    ) and not any(
+        profile.product != product
+        and (
+            context in {lane.context.strip() for lane in profile.lanes}
+            or context in profile.historical_contexts
+            or (profile.preview.enabled and profile.preview.context == context)
+        )
+        for profile in profiles
+    )
+
+
+def is_diagnostic_preview_config(payload: dict[str, object]) -> bool:
+    """A context write may store only individually named preview identities."""
+    runtime = payload.get("runtime_env")
+    secrets = payload.get("secrets")
+    if (
+        payload.get("instance")
+        or "public_hosts" in payload
+        or not isinstance(runtime, dict)
+        or runtime.get("env")
+        or runtime.get("retired_provider_keys") is not None
+        or runtime.get("adopt_provider_keys") is not None
+        or not isinstance(secrets, list)
+        or not secrets
+    ):
+        return False
+    for secret in secrets:
+        if not isinstance(secret, dict) or (
+            secret.get("integration") != DIAGNOSTIC_SECRET_INTEGRATION
+            or secret.get("binding_key") != DIAGNOSTIC_IDENTITY_KEY
+            or secret.get("scope") != "context"
+            or secret.get("context") != payload.get("context")
+            or secret.get("instance")
+            or secret.get("copy_from") is not None
+            or secret.get("adopt_from_provider") is not None
+        ):
+            return False
+        try:
+            identity = OdooDiagnosticIdentity.model_validate_json(secret["value"])
+        except (ValueError, KeyError, TypeError):
+            return False
+        if (
+            identity.product != payload.get("product")
+            or identity.context != payload.get("context")
+            or secret.get("name") != diagnostic_preview_secret_name(identity.instance)
+        ):
+            return False
+    return True
 
 
 class OdooDiagnosticIdentity(BaseModel):
@@ -34,13 +102,15 @@ def read_diagnostic_identity(
 ) -> OdooDiagnosticIdentity:
     """No inherited bindings, ambiguous selection, runtime env, or admin fallback."""
     try:
+        preview = runtime.environment_kind == "preview"
         records = {
             record.secret_id: record
             for record in store.list_secret_records(integration=DIAGNOSTIC_SECRET_INTEGRATION)
             if record.integration == DIAGNOSTIC_SECRET_INTEGRATION
-            and record.scope == "context_instance"
+            and record.scope == ("context" if preview else "context_instance")
             and record.context == runtime.context
-            and record.instance == runtime.instance
+            and record.instance == ("" if preview else runtime.instance)
+            and (not preview or record.name == diagnostic_preview_secret_name(runtime.instance))
             and record.status == "configured"
         }
         pairs = [
@@ -50,7 +120,7 @@ def read_diagnostic_identity(
             and binding.integration == DIAGNOSTIC_SECRET_INTEGRATION
             and binding.binding_key == DIAGNOSTIC_IDENTITY_KEY
             and binding.context == runtime.context
-            and binding.instance == runtime.instance
+            and binding.instance == ("" if preview else runtime.instance)
             and binding.status == "configured"
         ]
         if len(pairs) != 1:

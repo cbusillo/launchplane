@@ -36,6 +36,7 @@ from control_plane.odoo_diagnostic_identity import (
     OdooDiagnosticIdentity,
     OdooDiagnosticIdentityStore,
     read_diagnostic_identity,
+    DIAGNOSTIC_IDENTITY_UNAVAILABLE,
 )
 from control_plane.preview_serving_evidence import verify_serving_preview
 from control_plane.workflows.odoo_preview_runtime import (
@@ -297,7 +298,7 @@ def _production_runtime(selection: OdooRuntimeSelection) -> bool:
 
 def _diagnostic_unavailable() -> OdooRuntimeReadError:
     return OdooRuntimeReadError(
-        "odoo_diagnostic_identity_unavailable",
+        DIAGNOSTIC_IDENTITY_UNAVAILABLE,
         "The lane's Odoo diagnostic identity is unavailable.",
         503,
     )
@@ -310,7 +311,11 @@ def diagnostic_authentication(connection: OdooRuntimeConnection) -> dict[str, st
     if _production_runtime(connection.selection):
         password = credentials.get("ODOO_ADMIN_PASSWORD", "")
         if not database or not password:
-            raise _diagnostic_unavailable()
+            raise OdooRuntimeReadError(
+                "odoo_credentials_missing",
+                "The running Odoo container has no configured diagnostic credentials.",
+                503,
+            )
         return {
             "db": database,
             "login": credentials.get("ODOO_ADMIN_LOGIN", "") or "admin",
@@ -349,6 +354,12 @@ def require_diagnostic_user(connection: OdooRuntimeConnection, authenticated: ob
             )
         )
     ):
+        if _production_runtime(connection.selection):
+            raise OdooRuntimeReadError(
+                "odoo_authentication_failed",
+                "Odoo rejected its configured diagnostic credentials.",
+                503,
+            )
         raise _diagnostic_unavailable()
 
 

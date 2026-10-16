@@ -65,9 +65,13 @@ runtime-log reads do not require this identity. Production (`prod` stable
 runtime) retains its existing bootstrap-admin authentication until a separate
 production migration is authorized.
 
-Store exactly one configured `ODOO_DIAGNOSTIC_IDENTITY` binding in that
-integration, with both the binding and secret record scoped to the exact
-`context_instance`. Its encrypted value is a JSON object with `product`,
+For a stable testing lane, store exactly one configured
+`ODOO_DIAGNOSTIC_IDENTITY` binding in that integration, with both binding and
+secret record scoped to the exact `context_instance`. For a preview, use its
+product's configured preview context, scope `context`, empty stored instance,
+and the fixed secret name `preview-` followed by the exact runtime instance.
+Each preview has its own encrypted record: this is an exact named lookup,
+never context-secret inheritance. Its encrypted value is a JSON object with `product`,
 `context`, `instance`, `database`, `login`, `password`, and numeric `user_id`.
 The first four fields must match the selected runtime and its actual running
 database. `login` must name the separate service account; `admin`, the built-in
@@ -80,6 +84,14 @@ dry-run/apply API (`POST /v1/product-config/apply`). An activation session suppl
 the exact owned product/context/instance, a reason, and a secret entry with
 `scope="context_instance"`, `integration="odoo_diagnostics"`, an admin-chosen
 `name`, `binding_key="ODOO_DIAGNOSTIC_IDENTITY"`, and the JSON string as `value`.
+For previews, omit the top-level instance, use scope `context` and the fixed
+preview secret name above. The existing signed-in admin path supports this
+service-only write even when the preview context has no stable profile lane.
+It requires exclusive current product ownership of that preview context,
+rechecked at commit, and refuses runtime settings, other integrations, provider
+adoption and copies. Existing caller authorization still applies; this adds no
+agent or workflow rule. A denial stays with that identity; do not select another
+credential or workflow to carry it.
 Use the existing matching dry-run, apply confirmation and idempotency contract;
 keep the request body private. This is a service-purpose secret, separate from
 `runtime_environment`: do not sync it to the application, put it in host env,
@@ -101,8 +113,10 @@ legacy bootstrap passwords. Existing HTTPS/domain, container image and runtime
 identity checks remain required before authentication, with session destruction
 after model reads or an unexpected authenticated UID.
 
-Rotate or disable this binding through the same governed secret path; a missing
-or disabled identity leaves diagnostics unavailable. After a testing restore,
+Rotate through the same governed secret path, reusing the original secret name
+and binding key. A new name creates a second record rather than rotating the
+old one; ambiguous identities are unavailable. Existing disabled records are
+also unavailable. After a testing restore,
 the operational session must verify or reactivate its separate service account
 and exact database binding. Preserve restored people's passwords. For rollback,
 retain the encrypted record until its operational session no longer needs it;

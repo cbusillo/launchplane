@@ -16888,6 +16888,8 @@ def create_launchplane_fastapi_app(
         context_wide_config = not product_config_request.instance or any(
             secret.scope == "context" for secret in product_config_request.secrets
         )
+        from control_plane.odoo_diagnostic_identity import is_diagnostic_preview_config
+
         try:
             config_profile = control_plane_product_config_service.resolve_product_config_profile(
                 database_store,
@@ -16895,6 +16897,7 @@ def create_launchplane_fastapi_app(
                 context=product_config_request.context,
                 instance=product_config_request.instance,
                 context_wide=context_wide_config,
+                diagnostic_preview=is_diagnostic_preview_config(request_payload),
             )
         except control_plane_product_config.ProductConfigError as error:
             profile_error = control_plane_product_config_service.product_config_service_error(error)
