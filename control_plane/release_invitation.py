@@ -150,7 +150,7 @@ def _announced_changes(
 ) -> set[str]:
     if request is None:
         return set()
-    lines = _receipt_lines(request)
+    lines = _comment_lines(request)
     if candidate_marker in lines and not any(
         line.startswith("<!-- launchplane:release-request:") for line in lines
     ):
@@ -184,12 +184,19 @@ WHY_NOW = "**Why now:** "
 ADOPTED_ORIGINAL_PREFIX = "<!-- launchplane:release-adopted-original:"
 
 
-def _adopted_originals(comments: list[dict[str, object]]) -> set[int]:
+def _adopted_originals(
+    comments: list[dict[str, object]], *, token: str, control_plane_root: Path
+) -> set[int]:
     return {
         int(match[1])
         for comment in comments
         for line in _receipt_lines(comment)
         if (match := re.fullmatch(re.escape(ADOPTED_ORIGINAL_PREFIX) + r"([1-9][0-9]*) -->", line))
+        and github_app_authored(
+            comment,
+            resolve_delivery_github_app_id(control_plane_root=control_plane_root),
+            lookup_app=lambda slug: github_api_request(path=f"/apps/{quote(slug)}", token=token),
+        )
     }
 
 
@@ -201,13 +208,14 @@ def _replace_older_invitations(
     token: str,
     request_marker: str,
     last_decision: ReleaseReviewDecisionRecord | None,
+    control_plane_root: Path,
 ) -> None:
     current_id = current.get("id")
     if not isinstance(current_id, int) or current_id < 1:
         raise ValueError("Release invitation comment identity is unavailable.")
-    preserved = _adopted_originals(comments)
+    preserved = _adopted_originals(comments, token=token, control_plane_root=control_plane_root)
     for comment in comments:
-        lines = _receipt_lines(comment)
+        lines = _comment_lines(comment)
         if (
             comment.get("id") in preserved
             or comment.get("id") == current_id
@@ -323,7 +331,7 @@ def _open_request(
     matching = [
         comment
         for comment in comments
-        if marker in _receipt_lines(comment) and REPLACED_MARKER not in _receipt_lines(comment)
+        if marker in _comment_lines(comment) and REPLACED_MARKER not in _comment_lines(comment)
     ]
     if matching:
         # A lost post/replacement response may leave two current receipts. The
@@ -333,7 +341,7 @@ def _open_request(
     # Candidate markers alone cannot distinguish an open request from a decided one.
     legacy = []
     for comment in comments:
-        lines = _receipt_lines(comment)
+        lines = _comment_lines(comment)
         if REPLACED_MARKER in lines:
             continue
         if any(line.startswith("<!-- launchplane:release-request:") for line in lines):
@@ -394,7 +402,10 @@ def _pages(
             item
             for item in result
             if (not issues_only or "pull_request" not in item)
-            and (not marker or marker in _receipt_lines(item))
+            and (
+                not marker
+                or marker in (_comment_lines(item) if app_id is None else _receipt_lines(item))
+            )
         ]
         matching = []
         for item in marked:
@@ -504,7 +515,9 @@ def _settle_completed_invitation(
             if not isinstance(number, int) or number < 1:
                 raise ValueError("Release invitation issue number is unavailable.")
             comments = _pages(f"{path}/{number}/comments", token)
-            preserved = _adopted_originals(comments)
+            preserved = _adopted_originals(
+                comments, token=token, control_plane_root=control_plane_root
+            )
             comments = [comment for comment in comments if comment.get("id") not in preserved]
             marker = release_invitation_marker(profile.product, production)
             completion = (
@@ -518,7 +531,7 @@ def _settle_completed_invitation(
                 # A changed decision or release retry can use the same checklist
                 # without another invitation. Settle only its newest open receipt.
                 for comment in reversed(comments):
-                    lines = _receipt_lines(comment)
+                    lines = _comment_lines(comment)
                     if marker not in lines or REPLACED_MARKER in lines:
                         continue
                     if any(line.startswith(COMPLETED_PREFIX) for line in lines):
@@ -531,7 +544,7 @@ def _settle_completed_invitation(
             matched = False
             pending = False
             for comment in comments:
-                lines = _receipt_lines(comment)
+                lines = _comment_lines(comment)
                 if REPLACED_MARKER in lines:
                     continue
                 if completion in lines:
@@ -776,8 +789,8 @@ def publish_release_invitation(
             comments = [
                 comment
                 for comment in _pages(comments_path, token)
-                if REPLACED_MARKER not in _receipt_lines(comment)
-                and not any(line.startswith(COMPLETED_PREFIX) for line in _receipt_lines(comment))
+                if REPLACED_MARKER not in _comment_lines(comment)
+                and not any(line.startswith(COMPLETED_PREFIX) for line in _comment_lines(comment))
             ]
             request = _open_request(comments, request_marker, last_decision)
             # Engineering-only changes never open a release review on their own;
@@ -785,7 +798,7 @@ def publish_release_invitation(
             if request is None and not client_changes and not urgent_reason:
                 return False
             reminder_marker = request_marker.replace("release-request:", "release-reminder:")
-            reminded = any(reminder_marker in _receipt_lines(comment) for comment in comments)
+            reminded = any(reminder_marker in _comment_lines(comment) for comment in comments)
             # Recompile after destination lookup: a concurrent acceptance or testing
             # deploy must not receive an invitation for the obsolete snapshot.
             if store.read_product_profile_record(profile.product) != profile:
@@ -835,7 +848,7 @@ def publish_release_invitation(
                 and any(line.startswith("Updated at: ") for line in _comment_lines(request))
                 and any(line.startswith("**Release review**") for line in _comment_lines(request))
             )
-            if request and marker in _receipt_lines(request) and formatted and not added:
+            if request and marker in _comment_lines(request) and formatted and not added:
                 _replace_older_invitations(
                     comments=comments,
                     current=request,
@@ -843,6 +856,7 @@ def publish_release_invitation(
                     token=token,
                     request_marker=request_marker,
                     last_decision=last_decision,
+                    control_plane_root=control_plane_root,
                 )
                 # An explicit urgent-open retry only confirms the existing request;
                 # routine workers retain the scheduled reminder behavior.
@@ -868,6 +882,7 @@ def publish_release_invitation(
                     token=token,
                     request_marker=request_marker,
                     last_decision=last_decision,
+                    control_plane_root=control_plane_root,
                 )
                 _remember_delivery(backoff, receipt, due, True)
                 return True
@@ -888,15 +903,18 @@ def publish_release_invitation(
             )
             if reminded:
                 receipts += f"\n{reminder_marker}"
-            if request:
+            if request and _adopted_originals(
+                [request], token=token, control_plane_root=control_plane_root
+            ):
                 # Keep the adoption identity and original-comment custody through
                 # every ordinary rewrite, including later reminders/completion.
                 receipts += "\n" + "\n".join(
                     line
-                    for line in _receipt_lines(request)
+                    for line in _comment_lines(request)
                     if line.startswith(
                         (
                             ADOPTED_ORIGINAL_PREFIX,
+                            "<!-- launchplane:release-requests:",
                             "<!-- launchplane:release-adoption:",
                             "Adoption reason: ",
                         )
@@ -949,6 +967,7 @@ def publish_release_invitation(
                 token=token,
                 request_marker=request_marker,
                 last_decision=last_decision,
+                control_plane_root=control_plane_root,
             )
             if notify:
                 due = _timestamp(result.get("created_at")) + timedelta(days=3)
@@ -1038,7 +1057,7 @@ def adopt_release_invitation(
                 return False
             existing = _pages(comments_path, token, app_id=app_id, marker=adoption_marker)
             if existing:
-                return len(existing) == 1
+                return True
             latest = current_release_review(
                 control_plane_root=control_plane_root, record_store=store, profile=profile
             )

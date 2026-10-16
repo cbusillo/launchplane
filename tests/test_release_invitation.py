@@ -55,6 +55,8 @@ from control_plane.release_invitation import (
     release_request_issue_marker,
     adopt_release_invitation,
     advance_release_invitations,
+    _pages,
+    ADOPTED_ORIGINAL_PREFIX,
 )
 from control_plane.release_review import ReleaseReviewStore, build_release_review
 from control_plane.release_invitation_changes import (
@@ -113,9 +115,43 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(len(self.posts), 1)
         self.assertEqual(self.comments[0], original)
         self.assertIn(json.dumps(kwargs["reason"]), self.comments[1]["body"])
+        self.assertEqual(
+            [
+                item["number"]
+                for item in _pages(
+                    "/repos/example/site/issues?state=all",
+                    "delivery-token",
+                    app_id=77,
+                    marker=release_request_issue_marker(self.profile.product),
+                    issues_only=True,
+                )
+            ],
+            [91],
+        )
+        self.now += timedelta(days=4)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), 2)
+        self.assertTrue(adopt_release_invitation(**kwargs, dry_run=False))
+        self.assertEqual(len(self.posts), 2)
         self.complete_release()
         self.assertFalse(self.publish())
         self.assertEqual(self.comments[0], original)
+
+    def test_foreign_adoption_marker_cannot_prevent_completion(self) -> None:
+        self.publish()
+        request_id = self.comments[0]["id"]
+        self.comments.append(
+            {
+                "id": 600,
+                "created_at": self.now.isoformat(),
+                "body": ADOPTED_ORIGINAL_PREFIX + str(request_id) + " -->",
+                "performed_via_github_app": {"id": 88},
+            }
+        )
+        accepted, _ = self.complete_release()
+        self.assertFalse(self.publish())
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertIn(accepted.release_issue_url, self.comments[0]["body"])
 
     def test_manual_adoption_refuses_other_candidate_and_changed_checklist(self) -> None:
         self.issues.append(
@@ -1456,7 +1492,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             {
                 "id": 1,
                 "created_at": self.now.isoformat(),
-                "body": "Existing manual request\n"
+                "body": "Existing manual request\n```\n"
                 + release_invitation_marker(self.profile.product, self.review.checklist.candidate),
             }
         ]
