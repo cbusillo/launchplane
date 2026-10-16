@@ -20,7 +20,10 @@ test("lane evidence stays readable within its column", { tag: "@responsive" }, a
     await page.getByRole("button", { name: "Refresh current evidence" }).click();
     const badges = row.locator(".directory-lane .evidence-badge");
     await expect(badges).toHaveCount(product.environments.length);
-    for (const badge of await badges.all()) await expect(badge).toHaveAttribute("data-state", state);
+    for (const badge of await badges.all()) {
+      await expect(badge).toHaveAttribute("data-state", state);
+      await expect(badge.locator("strong")).toBeVisible();
+    }
     // Check the rendered text, not just the clipped badge's own box. The
     // entire label must fit its lane, without ellipsis or hidden overflow.
     expect(await row.locator(".directory-lane").evaluateAll(lanes => lanes.every(lane => {
