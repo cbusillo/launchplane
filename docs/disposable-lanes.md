@@ -550,6 +550,61 @@ generation, key and copy custody; do not edit its digest or invent a safe-releas
 attestation. A forward fix for new journals does not establish recovery of an
 already stranded legacy operation.
 
+### Retire an incomplete legacy generation into custody
+
+When the original full authority preimage is unavailable, a Director agent can
+use `POST /v1/products/{product}/testing-generation-retirement`. This retires the
+active generation pointer, **not the operation fence**. It is not an in-place
+network repair or permission to retry an old copy. The exact incomplete,
+previously queued generation must agree with the held service operation's
+legacy journal, current owned testing target and original resource allocation.
+Completed copies, new-format journals, staff holds, pending routes, target
+aliases and unavailable current service authority refuse retirement.
+
+Use the bounded repository client with the installed authenticated transport:
+
+```bash
+uv run python scripts/retire-testing-generation.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product example-odoo --context example \
+  --operation-id stranded-testing-operation \
+  --reason 'Retain the incomplete original for an isolated successor' \
+  --evidence-file /private/operator-evidence/testing-retirement.json
+```
+
+Review the receipt, then repeat with `apply`, `--reviewed-dry-run` and a stable
+`--idempotency-key`, keeping the same request and evidence file. The service
+rechecks operation, generation, allocation, source-capture receipt and current
+profile, target, override and configuration metadata under executor, lane and
+configuration locks. PostgreSQL commits the immutable retained generation and
+idempotency receipt atomically. A lost reply uses the original request, review
+and key; the client never retries automatically. `readback` reads retained
+custody without a review file. It reports unverified original authority and
+unknown historical effects; it never returns a safe-release assertion.
+
+Retirement sends no provider command and never cancels, changes a journal digest,
+recaptures, restores, edits credentials, starts web or queues reconciliation.
+The archive preserves the entire generation, held operation snapshot, target
+snapshot and original capture receipt if present. Capture records, private cache
+bytes, targets, storage and hostname remain untouched. The old hostname stays
+reserved, and the retired generation cannot be reactivated. Automatic recovery
+cannot cancel or retry that held operation.
+
+The existing replacement-resources and bootstrap clients can subsequently name
+the **still-held operation** as the retained operation. They must qualify a
+distinct target and namespace, use an independent hostname, preserve the old
+target/storage, and pass their normal current isolation and sanitization gates.
+Only that supported successor supersession releases the old lane fence. Its
+new generation never adopts the old capture receipt. A decision about preserved
+user logins or separate automation credentials remains effective for the new
+restore and startup; retirement does not resolve it or run either path.
+
+The additive retirement table is retained on schema downgrade and re-upgrade.
+Keep a compatible service image for retirement readback and hostname protection;
+forward-fix a failed transition using its original receipt rather than deleting
+custody or restoring old database state. Retained generations and copy artifacts
+require a separately authorized later disposal; this procedure cleans up none.
+
 For a containerized production source without host SSH restore coordinates, add
 `--source-mode container-export` to the same client's dry-run/apply/readback
 request. The service derives its single same-product production source from

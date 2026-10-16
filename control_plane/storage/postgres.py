@@ -108,6 +108,10 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 
 if TYPE_CHECKING:
     from control_plane.stored_record_snapshot import SnapshotAuthorization
+    from control_plane.testing_generation_retirement import (
+        RetainedTestingGeneration,
+        TestingGenerationRetirementRequest,
+    )
     from control_plane.legacy_preview_reconciliation import LegacyPreviewReconciliationRequest
     from control_plane.product_retirement import BoundProductRetirement
     from control_plane.contracts.merge_train_historical_completion import (
@@ -3733,6 +3737,13 @@ class LaunchplaneFreshOdooTestingGenerationRow(Base):
     __tablename__ = "launchplane_fresh_odoo_testing_generations"
     product: Mapped[str] = mapped_column(String, primary_key=True)
     context: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRetainedTestingGenerationRow(Base):
+    __tablename__ = "launchplane_retained_testing_generations"
+    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    generation_binding_sha256: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -10459,6 +10470,103 @@ class PostgresRecordStore(HumanSessionStore):
             row = session.get(LaunchplaneFreshOdooTestingGenerationRow, (product, context))
             return FreshOdooTestingGeneration.model_validate(row.payload) if row else None
 
+    def read_retained_testing_generation(
+        self, operation_id: str
+    ) -> RetainedTestingGeneration | None:
+        from control_plane.testing_generation_retirement import RetainedTestingGeneration
+
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneRetainedTestingGenerationRow, operation_id)
+            return RetainedTestingGeneration.model_validate(row.payload) if row else None
+
+    def retire_testing_generation(
+        self,
+        *,
+        product: str,
+        request: TestingGenerationRetirementRequest,
+        mutation: DbOnlyMutationRequest,
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Archive and receipt atomically, with the original held operation untouched."""
+        from control_plane.testing_generation_retirement import retirement_snapshot
+
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session,
+                mutation=mutation,
+            )
+            if status != "acquired":
+                return status, reservation
+            assert reservation_row is not None
+            with self.testing_replacement_execution_lock(request.operation_id) as check:
+                if check is None:
+                    raise ValueError("The original testing executor cannot be excluded.")
+                if self.database_dialect_name == "postgresql":
+                    self._lock_odoo_stable_lane(
+                        session, product=product, context=request.context, instance="testing"
+                    )
+                self._lock_product_authority_bundle_write(session)
+                operation_row = session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow,
+                    request.operation_id,
+                    with_for_update=True,
+                )
+                generation_row = session.get(
+                    LaunchplaneFreshOdooTestingGenerationRow,
+                    (product, request.context),
+                    with_for_update=True,
+                )
+                if operation_row is None or generation_row is None:
+                    raise ValueError("The original testing custody changed.")
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    snapshot = retirement_snapshot(self, product, request)
+                finally:
+                    self._disposable_authority_context.session = outer
+                if (
+                    snapshot.plan.plan_sha256 != request.reviewed_plan_sha256
+                    or snapshot.operation
+                    != OdooStableTargetReplacementOperationRecord.model_validate(
+                        operation_row.payload
+                    )
+                    or snapshot.generation
+                    != FreshOdooTestingGeneration.model_validate(generation_row.payload)
+                ):
+                    raise ValueError("The reviewed testing retirement changed.")
+                if (
+                    session.get(LaunchplaneRetainedTestingGenerationRow, request.operation_id)
+                    is not None
+                ):
+                    raise ValueError("Retirement custody is immutable; use the original key.")
+                retained = snapshot.model_copy(
+                    update={
+                        "retired_at": self._database_mutation_timestamp(session),
+                        "retired_by": mutation.scope,
+                        "plan": snapshot.plan.model_copy(update={"applied": True}),
+                    }
+                )
+                session.add(
+                    LaunchplaneRetainedTestingGenerationRow(
+                        operation_id=request.operation_id,
+                        generation_binding_sha256=retained.plan.generation_binding_sha256,
+                        payload=self._payload_dict(retained),
+                    )
+                )
+                session.delete(generation_row)
+                self._after_product_authority_bundle_step("retain_testing_generation")
+                completion = complete_launchplane_mutation_reservation(
+                    reservation,
+                    response_status_code=mutation.response_status_code,
+                    response_trace_id=mutation.response_trace_id,
+                    completed_at=self._database_mutation_timestamp(session),
+                    response_payload=mutation.response_payload,
+                )
+                self._sync_idempotency_row(reservation_row, completion)
+                check()
+                session.commit()
+                return "written", completion
+
     def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
         with self._session_factory() as session:
             row = session.get(LaunchplaneNativeTestingCopyCaptureRow, binding)
@@ -11077,9 +11185,21 @@ class PostgresRecordStore(HumanSessionStore):
             session.commit()
 
     def write_fresh_odoo_testing_generation(self, record: FreshOdooTestingGeneration) -> None:
+        from control_plane.odoo_testing_restore import generation_binding
+
         with self._session_factory() as session:
             self._begin_serialized_write(session)
             self._lock_product_authority_bundle_write(session)
+            if (
+                session.scalar(
+                    select(LaunchplaneRetainedTestingGenerationRow.operation_id).where(
+                        LaunchplaneRetainedTestingGenerationRow.generation_binding_sha256
+                        == generation_binding(record)
+                    )
+                )
+                is not None
+            ):
+                raise ValueError("A retired generation cannot be reactivated.")
             row = session.get(
                 LaunchplaneFreshOdooTestingGenerationRow,
                 (record.product, record.context),
@@ -11157,6 +11277,11 @@ class PostgresRecordStore(HumanSessionStore):
 
     def _retained_disposable_hostnames(self, session: Session) -> frozenset[str]:
         hosts: set[str] = set()
+        from control_plane.testing_generation_retirement import RetainedTestingGeneration
+
+        for payload in session.scalars(select(LaunchplaneRetainedTestingGenerationRow.payload)):
+            retained_generation = RetainedTestingGeneration.model_validate(payload)
+            hosts.add(retained_generation.generation.domain_host)
         for payload in session.scalars(
             select(LaunchplaneDisposableTestingResourceAllocationRow.payload)
         ):

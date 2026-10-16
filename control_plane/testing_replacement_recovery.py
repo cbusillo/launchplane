@@ -567,6 +567,14 @@ def recover_stranded_testing_replacements(
                     requested_at=_now(),
                 )
                 continue
+            retained_generation = getattr(store, "read_retained_testing_generation", None)
+            if (
+                callable(retained_generation)
+                and retained_generation(operation.operation_id) is not None
+            ):
+                # Retirement preserves unknown history. Only a distinct isolated
+                # successor above may supersede it; never cancel or retry it.
+                continue
             with store.testing_replacement_execution_lock(operation.operation_id) as check_lock:
                 if check_lock is None:
                     continue
