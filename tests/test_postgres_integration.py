@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
@@ -12337,11 +12338,34 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             )
         previous_engine.dispose()
         cleaned: list[str] = []
+        import io
+        import sys
+        from contextlib import redirect_stdout
+
+        filestore = Path(self.enterContext(TemporaryDirectory())).resolve()
+        (filestore / previous).mkdir()
+        concrete_path = type(filestore)
+
+        def child_path(value: str) -> Path:
+            return filestore if value == "/volumes/data/filestore" else concrete_path(value)
+
+        filestore_failure = False
+        refuse_connected = False
 
         def docker(*arguments: str, stdin: bytes | None = None) -> bytes:
             if stdin is None:
-                cleaned.append(arguments[-1])
-                return b""
+                if filestore_failure:
+                    raise OSError("fixture filestore removal failure")
+                output = io.StringIO()
+                with (
+                    patch("pathlib.Path", side_effect=child_path),
+                    patch.object(sys, "argv", ["child", arguments[-1]]),
+                    redirect_stdout(output),
+                ):
+                    exec(arguments[-2], {})
+                if not (filestore / previous).exists():
+                    cleaned.append(arguments[-1])
+                return output.getvalue().encode()
             command = shlex.split(arguments[arguments.index("-c") + 1])
             database = command[command.index("-d") + 1]
             database = arguments[-1] if database == "$1" else database
@@ -12355,7 +12379,8 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                         .replace(':"database_name"', sql.Identifier(arguments[-1]).as_string(raw))
                         .replace(":'database_name'", sql.Literal(arguments[-1]).as_string(raw))
                     )
-                    connection.exec_driver_sql("SET statement_timeout = '250ms'")
+                    if refuse_connected:
+                        connection.exec_driver_sql("SET statement_timeout = '250ms'")
                     result = connection.exec_driver_sql(program)
                     value = result.scalar_one_or_none() if result.returns_rows else None
                     return ("" if value is None else str(value)).encode()
@@ -12368,7 +12393,14 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
             for node in tree.body
             if isinstance(node, ast.FunctionDef) and node.name == "discard_previous_drill"
         )
-        namespace: dict[str, Any] = {"re": re, "docker": docker}
+        receipt_root = Path(self.enterContext(TemporaryDirectory())).resolve()
+        namespace: dict[str, Any] = {
+            "re": re,
+            "docker": docker,
+            "Path": Path,
+            "json": json,
+            "os": os,
+        }
         exec(
             compile(ast.Module(body=[function], type_ignores=[]), "<drill-disposal>", "exec"),
             namespace,
@@ -12376,18 +12408,34 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
         discard = namespace["discard_previous_drill"]
         generation = {"discard_drill_database": previous, "discard_copy_binding": witness}
         with self.assertRaises(RuntimeError):
-            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
         with previous_engine.connect() as connection:
             connection.execute(
                 text("UPDATE ir_config_parameter SET value = :witness"), {"witness": witness}
             )
         previous_engine.dispose()
         with previous_engine.connect():
+            refuse_connected = True
             with self.assertRaises(Exception):
-                discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+                discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
+        refuse_connected = False
         previous_engine.dispose()
         self.assertFalse(cleaned)
-        discard(generation, "database", "runner", "lp_drill_" + uuid4().hex)
+        filestore_failure = True
+        with self.assertRaises(OSError):
+            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
+        filestore_failure = False
+        discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, receipt_root)
+        self.assertEqual(cleaned, [previous])
+        # A legacy partial drop has no host receipt. Preserve its remaining
+        # filestore as visible attention, without blocking current resources.
+        (filestore / previous).mkdir()
+        legacy_state = Path(self.enterContext(TemporaryDirectory())).resolve()
+        self.assertEqual(
+            discard(generation, "database", "runner", "lp_drill_" + uuid4().hex, legacy_state),
+            "retained",
+        )
+        self.assertTrue((filestore / previous).is_dir())
         self.assertEqual(cleaned, [previous])
         with root_engine.connect() as connection:
             self.assertFalse(
@@ -12396,6 +12444,111 @@ class RealPostgresOdooTestingDrillTests(unittest.TestCase):
                     {"name": previous},
                 ).scalar_one()
             )
+
+    def test_storage_cleanup_excludes_first_authority_insert_and_other_drill_admission(
+        self,
+    ) -> None:
+        from control_plane.odoo_testing_storage import prepare_drill_storage
+        from control_plane.odoo_testing_drill import lane_key
+        from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+
+        scenario = self.scenario
+        scenario.scheduler.run_once()
+        operation = scenario.store.claim_next_odoo_stable_target_replacement_operation_record(
+            lease_owner="storage-worker",
+            claimed_at=datetime.fromtimestamp(scenario.now, timezone.utc).isoformat(),
+            lease_expires_at=datetime.fromtimestamp(scenario.now + 300, timezone.utc).isoformat(),
+        )
+        assert operation is not None
+        second = PostgresRecordStore(database_url=scenario.store.database_url)
+        self.addCleanup(second.close)
+        entered = threading.Event()
+        release = threading.Event()
+        waiting_remotely = threading.Event()
+        finish_remote = threading.Event()
+
+        def execute(*arguments: Any) -> dict[str, object]:
+            def send() -> None:
+                entered.set()
+                if not release.wait(10):
+                    raise TimeoutError("fixture cleanup dispatch")
+
+            arguments[3](send)
+            waiting_remotely.set()
+            if not finish_remote.wait(10):
+                raise TimeoutError("fixture remote completion")
+            return {"capacity": True, "disposals": []}
+
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            maintenance = pool.submit(
+                prepare_drill_storage,
+                scenario.store,
+                operation,
+                Path("."),
+                execute=execute,
+                now=scenario.now,
+                checkpoint=lambda: None,
+            )
+            self.assertTrue(entered.wait(5))
+            writer = pool.submit(
+                second.write_runtime_environment_record,
+                RuntimeEnvironmentRecord(
+                    scope="global",
+                    env={"EXAMPLE_INSERT": "changed"},
+                    updated_at=scenario.profile.updated_at,
+                ),
+            )
+            admission = pool.submit(
+                second.enqueue_odoo_testing_drill,
+                scenario.profile.product,
+                scenario.context,
+                lane_key(scenario.profile.product, scenario.context) + ":competing",
+                scenario.now,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                waiting = 0
+                while time.monotonic() < deadline:
+                    with scenario.store._engine.connect() as observer:
+                        waiting = int(
+                            observer.scalar(
+                                text(
+                                    "SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock'"
+                                )
+                            )
+                            or 0
+                        )
+                    if waiting >= 2:
+                        break
+                    time.sleep(0.01)
+                self.assertGreaterEqual(waiting, 2)
+                self.assertFalse(writer.done())
+                self.assertFalse(admission.done())
+            finally:
+                release.set()
+            self.assertTrue(waiting_remotely.wait(5))
+            try:
+                writer.result(timeout=5)
+                admission.result(timeout=5)
+                second.write_runtime_environment_record(
+                    scenario.runtime.model_copy(
+                        update={
+                            "env": {**scenario.runtime.env, "EXAMPLE_INSTANCE_SETTING": "changed"}
+                        }
+                    )
+                )
+            finally:
+                finish_remote.set()
+            from control_plane.odoo_testing_drill import DrillPrerequisite
+
+            with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_authority_changed"):
+                maintenance.result(timeout=10)
+        # The competing authority insert invalidates the completed capacity
+        # snapshot, so its old result cannot activate the worker's new database.
+        from control_plane.odoo_testing_drill import DrillPrerequisite
+
+        with self.assertRaisesRegex(DrillPrerequisite, "testing_storage_capacity_unverified"):
+            scenario.store.activate_odoo_testing_drill(operation, scenario.now)
 
     def test_scheduler_receipt_merge_keeps_worker_admission_under_real_row_lock(self) -> None:
         from control_plane.odoo_testing_drill import (
@@ -12864,3 +13017,8 @@ class RealPostgresNeverServedTests(unittest.TestCase):
             self.assertEqual(fixture.read().usage, "unknown")
             # The reverse order must refuse the stale negative, too.
             self.assertFalse(fixture.store.publish_collected_disposable_lane_safety(evidence))
+
+
+class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTransportTests):
+    def make_store(self) -> PostgresRecordStore:
+        return self.enterContext(_store_for_fresh_head_database())

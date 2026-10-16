@@ -52,14 +52,15 @@ class OdooInstanceOverrideConflictError(ValueError):
 
 
 def odoo_instance_override_records_match(
-    current: OdooInstanceOverrideRecord | None, expected: OdooInstanceOverrideRecord | None
+    current: OdooInstanceOverrideRecord | None,
+    expected: OdooInstanceOverrideRecord | None,
 ) -> bool:
-    """Compare the full snapshot without treating bool and numeric literals as equal."""
+    """Preserve JSON scalar types when checking a reviewed override snapshot."""
     if current is None or expected is None:
         return current is expected
-    return json.dumps(current.model_dump(mode="json"), sort_keys=True) == json.dumps(
-        expected.model_dump(mode="json"), sort_keys=True
-    )
+    return json.dumps(
+        current.model_dump(mode="json", exclude_none=True), sort_keys=True
+    ) == json.dumps(expected.model_dump(mode="json", exclude_none=True), sort_keys=True)
 
 
 class OdooInstanceOverrideWrite(BaseModel):
