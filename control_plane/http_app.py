@@ -17481,7 +17481,7 @@ def create_launchplane_fastapi_app(
                 ),
                 (),
             )
-        integration_key_markers: tuple[str, ...] = ()
+        integration_key_markers: tuple[str, ...] | None = None
         if any(
             secret.integration == "runtime_environment"
             for secret in environment_request.managed_secrets
@@ -17490,13 +17490,10 @@ def create_launchplane_fastapi_app(
                 integration_key_markers = latest_active_runtime_key_safety_policy(
                     database_store
                 ).integration_key_markers
-            except ValueError as error:
-                raise _launchplane_http_error(
-                    status_code=503,
-                    trace_id=trace_id,
-                    code="runtime_key_safety_unavailable",
-                    message="Launchplane runtime key-safety policy is unavailable.",
-                ) from error
+            except ValueError:
+                # Assert no class without a policy. The normal write gate below
+                # refuses its absence after validating/resolving the input.
+                pass
         try:
             product_config_request = product_environment_config_apply_request(
                 profile=profile,

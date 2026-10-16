@@ -491,7 +491,7 @@ def product_environment_config_apply_request(
     request: ProductEnvironmentConfigApplyEnvelope,
     owner_submission_resolver: Callable[[ProductSecretConfigRequirement, str], str] | None = None,
     current_retired_provider_keys: tuple[str, ...] = (),
-    integration_key_markers: tuple[str, ...] = (),
+    integration_key_markers: tuple[str, ...] | None = None,
 ) -> ProductConfigApplyEnvelope:
     runtime_requirements = {
         requirement.key
@@ -589,7 +589,7 @@ def _product_config_secret_input(
     requirement: ProductSecretConfigRequirement,
     lane: ProductLaneProfile,
     value: str,
-    integration_key_markers: tuple[str, ...],
+    integration_key_markers: tuple[str, ...] | None,
 ) -> ProductConfigSecretInput:
     # This surface accepts a freshly supplied value for this lane, never a copy
     # from another lane. Testing stores its own credentials under the same names
@@ -598,6 +598,7 @@ def _product_config_secret_input(
     if (
         requirement.integration == "runtime_environment"
         and runtime_key_safety_environment_class(lane.instance) == "testing"
+        and integration_key_markers is not None
         and not is_integration_runtime_key(
             requirement.binding_key, extra_markers=integration_key_markers
         )

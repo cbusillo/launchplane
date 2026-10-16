@@ -299,6 +299,40 @@ class TestingSecretEntryTests(unittest.IsolatedAsyncioTestCase):
                                 },
                             )
 
+                store.write_runtime_key_safety_policy_record(
+                    policy.model_copy(update={"status": "superseded"})
+                )
+                missing_policy = await _asgi_get(
+                    app,
+                    "/v1/products/example-site/environments/testing/config-status",
+                    headers=browser_headers(),
+                )
+                self.assertFalse(
+                    missing_policy.json()["config_status"]["write_availability"]["managed_secrets"][
+                        "plan"
+                    ]["enabled"]
+                )
+                refused = await _post_product_environment_config_apply(
+                    app,
+                    {
+                        "mode": "dry-run",
+                        "reason": "Verify missing policy refusal",
+                        "managed_secrets": [
+                            {
+                                "integration": "runtime_environment",
+                                "binding_key": "DISCORD_TOKEN",
+                                "value": "fake-without-policy",
+                            }
+                        ],
+                    },
+                    environment="testing",
+                    authorization="",
+                    headers=browser_headers(),
+                    idempotency_key="missing-policy-plan",
+                )
+                self.assertEqual(refused.status_code, 503, refused.json())
+                self.assertEqual(refused.json()["error"]["code"], "runtime_key_safety_unavailable")
+
 
 class IsolatedBindingClassificationTests(unittest.TestCase):
     def test_explicit_test_binding_is_independent_of_production_key_name_rule(self) -> None:
