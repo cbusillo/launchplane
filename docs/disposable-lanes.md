@@ -916,13 +916,16 @@ in custody until separately authorized disposition.
 
 ## Never-served testing generations
 
-Before consulting records, the service must observe no serving Odoo process and
-read a complete empty provider deployment history for that exact target. Process
+Before consulting records, the service must observe no serving Odoo process, or
+two unchanged complete inventories with no containers for the exact project, and
+read a complete empty provider deployment history for that exact target. The
+empty-inventory path supports fresh bootstrap resources before the first container
+exists; unreadable or changing inventories never qualify. Process
 inventory is read before the serving configuration, so a closed startup gate can
 be inspected without creating a configuration. A running process with an unreadable
 configuration/session/login store, an incomplete history, or any provider deployment
 cannot be overridden by this rule. These are collection-time checks, not a reservation
-against an operator starting a lane afterward; collect immediately before apply.
+against someone starting a lane afterward; collect immediately before apply.
 
 The service collector can qualify non-use without reading a serving configuration
 only for a generation with a complete lifetime witness, created by the supported

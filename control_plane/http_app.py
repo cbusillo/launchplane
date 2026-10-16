@@ -23945,7 +23945,8 @@ def create_launchplane_fastapi_app(
                     and target is not None
                     and target_id is not None
                     and odoo_usage.usage == "unknown"
-                    and odoo_usage.reason_code == "serving_process_absent"
+                    and odoo_usage.reason_code
+                    in {"serving_process_absent", "serving_container_absent"}
                     and odoo_usage.never_served_candidate
                 ):
                     never_served = read_never_served_testing_usage(

@@ -295,7 +295,7 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "control_plane.http_app.read_odoo_testing_usage",
             return_value=OdooTestingUsage(
-                reason_code="serving_process_absent", never_served_candidate=True
+                reason_code="serving_container_absent", never_served_candidate=True
             ),
         ):
             for revoked in (False, True):

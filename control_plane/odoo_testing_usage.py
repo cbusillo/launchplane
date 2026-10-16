@@ -31,6 +31,7 @@ ODOO_USAGE_PROBE_REASON_CODES = frozenset(
         "service_unavailable",
         "serving_configuration_mismatch",
         "serving_process_absent",
+        "serving_container_absent",
         "session_alias_unsupported",
         "session_file_unavailable",
         "session_file_unreadable",
@@ -254,8 +255,10 @@ def docker(*args,stdin=None):
 
 def containers():
     ids=docker('ps','-aq','--filter','label=com.docker.compose.project='+spec['project']).decode().split()
-    if not ids or len(ids)>16:
+    if len(ids)>16:
         raise UsageUnavailable('container_inventory_unavailable')
+    if not ids:
+        return {}
     values=json.loads(docker('inspect',*ids))
     if not isinstance(values,list) or len(values)!=len(ids):
         raise UsageUnavailable('container_inventory_unavailable')
@@ -292,7 +295,10 @@ def containers():
 try:
     before=containers()
     checkpoint='container_probe_unavailable'
-    output=docker('exec','-i',before['web']['Id'],'python3','-',stdin=spec['container_program'].encode())
+    if before:
+        output=docker('exec','-i',before['web']['Id'],'python3','-',stdin=spec['container_program'].encode())
+    else:
+        output=json.dumps({'type':'complete','unavailable':True,'reason_code':'serving_container_absent'})
     checkpoint='container_inventory_unavailable'
     after=containers()
     # Compare full Docker snapshots: identities, start times, env, command,
@@ -371,7 +377,7 @@ def read_odoo_testing_usage(
                 and isinstance(reason, str)
                 and reason in ODOO_USAGE_PROBE_REASON_CODES
             ):
-                if reason == "serving_process_absent":
+                if reason in {"serving_process_absent", "serving_container_absent"}:
                     checkpoint = "provider_history_unavailable"
                     if api.list_deployments_for_target(
                         host=host,

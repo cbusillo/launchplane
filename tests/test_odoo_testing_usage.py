@@ -402,6 +402,16 @@ class UsageReaderTests(unittest.TestCase):
         self.assertFalse(result.never_served_candidate)
         self.assertEqual(result.reason_code, "provider_history_unavailable")
 
+    def test_complete_empty_container_inventory_is_only_a_candidate_with_empty_provider_history(
+        self,
+    ) -> None:
+        self.remote.side_effect = lambda **kw: kw["receive"](
+            {"type": "complete", "unavailable": True, "reason_code": "serving_container_absent"}
+        )
+        self.assertTrue(self.read().never_served_candidate)
+        self.history.return_value = [{"deploymentId": "served-once"}]
+        self.assertFalse(self.read().never_served_candidate)
+
     def test_configuration_provider_and_transport_failures_report_the_failed_checkpoint(
         self,
     ) -> None:
@@ -470,6 +480,8 @@ class HostProbeTests(unittest.TestCase):
         wrong_context: bool = False,
         custom_command: bool = False,
         stopped: bool = False,
+        empty: bool = False,
+        inventory_fails: bool = False,
         probe_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         def container(service: str) -> dict[str, Any]:
@@ -511,7 +523,16 @@ class HostProbeTests(unittest.TestCase):
         def run(command: list[str], **kwargs: Any) -> Any:
             calls.append(command)
             if command[1] == "ps":
-                output = b"web database web2" if duplicate else b"web database"
+                if inventory_fails:
+                    raise OSError("fixture unreadable inventory")
+                first = sum(c[1] == "ps" for c in calls) == 1
+                output = (
+                    b""
+                    if empty and (first or not changed)
+                    else b"web database web2"
+                    if duplicate
+                    else b"web database"
+                )
             elif command[1] == "inspect":
                 values = [web, database, {**web, "Id": "web2"}] if duplicate else [web, database]
                 if changed and len(calls) > 3:
@@ -549,6 +570,18 @@ class HostProbeTests(unittest.TestCase):
         result = json.loads(output.getvalue().removeprefix("frame:"))
         assert isinstance(result, dict)
         return result
+
+    def test_complete_empty_bootstrap_inventory_is_distinct_from_unavailable_or_changed(
+        self,
+    ) -> None:
+        result = self.run_probe(empty=True)
+        self.assertEqual(result["reason_code"], "serving_container_absent")
+        self.assertIs(result["unavailable"], True)
+        self.assertEqual(
+            self.run_probe(empty=True, inventory_fails=True)["reason_code"],
+            "container_inventory_unavailable",
+        )
+        self.assertEqual(self.run_probe(empty=True, changed=True)["reason_code"], "runtime_changed")
 
     def test_fixed_host_read_collects_without_provider_mutations(self) -> None:
         self.assertFalse(self.run_probe()["authenticated_sessions"])
