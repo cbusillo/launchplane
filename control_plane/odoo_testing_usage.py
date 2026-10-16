@@ -14,47 +14,52 @@ from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceA
 
 
 # Public diagnostics are a closed vocabulary, never exception text or topology.
-ODOO_USAGE_REASON_CODES = frozenset(
-    {
-        "complete",
-        "not_collected",
-        "diagnostics_unavailable",
-        "unsupported_lane",
-        "target_unavailable",
-        "staff_testing_hold",
-        "target_alias",
-        "provider_config_unavailable",
-        "provider_target_unavailable",
-        "provider_target_changed",
-        "provider_transport_unavailable",
-        "probe_result_invalid",
-        "container_inventory_unavailable",
+ODOO_USAGE_PROBE_REASON_CODES = frozenset(
+    [
         "container_identity_changed",
+        "container_inventory_unavailable",
+        "container_probe_unavailable",
+        "database_cleanup_unavailable",
+        "database_connection_unavailable",
+        "database_driver_unavailable",
+        "database_network_unavailable",
+        "login_history_unavailable",
+        "probe_result_invalid",
+        "process_inventory_unavailable",
+        "runtime_changed",
         "service_ambiguous_or_stopped",
         "service_unavailable",
-        "testing_identity_mismatch",
-        "web_command_unsupported",
-        "database_network_unavailable",
-        "container_probe_unavailable",
-        "runtime_changed",
-        "database_driver_unavailable",
-        "testing_environment_unavailable",
-        "web_configuration_unavailable",
-        "web_database_mismatch",
-        "session_location_unavailable",
-        "process_inventory_unavailable",
-        "serving_process_absent",
         "serving_configuration_mismatch",
-        "session_store_unavailable",
-        "session_inventory_exceeds_bound",
+        "serving_process_absent",
         "session_alias_unsupported",
-        "session_layout_unsupported",
         "session_file_unavailable",
         "session_file_unreadable",
-        "database_connection_unavailable",
-        "login_history_unavailable",
-        "database_cleanup_unavailable",
-    }
+        "session_inventory_exceeds_bound",
+        "session_layout_unsupported",
+        "session_location_unavailable",
+        "session_store_unavailable",
+        "testing_environment_unavailable",
+        "testing_identity_mismatch",
+        "unsupported_lane",
+        "web_command_unsupported",
+        "web_configuration_unavailable",
+        "web_database_mismatch",
+    ]
+)
+ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
+    [
+        "complete",
+        "diagnostics_unavailable",
+        "diagnostics_unrecognized",
+        "not_collected",
+        "provider_config_unavailable",
+        "provider_target_changed",
+        "provider_target_unavailable",
+        "provider_transport_unavailable",
+        "staff_testing_hold",
+        "target_alias",
+        "target_unavailable",
+    ]
 )
 
 
@@ -166,6 +171,8 @@ def probe():
     if config.read(CONFIG_PATH)!=[CONFIG_PATH]:
         raise UsageUnavailable('web_configuration_unavailable')
     options=config['options']
+    if any(key not in options for key in ('db_user','db_password')):
+        raise UsageUnavailable('web_configuration_unavailable')
     if options.get('db_name')!=database or options.get('db_host')!='database':
         raise UsageUnavailable('web_database_mismatch')
     checkpoint='session_location_unavailable'
@@ -352,8 +359,7 @@ def read_odoo_testing_usage(
                 frame["type"] == "complete"
                 and frame["unavailable"] is True
                 and isinstance(reason, str)
-                and reason in ODOO_USAGE_REASON_CODES
-                and reason not in {"complete", "diagnostics_unavailable"}
+                and reason in ODOO_USAGE_PROBE_REASON_CODES
             ):
                 return OdooTestingUsage(reason_code=reason)
         if (

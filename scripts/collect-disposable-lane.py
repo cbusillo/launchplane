@@ -5,6 +5,7 @@ import http.client
 import json
 from pathlib import Path
 import runpy
+import re
 import sys
 import urllib.error
 
@@ -87,8 +88,17 @@ def main() -> int:
             raise ValueError("Invalid Odoo usage evidence.")
         usage_facts = {key: usage.get(key) for key in ("recent_signins", "authenticated_sessions")}
         reason_code = usage.get("reason_code", "diagnostics_unavailable")
-        if not isinstance(reason_code, str) or reason_code not in ODOO_USAGE_REASON_CODES:
+        if not isinstance(reason_code, str) or not re.fullmatch(
+            r"[a-z][a-z0-9_]{0,63}", reason_code
+        ):
             raise ValueError("Invalid Odoo usage diagnostic.")
+        if reason_code not in ODOO_USAGE_REASON_CODES:
+            reason_code = "diagnostics_unrecognized"
+        if "reason_code" in usage and (
+            (facts["usage"] == "unused" and reason_code != "complete")
+            or (facts["usage"] == "unknown" and reason_code == "complete")
+        ):
+            raise ValueError("Odoo usage and diagnostic disagree.")
         if any(value is not None and type(value) is not bool for value in usage_facts.values()):
             raise ValueError("Invalid Odoo usage evidence.")
         if facts["usage"] == "unused" and any(value is not False for value in usage_facts.values()):

@@ -49,7 +49,10 @@ Other drivers and previews retain their existing collection behavior.
 
 Collection returns the first failed checkpoint as an allowlisted code, never
 exception text, command lines, session identifiers, account names or topology.
-The bounded client preserves that code and rejects arbitrary diagnostics. A
+The bounded client preserves that code and rejects malformed diagnostics.
+A code introduced by a newer service is mapped to `diagnostics_unrecognized`
+without echoing it, preserving validated facts and the trace. Such a code cannot
+qualify non-use: when diagnostics are present, `unused` requires `complete`. A
 service image predating diagnostics is reported as `diagnostics_unavailable`;
 that means deploy the compatible collector before diagnosing the lane, not that
 any particular runtime checkpoint failed. Inspecting only the binding does not

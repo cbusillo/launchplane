@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from contextlib import nullcontext
 from typing import Any
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -288,6 +289,62 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                 response.json()["result"]["odoo_usage"]["reason_code"],
                 "serving_process_absent" if used is None else "complete",
             )
+
+    async def test_skipped_usage_reads_report_the_qualifying_precondition(self) -> None:
+        from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
+
+        profile = self.store.read_product_profile_record("example-site")
+        initial_target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=self.context, instance_name="testing"
+        )
+        for scenario, expected in (
+            ("other_driver", "unsupported_lane"),
+            ("missing_target", "target_unavailable"),
+            ("alias", "target_alias"),
+            ("held_alias", "staff_testing_hold"),
+        ):
+            with self.subTest(scenario=scenario):
+                self.store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "driver_id": "generic-web" if scenario == "other_driver" else "odoo"
+                        }
+                    )
+                )
+                target = initial_target.model_copy(deep=True)
+                if scenario == "held_alias":
+                    target.policies.staff_testing_hold = DokployTargetStaffTestingHold(
+                        reason="Staff testing", recorded_at=target.updated_at, recorded_by="fixture"
+                    )
+                self.store.write_dokploy_target_record(target)
+                if scenario in {"alias", "held_alias"}:
+                    self.store.write_dokploy_target_id_record(
+                        target_id.model_copy(update={"instance": "prod"})
+                    )
+                with (
+                    patch.object(
+                        self.store, "read_dokploy_target_record", side_effect=FileNotFoundError
+                    )
+                    if scenario == "missing_target"
+                    else nullcontext(),
+                    patch("control_plane.http_app.read_odoo_testing_usage") as reader,
+                ):
+                    inspected = await self.observe()
+                    response = await self.observe(
+                        mode="collect",
+                        expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                    )
+                    reader.assert_not_called()
+                self.assertEqual(response.status_code, 202, response.text)
+                result = response.json()["result"]
+                self.assertEqual(result["odoo_usage"]["reason_code"], expected)
+                self.assertEqual(
+                    result["usage"], "in_use" if scenario == "held_alias" else "unknown"
+                )
+                self.store.clear_disposable_lane_safety("example-site", self.context, "testing")
 
     async def test_delayed_unused_collection_cannot_erase_newer_protective_evidence(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage

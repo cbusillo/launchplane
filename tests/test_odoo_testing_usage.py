@@ -177,6 +177,8 @@ class SessionInventoryTests(unittest.TestCase):
             "db_password": "private-fixture",
         }
         config.__getitem__.return_value = options
+        if failure == "config_user_missing":
+            del options["db_user"]
         if failure == "database_identity":
             options["db_name"] = "another_db"
         connection = MagicMock()
@@ -224,6 +226,7 @@ class SessionInventoryTests(unittest.TestCase):
     def test_failed_container_checkpoint_is_bounded_and_never_negative_evidence(self) -> None:
         failures = {
             "config": "web_configuration_unavailable",
+            "config_user_missing": "web_configuration_unavailable",
             "database_identity": "web_database_mismatch",
             "process_absent": "serving_process_absent",
             "process_config": "serving_configuration_mismatch",
@@ -348,6 +351,8 @@ class UsageReaderTests(unittest.TestCase):
             ("login_history_unavailable", "login_history_unavailable"),
             ("private-fixture server password", "probe_result_invalid"),
             ("complete", "probe_result_invalid"),
+            ("staff_testing_hold", "probe_result_invalid"),
+            ("provider_target_changed", "probe_result_invalid"),
             (["private-fixture"], "probe_result_invalid"),
         ):
             with self.subTest(reason=reason):

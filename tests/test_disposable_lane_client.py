@@ -150,3 +150,28 @@ class DisposableLaneClientTests(unittest.TestCase):
                 status, output, _ = self.call_client(reason_code=invalid_reason)
                 self.assertEqual(status, 1)
                 self.assertNotIn("private-fixture", output)
+
+    def test_future_diagnostic_keeps_safe_facts_and_trace_without_echoing_unknown_text(
+        self,
+    ) -> None:
+        for usage in ("unknown", "in_use"):
+            with self.subTest(usage=usage):
+                status, output, _ = self.call_client(usage=usage, reason_code="future_checkpoint")
+                self.assertEqual(status, 0)
+                result = json.loads(output)
+                self.assertEqual(result["odoo_usage"]["reason_code"], "diagnostics_unrecognized")
+                self.assertEqual(result["facts"]["usage"], usage)
+                self.assertTrue(result["trace_id"])
+                self.assertNotIn("future_checkpoint", output)
+
+    def test_negative_usage_requires_consistent_diagnostic_when_service_supplies_one(self) -> None:
+        for usage, reason, expected_status in (
+            ("unused", "complete", 0),
+            ("unused", None, 0),  # Older services have complete booleans but no diagnostic.
+            ("unused", "not_collected", 1),
+            ("unused", "future_checkpoint", 1),
+            ("unknown", "complete", 1),
+        ):
+            with self.subTest(usage=usage, reason=reason):
+                status, _, _ = self.call_client(usage=usage, reason_code=reason)
+                self.assertEqual(status, expected_status)
