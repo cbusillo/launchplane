@@ -66,6 +66,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine, ExceptionContext, make_url
 from sqlalchemy.exc import DBAPIError, IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, aliased, mapped_column, sessionmaker
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.pool import NullPool
 from sqlalchemy.types import TypeDecorator
 
@@ -575,6 +576,8 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     PublicHostAuthorityBusy,
     SecretCopySourceConflictError,
+    SecretDeliveryConflictError,
+    odoo_instance_override_records_match,
     SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
@@ -584,7 +587,6 @@ from control_plane.storage.product_authority_bundle import (
     OdooInstanceOverrideConflictError,
     RuntimeEnvironmentWrite,
     runtime_environment_records_match,
-    odoo_instance_override_records_match,
 )
 from control_plane.storage.schema_invariants import (
     RUNTIME_COMPATIBLE_ALEMBIC_REVISIONS,
@@ -6182,7 +6184,10 @@ class PostgresRecordStore(HumanSessionStore):
                     )
                 ):
                     raise ValueError("Provider operation no longer owns this evidence write.")
-            session.merge(row)
+            if isinstance(row, LaunchplaneOdooInstanceOverrideRow):
+                self._merge_odoo_override_row(session, row)
+            else:
+                session.merge(row)
             session.commit()
 
     @contextmanager
@@ -6219,6 +6224,13 @@ class PostgresRecordStore(HumanSessionStore):
     def _after_product_authority_bundle_step(self, step_name: str) -> None:
         return None
 
+    @staticmethod
+    def _merge_odoo_override_row(session: Any, row: LaunchplaneOdooInstanceOverrideRow) -> None:
+        merged = session.merge(row)
+        # SQLAlchemy's JSON dirty check also treats True and 1 as equal. An
+        # explicit override write must persist the caller's actual scalar types.
+        flag_modified(merged, "payload")
+
     def _after_authz_policy_write_step(self, step_name: str) -> None:
         return None
 
@@ -6227,7 +6239,10 @@ class PostgresRecordStore(HumanSessionStore):
             self._protect_testing_hold_non_use(
                 session, DokployTargetRecord.model_validate(row.payload)
             )
-        session.merge(row)
+        if isinstance(row, LaunchplaneOdooInstanceOverrideRow):
+            self._merge_odoo_override_row(session, row)
+        else:
+            session.merge(row)
         self._after_product_authority_bundle_step(step_name)
 
     def _product_profile_row(
@@ -6659,6 +6674,18 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for secret_delivery in bundle.secret_delivery_read_sets:
+                if not secret_delivery.matches(
+                    (
+                        SecretRecord.model_validate(row.payload)
+                        for row in session.scalars(select(LaunchplaneSecretRow)).all()
+                    ),
+                    (
+                        SecretBinding.model_validate(row.payload)
+                        for row in session.scalars(select(LaunchplaneSecretBindingRow)).all()
+                    ),
+                ):
+                    raise SecretDeliveryConflictError("Lane secret metadata changed before commit.")
             for expected_secret in bundle.expected_secret_records:
                 current_secret = session.scalar(
                     select(LaunchplaneSecretRow)
@@ -28821,7 +28848,7 @@ class PostgresRecordStore(HumanSessionStore):
                     for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
                 ),
             )
-            session.merge(row)
+            self._merge_odoo_override_row(session, row)
             session.commit()
 
     def write_odoo_secret_transport_migration(

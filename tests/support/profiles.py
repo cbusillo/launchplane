@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from typing import cast
+from control_plane.contracts.product_profile_record import CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION
 
 
 def product_profile_payload(product: str = "sellyouroutboard") -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
         "product": product,
         "display_name": "Sell Your Outboard",
         "repository": f"cbusillo/{product}",
@@ -36,7 +37,7 @@ _product_profile_payload = product_profile_payload
 
 def _odoo_preview_profile_payload(product: str = "odoo-tenant-cm") -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
         "product": product,
         "display_name": "CM Odoo",
         "repository": f"cbusillo/{product}",
@@ -97,7 +98,7 @@ def _product_profile_payload_with_prod(product: str = "sellyouroutboard") -> dic
 
 def _generic_site_profile_payload(product: str = "example-site") -> dict[str, object]:
     return {
-        "schema_version": 1,
+        "schema_version": CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
         "product": product,
         "display_name": "Example Site",
         "repository": f"every/{product}",

@@ -61,7 +61,7 @@ import type {
   ProductPromotionWorkflowDeliveryStatusResponse,
   PrivilegedOperationHumanResponse,
   PrivilegedOperationListResponse,
-  PrivilegedOperationRecord,
+  PrivilegedOperationHumanRecord as PrivilegedOperationRecord,
   PrivilegedOperationSemanticReview,
   PrivilegedOperationSemanticReviewResponse,
   ReadHumanPrivilegedOperationData,
@@ -1124,4 +1124,15 @@ export function rebindBackupWorkerCredentials(product: string, body: BackupCrede
 }
 export function qualifyProductionBackupPreflight(query: QualifyProductionBackupPreflightData["query"]): Promise<AcceptedEvidenceResponse> {
   return requestJson(`/v1/production-backup-authority/preflight?${new URLSearchParams(query)}`, "GET");
+}
+
+export function readBackupPolicyProposals(scope: { product: string; context: string; environment: string }, signal?: AbortSignal): Promise<import("./generated/openapi.ts").BackupPolicyProposalListResponse> {
+  const query = new URLSearchParams({ product: scope.product, context: scope.context, instance: scope.environment });
+  return requestJson(`/v1/production-backup-authority/proposals?${query}`, "GET", undefined, signal);
+}
+
+export function decideBackupPolicyProposal(payload: { operationId: string; decision: "approve" | "decline" }, options: BrowserOperationOptions): Promise<import("./generated/openapi.ts").BackupPolicyDecisionResponse> {
+  return requestJson(BROWSER_WRITE_ROUTES.backupPolicyDecision.replace("{operation_id}", encodeURIComponent(payload.operationId)), "POST", {
+    decision: payload.decision, source_event_id: `ui:${payload.decision}:${payload.operationId}`,
+  }, options.signal, options.idempotencyKey, options.onDispatch);
 }
