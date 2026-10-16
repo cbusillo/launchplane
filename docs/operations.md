@@ -325,39 +325,27 @@ Admins submit exact revisioned target and policy records to
 `POST /v1/production-backup-authority/apply`. Run `mode=dry_run`, review the
 canonical `authority_digest`, then submit the same payload with `mode=apply`,
 the reviewed digest, expected-current record IDs, and an `Idempotency-Key`.
-The production lane's **Actions → Production backup authority** card accepts
-a private prepared proposal for that exact product/context/instance. It displays
-the proposed target coordinates (when supplied), whole-guest capture scope,
-snapshot retention, evidence ages and review date,
-runs the dry run, and approves only its returned digest through this same route.
-Preparation can load the file into the signed-in administrator's tab before the
-administrator reviews it. This is browser-local staging: preparation uses an
-already-authorized administrator tab, or the administrator loads the private file;
-there is no server-side proposal inbox. No terminal command or bearer token is needed from
-the person approving. Proposal loading does not submit or activate a policy.
+The production lane's **Actions → Production backup authority** card reads
+service-held pending proposals. An agent submits inert backup input through the
+existing privileged-policy proposal route; the service pins its dry run. The
+Director opens the returned product link and approves or declines with one click,
+without a file or digest comparison. The card identifies target additions or
+revisions without exposing provider coordinates. See the
+[backup proposal contract](production-backup-provider.md#review-a-proposed-backup-policy).
 
 Browser writes use the existing CSRF-checked session dependency and the unchanged
 `production_backup_authority.write` authorization model. A browser target revision
 also checks this action on every active lane using that target, including inside
 the locked write. A product-scoped caller cannot revise another product's target;
 an administrator already authorized on every affected lane retains that authority.
-The card accepts only target revisions used by the submitted policy and only a
-promotion action reported by the lane's current config-status read. Policy-only
-proposals display current target IDs, kinds and revisions; that read intentionally
-withholds provider coordinates. It retains the
-private proposal and, for an uncertain approval, the original request and
-idempotency key in that tab's session storage. A changed file invalidates review;
-an uncertain result locks replacement and permits only the original request's
-retry. A stale-authority conflict returned after the route's replay preflight
-settles that original request and permits a fresh review. Apply plans only inside
-the transaction after idempotency reservation/replay, so a concurrent original
-commit cannot become an unlocked stale-planning refusal. An authorization refusal
-occurs before replay and does not prove a lost response never committed; it keeps
-the original request locked. The card reads authority back after approval and
-keeps replacement disabled during that read. Approval does not enqueue
-a capture, restore, promotion or deployment; worker credentials and real capture
-qualification remain separate prerequisites. Existing target-only policy updates
-are bound to the current target revisions by the service digest.
+The card accepts only target revisions used by the submitted policy and a
+promotion action supported by the product's current driver. It shows target
+kinds, revisions and whether each is new, revised or retained. Private provider
+coordinates and proposal input remain server-held. The browser sends only the
+proposal identity and decision; after an interrupted response it re-reads the
+stored decision and retries only the original decision event. A settled conflict
+leaves Decline available. Approval changes no capture, restore, promotion or
+deployment, and worker credentials/capture qualification remain separate.
 
 Apply is PostgreSQL-only and commits all target supersessions, target revisions,
 policy supersession, policy revision, and idempotency evidence atomically.

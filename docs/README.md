@@ -39,6 +39,7 @@ not describe runtime authority until it is implemented, deployed, and activated.
   approval gate and new website repo checklist.
 - [artifact-provenance.md](artifact-provenance.md) — how Launchplane verifies
   which repository and commit a product's own build came from.
+- [artifact-security.md](artifact-security.md) — verified-image scanning before event deploys and service-side retention dry runs.
 - [release-database-compatibility.md](release-database-compatibility.md) — verified full-input release classification and targeted module-plan producer contract.
 - [event-driven-deploys.md](event-driven-deploys.md) — GitHub App webhook
   receiver and reconciler that deploy verified builds to testing and previews

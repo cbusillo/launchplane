@@ -12893,6 +12893,99 @@ class RealPostgresTestingGenerationRetirementTests(unittest.TestCase):
             )
 
 
+class RealPostgresSecretReferenceTests(unittest.TestCase):
+    def test_selection_cas_rollback_and_late_completion_preservation(self) -> None:
+        from tests.test_odoo_secret_references import seed, KEY
+        from control_plane.odoo_secret_references import plan_secret_reference_reconciliation
+        from control_plane.storage.product_authority_bundle import SecretDeliveryConflictError
+        from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
+
+        with (
+            _head_postgres_database() as url,
+            closing(PostgresRecordStore(database_url=url)) as store,
+        ):
+            profile, original = seed(store)
+            item = original.config_parameters[1]
+            original = original.model_copy(
+                update={
+                    "config_parameters": (
+                        original.config_parameters[0],
+                        item.model_copy(
+                            update={"value": item.value.model_copy(update={"value": True})}
+                        ),
+                    )
+                }
+            )
+            store.write_odoo_instance_override_record(original)
+            _, bundle = plan_secret_reference_reconciliation(
+                store=store, profile=profile, record=original, keys=(KEY,)
+            )
+            with patch.object(
+                store, "_after_product_authority_bundle_step", side_effect=RuntimeError("rollback")
+            ):
+                with self.assertRaises(RuntimeError):
+                    store.write_product_authority_bundle(bundle)
+            self.assertEqual(
+                store.read_odoo_instance_override_record(context_name="cm", instance_name="prod"),
+                original,
+            )
+            peer = PostgresRecordStore(database_url=url)
+            self.addCleanup(peer.close)
+            item = original.config_parameters[1]
+            peer.write_odoo_instance_override_record(
+                original.model_copy(
+                    update={
+                        "config_parameters": (
+                            original.config_parameters[0],
+                            item.model_copy(
+                                update={"value": item.value.model_copy(update={"value": 1})}
+                            ),
+                        )
+                    }
+                )
+            )
+            with self.assertRaises(OdooInstanceOverrideConflictError):
+                store.write_product_authority_bundle(bundle)
+            self.assertIs(
+                type(
+                    store.read_odoo_instance_override_record(
+                        context_name="cm", instance_name="prod"
+                    )
+                    .config_parameters[1]
+                    .value.value
+                ),
+                int,
+            )
+            peer.write_odoo_instance_override_record(original)
+            candidate = next(item for item in peer.list_secret_bindings() if item.instance)
+            peer.write_secret_binding(
+                candidate.model_copy(update={"binding_id": "concurrent-candidate"})
+            )
+            with self.assertRaises(SecretDeliveryConflictError):
+                store.write_product_authority_bundle(bundle)
+            peer.write_secret_binding(
+                candidate.model_copy(
+                    update={"binding_id": "concurrent-candidate", "status": "disabled"}
+                )
+            )
+            _, refreshed = plan_secret_reference_reconciliation(
+                store=store, profile=profile, record=original, keys=(KEY,)
+            )
+            store.write_product_authority_bundle(refreshed)
+            corrected = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="prod"
+            )
+            self.assertEqual(corrected, refreshed.odoo_instance_override_writes[0].record)
+            _write_odoo_instance_override_apply_result(
+                record_store=peer, record=original, status="pass", detail="late prior operation"
+            )
+            after = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="prod"
+            )
+            self.assertEqual(after.config_parameters, corrected.config_parameters)
+            self.assertEqual(after.last_apply.status, "pass")
+
+
 class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
     def test_removal_atomicity_replay_and_drift_on_postgres(self) -> None:
         from tests.test_reviewed_runtime_setting_removal import RuntimeRemovalTests

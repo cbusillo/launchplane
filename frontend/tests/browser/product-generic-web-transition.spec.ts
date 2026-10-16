@@ -1,6 +1,7 @@
 import { expect, test } from "./state";
+import type { GenericWebPreviewDeclaration } from "../../src/generated/openapi.ts";
 
-async function arrange(page: import("@playwright/test").Page, failure: "none" | "uncertain" | "uncertain-changed" | "stale" = "none") {
+async function arrange(page: import("@playwright/test").Page, failure: "none" | "uncertain" | "uncertain-changed" | "stale" = "none", omitPreviewExtensions = false) {
   await page.goto("/ui/products/atlas-commerce?fixture=products");
   const { products, fixtureIdentity } = await page.evaluate(async () => {
     const fixtures = await import("/ui/src/dev-fixtures.ts");
@@ -11,7 +12,7 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
     owner: { github_login: "example-owner", github_id: "9001" }, image: { repository: "ghcr.io/example/atlas-commerce" },
     production_use: "live", public_website: "required", release_on_acceptance: "held",
     lanes: [{ context: "atlas", instance: "testing", generic_web_extensions: { maintenance: [], schedules: [] } }, { context: "atlas", instance: "prod", generic_web_extensions: { maintenance: [], schedules: [] } }],
-    preview: { data_transport_mode: "driver", transport_extension: "", transport_database_prefix: "", app_name_suffix: "" },
+    preview: { data_transport_mode: "driver", transport_extension: "", transport_database_prefix: "", app_name_suffix: "" } as GenericWebPreviewDeclaration,
   };
   const requests: Array<{ body: Record<string, unknown>; key: string }> = [];
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", trace_id: "session", csrf_token: "csrf", identity: fixtureIdentity } }));
@@ -27,7 +28,11 @@ async function arrange(page: import("@playwright/test").Page, failure: "none" | 
         await route.fulfill({ status: 409, json: { trace_id: "stale", error: { code: "stale", message: "Review a new profile." } } }); return;
       }
       stored = { ...stored, driver_id: "generic-web", lanes: body.lanes.map((lane: { context: string; instance: string; extensions: typeof stored.lanes[0]["generic_web_extensions"] }) => ({ context: lane.context, instance: lane.instance, generic_web_extensions: lane.extensions })), preview: body.preview };
-      if (failure === "uncertain-changed") stored = { ...stored, preview: { ...stored.preview, app_name_suffix: "-concurrent" } };
+      if (omitPreviewExtensions) {
+        const { generic_web_extensions: _omitted, ...preview } = body.preview;
+        stored = { ...stored, preview };
+      }
+      if (failure === "uncertain-changed") stored = { ...stored, preview: { ...stored.preview, generic_web_extensions: { maintenance: [{ name: "concurrent", command: "node /app/concurrent.js", timeout_seconds: 300, on_reset: false }], schedules: [] } } };
       if (failure === "uncertain" || failure === "uncertain-changed") { await route.abort("failed"); return; }
     }
     await route.fulfill({ status: 202, json: { status: "accepted", trace_id: "transition", records: { product_profile: "atlas-commerce" }, result: {
@@ -70,6 +75,27 @@ test("shared-web review, draft invalidation, apply and exact readback", { tag: "
   await page.getByRole("heading", { name: "Shared web driver", exact: true }).click();
   await page.screenshot({ path: testInfo.outputPath("shared-web-visible.png") });
 });
+
+for (const configured of [false, true]) {
+  test(`preview maintenance and schedules read back after ${configured ? "declaration" : "clearing"}`, async ({ page }) => {
+    // Empty extensions are omitted from stored-profile responses by the service.
+    const { panel, requests } = await arrange(page, "none", !configured);
+    const input = panel.getByLabel("Lane and preview declarations");
+    const definition = JSON.parse(await input.inputValue());
+    const extensions = configured ? {
+      maintenance: [{ name: "migrate", command: "node /app/migrate.js", timeout_seconds: 300, on_reset: false }],
+      schedules: [{ name: "billing", command: "node /app/billing.js", timeout_seconds: 300, on_reset: false, cron_expression: "*/10 * * * *", enabled: true }],
+    } : { maintenance: [], schedules: [] };
+    definition.preview.generic_web_extensions = extensions;
+    await input.fill(JSON.stringify(definition));
+    await panel.getByRole("button", { name: "Review shared-web transition" }).click();
+    await panel.getByRole("button", { name: "Apply shared-web profile" }).click();
+    await expect(panel.locator("p[role=status]")).toBeVisible();
+    await expect(panel.getByRole("alert")).toHaveCount(0);
+    expect(requests).toHaveLength(1);
+    expect((requests[0].body.preview as { generic_web_extensions: unknown }).generic_web_extensions).toEqual(extensions);
+  });
+}
 
 test("lost transition response survives reload and settles only from original receipt", async ({ page }) => {
   const { panel, requests } = await arrange(page, "uncertain");

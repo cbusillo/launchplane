@@ -30,6 +30,12 @@ from control_plane.authz_grant_service import (
     AuthzManagedPolicyReconcileEnvelope,
 )
 from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.contracts.backup_policy_proposal import (
+    BackupPolicyProposalInput,
+    BackupPolicyHumanEvidence,
+    BackupPolicyExecutionEvidence,
+    BackupPolicyProposalSummary,
+)
 
 
 PRIVILEGED_SECRET_OPERATION_PLAN_ACTION = "privileged_secret_operation.plan"
@@ -59,6 +65,7 @@ ORDINARY_AGENT_DELIVERY_ACTIVATION_APPROVE_ACTION = "ordinary_agent_delivery_act
 ORDINARY_AGENT_DELIVERY_ACTIVATION_REVOKE_ACTION = "ordinary_agent_delivery_activation.revoke"
 
 PrivilegedOperationDescriptorId = Literal[
+    "production-backup-policy",
     "managed-secret-reencryption",
     "managed-authz-policy-set",
     "managed-merge-train-policy-import",
@@ -830,20 +837,23 @@ class ManagedMergeTrainPolicyImportExecutionEvidence(BaseModel):
 
 
 PrivilegedOperationRequest: TypeAlias = (
-    ManagedSecretReencryptionPlanInput
+    BackupPolicyProposalInput
+    | ManagedSecretReencryptionPlanInput
     | ManagedAuthzPolicySetProposalInput
     | ManagedMergeTrainPolicyImportProposalInput
     | OrdinaryAgentDeliveryActivationSetupRequest
     | OrdinaryAgentDeliveryActivationRevokeRequest
 )
 PrivilegedOperationHumanEvidence: TypeAlias = (
-    ManagedSecretReencryptionHumanEvidence
+    BackupPolicyHumanEvidence
+    | ManagedSecretReencryptionHumanEvidence
     | ManagedAuthzPolicySetHumanEvidence
     | ManagedMergeTrainPolicyImportHumanEvidence
     | OrdinaryAgentDeliveryActivationHumanEvidence
 )
 PrivilegedOperationTerminalEvidence: TypeAlias = (
-    PrivilegedOperationExecutionEvidence
+    BackupPolicyExecutionEvidence
+    | PrivilegedOperationExecutionEvidence
     | ManagedAuthzPolicySetExecutionEvidence
     | ManagedMergeTrainPolicyImportExecutionEvidence
     | OrdinaryAgentDeliveryActivationExecutionEvidence
@@ -900,6 +910,21 @@ class PrivilegedOperationRecord(BaseModel):
                 raise ValueError("Managed-secret execution evidence does not match descriptor")
             if self.approval is not None and self.approval.rollback_class != "key_retained":
                 raise ValueError("Managed-secret approvals require key-retained rollback")
+        elif self.descriptor_id == "production-backup-policy":
+            if (
+                self.safety_class != "policy_admin"
+                or not isinstance(self.request, BackupPolicyProposalInput)
+                or not isinstance(self.evidence, BackupPolicyHumanEvidence)
+            ):
+                raise ValueError("Backup policy proposal payloads do not match descriptor")
+            if self.requested_by.identity_type not in {"terminal_agent", "local_operator"}:
+                raise ValueError("Backup proposals require an agent requester")
+            if self.execution is not None and not isinstance(
+                self.execution, BackupPolicyExecutionEvidence
+            ):
+                raise ValueError("Backup policy execution evidence does not match descriptor")
+            if self.approval is not None and self.approval.rollback_class != "policy_cas":
+                raise ValueError("Backup policy approvals require policy CAS")
         elif self.descriptor_id == "managed-authz-policy-set":
             if self.safety_class != "policy_admin":
                 raise ValueError("Managed-policy operations require policy-admin safety")
@@ -1227,7 +1252,8 @@ class ManagedMergeTrainPolicyImportAgentSummary(BaseModel):
 
 
 PrivilegedOperationSummary: TypeAlias = (
-    PrivilegedOperationAgentSummary
+    BackupPolicyProposalSummary
+    | PrivilegedOperationAgentSummary
     | ManagedAuthzPolicySetAgentSummary
     | ManagedMergeTrainPolicyImportAgentSummary
 )
@@ -1689,6 +1715,8 @@ def privileged_operation_evidence_digest_candidates(
 def privileged_operation_pre_state_digest(
     evidence: PrivilegedOperationHumanEvidence,
 ) -> str:
+    if isinstance(evidence, BackupPolicyHumanEvidence):
+        return evidence.plan_digest
     if isinstance(evidence, ManagedSecretReencryptionHumanEvidence):
         payload = evidence.model_dump(mode="json")
         payload.pop("plan_digest")
@@ -1900,6 +1928,16 @@ def privileged_operation_agent_summary(
     record: PrivilegedOperationRecord,
 ) -> PrivilegedOperationSummary:
     evidence = record.evidence
+    if isinstance(evidence, BackupPolicyHumanEvidence):
+        from urllib.parse import quote
+
+        return BackupPolicyProposalSummary(
+            operation_id=record.operation_id,
+            status=record.status,
+            created_at=record.created_at,
+            expires_at=record.expires_at,
+            review_path=f"/ui/products/{quote(evidence.product, safe='')}/environments/prod/actions?backup_proposal={record.operation_id}#production-backup-authority",
+        )
     if isinstance(evidence, ManagedMergeTrainPolicyImportHumanEvidence):
         return ManagedMergeTrainPolicyImportAgentSummary(
             operation_id=record.operation_id,
