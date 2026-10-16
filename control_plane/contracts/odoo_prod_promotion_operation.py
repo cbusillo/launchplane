@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import timedelta
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -14,6 +15,7 @@ from control_plane.contracts.durable_operation_authorization import (
 
 
 ODOO_PROD_PROMOTION_RUN_ACTION = "odoo_prod_promotion_run.execute"
+ODOO_CUTOVER_RECONCILIATION_DELAY = timedelta(seconds=30)
 
 
 class OdooProdPromotionRunRequest(BaseModel):
