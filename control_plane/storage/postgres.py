@@ -37,6 +37,9 @@ from typing import (
 )
 
 from pydantic import BaseModel, JsonValue
+
+if TYPE_CHECKING:
+    from control_plane.testing_verification import TestingVerification
 from control_plane.lane_movement import source_read_retry_ready
 from sqlalchemy import (
     BigInteger,
@@ -10939,6 +10942,174 @@ class PostgresRecordStore(HumanSessionStore):
                 check()
                 session.commit()
                 return "written", completion
+
+    def publish_testing_verification(
+        self,
+        *,
+        verification: TestingVerification,
+        expected: dict[str, object],
+        completed: DeploymentRecord,
+        mutation: DbOnlyMutationRequest,
+        checkpoint: Callable[[], None],
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Publish verification, copy completion and release inventory atomically.
+
+        The caller continuously holds the generation executor and synchronous
+        lane reservation. Provider reads happen before this short transaction.
+        """
+        from control_plane.contracts.canonical_json import canonical_json_sha256
+        from control_plane.release_tuples import build_release_tuple_record_from_artifact_manifest
+        from control_plane.workflows.inventory import build_environment_inventory
+
+        request = verification.request
+        if completed.instance != "testing" or completed.deploy.status != "pass":
+            raise ValueError("Verification publication requires passing testing evidence.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, receipt_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session, mutation=mutation
+            )
+            if status != "acquired":
+                return status, reservation
+            assert receipt_row is not None
+            if self.database_dialect_name == "postgresql":
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=verification.product,
+                    context=request.context,
+                    instance="testing",
+                )
+            if (
+                self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=verification.product,
+                    context=request.context,
+                    instance="testing",
+                    include_synchronous=False,
+                )
+                is not None
+            ):
+                raise ValueError("A testing lane operation appeared before publication.")
+            self._lock_product_authority_bundle_write(session)
+            deployment_row = session.get(
+                LaunchplaneDeploymentRow, completed.record_id, with_for_update=True
+            )
+            generation_row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (verification.product, request.context),
+                with_for_update=True,
+            )
+            if deployment_row is None or generation_row is None:
+                raise ValueError("Testing publication lost its original records.")
+            outer = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                current = verification.snapshot()
+            finally:
+                self._disposable_authority_context.session = outer
+            if (
+                current != expected
+                or canonical_json_sha256(expected) != request.reviewed_plan_sha256
+            ):
+                raise ValueError("Testing authority changed during verification.")
+            generation = FreshOdooTestingGeneration.model_validate(generation_row.payload)
+            if generation.completed_at:
+                raise ValueError("The original testing copy is already complete.")
+            original = DeploymentRecord.model_validate(deployment_row.payload)
+            archive_id = "testing-verification-prior-" + canonical_json_sha256(
+                expected["deployment"]
+            )
+            if session.get(LaunchplaneDeploymentRow, archive_id) is not None:
+                raise ValueError("Original testing evidence is already retained.")
+            archive = original.model_copy(update={"record_id": archive_id})
+            completed = completed.model_copy(
+                update={
+                    "runtime_source": {
+                        **completed.runtime_source,
+                        "testing_verification_previous_record_id": archive_id,
+                    }
+                }
+            )
+            for record in (archive, completed):
+                session.merge(
+                    LaunchplaneDeploymentRow(
+                        record_id=record.record_id,
+                        context=record.context,
+                        instance=record.instance,
+                        artifact_id=_artifact_id_from_model(record),
+                        source_git_ref=record.source_git_ref,
+                        deploy_started_at=record.deploy.started_at,
+                        deploy_finished_at=record.deploy.finished_at,
+                        payload=self._payload_dict(record),
+                    )
+                )
+            finished = completed.deploy.finished_at
+            inventory = build_environment_inventory(
+                deployment_record=completed, updated_at=finished
+            )
+            session.merge(self._environment_inventory_row(inventory))
+            artifact = ArtifactIdentityManifest.model_validate(expected["artifact"])
+            session.merge(
+                self._release_tuple_row(
+                    build_release_tuple_record_from_artifact_manifest(
+                        context_name=completed.context,
+                        channel_name="testing",
+                        artifact_manifest=artifact,
+                        deployment_record_id=completed.record_id,
+                        minted_at=finished,
+                    )
+                )
+            )
+            generation_row.payload = self._payload_dict(
+                generation.model_copy(update={"completed_at": finished})
+            )
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(receipt_row, completion)
+            checkpoint()
+            session.commit()
+            return "written", completion
+
+    @contextmanager
+    def testing_verification_lane_guard(
+        self, *, product: str, context: str
+    ) -> Iterator[Callable[[], None]]:
+        """Reserve the existing lane lock and prove its connection stays held."""
+        with self._session_factory() as hold_session:
+            connection = hold_session.connection()
+            if not _try_odoo_synchronous_lane_lock(
+                hold_session, product=product, context=context, instance="testing"
+            ):
+                raise ValueError("The testing lane has a synchronous operation.")
+            with self._session_factory() as check_session:
+                self._lock_odoo_stable_lane(
+                    check_session, product=product, context=context, instance="testing"
+                )
+                owner = self._active_odoo_stable_lane_operation_owner(
+                    check_session,
+                    product=product,
+                    context=context,
+                    instance="testing",
+                    include_synchronous=False,
+                )
+                check_session.rollback()
+            if owner is not None:
+                raise ValueError("The testing lane has an active operation.")
+
+            def checkpoint() -> None:
+                if connection.invalidated or not connection.in_transaction():
+                    raise RuntimeError("Testing verification lost its lane reservation.")
+                try:
+                    connection.execute(text("SELECT 1"))
+                except SQLAlchemyError as error:
+                    raise RuntimeError("Testing verification lost its lane reservation.") from error
+
+            yield checkpoint
 
     def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
         with self._session_factory() as session:
