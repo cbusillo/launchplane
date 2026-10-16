@@ -314,7 +314,7 @@ descriptor; its product card owns review and decisions.
 event to `/v1/production-backup-authority/proposals/{operation_id}/decision`.
 Decisions require a signed-in administrator, CSRF/origin validation, current
 lane write authority and immutable-ID managed approval provenance. The proposer
-can never decide a proposal or use its local-operator credentials to apply backup
+can never decide a proposal or use its `local_operator` credentials to apply backup
 authority directly. Decline persists cancellation. Approval rechecks the pinned
 plan and records the human decision. The existing privileged-operation worker
 then rechecks the human's current authority and the exact plan before an atomic
