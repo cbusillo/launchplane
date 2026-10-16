@@ -639,7 +639,7 @@ def read_writer_receipt(spec, *, base=None):
         print(WRITER_ACTION_MARKER+'='+spec['action'])
         print(WRITER_BINDING_MARKER+'='+spec['binding'])
         return
-    terminal='paused' if spec['action']=='receipt_pause' else 'resumed' 
+    terminal='paused' if spec['action']=='receipt_pause' else 'resumed'
     if witness.get(terminal) is not True or terminal=='resumed' and witness.get('released') is not True:
         raise ValueError('no terminal retained writer witness')
     print(WRITER_ACTION_MARKER+'='+spec['action'])
