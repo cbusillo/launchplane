@@ -1,4 +1,40 @@
-import { expect, setClockTime, test } from "./state";
+import { expect, setClockTime, test, type Page } from "./state";
+import type { Locator } from "@playwright/test";
+
+// Each badge's container, label and indicator must all carry the color the
+// shared badge rule gives its state, measured on a bare badge of that state.
+async function expectEvidenceColors(badges: Locator) {
+  const colors = await badges.evaluateAll(elements => elements.map(badge => {
+    const reference = document.createElement("span");
+    reference.className = "evidence-badge";
+    reference.dataset.state = badge.dataset.state;
+    document.body.append(reference);
+    const expected = getComputedStyle(reference).color;
+    reference.remove();
+    return {
+      state: badge.dataset.state,
+      expected,
+      badge: getComputedStyle(badge).color,
+      label: getComputedStyle(badge.querySelector("strong")!).color,
+      indicator: getComputedStyle(badge.querySelector(":scope > span")!).backgroundColor,
+    };
+  }));
+  expect(colors.length).toBeGreaterThan(0);
+  for (const { expected, state, ...rendered } of colors) {
+    expect(rendered, `${state} evidence badge`).toEqual({ badge: expected, label: expected, indicator: expected });
+  }
+}
+
+async function themeColor(page: Page, scope: Locator, name: string) {
+  return scope.evaluate((element, variable) => {
+    const probe = document.createElement("span");
+    probe.style.color = `var(--${variable})`;
+    element.append(probe);
+    const color = getComputedStyle(probe).color;
+    probe.remove();
+    return color;
+  }, name);
+}
 
 test("lane evidence badge colors follow evidence, not lane health", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/products?fixture=products");
@@ -29,32 +65,19 @@ test("lane evidence badge colors follow evidence, not lane health", { tag: "@res
     await expect(failedLane.locator(".evidence-badge")).toHaveAttribute("data-state", "verified");
     await expect(healthyLane).not.toHaveAttribute("data-operational", /danger|warning/);
     await expect(healthyLane.locator(".evidence-badge")).toHaveAttribute("data-state", state);
-    const colors = await row.locator(".directory-lane").evaluateAll(elements => elements.map(lane => {
-      const tone = lane.getAttribute("data-operational");
-      const probe = document.createElement("span");
-      probe.style.color = `var(--${tone})`;
-      lane.append(probe);
-      const toneColor = getComputedStyle(probe).color;
-      probe.remove();
-      const badge = lane.querySelector<HTMLElement>(".evidence-badge")!;
-      return {
-        tone,
-        toneColor,
-        headline: getComputedStyle(lane.querySelector(":scope > strong")!).color,
-        badge: getComputedStyle(badge).color,
-        label: getComputedStyle(badge.querySelector("strong")!).color,
-        indicator: getComputedStyle(badge.querySelector(":scope > span")!).backgroundColor,
-      };
-    }));
-    // The failed lane's headline still carries its health color, while each
-    // badge's label and indicator agree with that badge's own evidence color.
-    const failedColors = colors.find(color => color.tone === "danger")!;
-    expect(failedColors.headline).toBe(failedColors.toneColor);
-    expect(failedColors.badge).not.toBe(failedColors.toneColor);
-    for (const color of colors) {
-      expect(color.label).toBe(color.badge);
-      expect(color.indicator).toBe(color.badge);
-    }
+    // The failed lane's headline keeps its health color; its badge does not.
+    const danger = await themeColor(page, failedLane, "danger");
+    await expect(failedLane.locator(":scope > strong")).toHaveCSS("color", danger);
+    await expect(failedLane.locator(".evidence-badge")).not.toHaveCSS("color", danger);
+    await expectEvidenceColors(row.locator(".directory-lane .evidence-badge"));
     await row.screenshot({ path: `../tmp/browser-smoke/evidence-badge-color-${state}-${testInfo.project.name}.png` });
   }
+});
+
+test("TLS domain evidence badges keep their evidence colors", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/products/atlas-commerce/environments/prod?fixture=products");
+  const list = page.locator(".tls-domain-list");
+  await expect(list.locator(".evidence-badge").first()).toBeVisible();
+  await list.screenshot({ path: `../tmp/browser-smoke/evidence-badge-color-tls-${testInfo.project.name}.png` });
+  await expectEvidenceColors(list.locator(".evidence-badge"));
 });
