@@ -22,6 +22,43 @@ A target ID also bound to another lane refuses it independently of the observati
 The existing Odoo preview-refresh exception below uses direct resource inspection
 and protected-use reports instead of positive occupancy/custody observations.
 Global and lane runtime configuration and secret metadata participate in the binding.
+
+For an Odoo testing lane, `collect` now reads recent successful logins from
+`res_users_log` in a transaction enforced read-only by PostgreSQL and checks the
+running web container's configured filesystem session store. The preceding
+24 hours count for every account, including administrator, portal and automation
+accounts. Restored login rows can conservatively count as use. Any authenticated
+or partially authenticated session for that database counts regardless of age;
+device-log rows and old login timestamps cannot prove that a browser session has
+ended. Session contents, identifiers, account names and credentials never leave
+the container. The result exposes only two booleans. The filesystem check follows
+[Odoo's session storage contract](https://github.com/odoo/odoo/blob/19.0/odoo/http.py),
+without calling methods that create, refresh, migrate or delete session files.
+
+The service uses its existing registered Dokploy transport and fixed read-only
+programs; the agent needs no host shell or new SSH trust. The tracked compose,
+testing context/instance, local database endpoint, supported web configuration,
+complete single-web/database inventory and unchanged container/placement snapshots
+must agree. Missing databases or session directories, unreadable or malformed
+files, replicas, custom startup, oversized inventories and incomplete/provider
+failures leave usage unknown. A provider authorization denial returns its service
+trace and is never retried with another identity. Only complete negative login
+and session reads can produce `unused`; staff holds still protect the lane.
+Other drivers and previews retain their existing collection behavior.
+
+This is a bounded snapshot of authenticated use, not a reservation against a
+future login or proof about anonymous browsing or unsaved work. Collect immediately
+before a governed rebuild and use the staff-testing hold for a testing session.
+The observation's expiry starts before provider collection; changed configuration
+or an elapsed lifetime rejects publication. Data custody and production isolation
+remain separate prerequisites and this read never starts a rebuild. Deploy the
+compatible service image, then use the existing `collect-disposable-lane.py`
+`inspect`/`collect` client. No schema migration or new grant is needed. Rollback to
+the prior image restores unknown usage collection; retained facts remain subject
+to their original binding and expiry. A lane with no readable application database
+still needs its supported bootstrap/never-served qualification; absence alone is
+not turned into an unused assertion.
+
 For an Odoo preview, the binding also includes its copied template-lane runtime
 settings, secret metadata and bootstrap override. Changing those inputs
 invalidates preview safety even when no record under the preview slug changes.

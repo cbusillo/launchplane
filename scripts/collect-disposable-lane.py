@@ -60,7 +60,7 @@ def main() -> int:
                 path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
                 settings=settings,
                 body=payload.model_dump(mode="json"),
-                timeout=30,
+                timeout=150,
             )
         result = response["result"]
         if result["mode"] != args.mode:
@@ -75,17 +75,26 @@ def main() -> int:
             raise ValueError("The collection coverage differs from this client.")
         facts = {key: result[key] for key in ("usage", "data", "production_resources")}
         for key, allowed in (
-            ("usage", {"unknown", "in_use"}),
+            ("usage", {"unknown", "in_use", "unused"}),
             ("data", {"unknown"}),
             ("production_resources", {"unknown", "shared"}),
         ):
             if facts[key] not in allowed:
                 raise ValueError("Invalid fact response.")
+        usage = result.get("odoo_usage", {})
+        if not isinstance(usage, dict):
+            raise ValueError("Invalid Odoo usage evidence.")
+        usage_facts = {key: usage.get(key) for key in ("recent_signins", "authenticated_sessions")}
+        if any(value is not None and type(value) is not bool for value in usage_facts.values()):
+            raise ValueError("Invalid Odoo usage evidence.")
+        if facts["usage"] == "unused" and any(value is not False for value in usage_facts.values()):
+            raise ValueError("Unused requires complete Odoo usage evidence.")
         print(
             json.dumps(
                 {
                     "mode": args.mode,
                     "facts": facts,
+                    "odoo_usage": usage_facts,
                     "source_coverage": coverage,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
                 }
