@@ -12,7 +12,7 @@ from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolic
 class MergeTrainReadyHandoff(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: Literal["ready", "missing", "waiting", "stale", "unreadable"]
+    status: Literal["ready", "missing", "waiting", "stale", "unreadable", "edited"]
     head_sha: str = ""
     actor_id: int | None = None
     actor_role: str = "unknown"
@@ -76,6 +76,8 @@ def ready_handoff_refusal(
 ) -> str:
     if handoff is None or handoff.status == "missing":
         return "missing trusted current-head Ready handoff"
+    if handoff.status == "edited":
+        return "trusted comment was edited; post a fresh checked gh-pr.py ready handoff"
     if handoff.status == "unreadable":
         return "Ready handoff evidence is unreadable"
     if handoff.status == "waiting":

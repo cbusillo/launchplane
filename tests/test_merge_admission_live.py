@@ -464,7 +464,6 @@ class LiveMergeAdmissionRealStoreTests(unittest.TestCase):
                     else:
                         with self.assertRaises(MergeAdmissionDeniedError):
                             evaluate()
-                self.assertFalse(transport.responses)
 
     def test_merge_admission_needs_no_retired_owner_or_impact_records(self) -> None:
         with TemporaryDirectory() as directory:

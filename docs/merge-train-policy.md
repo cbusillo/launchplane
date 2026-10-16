@@ -475,10 +475,14 @@ ancestry and unchanged source patches using the same proof as dependency
 refreshes. Unrecorded pushes or a changed source patch need a fresh handoff.
 Checks on the refreshed current head must still pass before admission.
 
-The same carry applies to completed stack collapses: the current policy binding,
-latest persisted collapse progress and exact root merge parents must prove each
-edge back to the handed-off head. Blocked, stale or incomplete collapse plans
-cannot carry readiness. Current source checks and Client gates still apply.
+The same carry applies to active stack collapses, including intermediate parents:
+the current policy binding, latest persisted progress and exact merge parents
+must prove each edge back to the handed-off head. The next planned merge can
+also carry when the executor's provider recovery proof confirms it succeeded
+before progress was saved. Blocked, retired or policy-stale plans cannot carry
+readiness. Retired ordinary-agent job records are excluded. Current source
+checks and Client gates still apply. Edited-comment diagnostics name the fresh
+checked handoff needed to resume.
 
 The handoff author must satisfy the existing enqueue policy: an allowed
 `repo_owner` or `repo_admin` role, or a numeric trusted-automation id. An App using a person's token

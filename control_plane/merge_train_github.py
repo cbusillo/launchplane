@@ -3385,7 +3385,7 @@ class GitHubMergeTrainSnapshotReader:
                     handoff = (
                         timestamp,
                         comment_id,
-                        "unreadable" if edited else kind or "unreadable",
+                        "edited" if edited else kind or "unreadable",
                         handoff_head(body),
                         actor_id,
                         role,
@@ -3421,6 +3421,8 @@ class GitHubMergeTrainSnapshotReader:
         return MergeTrainReadyHandoff(
             status="waiting"
             if latest_kind == "waiting"
+            else "edited"
+            if latest_kind == "edited"
             else "unreadable"
             if latest_kind == "unreadable"
             else "ready"
@@ -3449,7 +3451,9 @@ class GitHubMergeTrainSnapshotReader:
             records = store.list_merge_train_branch_refresh_records(
                 repository=repository_path, pull_request_number=number
             )
-            stack_edges = self._handoff_stack_edges(repository_path, number, base_branch)
+            stack_edges = self._handoff_stack_edges(repository_path, number, head_sha)
+        except MergeTrainGitHubError:
+            raise
         except Exception as error:
             raise ValueError("Ready handoff refresh records are unreadable.") from error
         current = head_sha
@@ -3520,7 +3524,12 @@ class GitHubMergeTrainSnapshotReader:
             "Comment editor evidence",
         )
         if payload.get("errors"):
-            return False
+            raise _github_graphql_error(
+                payload["errors"],
+                quota_timing=payload.quota_timing
+                if isinstance(payload, _GitHubQuotaResponse)
+                else (None, None, None),
+            )
         node = _json_object(
             _json_object(payload.get("data"), "Comment editor data").get("node"),
             "Comment editor node",
@@ -3538,7 +3547,7 @@ class GitHubMergeTrainSnapshotReader:
         )
 
     def _handoff_stack_edges(
-        self, repository_path: str, number: int, base_branch: str
+        self, repository_path: str, number: int, head_sha: str
     ) -> dict[str, tuple[str, str]]:
         from control_plane.contracts.merge_train_stack_collapse import (
             MergeTrainStackCollapsePlanRecord,
@@ -3557,6 +3566,7 @@ class GitHubMergeTrainSnapshotReader:
         )
         if not callable(reader) or self._repository_policy is None:
             return {}
+        base_branch = self._repository_policy.base_branch
         records = cast(
             tuple[MergeTrainStackCollapsePlanRecord, ...],
             reader(repository=repository_path, base_branch=base_branch),
@@ -3587,8 +3597,8 @@ class GitHubMergeTrainSnapshotReader:
             if (
                 plan.repository.casefold() != repository_path.casefold()
                 or plan.base_branch != base_branch
-                or plan.root_pull_request_number != number
-                or plan.status not in {"waiting_for_root_checks", "ready_for_train"}
+                or plan.status
+                not in {"planned", "collapsing", "waiting_for_root_checks", "ready_for_train"}
                 or plan.policy_key != target.policy_key
                 or not merge_train_policy_bindings_match(
                     record_store=self._branch_refresh_store,
@@ -3596,18 +3606,43 @@ class GitHubMergeTrainSnapshotReader:
                     recorded_sha256=plan.policy_sha256,
                     current_sha256=current.policy_sha256,
                 )
-                or not all(m.status == "mutated" and m.merge_commit_sha for m in plan.mutations)
             ):
                 continue
+            current_heads = {entry.pull_request_number: entry.head_sha for entry in plan.entries}
             for mutation in plan.mutations:
-                if mutation.parent_pull_request_number == number:
+                child_head = current_heads[mutation.child_pull_request_number]
+                parent_head = current_heads[mutation.parent_pull_request_number]
+                if mutation.status == "mutated" and mutation.merge_commit_sha:
+                    merge_sha = mutation.merge_commit_sha
                     edge = (mutation.expected_parent_head_sha, mutation.child_head_sha)
-                    if (
-                        mutation.merge_commit_sha in edges
-                        and edges[mutation.merge_commit_sha] != edge
-                    ):
-                        return {}
-                    edges[mutation.merge_commit_sha] = edge
+                    current_heads[mutation.parent_pull_request_number] = merge_sha
+                    if mutation.parent_pull_request_number != number:
+                        continue
+                else:
+                    # Only the next planned effect can have succeeded without
+                    # its progress write. Reuse the executor's read-only recovery
+                    # proof, then bind it to this PR snapshot and exact parents.
+                    if mutation.parent_pull_request_number != number:
+                        break
+                    merge_sha = GitHubMergeTrainClient(
+                        transport=self.transport
+                    ).find_stack_child_merge_commit(
+                        repository=repository_path,
+                        child_head_sha=child_head,
+                        expected_parent_head_sha=parent_head,
+                        parent_head_ref=mutation.parent_head_ref,
+                        collapse_id=plan.collapse_id,
+                        child_pull_request_number=mutation.child_pull_request_number,
+                        parent_pull_request_number=mutation.parent_pull_request_number,
+                    )
+                    if not merge_sha or merge_sha != head_sha:
+                        break
+                    edge = (parent_head, child_head)
+                if merge_sha in edges and edges[merge_sha] != edge:
+                    return {}
+                edges[merge_sha] = edge
+                if mutation.status != "mutated":
+                    break
         return edges
 
     def _safe_dependency_update_class(
