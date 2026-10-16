@@ -12,7 +12,7 @@ version is not proof of those facts.
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
 A current staff-testing hold always protects the lane. Without a hold,
-automated UNKNOWN or historical positive usage cannot block repair of a
+automated UNKNOWN or positive usage (including recent login/session reports) cannot block repair of a
 verified-down non-production lane. The usage observation stays UNKNOWN; this
 is repair eligibility, not an assertion that nobody ever used the copy.
 Serving or unverified lanes retain their existing usage protections.
@@ -44,7 +44,7 @@ replacement target setup, held-operation supersession and rehearsal admission.
 The Odoo daily drill uses the same usage decision before queueing and worker
 activation. Its down-lane read still runs the original container, storage,
 network, credential and copy-witness inspections, including protection of an
-already-opened replacement copy; it omits only the login-history requirement.
+already-opened replacement copy; it skips login-history collection.
 UNKNOWN is preserved in that scoped receipt, which remains usable only by
 the same continuously leased attempt. Reclaim needs new admission.
 Connection-isolation and environment-staging guards also use the shared usage

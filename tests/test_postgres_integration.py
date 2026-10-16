@@ -10822,8 +10822,19 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 "test_down_lane_queues_without_login_history_and_keeps_resource_qualification"
             )
             try:
-                drill.seed(url)
+                drill.seed(
+                    make_url(url)
+                    .update_query_dict({"options": "-c statement_timeout=1000"})
+                    .render_as_string(hide_password=False)
+                )
+                database_errors: list[str] = []
+                event.listen(
+                    drill.store._engine,
+                    "handle_error",
+                    lambda error: database_errors.append(type(error.original_exception).__name__),
+                )
                 drill.test_down_lane_queues_without_login_history_and_keeps_resource_qualification()
+                self.assertFalse(database_errors, database_errors)
             finally:
                 drill.doCleanups()
         for scenario in (

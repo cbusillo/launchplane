@@ -319,9 +319,12 @@ class TestingDrillTests(TestingDrillScenario):
             self.context,
             datetime.fromtimestamp(self.now, timezone.utc),
         )
+        record_safety(self.store, self.profile.product, self.context, "testing", usage="unknown")
         self.signins.return_value = None
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "queued")
+        self.activate()
+        # Re-entering activation uses the continuously leased checkpoint path.
         self.activate()
         operation = self.operation()
         receipt = self.store.read_idempotency_record(

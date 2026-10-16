@@ -23968,7 +23968,11 @@ def create_launchplane_fastapi_app(
                     odoo_usage=odoo_usage,
                 )
                 resource_facts: dict[str, str] | None = None
-                if profile.driver_id == "odoo" and observation.instance == "testing":
+                if (
+                    profile.driver_id == "odoo"
+                    and observation.instance == "testing"
+                    and facts.production_resources != "shared"
+                ):
                     try:
                         resource_facts = await run_in_threadpool(
                             collect_down_testing_resource_facts,
