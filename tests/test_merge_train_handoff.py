@@ -1,6 +1,8 @@
 from copy import deepcopy
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from tempfile import TemporaryDirectory
+from pathlib import Path
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -10,6 +12,7 @@ from control_plane.merge_train import (
     MergeTrainPullRequestSnapshot,
     build_merge_train_dry_run_result,
     merge_train_snapshot_of,
+    discover_merge_train_stack,
 )
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate
 from control_plane.contracts.merge_train_branch_refresh_record import (
@@ -28,6 +31,14 @@ from control_plane.merge_train_github import (
 from control_plane.merge_train_handoff import MergeTrainReadyHandoff, handoff_head
 from control_plane.merge_train_release_hold import MergeTrainReleaseHold
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from control_plane.contracts.merge_train_stack_collapse import (
+    build_merge_train_stack_collapse_plan,
+    build_merge_train_stack_collapse_plan_record,
+    execute_merge_train_stack_collapse_plan,
+)
+from control_plane.storage.filesystem import FilesystemRecordStore
+from tests.test_merge_train_stack_collapse import _RecordingStackCollapseBranchClient
 from tests.test_merge_train import _pull_request
 from tests.test_merge_train_github import (
     _check_run,
@@ -220,7 +231,12 @@ class GitHubHandoffTests(unittest.TestCase):
             handoff = reader._read_ready_handoff(
                 repository_path=REPOSITORY, number=1, head_sha=HEAD
             )
-        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+        self.assertTrue(
+            all(
+                request.method == "GET" or request.path == "/graphql"
+                for request in transport.requests
+            )
+        )
         return handoff
 
     def test_latest_trusted_handoff_cancels_ready_and_edits_are_unproven(self) -> None:
@@ -236,6 +252,45 @@ class GitHubHandoffTests(unittest.TestCase):
                 self.assertEqual(self._read((comments,)).status, "unreadable")
                 comments[1]["created_at"] = comments[1]["updated_at"] = "2026-10-16T09:00:00Z"
                 self.assertEqual(self._read((comments,)).status, "ready")
+
+    def test_erased_cancellation_is_unproven_but_bound_managed_updates_do_not_cancel(self) -> None:
+        edited = _comment(
+            "Changed text", id=2, node_id="comment-node", updated_at="2026-10-16T11:00:00Z"
+        )
+        self.assertEqual(self._read(([_comment(), edited],)).status, "unreadable")
+        policy = self.policy.model_copy(
+            update={
+                "enqueue": self.policy.enqueue.model_copy(
+                    update={"trusted_automation_github_user_ids": (42,)}
+                )
+            }
+        )
+        for editor_id, expected in ((42, "ready"), (99, "unreadable")):
+            transport = RecordingMergeTrainGitHubTransport(
+                responses=(
+                    [
+                        _comment(user={"id": 20, "login": "example"}),
+                        {**edited, "user": {"id": 20, "login": "example"}},
+                    ],
+                    {
+                        "data": {
+                            "node": {
+                                "id": edited["node_id"],
+                                "body": edited["body"],
+                                "updatedAt": edited["updated_at"],
+                                "editor": {"__typename": "Bot", "databaseId": editor_id},
+                            }
+                        }
+                    },
+                )
+            )
+            reader = GitHubMergeTrainSnapshotReader(transport=transport, repository_policy=policy)
+            self.assertEqual(
+                reader._read_ready_handoff(
+                    repository_path=REPOSITORY, number=1, head_sha=HEAD
+                ).status,
+                expected,
+            )
 
     def test_complete_pagination_and_unavailable_or_malformed_evidence_fail_closed(self) -> None:
         ready_page = [_comment(id=index) for index in range(1, 101)]
@@ -414,6 +469,111 @@ class GitHubHandoffTests(unittest.TestCase):
                 self.assertEqual(handoff.head_sha, refreshed)
                 self.assertFalse(transport.responses)
 
+    def test_collapsed_root_handoff_requires_current_recorded_plan_and_exact_parents(self) -> None:
+        policy_record = build_test_merge_train_policy_record(repository=REPOSITORY)
+        root = _ready().model_copy(update={"head_ref": "root"})
+        child = _ready(2).model_copy(
+            update={
+                "head_ref": "child",
+                "base_ref": "root",
+                "head_sha": "b" * 40,
+                "ready_handoff": MergeTrainReadyHandoff(
+                    status="ready", head_sha="b" * 40, actor_id=20, actor_role="repo_admin"
+                ),
+            }
+        )
+        discovery = discover_merge_train_stack(
+            policy=policy_record.policy,
+            snapshot=_snapshot(root, child),
+            root_pull_request_number=root.number,
+        )
+        plan = build_merge_train_stack_collapse_plan(
+            discovery_result=discovery,
+            policy_key=self.policy.policy_key,
+            policy_sha256=policy_record.policy_sha256,
+            created_at="2026-10-16T09:00:00Z",
+        )
+        collapsed = execute_merge_train_stack_collapse_plan(
+            plan=plan,
+            branch_client=_RecordingStackCollapseBranchClient(merge_commit_shas=("d" * 40,)),
+            child_readiness_reasons=lambda _: (),
+            updated_at="2026-10-16T09:30:00Z",
+        )
+        for changed, expected in (
+            ("none", "ready"),
+            ("parents", "stale"),
+            ("policy", "stale"),
+            ("blocked", "stale"),
+            ("superseded", "stale"),
+        ):
+            with self.subTest(changed=changed), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                store.write_merge_train_policy_record(policy_record)
+                saved = collapsed.model_copy(
+                    update={"policy_sha256": "wrong"}
+                    if changed == "policy"
+                    else {"status": "blocked"}
+                    if changed == "blocked"
+                    else {}
+                )
+                stored = build_merge_train_stack_collapse_plan_record(
+                    plan=saved, source="test", updated_at=saved.updated_at
+                )
+                store.write_merge_train_stack_collapse_plan_record(
+                    stored.model_copy(update={"status": "superseded"})
+                    if changed == "superseded"
+                    else stored
+                )
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        [_comment(user={"id": 20, "login": "example"})],
+                        {
+                            "sha": "d" * 40,
+                            "parents": [
+                                {"sha": "e" * 40 if changed == "parents" else HEAD},
+                                {"sha": child.head_sha},
+                            ],
+                        },
+                    )
+                )
+                reader = GitHubMergeTrainSnapshotReader(
+                    transport=transport, repository_policy=self.policy, branch_refresh_store=store
+                )
+                self.assertEqual(
+                    reader._read_ready_handoff(
+                        repository_path=REPOSITORY,
+                        number=1,
+                        head_sha="d" * 40,
+                        base_branch="main",
+                        base_sha="c" * 40,
+                    ).status,
+                    expected,
+                )
+
+    def test_refresh_store_failure_is_only_unreadable_handoff_evidence(self) -> None:
+        def unavailable(**_: object) -> tuple[()]:
+            raise OSError("unavailable store")
+
+        reader = GitHubMergeTrainSnapshotReader(
+            transport=RecordingMergeTrainGitHubTransport(
+                responses=([_comment(user={"id": 20, "login": "example"})],)
+            ),
+            repository_policy=self.policy,
+            branch_refresh_store=SimpleNamespace(
+                list_merge_train_branch_refresh_records=unavailable
+            ),
+        )
+        self.assertEqual(
+            reader._read_ready_handoff(
+                repository_path=REPOSITORY,
+                number=1,
+                head_sha="b" * 40,
+                base_branch="main",
+                base_sha="c" * 40,
+            ).status,
+            "unreadable",
+        )
+
     def test_client_single_pr_reader_keeps_policy_for_handoff_stack_children(self) -> None:
         pull = _github_pull_request(
             2, repository=REPOSITORY, head_sha=HEAD, author_association="OWNER"
@@ -439,6 +599,40 @@ class GitHubHandoffTests(unittest.TestCase):
             batch_landing=True,
         )
         self.assertEqual(result.queue_order, (2,))
+        self.assertFalse(transport.responses)
+
+    def test_ignored_enqueue_label_does_not_hide_a_valid_independent_handoff(self) -> None:
+        pull = _github_pull_request(
+            1, repository=REPOSITORY, head_sha=HEAD, author_association="OWNER"
+        )
+        pull["labels"] = [{"name": self.policy.enqueue_label}]
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                pull,
+                [
+                    {
+                        "event": "labeled",
+                        "label": {"name": self.policy.enqueue_label},
+                        "actor": {"id": 99, "login": "outsider", "type": "User"},
+                    }
+                ],
+                {"permission": "write"},
+                [_comment(user={"id": 20, "login": "example"})],
+                _combined_status(),
+                {"check_runs": [_check_run("completed", "success")]},
+                _conversation_rule(),
+                [],
+            )
+        )
+        client = GitHubMergeTrainClient(transport=transport)
+        client.begin_snapshot_pass(policy=self.policy, read_only=False)
+        pr = client.read_pull_request_snapshot(repository=REPOSITORY, pull_request_number=1)
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(repository=REPOSITORY),
+            snapshot=_snapshot(pr),
+            batch_landing=True,
+        )
+        self.assertEqual(result.queue_order, (1,))
         self.assertFalse(transport.responses)
 
     def test_optional_area_read_failure_does_not_hold_a_repo_without_ownership_rules(self) -> None:
@@ -525,7 +719,9 @@ class HandoffControllerTests(unittest.IsolatedAsyncioTestCase):
                 "control_plane.http_app.merge_train_release_hold_reader",
                 return_value=lambda repository: MergeTrainReleaseHold(product="site"),
             ):
-                await _post(app, request, "release_hold")
+                held = await _post(app, request, "release_hold")
+                self.assertEqual(held["blocking_reason"]["code"], "product_release_in_progress")
+                self.assertFalse(store.list_merge_train_batch_landing_plan_records())
             settled = True
             for action in ("build_candidate", "observe_candidate", "plan_landing", "land_batch"):
                 await _post(app, request, action)

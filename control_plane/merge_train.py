@@ -802,7 +802,9 @@ def _build_queue_entry(
         pull_request.actor_id is not None
         and pull_request.actor_id in repository_policy.enqueue.dependency_update_github_user_ids
     )
-    label_refusal = _enqueue_label_refusal(repository_policy, pull_request)
+    label_refusal = enqueue_label_refusal(
+        repository_policy, labels=pull_request.labels, label_actors=pull_request.label_actors
+    )
     handoff_refusal = ready_handoff_refusal(
         repository_policy, pull_request.ready_handoff, pull_request.head_sha
     )
@@ -885,19 +887,19 @@ def _build_queue_entry(
     )
 
 
-def _enqueue_label_refusal(
+def enqueue_label_refusal(
     repository_policy: MergeTrainRepositoryPolicy,
-    pull_request: MergeTrainPullRequestSnapshot,
+    *,
+    labels: tuple[str, ...],
+    label_actors: tuple[MergeTrainLabelActor, ...],
 ) -> str:
     """Return why the enqueue label does not admit the pull request, or ""."""
     enqueue_label = repository_policy.enqueue_label
-    if enqueue_label not in pull_request.labels:
+    if enqueue_label not in labels:
         return f"missing {enqueue_label} label"
     # Pull-request write access includes labels, so the label counts only when
     # the actor who applied it may enqueue, whoever authored the pull request.
-    labeler = next(
-        (actor for actor in pull_request.label_actors if actor.label == enqueue_label), None
-    )
+    labeler = next((actor for actor in label_actors if actor.label == enqueue_label), None)
     if labeler is None or labeler.actor_id is None:
         return f"{enqueue_label} label ignored: could not read who applied it"
     if labeler.on_behalf_via_app:

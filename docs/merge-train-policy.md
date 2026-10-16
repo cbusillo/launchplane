@@ -460,12 +460,25 @@ quoted, fenced, stale or unreadable head evidence cannot admit a PR. The adapter
 reports unavailable or incomplete discussion evidence as unreadable rather than
 guessing a previous handoff is still current.
 
+Edited comments from trusted authors remain unproven even when the handoff
+text has been erased. Unrelated managed-comment updates are ignored only when
+the provider's [comment editor](https://docs.github.com/en/graphql/reference/issues#issuecomment)
+is a configured trusted installation bot and the body, node and edit timestamp
+match the discussion read. The comments API cannot observe deleted handoffs;
+these signals describe the latest visible trusted intent, like the existing
+label controls, rather than an immutable approval journal.
+
 The train's own recorded branch refresh is the exception to requiring a new
 handoff after a push. It carries the source handoff only through a complete
 chain of its persisted refresh records, rechecking exact merge parents, base
 ancestry and unchanged source patches using the same proof as dependency
 refreshes. Unrecorded pushes or a changed source patch need a fresh handoff.
 Checks on the refreshed current head must still pass before admission.
+
+The same carry applies to completed stack collapses: the current policy binding,
+latest persisted collapse progress and exact root merge parents must prove each
+edge back to the handed-off head. Blocked, stale or incomplete collapse plans
+cannot carry readiness. Current source checks and Client gates still apply.
 
 The handoff author must satisfy the existing enqueue policy: an allowed
 `repo_owner` or `repo_admin` role, or a numeric trusted-automation id. An App using a person's token
