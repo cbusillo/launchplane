@@ -67,7 +67,7 @@ export function expireEnvironmentEvidence<T extends ProductEnvironmentSummary | 
     [topology.observed.ingress, ...topology.observed.tls_domains].some(evidence => evidence.trust_state === "stale"));
   return {
     ...environment, provenance,
-    trust_state: provenance.freshness_status === "stale" ? "stale" : environment.trust_state,
+    trust_state: provenance.freshness_status === "stale" ? "stale" : expiredAggregate(environment.trust_state, topology.trust_state === "stale"),
     health_monitoring: {
       ...environment.health_monitoring,
       checks,

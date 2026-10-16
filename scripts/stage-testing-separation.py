@@ -1,4 +1,4 @@
-"""Review testing's staging interlock and stage managed configuration without deploying."""
+"""Review testing holds and staging configuration through the maintained authenticated transport."""
 
 import argparse
 import http.client
@@ -54,6 +54,7 @@ def main() -> int:
     )
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
+    parser.add_argument("--require-rehearsal", action="store_true")
     parser.add_argument("--idempotency-key", default="")
     parser.add_argument("--config")
     parser.add_argument("--env-config")
@@ -66,6 +67,12 @@ def main() -> int:
         parser.error("Receipt read requires the original preparation key.")
     holding = args.mode.startswith(("hold-", "lift-"))
     lifting = args.mode.startswith("lift-")
+    if args.require_rehearsal and (
+        not holding or args.hold_purpose != "staff_testing" or args.activation_plan_sha256
+    ):
+        parser.error(
+            "Rehearsal requires a staff-testing hold mode without an activation interlock."
+        )
     if applying and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
         parser.error("Apply requires saved review evidence and its stable idempotency key.")
     reading = args.mode == "hold-read"
@@ -96,6 +103,7 @@ def main() -> int:
             instance="testing",
             mode="dry-run",
             hold=not lifting,
+            rehearsal=args.require_rehearsal,
             purpose=args.hold_purpose,
             activation_plan_sha256=args.activation_plan_sha256,
             reason=args.reason or "Inspect testing interlock.",
@@ -133,6 +141,7 @@ def main() -> int:
                         "status": "verified",
                         "held": held.hold is not None,
                         "purpose": held.hold.purpose if held.hold else None,
+                        "rehearsal": bool(held.hold and held.hold.rehearsal),
                         "trace_id": transport["public_trace_id"](response["trace_id"]),
                     }
                 )
@@ -170,6 +179,10 @@ def main() -> int:
         if response["status"] != "accepted":
             raise ValueError("Operation was not accepted.")
         result = response["result"]
+        rehearsal_hold = result.get("before" if lifting else "after") if holding else None
+        has_rehearsal = isinstance(rehearsal_hold, dict) and bool(rehearsal_hold.get("rehearsal"))
+        if holding and args.require_rehearsal and not has_rehearsal:
+            raise ValueError("This request did not qualify as a disposable rehearsal hold.")
         if holding and (
             result.get("reconcile_requested")
             is not (
@@ -228,7 +241,14 @@ def main() -> int:
                     "status": "accepted",
                     "mode": args.mode,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
-                    "deployment_requested": False,
+                    **(
+                        {
+                            "reconcile_requested": result["reconcile_requested"],
+                            "rehearsal": has_rehearsal,
+                        }
+                        if holding
+                        else {"deployment_requested": False}
+                    ),
                 }
             )
         )

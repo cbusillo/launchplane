@@ -1020,8 +1020,15 @@ uses; backup targets are global records, so revising one would change another
 product's backup. Referencing a shared target without revising it stays
 allowed. The check runs again inside the locked write against the locked policy
 records, so a concurrent policy change can't slip in between. A `local_operators`
-caller may set a testing hold but not lift one: lifting requests a testing
-reconcile, which can deploy.
+caller may set an ordinary protective testing hold. Lifting an ordinary staff
+hold remains an administrator action because it requests testing reconciliation,
+which can deploy. The authenticated Director agent has the separate bounded
+[disposable rehearsal continuation](operations.md#odoo-instance-override-contracts):
+the service must have marked its original hold as a qualified rehearsal, and
+the original actor, current safety evidence, bindings and unresolved-effect
+checks must still pass. This source permission installs no policy grant and
+does not apply to actual staff use, only-copy data, shared production resources,
+staging/activation holds or unknown outcomes.
 
 What it can reach on a live product: the testing lane's settings and secrets,
 the testing lane's new compose target, and production's backup policy. The

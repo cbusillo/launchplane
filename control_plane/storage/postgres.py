@@ -26901,6 +26901,88 @@ class PostgresRecordStore(HumanSessionStore):
                     "Administrator reconciliation is required; do not retry with a new key."
                 ) from error
 
+    def commit_testing_hold_rehearsal(
+        self,
+        *,
+        product: str,
+        expected_record: DokployTargetRecord,
+        replacement_record: DokployTargetRecord,
+        mutation: DbOnlyMutationRequest,
+    ) -> tuple[str, LaunchplaneIdempotencyRecord]:
+        """Commit the hold, its reconcile request and replay receipt as one DB change."""
+        if (expected_record.context, expected_record.instance) != (
+            replacement_record.context,
+            replacement_record.instance,
+        ) or expected_record.instance != "testing":
+            raise ValueError("A testing hold cannot change its lane.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            status, reservation_row, reservation = self._reserve_db_only_mutation_in_session(
+                session=session,
+                mutation=mutation,
+            )
+            if status != "acquired":
+                return status, reservation
+            assert reservation_row is not None
+            self._lock_product_authority_bundle_write(session)
+            require_bundle_context_owner(
+                ProductAuthorityBundle(
+                    required_context_owner=(product, expected_record.context),
+                    required_product_config_target=(product, expected_record.context, "testing"),
+                ),
+                (
+                    self._read_product_profile_payload(row.payload)
+                    for row in session.scalars(select(LaunchplaneProductProfileRow)).all()
+                ),
+            )
+            statement = select(LaunchplaneDokployTargetRow).where(
+                LaunchplaneDokployTargetRow.context == expected_record.context,
+                LaunchplaneDokployTargetRow.instance == "testing",
+            )
+            if self.database_dialect_name == "postgresql":
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if (
+                row is None
+                or self._read_payload(
+                    model_type=DokployTargetRecord, payload=_payload_from_row(row)
+                )
+                != expected_record
+            ):
+                raise DokployTargetRecordChanged("Testing hold changed before its atomic commit.")
+            row.updated_at = replacement_record.updated_at
+            row.payload = self._payload_dict(replacement_record)
+            if replacement_record.policies.staff_testing_hold is None:
+                target = ProductReconcileTarget(product=product, target_kind="testing")
+                self._lock_landing_authority(
+                    session, f"launchplane:product-reconcile:{target.target_key}"
+                )
+                self._fold_product_reconcile_request(
+                    session,
+                    target=target,
+                    requested_at=self._database_mutation_timestamp(session),
+                    delivery_id="",
+                )
+            session.flush()
+            session.refresh(row)
+            if (
+                self._read_payload(model_type=DokployTargetRecord, payload=_payload_from_row(row))
+                != replacement_record
+            ):
+                raise DokployTargetRecordChanged(
+                    "Testing hold readback did not match its atomic write."
+                )
+            completion = complete_launchplane_mutation_reservation(
+                reservation,
+                response_status_code=mutation.response_status_code,
+                response_trace_id=mutation.response_trace_id,
+                completed_at=self._database_mutation_timestamp(session),
+                response_payload=mutation.response_payload,
+            )
+            self._sync_idempotency_row(reservation_row, completion)
+            session.commit()
+            return "written", completion
+
     def compare_and_write_dokploy_target_record(
         self,
         *,

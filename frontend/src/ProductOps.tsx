@@ -324,7 +324,7 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
           </span>
           <EvidenceBadge
             state={product.trust_state}
-            timestamp={evidenceTimestamp(product.provenance)}
+            qualifier={product.environments.length ? "Lane evidence" : "Profile"}
           />
         </span>
         <DirectoryLane environment={testing} lane="testing" />
@@ -334,7 +334,8 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
           <strong>
             {previewInventoryPresentation(product.preview).headline}
           </strong>
-          <EvidenceBadge compact state={product.preview.trust_state} />
+          {product.preview.enabled && product.preview.trust_state !== "verified" && product.preview.trust_state !== "recorded" ? <small>{product.preview.active_count} recorded; live inventory unverified</small> : null}
+          {product.preview.enabled ? <EvidenceBadge compact state={product.preview.trust_state} qualifier="Inventory" /> : <small>Not applicable</small>}
         </span>
         <span className="directory-warnings" data-has-warnings={warnings.length > 0}>
           {warnings.length ? <AlertTriangle size={15} aria-hidden="true" /> : null}
@@ -369,7 +370,7 @@ function DirectoryLane({
         {tone === "danger" ? "Issue · " : tone === "warning" ? "Warning · " : ""}
         {headline}
       </strong>
-      <EvidenceBadge compact state={environment?.trust_state ?? "missing"} />
+      <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
     </span>
   );
 }
@@ -435,15 +436,15 @@ function ProductWorkspace({
               {product.display_name}
             </h1>
             <EvidenceBadge
-              qualifier="All evidence"
+              qualifier={product.environments.length ? "Lane evidence" : "Profile"}
               state={product.trust_state}
-              timestamp={evidenceTimestamp(product.provenance)}
             />
           </div>
           <p>
             Stable environments, preview inventory, operational warnings, and the
             next safe inspection for this product.
           </p>
+          <p>Lane evidence includes route records and runtime observations. Operational health is shown separately.{evidenceTimestamp(product.provenance) ? ` Profile updated ${formatEvidenceTime(product.provenance)}.` : ""}</p>
           <span className="workspace-repository">
             Owning repository · {product.repository || "not recorded"}
           </span>
@@ -498,7 +499,9 @@ function ProductWorkspace({
         <SignalTile
           label="Previews"
           state={product.preview.trust_state}
+          tone={product.preview.enabled ? product.preview.trust_state : "unsupported"}
           value={previewInventoryPresentation(product.preview).headline}
+          detail={product.preview.enabled ? undefined : "Not applicable"}
         />
         <SignalTile
           label="Warnings"
@@ -705,9 +708,8 @@ function EnvironmentRow({
         </div>
         <EvidenceBadge
           compact
-          qualifier="All evidence"
-          state={environment.trust_state}
-          timestamp={evidenceTimestamp(environment.provenance)}
+          qualifier="Topology evidence"
+          state={environment.topology.trust_state}
         />
       </div>
       <dl className="environment-facts">
@@ -720,27 +722,27 @@ function EnvironmentRow({
                 <ExternalLink size={13} aria-hidden="true" />
               </a>
             ) : (
-              domain
+              environment.topology.desired.public_website === "none" ? "Not applicable" : domain
             )}
           </dd>
           <small>{ingressHeadline(environment)}</small>
         </div>
         <div>
           <dt>TLS evidence</dt>
-          <dd>{tls ? humanize(tls.status) : "Not recorded"}</dd>
+          <dd>{tls ? humanize(tls.status) : environment.topology.desired.public_website === "none" ? "Not applicable" : "Not recorded"}</dd>
           <small>
-            {tls?.summary || tls?.likely_failure_cause || "No TLS observation returned"}
+            {tls?.summary || tls?.likely_failure_cause || (environment.topology.desired.public_website === "none" ? "This product declares no public website." : "No TLS observation returned")}
           </small>
         </div>
         <div>
           <dt>Topology warnings</dt>
-          <dd>{topologyWarnings.length}</dd>
+          <dd>{topologyWarnings.filter(warning => warning.severity !== "info").length}</dd>
           <small>
             {topologyWarnings.some((warning) => warning.severity === "error")
               ? "Action required"
-              : topologyWarnings.length
+              : topologyWarnings.some(warning => warning.severity !== "info")
                 ? "Review recommended"
-                : "None recorded"}
+                : topologyWarnings.length ? "Information only" : "None recorded"}
           </small>
         </div>
         <div>
@@ -774,10 +776,11 @@ function PreviewSummary({ product }: { product: ProductSiteOverview }) {
         <h2>{headline}</h2>
         <p>{detail}</p>
       </div>
-      <EvidenceBadge
+      {preview.enabled ? <EvidenceBadge
         state={preview.trust_state}
         timestamp={evidenceTimestamp(preview.provenance)}
-      />
+        qualifier="Inventory"
+      /> : <span>Not applicable</span>}
     </section>
   );
 }
@@ -808,7 +811,7 @@ function WarningSummary({
       </div>
       {warnings.length ? (
         <ul className="warning-list">
-          {warnings.slice(0, 6).map((warning) => (
+          {warnings.map((warning) => (
             <li data-severity={warning.severity} key={warning.id}>
               {warning.severity === "error" ? (
                 <AlertCircle size={16} aria-hidden="true" />
@@ -1117,6 +1120,7 @@ function warningsForProduct(product: ProductSiteOverview): WarningItem[] {
   }));
   for (const environment of product.environments) {
     for (const [index, detail] of environment.warnings.entries()) {
+      if (environment.topology.warnings.some(warning => warning.detail === detail)) continue;
       warningItems.push({
         id: `${environment.environment}:summary:${index}:${detail}`,
         scope: environmentLabel(environment.environment),
@@ -1145,7 +1149,7 @@ function topologyWarningItem(
 ): WarningItem {
   return {
     id: `${environment.environment}:topology:${warning.code}:${warning.domain_name}`,
-    scope: `${environmentLabel(environment.environment)} · ${humanize(warning.scope)}`,
+    scope: `${environmentLabel(environment.environment)} · ${humanize(warning.scope)}${warning.domain_name ? ` · ${warning.domain_name}` : ""}`,
     detail: warning.detail,
     severity: warning.severity,
   };
@@ -1214,6 +1218,13 @@ function compareEnvironments(
 }
 
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
+  if (environment.topology.desired.public_website === "none") {
+    if (environment.public_ingress.observed_at) {
+      return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
+    }
+    const tone = environmentOperationalTone(environment);
+    return tone === "verified" ? "Private checks passed" : tone === "danger" ? "Monitoring needs attention" : "Verification incomplete";
+  }
   const summary = environment.public_ingress.summary.trim();
   if (summary) {
     return summary;

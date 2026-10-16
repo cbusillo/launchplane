@@ -95,7 +95,10 @@ from control_plane.dokploy_target_setup_http import (
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_public_hosts
-from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecordChanged,
+    TestingHoldRehearsal,
+)
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane import product_health_monitoring as control_plane_product_health_monitoring
@@ -8955,10 +8958,18 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Testing hold request failed validation.",
             ) from error
+        director_staff_hold = (
+            director_agent_identity(identity)
+            and hold_request.rehearsal
+            and hold_request.purpose == "staff_testing"
+            and not hold_request.activation_plan_sha256
+        )
         _authorize_lane_product_config(
             identity=identity,
             action=(
-                "product_config.apply" if hold_request.mode == "apply" else "product_config.plan"
+                "product_config.apply"
+                if hold_request.mode == "apply" and not director_staff_hold
+                else "product_config.plan"
             ),
             product=hold_request.product,
             context=hold_request.context,
@@ -9019,6 +9030,7 @@ def create_launchplane_fastapi_app(
             and not hold_request.hold
             and (hold_request.mode == "apply" or not director_agent_identity(identity))
             and not activated_interlock
+            and not director_staff_hold
         ):
             # Lifting a hold requests a testing reconcile, which can deploy.
             raise _launchplane_http_error(
@@ -9036,6 +9048,30 @@ def create_launchplane_fastapi_app(
         )
         typed_store = cast(control_plane_testing_lane_hold.TestingHoldStore, record_store)
         actor = launchplane_identity_actor(identity)
+        from control_plane.testing_hold_rehearsal import (
+            qualify_testing_hold_rehearsal,
+            prepare_testing_hold_rehearsal_apply,
+        )
+
+        def rehearsal_provenance(*, planning: bool = False) -> TestingHoldRehearsal | None:
+            if not director_staff_hold:
+                return None
+            try:
+                if not isinstance(record_store, PostgresRecordStore):
+                    raise DisposableLaneSafetyUnknown("Testing rehearsal requires service records.")
+                return qualify_testing_hold_rehearsal(record_store, hold_request, actor)
+            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                # Inert plans stay available. Explicit rehearsal apply never
+                # silently becomes an ordinary protective hold.
+                if planning:
+                    return None
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="disposable_lane_safety_unknown",
+                    message="The staff-hold rehearsal is not currently qualified for this caller.",
+                ) from error
+
         records = {
             "product_profile": hold_request.product,
             "context": hold_request.context,
@@ -9045,7 +9081,10 @@ def create_launchplane_fastapi_app(
             await verify_activation_interlock()
             try:
                 plan, _replacement = control_plane_testing_lane_hold.build_testing_hold_plan(
-                    record_store=typed_store, request=hold_request, actor=actor
+                    record_store=typed_store,
+                    request=hold_request,
+                    actor=actor,
+                    rehearsal=rehearsal_provenance(planning=True),
                 )
             except control_plane_testing_lane_hold.TestingHoldRefusal as error:
                 raise _launchplane_http_error(
@@ -9082,10 +9121,13 @@ def create_launchplane_fastapi_app(
         if replay_response is not None:
             return replay_response
         await verify_activation_interlock()
+        rehearsal = rehearsal_provenance()
+        qualified_staff_hold = director_staff_hold and rehearsal is not None
         try:
             with (
                 record_store.serialize_disposable_testing_resources()
-                if activated_interlock and isinstance(record_store, PostgresRecordStore)
+                if (activated_interlock or qualified_staff_hold)
+                and isinstance(record_store, PostgresRecordStore)
                 else nullcontext()
             ):
                 if activated_interlock:
@@ -9095,6 +9137,54 @@ def create_launchplane_fastapi_app(
                         actor,
                         resolved_control_plane_root,
                         inspect_provider=False,
+                    )
+                if qualified_staff_hold:
+                    assert isinstance(record_store, PostgresRecordStore)
+                    rehearsal = rehearsal_provenance()
+                    if rehearsal is None:
+                        raise control_plane_testing_lane_hold.TestingHoldStale(
+                            "Rehearsal qualification changed before apply."
+                        )
+                    applied_plan, expected, replacement = prepare_testing_hold_rehearsal_apply(
+                        record_store,
+                        hold_request,
+                        actor,
+                        rehearsal,
+                    )
+                    response = accepted_evidence_response(
+                        trace_id=trace_id,
+                        records=records,
+                        result=applied_plan.model_dump(mode="json"),
+                    )
+                    write_status, receipt = record_store.commit_testing_hold_rehearsal(
+                        product=hold_request.product,
+                        expected_record=expected,
+                        replacement_record=replacement,
+                        mutation=DbOnlyMutationRequest(
+                            scope=idempotency_scope(identity),
+                            route_path=route_path,
+                            idempotency_key=normalized_idempotency_key,
+                            request_fingerprint=payload_fingerprint,
+                            lease_owner=trace_id,
+                            response_status_code=202,
+                            response_trace_id=trace_id,
+                            response_payload=response.model_dump(mode="json", exclude_none=True),
+                        ),
+                    )
+                    if write_status == "written":
+                        return response
+                    if write_status == "replayed":
+                        return replay_idempotent_response(
+                            trace_id=trace_id, stored_record=receipt, route_path=route_path
+                        )
+                    raise _launchplane_http_error(
+                        status_code=409,
+                        trace_id=trace_id,
+                        code={
+                            "idempotency_conflict": "idempotency_key_reused",
+                            "reconciliation_required": "mutation_reconciliation_required",
+                        }.get(write_status, "mutation_in_progress"),
+                        message="The original testing hold mutation must be retained and reconciled.",
                     )
                 applied_plan = control_plane_testing_lane_hold.apply_testing_hold_plan(
                     record_store=typed_store,
@@ -9112,6 +9202,13 @@ def create_launchplane_fastapi_app(
                     ),
                     activation_verified=activated_interlock,
                 )
+        except DokployTargetRecordChanged as error:
+            raise _launchplane_http_error(
+                status_code=409,
+                trace_id=trace_id,
+                code="stale",
+                message="Testing hold changed before its atomic write.",
+            ) from error
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(
                 status_code=409,
