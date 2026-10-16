@@ -1,3 +1,6 @@
+from control_plane.contracts.preview_inventory_scan_record import (
+    PREVIEW_INVENTORY_COLLECTION_SOURCE,
+)
 from datetime import datetime, timezone
 from types import SimpleNamespace
 import unittest
@@ -201,7 +204,7 @@ class PreviewInventoryEvidenceTests(unittest.TestCase):
                     "context": "preview",
                     "product": "example-site",
                     "repository": "example/site",
-                    "source": "service-preview-inventory",
+                    "source": PREVIEW_INVENTORY_COLLECTION_SOURCE,
                     "scanned_at": datetime.now(timezone.utc).isoformat(),
                     "preview_count": 0,
                     "status": outcome,

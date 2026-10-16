@@ -4195,7 +4195,9 @@ inventory. Provider reads produce append-only scan evidence only. Product reads 
 100 recent scans per context; no matching scoped evidence in that window is
 unknown, never empty. No desired-state
 discovery, lifecycle plan, cleanup apply, deployment or record destruction runs in
-this job. Unsupported drivers and read/collection failures remain explicit scans;
+this job. Explicit lifecycle planning excludes these scans in storage before
+limiting its result, so background history cannot crowd out its own evidence.
+Unsupported drivers and read/collection failures remain explicit scans;
 a failure is retried in the next slot rather than every poll. Shutdown stops between
 products; an interrupted slot remains eligible after restart.
 

@@ -2835,6 +2835,7 @@ class _PreviewLifecyclePlanApplyStore(Protocol):
         context_name: str | None = None,
         limit: int | None = 50,
         offset: int = 0,
+        exclude_source: str = "",
     ) -> tuple[PreviewInventoryScanRecord, ...]: ...
 
     def write_preview_lifecycle_plan_record(
@@ -23392,15 +23393,12 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        # Preserve the explicit lifecycle inventory boundary; report-only
-        # background collection cannot replace a caller's lifecycle scan.
-        inventory_scans = tuple(
-            scan
-            for scan in plan_store.list_preview_inventory_scan_records(
-                context_name=plan_request.context,
-                limit=100,
-            )
-            if scan.source != PREVIEW_INVENTORY_COLLECTION_SOURCE
+        # Filter before limiting: background scans must not crowd lifecycle
+        # evidence out of its read window between daily sweeps.
+        inventory_scans = plan_store.list_preview_inventory_scan_records(
+            context_name=plan_request.context,
+            limit=1,
+            exclude_source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
         )
         plan_record = build_preview_lifecycle_plan(
             product=plan_request.product,

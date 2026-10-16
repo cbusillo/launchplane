@@ -150,3 +150,78 @@ class PreviewInventoryCollectionTests(unittest.TestCase):
                 control_plane_root=self.root, record_store=self.store, should_stop=lambda: True
             )
         self.assertEqual(self.store.list_preview_inventory_scan_records(), ())
+
+    def test_caller_source_cannot_forge_persisted_product_scope(self) -> None:
+        from control_plane.contracts.preview_inventory_scan_record import (
+            PREVIEW_INVENTORY_COLLECTION_SOURCE,
+        )
+        from control_plane.preview_inventory_evidence import read_preview_inventory_evidence
+
+        scoped = PreviewInventoryScanRecord(
+            scan_id="another-product-scan",
+            context=self.profile.preview.context,
+            product="other-site",
+            repository="example/other-site",
+            scanned_at=self.profile.updated_at,
+            source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
+            status="pass",
+            preview_count=0,
+        )
+        supplied_source = scoped.model_dump()["source"]
+        caller_scan = PreviewInventoryScanRecord(
+            scan_id="caller-inventory",
+            context=self.profile.preview.context,
+            scanned_at=self.profile.updated_at,
+            source=str(supplied_source),
+            status="pass",
+            preview_count=0,
+        )
+        self.assertEqual(caller_scan.product, "")
+        self.store.write_preview_inventory_scan_record(caller_scan)
+        restored = self.store.list_preview_inventory_scan_records()[0]
+        self.assertEqual(restored.product, "")
+        self.assertEqual(
+            read_preview_inventory_evidence(
+                record_store=self.store,
+                context=self.profile.preview.context,
+                product=scoped.product,
+                repository=scoped.repository,
+            ).status,
+            "missing",
+        )
+
+    def test_lifecycle_query_filters_background_rows_before_limiting(self) -> None:
+        from datetime import datetime, timedelta, timezone
+        from control_plane.contracts.preview_inventory_scan_record import (
+            PREVIEW_INVENTORY_COLLECTION_SOURCE,
+        )
+        from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_SCAN_READ_LIMIT
+
+        now = datetime.now(timezone.utc)
+        lifecycle = PreviewInventoryScanRecord(
+            scan_id="lifecycle",
+            context=self.profile.preview.context,
+            scanned_at=now.isoformat(),
+            source="explicit-lifecycle",
+            status="pass",
+            preview_count=0,
+        )
+        self.store.write_preview_inventory_scan_record(lifecycle)
+        for index in range(PREVIEW_INVENTORY_SCAN_READ_LIMIT + 1):
+            self.store.write_preview_inventory_scan_record(
+                lifecycle.model_copy(
+                    update={
+                        "scan_id": f"background-{index}",
+                        "source": PREVIEW_INVENTORY_COLLECTION_SOURCE,
+                        "product": self.profile.product,
+                        "repository": self.profile.repository,
+                        "scanned_at": (now + timedelta(seconds=index + 1)).isoformat(),
+                    }
+                )
+            )
+        selected = self.store.list_preview_inventory_scan_records(
+            context_name=self.profile.preview.context,
+            limit=1,
+            exclude_source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
+        )
+        self.assertEqual(selected, (lifecycle,))

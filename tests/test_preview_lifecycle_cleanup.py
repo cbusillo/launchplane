@@ -1,3 +1,6 @@
+from control_plane.contracts.preview_inventory_scan_record import (
+    PREVIEW_INVENTORY_COLLECTION_SOURCE,
+)
 import unittest
 
 import click
@@ -368,7 +371,7 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
                         product=profile.product,
                         repository=profile.repository,
                         scanned_at=datetime.now(timezone.utc).isoformat(),
-                        source="service-preview-inventory",
+                        source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
                         status="fail",
                         preview_count=0,
                     )

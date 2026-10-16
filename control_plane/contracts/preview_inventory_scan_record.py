@@ -14,6 +14,7 @@ from pydantic import (
 PreviewInventoryScanStatus = Literal["pass", "fail", "unsupported", "unavailable"]
 PREVIEW_INVENTORY_COLLECTION_SOURCE = "service-preview-inventory"
 _SCOPED_SOURCE_PREFIX = "preview-inventory-scope-v1:"
+_SCOPED_READER_MESSAGE = "Scoped preview inventory; use a current reader for details."
 
 
 class _ScanSource(BaseModel):
@@ -23,6 +24,7 @@ class _ScanSource(BaseModel):
     repository: str
     truncated: bool
     status: PreviewInventoryScanStatus
+    error_message: str
 
 
 class PreviewInventoryScanRecord(BaseModel):
@@ -48,6 +50,9 @@ class PreviewInventoryScanRecord(BaseModel):
             isinstance(value, dict)
             and isinstance(source := value.get("source"), str)
             and source.startswith(_SCOPED_SOURCE_PREFIX)
+            # Inventory callers control source, but cannot supply the persisted
+            # compatibility message. Source alone must never establish scope.
+            and value.get("error_message") == _SCOPED_READER_MESSAGE
         ):
             metadata = _ScanSource.model_validate_json(source[len(_SCOPED_SOURCE_PREFIX) :])
             return {**value, **metadata.model_dump()}
@@ -70,11 +75,13 @@ class PreviewInventoryScanRecord(BaseModel):
                 repository=self.repository,
                 truncated=self.truncated,
                 status=self.status,
+                error_message=self.error_message,
             )
             payload["source"] = _SCOPED_SOURCE_PREFIX + json.dumps(
                 metadata.model_dump(), sort_keys=True, separators=(",", ":")
             )
             payload["status"] = "pass" if self.status == "pass" and not self.truncated else "fail"
+            payload["error_message"] = _SCOPED_READER_MESSAGE
         return payload
 
     @model_validator(mode="after")

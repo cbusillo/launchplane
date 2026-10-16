@@ -2766,6 +2766,8 @@ credential, runtime grant, or stored record is changed by this code retirement.
 - New inventory-only scans bind product and repository as well as context.
   The persisted payload preserves the strict v1 reader shape: a versioned envelope
   in the existing opaque `source` string carries scope and detailed outcome;
+  A writer-owned compatibility message distinguishes this envelope from caller
+  supplied source text, which cannot assert a product or repository scope.
   v1 sees only pass/fail, with unsupported/unavailable/truncated outcomes failing
   closed. New readers decode the envelope. This keeps a prior service image able
   to read records after rollback, without changing or deleting evidence. Legacy
