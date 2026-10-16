@@ -25,6 +25,7 @@ from control_plane.dokploy.odoo_walkthrough import (
     testing_account_command,
     testing_account_dispatch_finished,
     testing_task_unused,
+    testing_connection_isolated,
 )
 from control_plane.dokploy import source
 from control_plane.odoo_runtime_reads import (
@@ -154,22 +155,32 @@ def plan_walkthrough(
     binding = canonical_json_sha256(
         [request.product, request.context, request.task_id, copy_binding]
     )
-    if request.operation != "cleanup" and not testing_task_unused(
-        host=connection.host,
-        token=connection.token,
-        server_id=connection.server_id,
-        require_task=False,
-        intent={
-            "project": connection.app_name,
-            "identity": selection.identity.model_dump(mode="json"),
-            "identity_key": RUNTIME_IDENTITY_ENV_KEY,
-            "image": selection.identity.image_reference,
-            "database": database,
-            "copy_binding": copy_binding,
-            "usage_since": generation.prepared_at,
-        },
-    ):
-        raise ValueError("Testing has recent staff sign-ins or unreadable usage.")
+    readback_intent: dict[str, object] = {
+        "project": connection.app_name,
+        "identity": selection.identity.model_dump(mode="json"),
+        "identity_key": RUNTIME_IDENTITY_ENV_KEY,
+        "image": selection.identity.image_reference,
+        "database": database,
+        "copy_binding": copy_binding,
+        "usage_since": generation.prepared_at,
+    }
+    if request.operation == "cleanup":
+        clear = testing_connection_isolated(
+            host=connection.host,
+            token=connection.token,
+            server_id=connection.server_id,
+            intent=readback_intent,
+        )
+    else:
+        clear = testing_task_unused(
+            host=connection.host,
+            token=connection.token,
+            server_id=connection.server_id,
+            require_task=False,
+            intent=readback_intent,
+        )
+    if not clear:
+        raise ValueError("Testing connection isolation or protected usage readback did not pass.")
     secret_name = "task-" + binding
     secret = store.find_secret_record(
         scope="context_instance",

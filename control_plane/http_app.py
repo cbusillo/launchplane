@@ -141,6 +141,10 @@ from control_plane import (
     route_binding_refresh_controller as control_plane_route_binding_refresh_controller,
 )
 from control_plane import secrets as control_plane_secrets
+from control_plane.http_routes.local_consumer_delivery import (
+    LocalConsumerDependencies,
+    register_local_consumer_delivery_routes,
+)
 from control_plane import service_status as control_plane_service_status
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane.http_routes.lane_service_restart import (
@@ -17491,6 +17495,19 @@ def create_launchplane_fastapi_app(
                 ),
                 (),
             )
+        integration_key_markers: tuple[str, ...] | None = None
+        if any(
+            secret.integration == "runtime_environment"
+            for secret in environment_request.managed_secrets
+        ):
+            try:
+                integration_key_markers = latest_active_runtime_key_safety_policy(
+                    database_store
+                ).integration_key_markers
+            except ValueError:
+                # Assert no class without a policy. The normal write gate below
+                # refuses its absence after validating/resolving the input.
+                pass
         try:
             product_config_request = product_environment_config_apply_request(
                 profile=profile,
@@ -17506,6 +17523,7 @@ def create_launchplane_fastapi_app(
                     )
                 ),
                 current_retired_provider_keys=current_retired_provider_keys,
+                integration_key_markers=integration_key_markers,
             )
         except ProductEnvironmentConfigRefused as error:
             raise _launchplane_http_error(
@@ -28129,6 +28147,13 @@ def create_launchplane_fastapi_app(
                 urgent_reason=reason,
                 urgent_checklist_digest=digest,
             ),
+        ),
+    )
+    register_local_consumer_delivery_routes(
+        app,
+        dependencies=LocalConsumerDependencies(
+            common=owner_review_route_dependencies,
+            read_human_mutation_identity=read_github_human_browser_mutation_identity,
         ),
     )
     register_owner_secret_input_routes(

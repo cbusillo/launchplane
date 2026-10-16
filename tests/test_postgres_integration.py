@@ -1092,6 +1092,7 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
         )
         from control_plane.dokploy.odoo_walkthrough import ACCOUNT_DATABASE_PROBE
         from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
+        from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
 
         with _isolated_postgres_database() as database_url:
             url = database_url.replace("postgresql+psycopg://", "postgresql://")
@@ -1106,6 +1107,8 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                 owner.execute("CREATE TABLE ir_config_parameter (key text, value text)")
                 owner.execute("CREATE TABLE res_users (id int, login text, active bool)")
                 owner.execute("CREATE TABLE res_users_log (create_uid int, create_date timestamp)")
+                for key, value in CONNECTION_ISOLATION_PARAMETERS.items():
+                    owner.execute("INSERT INTO ir_config_parameter VALUES (%s,%s)", (key, value))
                 owner.execute(
                     "INSERT INTO ir_config_parameter VALUES (%s,%s)",
                     ("web.base.url", "https://fixture.invalid"),
@@ -1214,12 +1217,25 @@ class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
                 )
                 owner.commit()
                 self.assertFalse(probe())
+
                 owner.execute("DELETE FROM res_users_log")
                 owner.execute(
                     "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (23,)
                 )
                 owner.commit()
                 self.assertFalse(probe())
+
+                spec["mode"] = "isolation"
+                self.assertTrue(probe())
+                key = next(iter(CONNECTION_ISOLATION_PARAMETERS))
+                owner.execute(
+                    "UPDATE ir_config_parameter SET value=%s WHERE key=%s", ("changed", key)
+                )
+                owner.commit()
+                with self.assertRaises(RuntimeError):
+                    probe()
+                spec["mode"] = "quiescence"
+                self.assertTrue(probe())
 
 
 @unittest.skipUnless(

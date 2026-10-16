@@ -27,6 +27,7 @@ from control_plane.contracts.secret_record import SecretAuditEvent, SecretRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretScope
 from control_plane.contracts.secret_record import SecretSharingReason
+from control_plane.contracts.secret_record import SecretValueSource
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
     is_secret_shaped_runtime_key,
@@ -362,6 +363,7 @@ def plan_product_config_authority_bundle(
                 description=str(secret["description"]),
                 declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
                 sharing_reason=_product_config_sharing_reason(secret, actor=actor),
+                value_source=cast(SecretValueSource, secret["value_source"]),
                 actor=actor,
                 source_label=source_label,
             )
@@ -830,6 +832,13 @@ def _product_config_secret_inputs(
                 "description": str(raw_secret.get("description", "") or "").strip(),
                 "secret_class": secret_class,
                 "sharing_reason": sharing_reason,
+                "value_source": (
+                    "copy"
+                    if copy_from is not None
+                    else "provider"
+                    if adopt_from_provider
+                    else "supplied"
+                ),
             }
         )
     return tuple(normalized)
@@ -993,6 +1002,7 @@ def _plan_product_config_secret_write(
     description: str = "",
     declared_secret_class: RuntimeSecretClass | None = None,
     sharing_reason: SecretSharingReason | None = None,
+    value_source: SecretValueSource | None = None,
     actor: str = "",
     source_label: str = "manual",
 ) -> _ProductConfigSecretWritePlan:
@@ -1028,6 +1038,7 @@ def _plan_product_config_secret_write(
         context=context_name,
         instance=instance_name,
         declared_secret_class=declared_secret_class,
+        value_source=value_source,
         sharing_reason=sharing_reason,
         created_at=created_at,
         updated_at=now,
@@ -1187,6 +1198,7 @@ def _planned_runtime_secret_bindings(
                 instance=str(secret["instance"]),
                 status="configured",
                 declared_secret_class=cast(RuntimeSecretClass | None, secret["secret_class"]),
+                value_source=cast(SecretValueSource, secret["value_source"]),
                 sharing_reason=_product_config_sharing_reason(secret, actor="", recorded_at=now),
                 created_at=existing_binding.created_at if existing_binding is not None else now,
                 updated_at=now,
