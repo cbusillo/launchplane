@@ -408,14 +408,21 @@ For Python source, a fixed protocol identifier can be classified as `schema_only
 when a single uppercase module binding holds an identifier-shaped string and
 every local reference uses the same protocol field role. Evidence must include
 an equality/inequality comparison against `integration`, `binding_key`, or
-`code` (an attribute or a one-argument dictionary `get`). Secret integration
-selectors on `list_secret_records`/`list_secret_bindings` and positional code
-arguments to locally declared exception constructors that store `self.code`
-may accompany those comparisons. This classifies generic discriminators,
+`code` (an attribute or a one-argument dictionary `get`). Secret receivers must
+be unambiguously bound by iteration over `list_secret_records`,
+`list_secret_bindings`, or a payload's `get("secrets")` list. Binding-key
+attributes require secret bindings. Error-code receivers must be bound by an
+`except` handler for a local exception class whose constructor uses its code
+parameter only to store `self.code`. Integration selectors on the secret-list
+APIs and raised instances of those exceptions may accompany the comparisons.
+This classifies generic discriminators,
 payload keys, and error codes; it does not allow names merely because they
 contain diagnostic, secret, or error words. Mixed runtime/grant uses, rebinding,
-shadowing, aliases, unused declarations, and imported-only declarations provide
-no classification proof. Evidence is bound to the committed declaration's
+shadowing (including wildcard imports and match captures), aliases, unused
+declarations, and imported-only declarations provide no classification proof
+within the declaring module. Cross-module consumers are not followed; this is
+a conservative local syntax classification, not a whole-program proof.
+Evidence is bound to the committed declaration's
 path, line, key, and value; a same-named settings or environment assignment
 does not inherit it. Audit completion (`status: ok`) remains distinct from
 the enforcement result (`gate.status`).
