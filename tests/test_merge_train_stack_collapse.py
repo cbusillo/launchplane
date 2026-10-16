@@ -377,6 +377,27 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         # The already merged child is adopted, not re-read: GitHub closed it as merged.
         self.assertEqual(readiness_reads, [31])
 
+    def test_execute_plan_does_not_recover_a_held_child(self) -> None:
+        branch_client = _RecordingStackCollapseBranchClient(
+            observed_merge_commit_shas=("merge-32-31",),
+            merge_commit_shas=(),
+        )
+        checkpoints: list[MergeTrainStackCollapsePlan] = []
+
+        with self.assertRaises(MergeTrainStackChildNotReadyError):
+            execute_merge_train_stack_collapse_plan(
+                plan=_collapse_plan(),
+                branch_client=branch_client,
+                child_readiness_reasons=lambda number: ("child is held",),
+                updated_at="2026-05-14T13:45:00Z",
+                checkpoint=checkpoints.append,
+            )
+
+        self.assertFalse(branch_client.requests)
+        self.assertTrue(
+            all(mutation.status == "planned" for mutation in checkpoints[-1].mutations)
+        )
+
     def test_execute_plan_stops_before_merging_a_child_held_mid_collapse(self) -> None:
         plan = _collapse_plan()
         branch_client = _RecordingStackCollapseBranchClient(

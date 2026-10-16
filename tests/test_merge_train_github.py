@@ -40,6 +40,7 @@ from control_plane.merge_train import MergeTrainReviewConversations
 from control_plane.merge_train import review_conversations_reason
 from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import _stack_collapse_commit_message
 from control_plane.merge_train_github import MergeTrainGitHubCandidateEntryConflictError
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
@@ -745,8 +746,10 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 {
                     "sha": "forged-merge",
                     "commit": {
-                        "message": (
-                            "Launchplane stack collapse collapse-123: merge PR #11 into PR #10"
+                        "message": _stack_collapse_commit_message(
+                            collapse_id="collapse-123",
+                            child_pull_request_number=11,
+                            parent_pull_request_number=10,
                         ),
                         "tree": {"sha": "unreviewed-tree"},
                     },
