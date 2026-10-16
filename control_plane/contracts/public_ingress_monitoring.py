@@ -838,8 +838,10 @@ class PublicIngressNotificationDestination(BaseModel):
 class PublicIngressNotificationPolicyRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    # Explicitly opt existing Director Discord destinations into calm release lists.
-    release_digest_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
+    # Digest policies never participate in incident routing.
+    purpose: Literal["incident_alerts", "release_digest"] = Field(
+        default="incident_alerts", exclude_if=lambda value: value == "incident_alerts"
+    )
 
     schema_version: int = Field(default=1, ge=1)
     policy_id: str
@@ -892,13 +894,25 @@ class PublicIngressNotificationPolicyRecord(BaseModel):
             raise ValueError(
                 "public ingress notification policy with check_kind scope requires lane scope"
             )
+        if self.purpose == "release_digest" and (
+            not self.product
+            or not self.context
+            or self.instance != "prod"
+            or self.check_name
+            or self.check_kind
+            or any(destination.kind != "discord" for destination in self.destinations)
+        ):
+            raise ValueError(
+                "Release digests require an explicit product/prod lane and Discord destinations without check filters"
+            )
         return self
 
     def matches(self, incident: PublicIngressIncidentRecord) -> bool:
         monitored = monitored_check_identity(incident.check_name)
         check_kind, check_name = monitored or (incident.check_kind, incident.check_name)
         return (
-            (not self.product or self.product == incident.product)
+            self.purpose == "incident_alerts"
+            and (not self.product or self.product == incident.product)
             and (not self.context or self.context == incident.context)
             and (not self.instance or self.instance == incident.instance)
             and (

@@ -4847,7 +4847,7 @@ business data, and invokes no importer, deployment or synchronization.
 
 ### Daily waiting-release digest
 
-The service's daily release-digest scheduler (UTC calendar days) lists source changes ahead of each
+The service's daily release-digest scheduler (UTC calendar days, rolling over at 8 PM EDT / 7 PM EST) lists source changes ahead of each
 active product's recorded production version. It does not create incidents,
 change product colors, send Client invitations, or start or approve a release.
 The list includes an immutable source comparison, a short list of changes, time
@@ -4860,13 +4860,18 @@ inventing a waiting release. Waiting time uses default-branch first-parent landi
 or component-only changes show age unavailable rather than guessing. Age is
 informational, never a failure signal.
 
-A signed-in admin can opt a Director-owned Discord destination into this digest
-through the existing notification-policy plan/apply service surface by setting
-`release_digest_enabled: true`. Use a product/lane policy without check-name or
-check-kind filters and only the Director's intended Discord destinations. Existing
-policies default to false; configuring health alerts alone does not opt anyone in.
+A signed-in admin can create a dedicated Director Discord digest policy through
+`POST /v1/public-ingress/notification-policies/apply` (`mode: dry-run`, then
+`mode: apply`) with `purpose: release_digest`. It requires an explicit product,
+production context and `instance: prod`, Discord destinations only, and no check
+filters. The existing product/context authorization check still applies; source
+delivery adds no grants. The policy's managed webhook reference must already be
+applicable to that exact context/prod lane. Missing scope is recorded as unavailable;
+the scheduler never copies secrets or invents access. Incident policies keep their
+default purpose, and digest policies never match incidents. Configuring health
+alerts alone does not opt anyone into the digest.
 The service's existing public OAuth URL supplies Launchplane links. Without that
-bootstrap URL or an opted-in policy no digest is sent. Source delivery alone does
+bootstrap URL or an enabled digest policy no digest is sent. Source delivery alone does
 not activate a destination or claim a live Discord receipt.
 
 Daily receipts use the existing idempotency store; per-product, policy,
@@ -4875,9 +4880,12 @@ The existing outbox worker delivers the separate `release_digest` kind. It
 rechecks current policy and product scope and drops expired daily messages.
 Failures before sending and explicit rate-limit refusals retry through the existing
 outbox backoff, within the current daily slot and attempt budget. Invalid or rejected
-destinations remain recorded; a Discord timeout or interrupted send
+destinations remain recorded; a Discord timeout, 5xx response or interrupted send
 retains its provider marker and uncertain outcome, and is not blindly repeated.
 Evidence failures wait for the next daily slot. Outbox records and scheduler
-receipts are the maintenance/diagnostic path. Disable the policy's digest flag
+receipts are the maintenance/diagnostic path. An outbox `delivered` state means
+processing completed: only `action: sent_release_digest` proves a successful send;
+`skipped_*` actions distinguish disabled, retired, expired or changed-production
+messages that were deliberately not sent. Disable the dedicated policy (`status: disabled`)
 through the same service surface to stop future and queued sends; it leaves
-health alerts and historical delivery evidence intact.
+health-alert policies and historical delivery evidence intact.

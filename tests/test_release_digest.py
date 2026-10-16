@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.product_profile_record import ProductLaneProfile
+from control_plane.contracts.product_profile_record import ProductLaneProfile, ProductOwnerProfile
 from control_plane.contracts.promotion_record import DeploymentEvidence, HealthcheckEvidence
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationDestination,
@@ -49,6 +49,7 @@ class ReleaseDigestTests(unittest.TestCase):
         self.profile = _profile().model_copy(
             update={
                 "production_use": "live",
+                "owner": ProductOwnerProfile(github_login="example-client", github_id="123"),
                 "release_on_acceptance": "promote",
             }
         )
@@ -61,7 +62,9 @@ class ReleaseDigestTests(unittest.TestCase):
         self.policy = PublicIngressNotificationPolicyRecord(
             policy_id="director-digest",
             product=self.profile.product,
-            release_digest_enabled=True,
+            purpose="release_digest",
+            context=self.prod.context,
+            instance="prod",
             created_at=self.now.isoformat(),
             updated_at=self.now.isoformat(),
             destinations=(
@@ -221,7 +224,7 @@ class ReleaseDigestTests(unittest.TestCase):
             control_plane_root=self.root,
         )
         assert body is not None
-        self.assertEqual(body.action, DigestAction.PROMOTION)
+        self.assertEqual(body.action, DigestAction.TESTING)
         self.assertIn(DigestBlocker.TESTING_BEHIND, body.blockers)
         self.assertIn(DigestBlocker.REVIEW_UNAVAILABLE, body.blockers)
 
@@ -235,7 +238,7 @@ class ReleaseDigestTests(unittest.TestCase):
 
     def test_existing_alert_policy_does_not_opt_in_recipients(self) -> None:
         self.store.write_public_ingress_notification_policy_record(
-            self.policy.model_copy(update={"release_digest_enabled": False})
+            self.policy.model_copy(update={"status": "disabled"})
         )
         self.scheduler().run_once()
         self.transport.get_json.assert_not_called()
@@ -244,7 +247,7 @@ class ReleaseDigestTests(unittest.TestCase):
     def test_disable_after_enqueue_suppresses_delivery(self) -> None:
         self.scheduler().run_once()
         self.store.write_public_ingress_notification_policy_record(
-            self.policy.model_copy(update={"release_digest_enabled": False})
+            self.policy.model_copy(update={"status": "disabled"})
         )
         self.assertEqual(self.worker(), "delivered")
         self.sender.assert_not_called()
@@ -414,3 +417,38 @@ class ReleaseDigestTests(unittest.TestCase):
                     "https://discord.com/api/webhooks/fixture/opaque", {"content": "fixture"}
                 )
         self.assertEqual(caught.exception.status_code, response.status_code)
+
+    def test_own_product_uses_promotion_without_waiting_for_client_acceptance(self) -> None:
+        self.profile = self.profile.model_copy(
+            update={"release_on_acceptance": "director_standing"}
+        )
+        waiting = self.waiting()
+        assert waiting is not None
+        self.assertEqual(waiting.action, DigestAction.PROMOTION)
+        self.assertNotIn(DigestBlocker.ACCEPTANCE_PENDING, waiting.blockers)
+
+    def test_testing_without_new_candidate_does_not_ask_for_acceptance(self) -> None:
+        self.inventory(self.testing, self.current)
+        self.review.return_value = ReleaseReviewStatus(no_new_release=True)
+        waiting = self.waiting()
+        assert waiting is not None
+        self.assertEqual(waiting.action, DigestAction.TESTING)
+        self.assertNotIn(DigestBlocker.ACCEPTANCE_PENDING, waiting.blockers)
+
+    def test_digest_policy_cannot_route_incidents_or_fan_out_globally(self) -> None:
+        from pydantic import ValidationError
+        from control_plane.production_delivery_monitor import record_production_delivery_failure
+
+        record_production_delivery_failure(
+            self.store,
+            self.profile,
+            self.prod,
+            candidate="fixture-candidate",
+            reason="delivery_failed",
+            trace_id="fixture-trace",
+        )
+        incident = self.store.list_public_ingress_incident_records()[0]
+        self.assertFalse(self.policy.matches(incident))
+        for update in ({"product": ""}, {"context": ""}, {"check_kind": "provider"}):
+            with self.subTest(update=update), self.assertRaises(ValidationError):
+                type(self.policy).model_validate({**self.policy.model_dump(), **update})

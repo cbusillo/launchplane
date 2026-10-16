@@ -2409,7 +2409,11 @@ class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
     @model_validator(mode="after")
     def _validate_request(self) -> "PublicIngressNotificationPolicyApplyEnvelope":
         self.reason = self.reason.strip()
-        if self.policy.product and self.policy.product != "launchplane":
+        if (
+            self.policy.purpose != "release_digest"
+            and self.policy.product
+            and self.policy.product != "launchplane"
+        ):
             raise ValueError(
                 "public ingress notification policy apply requires product 'launchplane'"
             )
@@ -3834,7 +3838,7 @@ def _public_ingress_notification_policy_summary(
         "instance": policy.instance,
         "status": policy.status,
         "reminder_interval_seconds": policy.reminder_interval_seconds,
-        "release_digest_enabled": policy.release_digest_enabled,
+        "purpose": policy.purpose,
         "destination_count": len(policy.destinations),
         "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
         "created_at": policy.created_at,

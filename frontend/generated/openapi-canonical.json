@@ -41058,10 +41058,14 @@
             "title": "Product",
             "type": "string"
           },
-          "release_digest_enabled": {
-            "default": false,
-            "title": "Release Digest Enabled",
-            "type": "boolean"
+          "purpose": {
+            "default": "incident_alerts",
+            "enum": [
+              "incident_alerts",
+              "release_digest"
+            ],
+            "title": "Purpose",
+            "type": "string"
           },
           "reminder_interval_seconds": {
             "default": 21600,

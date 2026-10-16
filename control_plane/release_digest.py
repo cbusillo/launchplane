@@ -22,7 +22,7 @@ from control_plane.release_review import (
 )
 from control_plane.contracts.release_review import ReleaseVersion
 from control_plane.notifications import DiscordNotificationError, public_discord_url_error
-from control_plane.source_control_change import read_branch_revision
+from control_plane.source_control_change import read_branch_revision, read_waiting_source_changes
 from control_plane.storage.postgres import PostgresRecordStore, OutboxWithIdempotencyRequest
 from control_plane.workflows.public_ingress_monitor import (
     PublicIngressNotificationDriverSet,
@@ -35,6 +35,9 @@ _LOGGER = logging.getLogger(__name__)
 class DigestAction(StrEnum):
     PROMOTION = "promotion"
     INVITATION = "invitation"
+    TESTING = "testing"
+    CLIENT_CONFIGURATION = "client_configuration"
+    HELD = "held"
 
 
 class DigestBlocker(StrEnum):
@@ -64,36 +67,6 @@ class WaitingReleaseList:
     waiting_hours: int | None
     blockers: tuple[DigestBlocker, ...]
     action: DigestAction
-
-
-def _landing_age(commits: list[object], base: str, head: str, now: datetime) -> int | None:
-    # Only first-parent commits measure time on the default branch. Feature
-    # branch dates can precede their merge by months. Truncation stays unknown.
-    by_sha = {item.get("sha"): item for item in commits if isinstance(item, dict)}
-    dates = []
-    seen: set[str] = set()
-    while head != base:
-        item = by_sha.get(head)
-        if not isinstance(item, dict) or head in seen:
-            return None
-        seen.add(head)
-        parents = item.get("parents")
-        metadata = item.get("commit")
-        if not isinstance(parents, list) or not parents or not isinstance(parents[0], dict):
-            return None
-        if not isinstance(metadata, dict) or not isinstance(metadata.get("committer"), dict):
-            return None
-        try:
-            dates.append(
-                datetime.fromisoformat(str(metadata["committer"]["date"]).replace("Z", "+00:00"))
-            )
-            head = str(parents[0]["sha"])
-        except (KeyError, ValueError):
-            return None
-    try:
-        return max(0, int((now - min(dates)).total_seconds() // 3600))
-    except (ValueError, TypeError):
-        return None
 
 
 def waiting_release_list(
@@ -130,29 +103,24 @@ def waiting_release_list(
             components.append("Updated artifact in testing")
     if head.commit == production.source_commit and not components:
         return None
-    repository = "/".join(quote(part, safe="") for part in profile.repository.split("/"))
     total = 0
     lines: list[str] = []
     age: int | None = None
+    comparison_url = ""
     if head.commit != production.source_commit:
-        comparison = read(f"/repos/{repository}/compare/{production.source_commit}...{head.commit}")
-        if not isinstance(comparison, dict) or comparison.get("status") != "ahead":
-            raise ValueError("Release ancestry unavailable")
-        commits, count = comparison.get("commits"), comparison.get("total_commits")
-        if (
-            not isinstance(commits, list)
-            or not commits
-            or not isinstance(count, int)
-            or count < len(commits)
-        ):
-            raise ValueError("Release changes unavailable")
-        total = count
-        age = _landing_age(commits, production.source_commit, head.commit, now)
-        for commit in commits[:5]:
-            if not isinstance(commit, dict) or not isinstance(commit.get("commit"), dict):
-                raise ValueError("Release change metadata unavailable")
-            title = str(commit["commit"].get("message", "")).splitlines()[0:1]
-            lines.append("  - " + _plain(title[0] if title else "Change", 120))
+        changes = read_waiting_source_changes(
+            repository=profile.repository,
+            production_commit=production.source_commit,
+            head_commit=head.commit,
+            read=read,
+            now=now,
+        )
+        total, age, comparison_url = (
+            changes.total_commits,
+            changes.waiting_hours,
+            changes.comparison_url,
+        )
+        lines.extend("  - " + _plain(title, 120) for title in changes.titles)
     lines.extend("  - " + component for component in components)
     review = current_release_review(
         control_plane_root=control_plane_root, record_store=store, profile=profile
@@ -175,24 +143,46 @@ def waiting_release_list(
             blockers.append(DigestBlocker.TESTING_UNAVAILABLE)
     if review.unavailable_reason is not None:
         blockers.append(DigestBlocker.REVIEW_UNAVAILABLE)
-    elif not review.approved:
+    elif (
+        not review.approved
+        and not review.no_new_release
+        and profile.release_on_acceptance != "director_standing"
+        and profile.owner.is_set
+    ):
         blockers.append(DigestBlocker.ACCEPTANCE_PENDING)
     if profile.release_on_acceptance == "held":
         blockers.append(DigestBlocker.RELEASE_HELD)
-    action = (
-        DigestAction.PROMOTION
-        if profile.release_on_acceptance == "director_standing"
-        else DigestAction.INVITATION
-    )
     product_path = f"{public_url.rstrip('/')}/ui/products/{quote(profile.product, safe='')}"
-    action_line = (
-        f"Review the promotion step: {product_path}/environments/prod/actions"
-        if action == DigestAction.PROMOTION
-        else f"Send the Client a release invitation: {public_url.rstrip('/')}/ui/owner-review?product={quote(profile.product, safe='')}"
+    review_path = (
+        f"{public_url.rstrip('/')}/ui/owner-review?product={quote(profile.product, safe='')}"
     )
-    compare_url = (
-        f"https://github.com/{repository}/compare/{production.source_commit}...{head.commit}"
-    )
+    if (
+        any(
+            blocker in blockers
+            for blocker in (
+                DigestBlocker.TESTING_BEHIND,
+                DigestBlocker.TESTING_UNAVAILABLE,
+                DigestBlocker.TESTING_UNHEALTHY,
+            )
+        )
+        or review.no_new_release
+    ):
+        action = DigestAction.TESTING
+        action_line = (
+            f"Check testing before preparing the release: {product_path}/environments/testing"
+        )
+    elif not profile.owner.is_set:
+        action = DigestAction.CLIENT_CONFIGURATION
+        action_line = f"Set the product's Client before preparing the release: {product_path}"
+    elif profile.release_on_acceptance == "held":
+        action = DigestAction.HELD
+        action_line = f"Review the release hold: {review_path}"
+    elif profile.release_on_acceptance == "director_standing":
+        action = DigestAction.PROMOTION
+        action_line = f"Review the promotion step: {product_path}/environments/prod/actions"
+    else:
+        action = DigestAction.INVITATION
+        action_line = f"Send the Client a release invitation: {review_path}"
     remaining = f"\n  - {total - 5} more commits in the full list" if total > 5 else ""
     descriptions = [_BLOCKER_TEXT[blocker] for blocker in blockers]
     descriptions.extend(_plain(blocker, 160) for blocker in review.blockers[:3])
@@ -202,7 +192,7 @@ def waiting_release_list(
         + "\n"
         + "\n".join(lines)
         + remaining
-        + (f"\n  Full list: {compare_url}" if total else "")
+        + (f"\n  Full list: {comparison_url}" if total else "")
         + "\n  Release status: "
         + ("; ".join(descriptions) or "Ready for the supported release path")
         + f"\n  {action_line}"
@@ -271,7 +261,7 @@ class ReleaseDigestScheduler(_PreviewScheduler):
                     instance_name="prod",
                     status="enabled",
                 )
-                if policy.release_digest_enabled and not policy.check_name and not policy.check_kind
+                if policy.purpose == "release_digest"
             )
             if not policies:
                 continue
@@ -378,7 +368,7 @@ def deliver_release_digest(
                 destination
                 for policy in policies
                 if policy.policy_id == record.payload["policy_id"]
-                and policy.release_digest_enabled
+                and policy.purpose == "release_digest"
                 and not policy.check_name
                 and not policy.check_kind
                 for destination in policy.destinations
