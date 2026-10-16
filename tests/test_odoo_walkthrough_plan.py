@@ -83,6 +83,9 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.unused = self.stack.enter_context(
             patch("control_plane.odoo_walkthrough.testing_task_unused", return_value=True)
         )
+        self.isolated = self.stack.enter_context(
+            patch("control_plane.odoo_walkthrough.testing_connection_isolated", return_value=True)
+        )
         self.hold = self.stack.enter_context(
             patch("control_plane.odoo_walkthrough.require_drill_use_unprotected")
         )
@@ -217,6 +220,11 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.unused.assert_not_called()
         self.hold.assert_not_called()
         self.physical.assert_called_once()
+        self.isolated.assert_called_once()
+        self.isolated.return_value = False
+        with self.assertRaises(ValueError):
+            self.plan("cleanup")
+        self.isolated.return_value = True
         self.physical.side_effect = lambda **kwargs: kwargs["receive"](
             {"type": "complete", "cleanup_qualified": False}
         )

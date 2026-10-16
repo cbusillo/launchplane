@@ -3,6 +3,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import io
 import json
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -28,6 +29,8 @@ from control_plane.dokploy.odoo_walkthrough import (
     WALKTHROUGH_JOURNAL_DIRECTORY,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
+from control_plane.odoo_connection_isolation import connection_isolation_library
+from tests.test_odoo_connection_isolation import SqliteCursor, seed
 
 
 class ProbeConnection:
@@ -41,9 +44,20 @@ class ProbeConnection:
         self.active = True
         self.statement = ""
         self.parameters: tuple[object, ...] = ()
+        self.database = sqlite3.connect(":memory:")
+        seed(self.database)
+        self.sql = SqliteCursor(self.database)
+        namespace: dict[str, Any] = {}
+        exec(connection_isolation_library(), namespace)
+        self.repair = namespace["connection_isolation"]
+        self.repair(self.sql, apply=True)
+        self.sql_result = False
+        self.isolation_readable = True
 
     def set_session(self, *, readonly: bool, autocommit: bool) -> None:
         self.readonly = readonly and not autocommit
+        if not self.isolation_readable:
+            raise RuntimeError("Database read is unavailable")
 
     def cursor(self) -> "ProbeConnection":
         return self
@@ -58,8 +72,22 @@ class ProbeConnection:
         if not self.readonly or not statement.strip().upper().startswith(("SELECT", "SET", "WITH")):
             raise AssertionError("Probe attempted a write")
         self.statement, self.parameters = statement, parameters
+        self.sql_result = not any(
+            marker in statement
+            for marker in (
+                "SET LOCAL",
+                "pg_try_advisory_xact_lock",
+                "res_users_log",
+                "SELECT value FROM ir_config_parameter WHERE key=%s",
+                "SELECT login,active FROM res_users",
+            )
+        )
+        if self.sql_result:
+            self.sql.execute(statement, parameters)
 
     def fetchone(self) -> tuple[object, ...]:
+        if self.sql_result:
+            return tuple(self.sql.fetchone())
         if "pg_try_advisory_xact_lock" in self.statement:
             return (self.free,)
         if "res_users_log" in self.statement:
@@ -79,6 +107,9 @@ class ProbeConnection:
         if "res_users" in self.statement:
             return (WALKTHROUGH_LOGIN_PREFIX + self.spec["task_id"], self.active)
         raise AssertionError("Unexpected database read")
+
+    def fetchall(self) -> list[tuple[str]]:
+        return list(self.sql.fetchall())
 
     def rollback(self) -> None:
         pass
@@ -116,6 +147,7 @@ class NativeProbeTests(unittest.TestCase):
             "probe": ACCOUNT_DATABASE_PROBE,
         }
         self.connection = ProbeConnection(self.spec)
+        self.addCleanup(self.connection.database.close)
         self.environment = {
             **runtime_identity_env(self.identity),
             "PLATFORM_INSTANCE": "testing",
@@ -215,3 +247,21 @@ class NativeProbeTests(unittest.TestCase):
         self.connection.used = False
         self.connection.active = False
         self.assertFalse(self.run_probe())
+
+    def test_isolation_is_current_and_fail_closed_at_every_usage_and_cleanup_probe(self) -> None:
+        for mode in ("lane_usage", "usage", "isolation"):
+            with self.subTest(mode=mode):
+                self.spec["mode"] = mode
+                self.connection.repair(self.connection.sql, apply=True)
+                self.connection.isolation_readable = True
+                self.assertTrue(self.run_probe())
+                for mutation in (
+                    "UPDATE res_company SET stock_move_sms_validation = true",
+                    "UPDATE iap_account SET account_token = 'live-fixture-key'",
+                    "UPDATE delivery_carrier SET prod_environment = true",
+                ):
+                    self.connection.database.execute(mutation)
+                    self.assertFalse(self.run_probe())
+                    self.connection.repair(self.connection.sql, apply=True)
+                self.connection.isolation_readable = False
+                self.assertFalse(self.run_probe())

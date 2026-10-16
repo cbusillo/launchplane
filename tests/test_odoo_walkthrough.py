@@ -6,6 +6,7 @@ import io
 from contextlib import ExitStack
 import json
 import logging
+import sqlite3
 import subprocess
 import sys
 import time
@@ -22,6 +23,7 @@ from pydantic import BaseModel, ValidationError
 
 from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_ACTION,
+    WALKTHROUGH_PLAN_ACTION,
     WALKTHROUGH_ROUTE,
     WALKTHROUGH_RECONCILIATION_REQUIRED,
     OdooWalkthroughRequest,
@@ -49,7 +51,14 @@ from control_plane.odoo_runtime_reads import (
 )
 from control_plane.odoo_walkthrough import WalkthroughPlan
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
-from control_plane.service_auth import LocalOperatorIdentity
+from control_plane.odoo_connection_isolation import connection_isolation_library
+from control_plane.service_auth import (
+    AuthorizationTarget,
+    LocalOperatorIdentity,
+    LocalOperatorPolicyRule,
+    LaunchplaneAuthzPolicy,
+)
+from tests.test_odoo_connection_isolation import SqliteCursor, seed
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.support.http import request as http_request
 
@@ -67,6 +76,52 @@ def task_request(**changes: Any) -> OdooWalkthroughRequest:
 
 
 class TaskContractTests(unittest.TestCase):
+    def test_standing_rule_covers_future_products_only_on_testing_for_the_exact_agent(self) -> None:
+        identity = LocalOperatorIdentity(subject="director-fixture", token_label="operator-fixture")
+        rule = LocalOperatorPolicyRule(
+            subjects=(identity.subject,),
+            token_labels=(identity.token_label,),
+            instances=("testing",),
+            actions=(WALKTHROUGH_ACTION,),
+        )
+        policy = LaunchplaneAuthzPolicy(schema_version=3, local_operators=(rule,))
+        self.assertTrue(
+            policy.allows(
+                identity=LocalOperatorIdentity(
+                    subject=identity.subject, token_label=identity.token_label, director_agent=True
+                ),
+                action=WALKTHROUGH_PLAN_ACTION,
+                product="future-product",
+                context="future-context",
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+                inherit_agent_read_role=True,
+            )
+        )
+        for product, context in (("example-odoo", "example"), ("future-product", "future-context")):
+            for instance in ("testing", "prod", "stable", "preview-1"):
+                with self.subTest(product=product, instance=instance):
+                    self.assertEqual(
+                        policy.allows(
+                            identity=identity,
+                            action=WALKTHROUGH_ACTION,
+                            product=product,
+                            context=context,
+                            target=AuthorizationTarget(scope="instance", instances=(instance,)),
+                        ),
+                        instance == "testing",
+                    )
+        self.assertFalse(
+            policy.allows(
+                identity=LocalOperatorIdentity(
+                    subject="other-agent", token_label=identity.token_label
+                ),
+                action=WALKTHROUGH_ACTION,
+                product="future-product",
+                context="future-context",
+                target=AuthorizationTarget(scope="instance", instances=("testing",)),
+            )
+        )
+
     def test_only_testing_and_bounded_declarative_browser_input(self) -> None:
         for instance in ("prod", "production", "preview-1", ""):
             with self.subTest(instance=instance), self.assertRaises(ValidationError):
@@ -184,6 +239,9 @@ class TaskRouteTests(unittest.TestCase):
         )
         self.unused = self.stack.enter_context(
             patch("control_plane.odoo_walkthrough.testing_task_unused", return_value=True)
+        )
+        self.stack.enter_context(
+            patch("control_plane.odoo_walkthrough.testing_connection_isolated", return_value=True)
         )
         self.stack.enter_context(
             patch(
@@ -460,6 +518,26 @@ class AccountProgramTests(unittest.TestCase):
         for model in models.values():
             model.sudo.return_value = model
         self.env.cr.fetchone.return_value = (False,)
+        self.isolation_database = sqlite3.connect(":memory:")
+        self.addCleanup(self.isolation_database.close)
+        seed(self.isolation_database)
+        isolation_cursor = SqliteCursor(self.isolation_database)
+        namespace: dict[str, Any] = {}
+        exec(connection_isolation_library(), namespace)
+        namespace["connection_isolation"](isolation_cursor, apply=True)
+        sql_result = False
+
+        def execute(query: str, parameters: tuple[object, ...] = ()) -> None:
+            nonlocal sql_result
+            sql_result = "pg_advisory_xact_lock" not in query and "res_users_log" not in query
+            if sql_result:
+                isolation_cursor.execute(query, parameters)
+
+        self.env.cr.execute.side_effect = execute
+        self.env.cr.fetchone.side_effect = lambda: (
+            isolation_cursor.fetchone() if sql_result else self.env.cr.fetchone.return_value
+        )
+        self.env.cr.fetchall.side_effect = isolation_cursor.fetchall
         group = MagicMock()
         group._name, group.id = "res.groups", 8
         self.env.ref.return_value = group
@@ -496,6 +574,20 @@ class AccountProgramTests(unittest.TestCase):
         self.users.create.assert_called_once()
         self.user.write.assert_not_called()
 
+    def test_connection_isolation_must_still_pass_before_each_account_operation(self) -> None:
+        self.execute()
+        self.users.create.reset_mock()
+        self.env.cr.commit.reset_mock()
+        self.isolation_database.execute("UPDATE res_company SET stock_move_sms_validation = true")
+        for operation in ("provision", "run", "cleanup"):
+            with self.subTest(operation=operation):
+                self.request["operation"] = operation
+                with self.assertRaises(RuntimeError):
+                    self.execute()
+        self.users.create.assert_not_called()
+        self.user.write.assert_not_called()
+        self.env.cr.commit.assert_not_called()
+
     def test_existing_login_or_wrong_copy_refuses_without_writing(self) -> None:
         self.users.search_count.return_value = 1
         with self.assertRaises(RuntimeError):
@@ -520,10 +612,12 @@ class AccountProgramTests(unittest.TestCase):
 
     def test_cleanup_archives_only_the_witnessed_task_and_changes_its_password(self) -> None:
         self.execute()
+        original_execute = self.env.cr.execute.side_effect
 
         def execute(query: str, *args: Any) -> None:
             if "res_users_log" in query:
                 raise RuntimeError("login history unavailable")
+            original_execute(query, *args)
 
         self.env.cr.execute.side_effect = execute
         self.request["operation"] = "cleanup"
