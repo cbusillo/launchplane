@@ -2,10 +2,11 @@ import { expect, setClockTime, test, waitForState } from "./state";
 import { DEADLINE_RETRY_INTERVAL_MS, READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 for (const view of ["index", "workspace", "environment"] as const) {
-  for (const journey of ["long-lived", "stopped"] as const) {
+  for (const journey of ["long-lived", "stopped", "failed"] as const) {
     const purpose = journey === "long-lived"
       ? "follows production evidence deadlines for over thirty minutes"
-      : "retains stopped evidence and bounds follow-up reads";
+      : journey === "stopped" ? "retains stopped evidence and bounds follow-up reads"
+        : "returns failed deadline reads to normal polling";
     test(`open ${view} ${purpose}`, { tag: "@responsive" }, async ({ page }, testInfo) => {
       await page.goto("/ui/products?fixture=products");
       const fixture = await page.evaluate(async () => {
@@ -73,8 +74,8 @@ for (const view of ["index", "workspace", "environment"] as const) {
       });
       await page.route(target, async route => {
         reads++;
-        const name = lastName = `Cadence observation ${reads}`;
         if (unavailable) return route.fulfill({ status: 503, json: { error: { code: "read_unavailable", message: "Cadence fixture unavailable" } } });
+        const name = lastName = `Cadence observation ${reads}`;
         serviceTime = browserTime;
         const payload = view === "environment"
           ? { environment: { ...response(fixture.detail), display_name: name } }
@@ -112,9 +113,9 @@ for (const view of ["index", "workspace", "environment"] as const) {
         await expect(findSignal(nextSurface)).toHaveAttribute(attribute, tone);
       };
       for (let minute = 0; minute < (journey === "long-lived" ? 31 : 1); minute++) {
-        if (minute > 0) {
-          // Keep the page open and verify replacement proof every minute. The
-          // first cycle separately checks the publication race in small steps.
+        if (![0, 15, 30].includes(minute)) {
+          // Verify replacement proof every minute. Also sample the full
+          // publication race at the start, midpoint and final minute.
           await advance(cadence, healthy);
           continue;
         }
@@ -127,6 +128,27 @@ for (const view of ["index", "workspace", "environment"] as const) {
       }
       if (journey === "long-lived") {
         await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-${view}-${testInfo.project.name}.png`, fullPage: true });
+        expect(mutations).toEqual([]);
+        return;
+      }
+      // Replacement proof ends the old retry window, so a healthy lane must
+      // not keep polling at the short follow-up interval.
+      const recoveredReads = reads;
+      await advanceRead(DEADLINE_RETRY_INTERVAL_MS * 2);
+      await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-recovered-${journey}-${view}-${testInfo.project.name}.png`, fullPage: true });
+      expect(reads).toBe(recoveredReads);
+      if (journey === "failed") {
+        unavailable = true;
+        // Fail inside the next watched window, while its retries are eligible.
+        await advanceRead(origin + cadence * 2 + 1 - browserTime);
+        await expect(page.getByText("Cadence fixture unavailable", { exact: false }).first()).toBeVisible();
+        const failedReads = reads;
+        await advanceRead(DEADLINE_RETRY_INTERVAL_MS * 2);
+        await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-failed-${view}-${testInfo.project.name}.png`, fullPage: true });
+        expect(reads).toBe(failedReads);
+        unavailable = false;
+        await advance(READ_REFRESH_INTERVAL_MS + DEADLINE_RETRY_INTERVAL_MS, healthy);
+        expect(reads).toBe(failedReads + 1);
         expect(mutations).toEqual([]);
         return;
       }
