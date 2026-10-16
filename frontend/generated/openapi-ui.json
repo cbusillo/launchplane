@@ -1397,6 +1397,7 @@
             "schema": {
               "default": "managed-secret-reencryption",
               "enum": [
+                "production-backup-policy",
                 "managed-secret-reencryption",
                 "managed-authz-policy-set",
                 "managed-merge-train-policy-import",
@@ -2437,6 +2438,96 @@
           }
         },
         "summary": "Preflight"
+      }
+    },
+    "/v1/production-backup-authority/proposals": {
+      "get": {
+        "operationId": "list_backup_policy_proposals",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "context",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Context",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "instance",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Instance",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPolicyProposalListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "List Backup Policy Proposals"
       }
     },
     "/v1/production-backup-gates/operations/{operation_id}": {
@@ -5841,6 +5932,16 @@
                     "title": "Context",
                     "type": "string"
                   },
+                  "dependency_health": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "enabled": {
                     "default": true,
                     "title": "Enabled",
@@ -7514,6 +7615,87 @@
           }
         },
         "summary": "Dry-run or apply typed production backup authority"
+      }
+    },
+    "/v1/production-backup-authority/proposals/{operation_id}/decision": {
+      "post": {
+        "operationId": "decide_backup_policy_proposal",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "operation_id",
+            "required": true,
+            "schema": {
+              "maxLength": 96,
+              "minLength": 1,
+              "title": "Operation Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupPolicyDecision"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BackupPolicyDecisionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Decide Backup Policy Proposal"
       }
     },
     "/v1/production-backup-gates": {
@@ -10345,6 +10527,275 @@
         "title": "BackupGateRecord",
         "type": "object"
       },
+      "BackupPolicyDecision": {
+        "additionalProperties": false,
+        "properties": {
+          "decision": {
+            "enum": [
+              "approve",
+              "decline"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "source_event_id": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+            "title": "Source Event Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "decision",
+          "source_event_id"
+        ],
+        "title": "BackupPolicyDecision",
+        "type": "object"
+      },
+      "BackupPolicyDecisionResponse": {
+        "properties": {
+          "proposal": {
+            "$ref": "#/components/schemas/BackupPolicyProposalReview"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal",
+          "status",
+          "trace_id"
+        ],
+        "title": "BackupPolicyDecisionResponse",
+        "type": "object"
+      },
+      "BackupPolicyExecutionEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "failure_code": {
+            "default": "",
+            "title": "Failure Code",
+            "type": "string"
+          },
+          "reconciliation_required": {
+            "default": false,
+            "title": "Reconciliation Required",
+            "type": "boolean"
+          },
+          "result_digest": {
+            "title": "Result Digest",
+            "type": "string"
+          },
+          "result_status": {
+            "enum": [
+              "ok",
+              "error"
+            ],
+            "title": "Result Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "failure_code",
+          "reconciliation_required",
+          "result_digest",
+          "result_status"
+        ],
+        "title": "BackupPolicyExecutionEvidence",
+        "type": "object"
+      },
+      "BackupPolicyHumanEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "backup_max_age_seconds": {
+            "title": "Backup Max Age Seconds",
+            "type": "integer"
+          },
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "effective_at": {
+            "title": "Effective At",
+            "type": "string"
+          },
+          "instance": {
+            "title": "Instance",
+            "type": "string"
+          },
+          "plan_digest": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Plan Digest",
+            "type": "string"
+          },
+          "policy_revision": {
+            "title": "Policy Revision",
+            "type": "integer"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "promotion_action": {
+            "title": "Promotion Action",
+            "type": "string"
+          },
+          "result_status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Result Status",
+            "type": "string"
+          },
+          "retention_count": {
+            "title": "Retention Count",
+            "type": "integer"
+          },
+          "review_after": {
+            "title": "Review After",
+            "type": "string"
+          },
+          "snapshot_max_age_seconds": {
+            "title": "Snapshot Max Age Seconds",
+            "type": "integer"
+          },
+          "targets": {
+            "items": {
+              "$ref": "#/components/schemas/BackupPolicyTargetChange"
+            },
+            "title": "Targets",
+            "type": "array"
+          }
+        },
+        "required": [
+          "backup_max_age_seconds",
+          "context",
+          "effective_at",
+          "instance",
+          "plan_digest",
+          "policy_revision",
+          "product",
+          "promotion_action",
+          "result_status",
+          "retention_count",
+          "review_after",
+          "snapshot_max_age_seconds",
+          "targets"
+        ],
+        "title": "BackupPolicyHumanEvidence",
+        "type": "object"
+      },
+      "BackupPolicyProposalListResponse": {
+        "properties": {
+          "proposals": {
+            "items": {
+              "$ref": "#/components/schemas/BackupPolicyProposalReview"
+            },
+            "title": "Proposals",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposals",
+          "status",
+          "trace_id"
+        ],
+        "title": "BackupPolicyProposalListResponse",
+        "type": "object"
+      },
+      "BackupPolicyProposalReview": {
+        "additionalProperties": false,
+        "properties": {
+          "can_approve": {
+            "title": "Can Approve",
+            "type": "boolean"
+          },
+          "can_decline": {
+            "title": "Can Decline",
+            "type": "boolean"
+          },
+          "operation_id": {
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "protection": {
+            "$ref": "#/components/schemas/BackupPolicyHumanEvidence"
+          },
+          "status": {
+            "enum": [
+              "planned",
+              "approved",
+              "revoked",
+              "executing",
+              "executed",
+              "execution_failed",
+              "expired",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "can_approve",
+          "can_decline",
+          "operation_id",
+          "protection",
+          "status"
+        ],
+        "title": "BackupPolicyProposalReview",
+        "type": "object"
+      },
+      "BackupPolicyTargetChange": {
+        "additionalProperties": false,
+        "properties": {
+          "change": {
+            "enum": [
+              "new",
+              "revised",
+              "unchanged"
+            ],
+            "title": "Change",
+            "type": "string"
+          },
+          "destination_kind": {
+            "enum": [
+              "proxmox_guest",
+              "proxmox_storage"
+            ],
+            "title": "Destination Kind",
+            "type": "string"
+          },
+          "target_revision": {
+            "title": "Target Revision",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "change",
+          "destination_kind",
+          "target_revision"
+        ],
+        "title": "BackupPolicyTargetChange",
+        "type": "object"
+      },
       "BootstrapEvidence": {
         "additionalProperties": false,
         "properties": {
@@ -12817,6 +13268,11 @@
             "title": "Name",
             "type": "string"
           },
+          "on_reset": {
+            "default": false,
+            "title": "On Reset",
+            "type": "boolean"
+          },
           "timeout_seconds": {
             "default": 300,
             "maximum": 3600,
@@ -12830,6 +13286,7 @@
           "cron_expression",
           "enabled",
           "name",
+          "on_reset",
           "timeout_seconds"
         ],
         "title": "GenericWebApplicationSchedule",
@@ -13121,6 +13578,11 @@
             "title": "Name",
             "type": "string"
           },
+          "on_reset": {
+            "default": false,
+            "title": "On Reset",
+            "type": "boolean"
+          },
           "timeout_seconds": {
             "default": 300,
             "maximum": 3600,
@@ -13132,6 +13594,7 @@
         "required": [
           "command",
           "name",
+          "on_reset",
           "timeout_seconds"
         ],
         "title": "GenericWebMaintenanceCommand",
@@ -13152,6 +13615,16 @@
             ],
             "title": "Data Transport Mode",
             "type": "string"
+          },
+          "generic_web_extensions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenericWebLaneExtensions"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "transport_database_prefix": {
             "default": "",
@@ -14898,7 +15371,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "default": 1,
+            "default": 2,
             "minimum": 1,
             "title": "Schema Version",
             "type": "integer"
@@ -24334,6 +24807,7 @@
           },
           "descriptor_id": {
             "enum": [
+              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -24631,115 +25105,9 @@
         "title": "PrivilegedOperationExecutionEvidence",
         "type": "object"
       },
-      "PrivilegedOperationHumanResponse": {
+      "PrivilegedOperationHumanRecord": {
         "additionalProperties": false,
-        "properties": {
-          "events": {
-            "items": {
-              "$ref": "#/components/schemas/PrivilegedOperationEventRecord"
-            },
-            "title": "Events",
-            "type": "array"
-          },
-          "record": {
-            "$ref": "#/components/schemas/PrivilegedOperationRecord"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          },
-          "write_status": {
-            "default": "not_applicable",
-            "enum": [
-              "written",
-              "replayed",
-              "not_applicable"
-            ],
-            "title": "Write Status",
-            "type": "string"
-          }
-        },
-        "required": [
-          "events",
-          "record",
-          "status",
-          "trace_id",
-          "write_status"
-        ],
-        "title": "PrivilegedOperationHumanResponse",
-        "type": "object"
-      },
-      "PrivilegedOperationListResponse": {
-        "additionalProperties": false,
-        "properties": {
-          "reviews": {
-            "items": {
-              "$ref": "#/components/schemas/PrivilegedOperationSemanticReview"
-            },
-            "title": "Reviews",
-            "type": "array"
-          },
-          "status": {
-            "const": "ok",
-            "default": "ok",
-            "title": "Status",
-            "type": "string"
-          },
-          "total": {
-            "minimum": 0,
-            "title": "Total",
-            "type": "integer"
-          },
-          "trace_id": {
-            "title": "Trace Id",
-            "type": "string"
-          }
-        },
-        "required": [
-          "reviews",
-          "status",
-          "total",
-          "trace_id"
-        ],
-        "title": "PrivilegedOperationListResponse",
-        "type": "object"
-      },
-      "PrivilegedOperationLocalOperatorActor": {
-        "additionalProperties": false,
-        "properties": {
-          "identity_type": {
-            "const": "local_operator",
-            "default": "local_operator",
-            "title": "Identity Type",
-            "type": "string"
-          },
-          "login": {
-            "const": "local-operator",
-            "default": "local-operator",
-            "title": "Login",
-            "type": "string"
-          },
-          "principal_sha256": {
-            "title": "Principal Sha256",
-            "type": "string"
-          }
-        },
-        "required": [
-          "identity_type",
-          "login",
-          "principal_sha256"
-        ],
-        "title": "PrivilegedOperationLocalOperatorActor",
-        "type": "object"
-      },
-      "PrivilegedOperationRecord": {
-        "additionalProperties": false,
+        "description": "The generic browser record excludes private product-card adapters.",
         "properties": {
           "approval": {
             "anyOf": [
@@ -24808,6 +25176,9 @@
           },
           "execution": {
             "anyOf": [
+              {
+                "$ref": "#/components/schemas/BackupPolicyExecutionEvidence"
+              },
               {
                 "$ref": "#/components/schemas/PrivilegedOperationExecutionEvidence"
               },
@@ -24943,7 +25314,114 @@
           "terminal_reason",
           "updated_at"
         ],
-        "title": "PrivilegedOperationRecord",
+        "title": "PrivilegedOperationHumanRecord",
+        "type": "object"
+      },
+      "PrivilegedOperationHumanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "events": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationEventRecord"
+            },
+            "title": "Events",
+            "type": "array"
+          },
+          "record": {
+            "$ref": "#/components/schemas/PrivilegedOperationHumanRecord"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          },
+          "write_status": {
+            "default": "not_applicable",
+            "enum": [
+              "written",
+              "replayed",
+              "not_applicable"
+            ],
+            "title": "Write Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "events",
+          "record",
+          "status",
+          "trace_id",
+          "write_status"
+        ],
+        "title": "PrivilegedOperationHumanResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationListResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "reviews": {
+            "items": {
+              "$ref": "#/components/schemas/PrivilegedOperationSemanticReview"
+            },
+            "title": "Reviews",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "total": {
+            "minimum": 0,
+            "title": "Total",
+            "type": "integer"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reviews",
+          "status",
+          "total",
+          "trace_id"
+        ],
+        "title": "PrivilegedOperationListResponse",
+        "type": "object"
+      },
+      "PrivilegedOperationLocalOperatorActor": {
+        "additionalProperties": false,
+        "properties": {
+          "identity_type": {
+            "const": "local_operator",
+            "default": "local_operator",
+            "title": "Identity Type",
+            "type": "string"
+          },
+          "login": {
+            "const": "local-operator",
+            "default": "local-operator",
+            "title": "Login",
+            "type": "string"
+          },
+          "principal_sha256": {
+            "title": "Principal Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "identity_type",
+          "login",
+          "principal_sha256"
+        ],
+        "title": "PrivilegedOperationLocalOperatorActor",
         "type": "object"
       },
       "PrivilegedOperationRevocationEnvelope": {
@@ -25018,6 +25496,7 @@
           },
           "descriptor_id": {
             "enum": [
+              "production-backup-policy",
               "managed-secret-reencryption",
               "managed-authz-policy-set",
               "managed-merge-train-policy-import",
@@ -27619,6 +28098,17 @@
       "ProductHealthMonitoringCheckSummary": {
         "additionalProperties": false,
         "properties": {
+          "dependency_health": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyHealthEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -27850,6 +28340,10 @@
             ],
             "title": "Current Check Kind"
           },
+          "current_dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
+          },
           "current_enabled": {
             "anyOf": [
               {
@@ -27959,6 +28453,10 @@
             ],
             "title": "Requested Check Kind",
             "type": "string"
+          },
+          "requested_dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
           },
           "requested_enabled": {
             "title": "Requested Enabled",
@@ -28107,6 +28605,28 @@
             "title": "Checks",
             "type": "array"
           },
+          "dependency_expectations": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyExpectations"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "dependency_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "monitoring_intent": {
             "enum": [
               "public",
@@ -28149,6 +28669,12 @@
             "default": "",
             "title": "Repository",
             "type": "string"
+          },
+          "scan_enabled": {
+            "default": false,
+            "title": "Scan Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "ProductImageProfile",
@@ -28380,6 +28906,8 @@
           },
           "failure_code": {
             "enum": [
+              "dependency_failed",
+              "dependency_not_covered",
               "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
@@ -28569,6 +29097,8 @@
             "anyOf": [
               {
                 "enum": [
+                  "dependency_failed",
+                  "dependency_not_covered",
                   "production_delivery_failed",
                   "connection_timeout",
                   "deploy_fence_held",
@@ -28826,6 +29356,8 @@
           },
           "failure_code": {
             "enum": [
+              "dependency_failed",
+              "dependency_not_covered",
               "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
@@ -29152,6 +29684,10 @@
             },
             "title": "Checks",
             "type": "array"
+          },
+          "dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
           },
           "monitoring_intent": {
             "default": "prelaunch",
@@ -30735,6 +31271,10 @@
             "default": false,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "generic_web_extensions": {
+            "$ref": "#/components/schemas/GenericWebLaneExtensions",
+            "x-launchplane-optional-response": true
           },
           "historical_transport": {
             "additionalProperties": {
@@ -36806,6 +37346,158 @@
           "status",
           "target_deployment_record_id"
         ]
+      },
+      "RuntimeDependencyExpectations": {
+        "additionalProperties": false,
+        "properties": {
+          "dependencies": {
+            "default": [],
+            "items": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ],
+              "type": "string"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "source": {
+            "default": "derived",
+            "enum": [
+              "derived",
+              "override",
+              "unavailable"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "title": "RuntimeDependencyExpectations",
+        "type": "object",
+        "required": [
+          "dependencies",
+          "source"
+        ]
+      },
+      "RuntimeDependencyHealthEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "enum": [
+              "informational",
+              "required"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "results": {
+            "additionalProperties": {
+              "enum": [
+                "pass",
+                "fail",
+                "not_covered"
+              ],
+              "type": "string"
+            },
+            "propertyNames": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ]
+            },
+            "title": "Results",
+            "type": "object"
+          },
+          "source": {
+            "enum": [
+              "derived",
+              "override",
+              "unavailable"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "not_covered",
+              "none"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "results",
+          "source",
+          "status"
+        ],
+        "title": "RuntimeDependencyHealthEvidence",
+        "type": "object"
+      },
+      "RuntimeDependencyHealthPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "informational",
+            "enum": [
+              "informational",
+              "required"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "RuntimeDependencyHealthPolicy",
+        "type": "object",
+        "required": [
+          "mode",
+          "override"
+        ]
+      },
+      "RuntimeDependencyOverride": {
+        "additionalProperties": false,
+        "properties": {
+          "dependencies": {
+            "items": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ],
+              "type": "string"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dependencies",
+          "reason"
+        ],
+        "title": "RuntimeDependencyOverride",
+        "type": "object"
       },
       "RuntimeEnvironmentRecord": {
         "additionalProperties": false,

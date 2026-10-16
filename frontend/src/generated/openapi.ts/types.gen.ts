@@ -303,6 +303,60 @@ export type BackupGateRecord = {
     status: 'pending' | 'pass' | 'fail' | 'skipped';
 };
 
+export type BackupPolicyDecision = {
+    decision: 'approve' | 'decline';
+    source_event_id: string;
+};
+
+export type BackupPolicyDecisionResponse = {
+    proposal: BackupPolicyProposalReview;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type BackupPolicyExecutionEvidence = {
+    failure_code: string;
+    reconciliation_required: boolean;
+    result_digest: string;
+    result_status: 'ok' | 'error';
+};
+
+export type BackupPolicyHumanEvidence = {
+    backup_max_age_seconds: number;
+    context: string;
+    effective_at: string;
+    instance: string;
+    plan_digest: string;
+    policy_revision: number;
+    product: string;
+    promotion_action: string;
+    result_status: 'ok';
+    retention_count: number;
+    review_after: string;
+    snapshot_max_age_seconds: number;
+    targets: Array<BackupPolicyTargetChange>;
+};
+
+export type BackupPolicyProposalListResponse = {
+    proposals: Array<BackupPolicyProposalReview>;
+    status: 'ok';
+    trace_id: string;
+};
+
+export type BackupPolicyProposalReview = {
+    can_approve: boolean;
+    can_decline: boolean;
+    operation_id: string;
+    protection: BackupPolicyHumanEvidence;
+    status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
+};
+
+export type BackupPolicyTargetChange = {
+    change: 'new' | 'revised' | 'unchanged';
+    destination_kind: 'proxmox_guest' | 'proxmox_storage';
+    target_revision: number;
+};
+
 export type BootstrapEvidence = {
     attempted: boolean;
     detail: string;
@@ -739,6 +793,7 @@ export type GenericWebApplicationSchedule = {
     cron_expression: string;
     enabled: boolean;
     name: string;
+    on_reset: boolean;
     timeout_seconds: number;
 };
 
@@ -794,12 +849,14 @@ export type GenericWebLaneExtensions = {
 export type GenericWebMaintenanceCommand = {
     command: string;
     name: string;
+    on_reset: boolean;
     timeout_seconds: number;
 };
 
 export type GenericWebPreviewDeclaration = {
     app_name_suffix?: string;
     data_transport_mode: 'none' | 'driver';
+    generic_web_extensions?: GenericWebLaneExtensions | null;
     transport_database_prefix?: string;
     transport_extension?: '' | 'verireel-postgres';
 };
@@ -2651,7 +2708,7 @@ export type PrivilegedOperationAgentActor = {
 
 export type PrivilegedOperationApproval = {
     approver: PrivilegedOperationActor;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+    descriptor_id: 'production-backup-policy' | 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
     descriptor_version: number;
     evidence_digest: string;
     expires_at: string;
@@ -2701,9 +2758,35 @@ export type PrivilegedOperationExecutionEvidence = {
     unreadable_secret_count: number;
 };
 
+export type PrivilegedOperationHumanRecord = {
+    approval: PrivilegedOperationApproval | null;
+    created_at: string;
+    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+    descriptor_version: number;
+    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence | ({
+        action: 'setup';
+    } & OrdinaryAgentDeliveryActivationSetupHumanEvidence) | ({
+        action: 'revoke_activation';
+    } & OrdinaryAgentDeliveryActivationRevokeHumanEvidence);
+    evidence_digest: string;
+    execution: BackupPolicyExecutionEvidence | PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | OrdinaryAgentDeliveryActivationExecutionEvidence | null;
+    expires_at: string;
+    operation_id: string;
+    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
+    request_digest: string;
+    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
+    safety_class: 'secret_backed' | 'policy_admin';
+    schema_version: number;
+    source_event_id: string;
+    status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
+    terminal_at: string;
+    terminal_reason: string;
+    updated_at: string;
+};
+
 export type PrivilegedOperationHumanResponse = {
     events: Array<PrivilegedOperationEventRecord>;
-    record: PrivilegedOperationRecord;
+    record: PrivilegedOperationHumanRecord;
     status: 'ok';
     trace_id: string;
     write_status: 'written' | 'replayed' | 'not_applicable';
@@ -2722,32 +2805,6 @@ export type PrivilegedOperationLocalOperatorActor = {
     principal_sha256: string;
 };
 
-export type PrivilegedOperationRecord = {
-    approval: PrivilegedOperationApproval | null;
-    created_at: string;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
-    descriptor_version: number;
-    evidence: ManagedSecretReencryptionHumanEvidence | ManagedAuthzPolicySetHumanEvidence | ManagedMergeTrainPolicyImportHumanEvidence | ({
-        action: 'setup';
-    } & OrdinaryAgentDeliveryActivationSetupHumanEvidence) | ({
-        action: 'revoke_activation';
-    } & OrdinaryAgentDeliveryActivationRevokeHumanEvidence);
-    evidence_digest: string;
-    execution: PrivilegedOperationExecutionEvidence | ManagedAuthzPolicySetExecutionEvidence | ManagedMergeTrainPolicyImportExecutionEvidence | OrdinaryAgentDeliveryActivationExecutionEvidence | null;
-    expires_at: string;
-    operation_id: string;
-    request: ManagedSecretReencryptionPlanInput | ManagedAuthzPolicySetProposalInputOutput | ManagedMergeTrainPolicyImportProposalInputOutput | OrdinaryAgentDeliveryActivationSetupRequest | OrdinaryAgentDeliveryActivationRevokeRequest;
-    request_digest: string;
-    requested_by: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
-    safety_class: 'secret_backed' | 'policy_admin';
-    schema_version: number;
-    source_event_id: string;
-    status: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
-    terminal_at: string;
-    terminal_reason: string;
-    updated_at: string;
-};
-
 export type PrivilegedOperationRevocationEnvelope = {
     reason: string;
     schema_version?: number;
@@ -2763,7 +2820,7 @@ export type PrivilegedOperationSemanticReview = {
     can_approve: boolean;
     can_revoke: boolean;
     change: PrivilegedOperationSemanticReviewChange;
-    descriptor_id: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+    descriptor_id: 'production-backup-policy' | 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
     descriptor_version: number;
     evidence: PrivilegedOperationSemanticReviewEvidence;
     lifecycle: PrivilegedOperationSemanticReviewLifecycle;
@@ -3222,6 +3279,7 @@ export type ProductGenericWebTransitionRequest = {
 };
 
 export type ProductHealthMonitoringCheckSummary = {
+    dependency_health?: RuntimeDependencyHealthEvidence | null;
     enabled: boolean;
     failure_code: string;
     incident_eligible: boolean;
@@ -3252,6 +3310,7 @@ export type ProductHealthMonitoringPlan = {
     check_name: string;
     context: string;
     current_check_kind: 'public_http' | 'private_http' | 'provider' | null;
+    current_dependency_health?: RuntimeDependencyHealthPolicy;
     current_enabled: boolean | null;
     current_expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     current_monitoring_intent: 'public' | 'private' | 'prelaunch';
@@ -3268,6 +3327,7 @@ export type ProductHealthMonitoringPlan = {
     profile_updated_at_before: string;
     reason: string;
     requested_check_kind: 'public_http' | 'private_http';
+    requested_dependency_health?: RuntimeDependencyHealthPolicy;
     requested_enabled: boolean;
     requested_expected_dns_targets?: Array<PublicDnsExpectedTarget>;
     requested_monitoring_intent: 'public' | 'private' | 'prelaunch';
@@ -3290,6 +3350,8 @@ export type ProductHealthMonitoringResponse = {
 
 export type ProductHealthMonitoringSummary = {
     checks: Array<ProductHealthMonitoringCheckSummary>;
+    dependency_expectations?: RuntimeDependencyExpectations | null;
+    dependency_policy?: RuntimeDependencyHealthPolicy | null;
     monitoring_intent: 'public' | 'private' | 'prelaunch';
     open_incidents: Array<ProductIncidentSummary>;
     provenance: DataProvenance;
@@ -3298,6 +3360,7 @@ export type ProductHealthMonitoringSummary = {
 
 export type ProductImageProfile = {
     repository: string;
+    scan_enabled?: boolean;
 };
 
 export type ProductIncidentDetail = {
@@ -3330,7 +3393,7 @@ export type ProductIncidentEventSummary = {
 export type ProductIncidentMaterialEvidence = {
     affected_targets: Array<'base_url' | 'health_url' | 'private_health_url' | 'monitoring_intent' | 'provider' | 'tls_domain'>;
     check_kind: 'public_http' | 'private_http' | 'provider' | 'tls';
-    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'dependency_failed' | 'dependency_not_covered' | 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     route_authority_kind: string;
     runtime_identity_mismatched_fields: Array<string>;
@@ -3353,7 +3416,7 @@ export type ProductIncidentNotificationAttemptSummary = {
 };
 
 export type ProductIncidentObservationSummary = {
-    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
+    failure_code: 'dependency_failed' | 'dependency_not_covered' | 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error' | '';
     incident_event_id: string;
     material_fingerprint_sha256: string;
     notification_sent: boolean;
@@ -3395,7 +3458,7 @@ export type ProductIncidentSummary = {
     context: string;
     display_name: string;
     environment: string;
-    failure_code: 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
+    failure_code: 'dependency_failed' | 'dependency_not_covered' | 'production_delivery_failed' | 'connection_timeout' | 'deploy_fence_held' | 'dns_failure' | 'health_status_error' | 'http_error' | 'invalid_url' | 'private_endpoint_disabled' | 'private_endpoint_mismatch' | 'private_endpoint_not_found' | 'private_url' | 'monitoring_intent_changed' | 'monitor_run_missed' | 'provider_check_unavailable' | 'redirect_loop' | 'self_redirect' | 'tls_chain_failure' | 'tls_expired' | 'tls_expiring' | 'tls_failure' | 'tls_hostname_mismatch' | 'tls_self_signed' | 'tls_unsupported' | 'wrong_runtime_identity' | 'unknown_error';
     failure_layer: 'configuration' | 'dns' | 'network' | 'redirect' | 'http' | 'tls' | 'runtime_identity' | 'provider' | 'unknown';
     incident_id: string;
     instance: string;
@@ -3437,6 +3500,7 @@ export type ProductLaneHealthCheck = {
 
 export type ProductLaneHealthMonitoringPolicy = {
     checks: Array<ProductLaneHealthCheck>;
+    dependency_health?: RuntimeDependencyHealthPolicy;
     monitoring_intent: 'public' | 'private' | 'prelaunch';
 };
 
@@ -3680,6 +3744,7 @@ export type ProductPreviewProfile = {
     data_transport_mode: 'none' | 'driver';
     domain_certificate_type: 'none' | 'letsencrypt';
     enabled: boolean;
+    generic_web_extensions?: GenericWebLaneExtensions;
     readonly historical_transport?: {
         [key: string]: string;
     };
@@ -4736,6 +4801,30 @@ export type RollbackExecutionEvidence = {
     target_promotion_record_id?: string;
 };
 
+export type RuntimeDependencyExpectations = {
+    dependencies: Array<'database' | 'email' | 'cache'>;
+    source: 'derived' | 'override' | 'unavailable';
+};
+
+export type RuntimeDependencyHealthEvidence = {
+    mode: 'informational' | 'required';
+    results: {
+        [key: string]: 'pass' | 'fail' | 'not_covered';
+    };
+    source: 'derived' | 'override' | 'unavailable';
+    status: 'pass' | 'fail' | 'not_covered' | 'none';
+};
+
+export type RuntimeDependencyHealthPolicy = {
+    mode: 'informational' | 'required';
+    override: RuntimeDependencyOverride | null;
+};
+
+export type RuntimeDependencyOverride = {
+    dependencies: Array<'database' | 'email' | 'cache'>;
+    reason: string;
+};
+
 export type RuntimeEnvironmentRecord = {
     context: string;
     env: {
@@ -5233,6 +5322,7 @@ export type ProductPreviewProfileWritable = {
     data_transport_mode: 'none' | 'driver';
     domain_certificate_type: 'none' | 'letsencrypt';
     enabled: boolean;
+    generic_web_extensions?: GenericWebLaneExtensions;
     omitted_env_keys: Array<string>;
     override_env: {
         [key: string]: string;
@@ -5631,7 +5721,7 @@ export type ListHumanPrivilegedOperationsData = {
     path?: never;
     query?: {
         status?: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled' | null;
-        descriptor_id?: 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
+        descriptor_id?: 'production-backup-policy' | 'managed-secret-reencryption' | 'managed-authz-policy-set' | 'managed-merge-train-policy-import' | 'ordinary-agent-delivery-activation';
         limit?: number;
     };
     url: '/v1/privileged-operations/plans';
@@ -5915,6 +6005,34 @@ export type QualifyProductionBackupPreflightResponses = {
 };
 
 export type QualifyProductionBackupPreflightResponse = QualifyProductionBackupPreflightResponses[keyof QualifyProductionBackupPreflightResponses];
+
+export type ListBackupPolicyProposalsData = {
+    body?: never;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path?: never;
+    query: {
+        product: string;
+        context: string;
+        instance: string;
+    };
+    url: '/v1/production-backup-authority/proposals';
+};
+
+export type ListBackupPolicyProposalsErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type ListBackupPolicyProposalsError = ListBackupPolicyProposalsErrors[keyof ListBackupPolicyProposalsErrors];
+
+export type ListBackupPolicyProposalsResponses = {
+    200: BackupPolicyProposalListResponse;
+};
+
+export type ListBackupPolicyProposalsResponse = ListBackupPolicyProposalsResponses[keyof ListBackupPolicyProposalsResponses];
 
 export type ReadProductionBackupGateOperationData = {
     body?: never;
@@ -6806,6 +6924,7 @@ export type ApplyProductHealthMonitoringData = {
         check_kind?: 'public_http' | 'private_http';
         check_name: string;
         context: string;
+        dependency_health?: RuntimeDependencyHealthPolicy | null;
         enabled?: boolean;
         expected_dns_targets?: Array<PublicDnsExpectedTarget> | null;
         instance: string;
@@ -7197,6 +7316,32 @@ export type ApplyProductionBackupAuthorityResponses = {
 };
 
 export type ApplyProductionBackupAuthorityResponse = ApplyProductionBackupAuthorityResponses[keyof ApplyProductionBackupAuthorityResponses];
+
+export type DecideBackupPolicyProposalData = {
+    body: BackupPolicyDecision;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/production-backup-authority/proposals/{operation_id}/decision';
+};
+
+export type DecideBackupPolicyProposalErrors = {
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type DecideBackupPolicyProposalError = DecideBackupPolicyProposalErrors[keyof DecideBackupPolicyProposalErrors];
+
+export type DecideBackupPolicyProposalResponses = {
+    200: BackupPolicyDecisionResponse;
+};
+
+export type DecideBackupPolicyProposalResponse = DecideBackupPolicyProposalResponses[keyof DecideBackupPolicyProposalResponses];
 
 export type EnqueueProductionBackupGateData = {
     body: ProductionBackupGateRequest;

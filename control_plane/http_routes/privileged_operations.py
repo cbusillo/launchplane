@@ -5,11 +5,15 @@ from typing import Annotated, Literal
 
 from fastapi import Depends, Path, Query
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.backup_policy_proposal import BackupPolicyProposalInput
 
 from control_plane.contracts.privileged_operation import (
     ManagedAuthzPolicySetProposalInput,
     ManagedMergeTrainPolicyImportProposalInput,
     ManagedSecretReencryptionPlanInput,
+    ManagedSecretReencryptionHumanEvidence,
+    ManagedAuthzPolicySetHumanEvidence,
+    ManagedMergeTrainPolicyImportHumanEvidence,
     PrivilegedOperationApproval,
     PrivilegedOperationActor,
     PrivilegedOperationAgentActor,
@@ -32,6 +36,7 @@ from control_plane.contracts.privileged_operation import (
 from control_plane.contracts.ordinary_agent_activation import (
     OrdinaryAgentDeliveryActivationRevokeRequest,
     OrdinaryAgentDeliveryActivationSetupRequest,
+    OrdinaryAgentDeliveryActivationHumanEvidence,
 )
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.authz_candidate_preparation import (
@@ -126,6 +131,8 @@ class PrivilegedOperationPlanEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "PrivilegedOperationPlanEnvelope":
+        if self.descriptor_id == "production-backup-policy":
+            raise ValueError("Backup proposals use the agent proposal surface.")
         if self.schema_version != 1:
             raise ValueError("Unsupported privileged-operation plan envelope schema version.")
         self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
@@ -210,6 +217,7 @@ class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
     descriptor_id: Literal[
         "managed-authz-policy-set",
         "managed-merge-train-policy-import",
+        "production-backup-policy",
     ] = "managed-authz-policy-set"
     source_event_id: str = Field(min_length=1, max_length=128)
     expires_in_seconds: int = Field(
@@ -217,12 +225,20 @@ class PrivilegedPolicyOperationAgentProposalEnvelope(BaseModel):
         ge=MIN_PRIVILEGED_OPERATION_TTL_SECONDS,
         le=MAX_PRIVILEGED_OPERATION_TTL_SECONDS,
     )
-    request: ManagedAuthzPolicySetProposalInput | ManagedMergeTrainPolicyImportProposalInput
+    request: (
+        ManagedAuthzPolicySetProposalInput
+        | ManagedMergeTrainPolicyImportProposalInput
+        | BackupPolicyProposalInput
+    )
 
     @model_validator(mode="after")
     def _validate_envelope(self) -> "PrivilegedPolicyOperationAgentProposalEnvelope":
         if self.schema_version != 1:
             raise ValueError("Unsupported privileged policy proposal envelope schema version.")
+        if self.descriptor_id == "production-backup-policy" and not isinstance(
+            self.request, BackupPolicyProposalInput
+        ):
+            raise ValueError("Backup policy descriptor requires a backup proposal request.")
         self.source_event_id = normalize_privileged_operation_source_event_id(self.source_event_id)
         if self.descriptor_id == "managed-authz-policy-set" and not isinstance(
             self.request, ManagedAuthzPolicySetProposalInput
@@ -291,13 +307,37 @@ class PrivilegedOperationRevocationEnvelope(PrivilegedOperationApprovalEnvelope)
     pass
 
 
+class PrivilegedOperationHumanRecord(PrivilegedOperationRecord):
+    """The generic browser record excludes private product-card adapters."""
+
+    descriptor_id: Literal[
+        "managed-secret-reencryption",
+        "managed-authz-policy-set",
+        "managed-merge-train-policy-import",
+        "ordinary-agent-delivery-activation",
+    ]
+    request: (
+        ManagedSecretReencryptionPlanInput
+        | ManagedAuthzPolicySetProposalInput
+        | ManagedMergeTrainPolicyImportProposalInput
+        | OrdinaryAgentDeliveryActivationSetupRequest
+        | OrdinaryAgentDeliveryActivationRevokeRequest
+    )
+    evidence: (
+        ManagedSecretReencryptionHumanEvidence
+        | ManagedAuthzPolicySetHumanEvidence
+        | ManagedMergeTrainPolicyImportHumanEvidence
+        | OrdinaryAgentDeliveryActivationHumanEvidence
+    )
+
+
 class PrivilegedOperationHumanResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["ok"] = "ok"
     trace_id: str
     write_status: Literal["written", "replayed", "not_applicable"] = "not_applicable"
-    record: PrivilegedOperationRecord
+    record: PrivilegedOperationHumanRecord
     events: tuple[PrivilegedOperationEventRecord, ...]
 
 
@@ -568,6 +608,13 @@ def register_privileged_operation_routes(
             ) from error
 
     def descriptor_action(descriptor_id: PrivilegedOperationDescriptorId, field_name: str) -> str:
+        if descriptor_id == "production-backup-policy":
+            raise dependencies.common.http_error(
+                status_code=404,
+                trace_id=dependencies.common.next_trace_id(),
+                code="backup_proposal_card_required",
+                message="Use the product backup proposal card for redacted review and decisions.",
+            )
         registration = read_privileged_operation_descriptor(descriptor_id)
         if registration.planner is None and field_name not in {
             "human_read_action",
@@ -710,7 +757,9 @@ def register_privileged_operation_routes(
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
-            record=result.record,
+            record=PrivilegedOperationHumanRecord.model_validate(
+                result.record.model_dump(mode="json")
+            ),
             events=events,
         )
 
@@ -801,7 +850,7 @@ def register_privileged_operation_routes(
             ) from error
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
-            record=record,
+            record=PrivilegedOperationHumanRecord.model_validate(record.model_dump(mode="json")),
             events=events,
         )
 
@@ -954,7 +1003,9 @@ def register_privileged_operation_routes(
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
-            record=result.record,
+            record=PrivilegedOperationHumanRecord.model_validate(
+                result.record.model_dump(mode="json")
+            ),
             events=events,
         )
 
@@ -1009,7 +1060,9 @@ def register_privileged_operation_routes(
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
-            record=result.record,
+            record=PrivilegedOperationHumanRecord.model_validate(
+                result.record.model_dump(mode="json")
+            ),
             events=events,
         )
 
@@ -1079,7 +1132,9 @@ def register_privileged_operation_routes(
         return PrivilegedOperationHumanResponse(
             trace_id=trace_id,
             write_status=result.write_status,
-            record=result.record,
+            record=PrivilegedOperationHumanRecord.model_validate(
+                result.record.model_dump(mode="json")
+            ),
             events=events,
         )
 
@@ -1154,6 +1209,41 @@ def register_privileged_operation_routes(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Only authorized local operators or terminal agents can propose policy operations.",
+            )
+        if envelope.descriptor_id == "production-backup-policy":
+            from control_plane.backup_policy_proposals import propose_backup_policy
+
+            try:
+                record = propose_backup_policy(
+                    record_store=record_store,
+                    identity=identity,
+                    envelope=envelope,
+                    authorization_allows=dependencies.common.authorization_allows,
+                    http_error=dependencies.common.http_error,
+                    trace_id=trace_id,
+                )
+            except PrivilegedOperationConflictError as error:
+                raise dependencies.common.http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="privileged_operation_plan_conflict",
+                    message="The source event already identifies a different proposal.",
+                ) from error
+            except (
+                PrivilegedOperationPlannerError,
+                PrivilegedOperationPlanningStoreError,
+                PrivilegedOperationStoreUnavailableError,
+            ) as error:
+                raise dependencies.common.http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="privileged_operation_planning_unavailable",
+                    message="The backup proposal cannot be planned against current service records.",
+                ) from error
+            return PrivilegedPolicyOperationAgentProposalResponse(
+                trace_id=trace_id,
+                write_status=record.write_status,
+                summary=privileged_operation_agent_summary(record.record),
             )
         require_managed_rule(
             identity=identity,

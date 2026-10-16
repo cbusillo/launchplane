@@ -529,3 +529,13 @@ None. #2204 and #2177, the issues this section held open, are closed.
 
 **Preserved history:** Phase 1 planning-only descriptions remain historical
 context only; the supervised Phase 2 worker flow above is current guidance.
+
+## Backup policy adapter
+
+`production-backup-policy` reuses the persisted privileged-operation plans,
+source-event replay, human approval and cancellation, and worker lifecycle.
+Its planning and decisions use the existing lane-scoped backup authorities.
+Its private request is never returned by the generic raw-record or transition
+surfaces. The product's production Actions card reads an allowlisted review and
+sends a human decision through the dedicated backup proposal routes. See the
+[backup proposal contract](production-backup-provider.md#review-a-proposed-backup-policy).

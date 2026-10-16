@@ -405,6 +405,14 @@ reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
 
+Filesystem paths with `./`, `../`, `/` or `\\` prefixes in Python strings are not
+repository references. A separate owner/repository reference elsewhere in the same string
+is still audited. Historical profile-conversion command constants in
+`control_plane/contracts/*_migration.py` may contain HTTP loopback endpoints:
+they translate in-container behavior into stored declarations. This does not
+classify external hosts, embedded credentials, or runtime defaults outside a
+profile conversion as schema.
+
 For Python source, a fixed protocol identifier can be classified as `schema_only`
 when a single uppercase module binding holds an identifier-shaped string and
 every local reference uses the same protocol field role. Evidence must include

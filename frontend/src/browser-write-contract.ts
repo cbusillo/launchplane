@@ -1,4 +1,5 @@
 import type {
+  DecideBackupPolicyProposalData,
   ExecuteProductRetirementData,
   RebindBackupWorkerCredentialsData,
   ApplyProductionBackupAuthorityData,
@@ -34,6 +35,7 @@ import type {
 } from "./generated/openapi.ts";
 
 export const BROWSER_WRITE_ROUTES = {
+  backupPolicyDecision: "/v1/production-backup-authority/proposals/{operation_id}/decision" satisfies DecideBackupPolicyProposalData["url"],
   localConsumerDelivery: "/v1/local-consumer-deliveries" satisfies DeliverTestingLocalConsumerData["url"],
   productRetirement: "/v1/product-retirement" satisfies ExecuteProductRetirementData["url"],
   backupWorkerBindings: "/v1/products/{product}/environments/prod/backup-worker-bindings/apply" satisfies RebindBackupWorkerCredentialsData["url"],

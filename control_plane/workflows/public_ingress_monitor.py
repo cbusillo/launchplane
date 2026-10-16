@@ -103,6 +103,12 @@ from control_plane.contracts.runtime_identity import (
     RuntimeIdentityStatus,
     health_payload_runtime_identity_status,
 )
+from control_plane.contracts.runtime_dependency_health import (
+    RuntimeDependencyExpectations,
+    RuntimeDependencyHealthPolicy,
+    runtime_dependency_health_evidence,
+)
+from control_plane.runtime_dependency_health import derive_runtime_dependencies
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.lane_runtime_verification import lane_expected_runtime_identity
 from control_plane.notifications import (
@@ -261,12 +267,15 @@ class PublicIngressMonitorTarget:
     incident_eligible: bool
     expected_runtime_identity: RuntimeIdentity | None
     require_runtime_identity: bool
+    dependency_expectations: RuntimeDependencyExpectations | None = None
+    dependency_policy: RuntimeDependencyHealthPolicy | None = None
     expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = ()
     provider: str = ""
     provider_check: str = ""
     private_endpoint_key: str = ""
     private_endpoint_sha256: str = ""
     private_endpoint_material_sha256: str = ""
+    private_tls_ca_pem: str = ""
     route_binding_sha256: str = ""
     recovery_observation_threshold: int = 1
     resolution_failure_code: PublicIngressFailureCode | None = None
@@ -587,6 +596,7 @@ def _health_check_monitor_target(
     resolution_failure_summary = ""
     private_endpoint_sha256 = ""
     private_endpoint_material_sha256 = ""
+    private_tls_ca_pem = ""
     if check.kind == "public_http":
         base_url = lane.base_url.strip().rstrip("/")
         health_url = check.url.strip() or _monitor_health_url(
@@ -611,6 +621,7 @@ def _health_check_monitor_target(
             resolution_failure_summary = resolution.summary
             private_endpoint_sha256 = resolution.authority_sha256
             private_endpoint_material_sha256 = resolution.material_authority_sha256
+            private_tls_ca_pem = resolution.tls_ca_pem
         if not health_url and not resolution_failure_code:
             return None
     else:
@@ -638,6 +649,12 @@ def _health_check_monitor_target(
             instance_name=lane.instance,
         ),
         require_runtime_identity=check.require_runtime_identity,
+        dependency_expectations=derive_runtime_dependencies(
+            profile=profile, lane=lane, record_store=record_store
+        )
+        if check.kind in {"public_http", "private_http"}
+        else None,
+        dependency_policy=lane.health_monitoring.dependency_health,
         expected_dns_targets=check.expected_dns_targets,
         recovery_observation_threshold=check.recovery_observation_threshold,
         provider=check.provider,
@@ -645,6 +662,7 @@ def _health_check_monitor_target(
         private_endpoint_key=check.private_endpoint_key,
         private_endpoint_sha256=private_endpoint_sha256,
         private_endpoint_material_sha256=private_endpoint_material_sha256,
+        private_tls_ca_pem=private_tls_ca_pem,
         resolution_failure_code=resolution_failure_code,
         resolution_failure_summary=resolution_failure_summary,
     )
@@ -657,6 +675,7 @@ class PrivateHealthEndpointResolution:
     summary: str = ""
     authority_sha256: str = ""
     material_authority_sha256: str = ""
+    tls_ca_pem: str = ""
 
 
 def _resolved_private_health_url(
@@ -709,6 +728,7 @@ def _resolved_private_health_url(
         url=endpoint.url,
         authority_sha256=authority_sha256,
         material_authority_sha256=material_authority_sha256,
+        tls_ca_pem=endpoint.tls_ca_pem,
     )
 
 
@@ -722,6 +742,7 @@ def _private_health_endpoint_material_sha256(endpoint: PrivateHealthEndpointReco
                 "instance": endpoint.instance,
                 "url": endpoint.url,
                 "status": endpoint.status,
+                **({"tls_ca_pem": endpoint.tls_ca_pem} if endpoint.tls_ca_pem else {}),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -779,11 +800,22 @@ def run_public_ingress_monitor_once(
 
     def probe(target: PublicIngressMonitorTarget) -> PublicIngressObservationRecord:
         _check_monitor_cancelled(should_stop)
+        target_http_get = private_get if target.check_kind == "private_http" else public_get
+        if (
+            target.check_kind == "private_http"
+            and target.private_tls_ca_pem
+            and private_http_get is None
+        ):
+
+            def scoped_private_get(url: str, timeout: int) -> HttpObservation:
+                return fetch_private_health_url(url, timeout, tls_ca_pem=target.private_tls_ca_pem)
+
+            target_http_get = scoped_private_get
         return check_public_ingress_target(
             target=target,
             checked_at=observed_at,
             timeout_seconds=timeout_seconds,
-            http_get=(private_get if target.check_kind == "private_http" else public_get),
+            http_get=target_http_get,
             tls_get=tls_probe,
             dns_get=dns_get,
         )
@@ -2444,12 +2476,19 @@ def fetch_public_ingress_url(url: str, timeout_seconds: int) -> HttpObservation:
     )
 
 
-def fetch_private_health_url(url: str, timeout_seconds: int) -> HttpObservation:
+def fetch_private_health_url(
+    url: str, timeout_seconds: int, *, tls_ca_pem: str = ""
+) -> HttpObservation:
+    tls_context = None
+    if tls_ca_pem:
+        tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        tls_context.load_verify_locations(cadata=tls_ca_pem)
     response = request_private_http(
         url,
         headers={"User-Agent": USER_AGENT},
         timeout_seconds=timeout_seconds,
-        max_redirects=MAX_REDIRECTS,
+        max_redirects=0 if tls_ca_pem else MAX_REDIRECTS,
+        ssl_context=tls_context,
     )
     payload: object = None
     if response.body and "json" in response.header("content-type").lower():
@@ -2601,6 +2640,18 @@ def _check_url(
             code="unknown_error",
             summary=str(error),
         )
+    is_health_response = target_kind in {"health_url", "private_health_url"} or (
+        target_kind == "base_url" and url == target.health_url
+    )
+    dependency_health = (
+        runtime_dependency_health_evidence(
+            payload=observation.payload,
+            expectations=target.dependency_expectations,
+            policy=target.dependency_policy or RuntimeDependencyHealthPolicy(),
+        )
+        if is_health_response and target.dependency_expectations is not None
+        else None
+    )
     if not 200 <= observation.status_code < 300:
         return PublicIngressTargetObservation(
             target=target_kind,
@@ -2615,6 +2666,7 @@ def _check_url(
             final_url=observation.final_url,
             redirect_count=observation.redirect_count,
             summary=f"HTTP {observation.status_code}",
+            dependency_health=dependency_health,
         )
     runtime_status: RuntimeIdentityStatus = "unchecked"
     runtime_detail = ""
@@ -2637,6 +2689,7 @@ def _check_url(
                 "No expected runtime identity is recorded for this strict public health check."
             ),
             summary="Expected runtime identity is unavailable.",
+            dependency_health=dependency_health,
         )
     if (
         target_kind in {"health_url", "private_health_url"}
@@ -2665,18 +2718,31 @@ def _check_url(
                 runtime_identity_detail=runtime_detail,
                 observed_runtime_identity=observed_runtime_identity,
                 summary=runtime_detail or "Runtime identity did not match expected deployment.",
+                dependency_health=dependency_health,
             )
+    dependency_failure: PublicIngressFailureCode | None = None
+    summary = _successful_target_summary(target)
+    if dependency_health is not None:
+        if dependency_health.status == "fail":
+            dependency_failure = "dependency_failed"
+            summary = "A declared runtime dependency failed."
+        elif dependency_health.status == "not_covered":
+            summary += " Dependency health: not covered."
+            if dependency_health.mode == "required":
+                dependency_failure = "dependency_not_covered"
     return PublicIngressTargetObservation(
         target=target_kind,
         url=url,
-        status="pass",
+        status="fail" if dependency_failure else "pass",
+        failure_code=dependency_failure,
         http_status=observation.status_code,
         final_url=observation.final_url,
         redirect_count=observation.redirect_count,
         runtime_identity_status=runtime_status,
         runtime_identity_detail=runtime_detail,
         observed_runtime_identity=observed_runtime_identity,
-        summary=_successful_target_summary(target),
+        summary=summary,
+        dependency_health=dependency_health,
     )
 
 
@@ -2942,7 +3008,13 @@ def _record_summary(
     if status == "pass":
         if _is_deploy_fence_target(target):
             return f"No unresolved deploy is holding {target.product}/{target.instance}."
-        return f"{_check_label(target)} is reachable for {target.product}/{target.instance}."
+        coverage = next(
+            (item.dependency_health for item in observations if item.dependency_health), None
+        )
+        summary = f"{_check_label(target)} is reachable for {target.product}/{target.instance}."
+        if coverage is not None and coverage.status == "not_covered":
+            summary += " Dependency health: not covered (informational until adoption)."
+        return summary
     failing = next(
         (observation for observation in observations if observation.status == "fail"), None
     )

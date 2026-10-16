@@ -15,6 +15,7 @@ ODOO_VERSION_ENV_KEY = "ODOO_VERSION"
 # Stable codes for why a replacement plan is blocked, kept beside each human
 # blocker message. A code never carries provider or exception text.
 OdooTargetReplacementPlanBlockerCode = Literal[
+    "two_slot_cutover_required",
     "target_record_missing",
     "target_id_record_missing",
     "target_not_compose",

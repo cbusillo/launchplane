@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
 from control_plane.private_testing_transport import ROUTE as PRIVATE_TESTING_TRANSPORT_ROUTE
+from control_plane.private_testing_activation import ROUTE as PRIVATE_TESTING_ACTIVATION_ROUTE
 from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
 from control_plane.contracts.disposable_lane import (
     DISPOSABLE_LANE_OBSERVATION_ROUTE,
     TESTING_REPLACEMENT_RESOURCES_ROUTE,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
     TESTING_PUBLIC_INGRESS_ROUTE,
+    TESTING_VERIFICATION_ROUTE,
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
 from control_plane.testing_generation_retirement import ROUTE as TESTING_GENERATION_RETIREMENT_ROUTE
@@ -96,8 +98,26 @@ class OperationSpec:
 OPERATION_SPECS = (
     OperationSpec(
         "POST",
+        PRIVATE_TESTING_ACTIVATION_ROUTE,
+        "Install or remove exact reviewed private testing Compose source using immutable product provenance and original-operation recovery; deployment and live TLS proof remain separate.",
+        ("service_api", "local_cli"),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("expected_plan_sha256", "host_review", "custody_review", "trust_review"),
+    ),
+    OperationSpec(
+        "POST",
         TESTING_PUBLIC_INGRESS_ROUTE,
         "Publish the current independent Odoo testing hostname at its recorded edge using an existing covering certificate; preserve its restored copy and retained routes.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
+    OperationSpec(
+        "POST",
+        TESTING_VERIFICATION_ROUTE,
+        "Verify the installed Odoo testing copy and finish its deployment and inventory publication without another deployment or restore.",
         ("service_api",),
         ("dry-run", "apply", "readback"),
         "apply",

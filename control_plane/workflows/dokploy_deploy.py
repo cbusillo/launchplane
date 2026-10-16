@@ -10,7 +10,11 @@ from control_plane.contracts.deploy_reference import (
     is_digest_pinned_image_reference,
     provider_image_reference,
 )
-from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.runtime_identity import (
+    COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
+    RuntimeIdentity,
+    runtime_identity_env,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import api as dokploy_api
 
@@ -99,7 +103,7 @@ def update_dokploy_target_artifact(
         env_text = dokploy_api.render_dokploy_env_text_with_overrides(
             str(target_payload.get("env") or ""),
             updates={
-                "DOCKER_IMAGE_REFERENCE": artifact_id,
+                **{key: artifact_id for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS},
                 **(runtime_identity_env(runtime_identity) if runtime_identity is not None else {}),
             },
         )

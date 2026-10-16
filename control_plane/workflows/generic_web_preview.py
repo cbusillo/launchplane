@@ -1,5 +1,11 @@
 from __future__ import annotations
 
+from control_plane.workflows.generic_web_application_lifecycle import (
+    DokployApplicationLifecycle,
+    preview_application_lifecycle,
+    recover_preview_application_lifecycle,
+)
+
 from contextlib import contextmanager, nullcontext
 
 import json
@@ -1497,6 +1503,9 @@ def _execute_generic_web_preview_refresh_unserialized(
     application_id = ""
     host = ""
     token = ""
+    lifecycle: DokployApplicationLifecycle | None = None
+    image_effect_attempted = False
+    application_configuration_attempted = False
     preview_runtime_identity: RuntimeIdentity | None = None
     try:
         from control_plane.lane_movement import LaneBuild, require_forward_preview_build
@@ -1549,6 +1558,21 @@ def _execute_generic_web_preview_refresh_unserialized(
         application_id = str(application.get("applicationId") or "").strip()
         if created_application:
             created_application_id = application_id
+        lifecycle = preview_application_lifecycle(
+            record_store=record_store,
+            host=host,
+            token=token,
+            application_id=application_id,
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            instance=request.preview_slug,
+            artifact_id=request.image_reference,
+            source_git_ref=request.anchor_head_sha,
+            extensions=resolved_profile.preview.generic_web_extensions,
+        )
+        lifecycle.capture()
+        lifecycle.prepare()
+        application_configuration_attempted = True
         _configure_application(
             host=host,
             token=token,
@@ -1571,6 +1595,7 @@ def _execute_generic_web_preview_refresh_unserialized(
             target_type="application",
             target_id=application_id,
         )
+        image_effect_attempted = True
         dokploy_api.trigger_deployment(
             host=host,
             token=token,
@@ -1586,12 +1611,14 @@ def _execute_generic_web_preview_refresh_unserialized(
             before_key=dokploy_api.deployment_key(latest_before),
             timeout_seconds=request.timeout_seconds,
         )
+        lifecycle.maintain()
         _wait_for_preview_health(
             preview_url=preview_url,
             health_path=resolved_profile.health_path,
             timeout_seconds=request.timeout_seconds,
             expected_runtime_identity=preview_runtime_identity,
         )
+        lifecycle.complete()
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
     except click.ClickException as exc:
@@ -1606,6 +1633,15 @@ def _execute_generic_web_preview_refresh_unserialized(
                 _delete_application(host=host, token=token, application_id=created_application_id)
             except click.ClickException as rollback_exc:
                 rollback_errors.append(f"application rollback failed: {rollback_exc}")
+        if lifecycle is not None and not created_application_id:
+            try:
+                recover_preview_application_lifecycle(
+                    lifecycle,
+                    image_effect_attempted=image_effect_attempted,
+                    target_restored=not application_configuration_attempted,
+                )
+            except click.ClickException as recovery_error:
+                rollback_errors.append(f"application schedule recovery failed: {recovery_error}")
         finished_at = utc_now_timestamp()
         message = str(exc)
         if rollback_errors:

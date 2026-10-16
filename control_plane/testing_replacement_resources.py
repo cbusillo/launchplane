@@ -45,6 +45,7 @@ from control_plane.odoo_testing_resources import (
     resource_readback_passes,
     TESTING_RESOURCES_INCOMPLETE_MARKER,
 )
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderMutationRejectedError,
@@ -81,8 +82,10 @@ class TestingReplacementResourcesRequest(BaseModel):
 
     context: str = Field(min_length=1)
     instance: Literal["testing"] = "testing"
-    operation_id: str = Field(min_length=1)
-    mode: Literal["dry-run", "apply", "readback"] = "dry-run"
+    operation_id: str = ""
+    initial_generation: bool = False
+    source_mode: Literal["ssh", "container-export"] = "ssh"
+    mode: Literal["dry-run", "apply", "readback", "release"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
@@ -125,6 +128,46 @@ class TestingReplacementResourcesReadback(BaseModel):
     schedule_id: str = Field(min_length=1)
 
 
+class TestingInitialPreparationRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    product: str
+    context: str
+    instance: Literal["testing"] = "testing"
+    operation_id: str
+    released: Literal[True] = True
+    provider_effects_started: Literal[False] = False
+    retained_target_preserved: Literal[True] = True
+
+
+def resource_preparation_payload(
+    preparation: DisposableTestingResourcePreparation,
+) -> dict[str, object]:
+    payload = preparation.model_dump(mode="json")
+    if not preparation.initial_request_sha256:
+        for field in tuple(payload):
+            if field.startswith("initial_"):
+                payload.pop(field)
+    return payload
+
+
+def resource_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
+    payload = request.model_dump(mode="json")
+    if request.source_mode == "ssh":
+        payload.pop("source_mode")
+    if not request.initial_generation:
+        payload.pop("initial_generation")
+    return payload
+
+
+def resource_request_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
+    payload = request.model_dump(exclude={"mode", "reviewed_plan_sha256"})
+    if request.source_mode == "ssh":
+        payload.pop("source_mode")
+    if not request.initial_generation:
+        payload.pop("initial_generation")
+    return payload
+
+
 def resource_context(
     store: PostgresRecordStore,
     *,
@@ -133,7 +176,7 @@ def resource_context(
     allow_bootstrap_resume: bool = False,
 ) -> tuple[
     LaunchplaneProductProfileRecord,
-    OdooStableTargetReplacementOperationRecord,
+    OdooStableTargetReplacementOperationRecord | DisposableTestingResourcePreparation,
     DisposableTestingResourcePreparation,
     DokployTargetRecord,
     DokployTargetIdRecord,
@@ -158,26 +201,41 @@ def resource_context(
         != 1
     ):
         raise ValueError("Replacement resources require an exact active owned Odoo testing lane.")
-    operation = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
-    generation = (
-        store.read_fresh_odoo_testing_generation(product, request.context)
-        if allow_bootstrap_resume
-        else None
-    )
-    resuming = generation is not None and generation.operation_id == operation.operation_id
-    if (
-        not service_testing_operation(operation)
-        or operation.status
-        not in (
-            {"reconciliation_required", "superseded"} if resuming else {"reconciliation_required"}
+    preparation = store.read_disposable_resource_preparation(request.operation_id)
+    if request.initial_generation:
+        from control_plane.testing_initial_generation import initial_resource_context
+
+        if preparation is None:
+            raise ValueError("Initial testing preparation is unavailable.")
+        initial_resource_context(store, product, request, preparation, allow_bootstrap_resume)
+        operation: (
+            OdooStableTargetReplacementOperationRecord | DisposableTestingResourcePreparation
+        ) = preparation
+        generation = store.read_fresh_odoo_testing_generation(product, request.context)
+        resuming = generation is not None and generation.operation_id == request.operation_id
+    else:
+        operation = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
+        generation = (
+            store.read_fresh_odoo_testing_generation(product, request.context)
+            if allow_bootstrap_resume
+            else None
         )
-        or (operation.product, operation.context, operation.instance)
-        != (product, request.context, "testing")
-    ):
-        raise ValueError("The retained testing operation is unavailable or changed.")
-    preparation = store.read_disposable_resource_preparation(operation.operation_id)
-    if preparation is None or not preparation.resource_namespace:
-        raise ValueError("Capture the retained target before preparing replacement resources.")
+        resuming = generation is not None and generation.operation_id == operation.operation_id
+        if (
+            not service_testing_operation(operation)
+            or operation.status
+            not in (
+                {"reconciliation_required", "superseded"}
+                if resuming
+                else {"reconciliation_required"}
+            )
+            or (operation.product, operation.context, operation.instance)
+            != (product, request.context, "testing")
+        ):
+            raise ValueError("The retained testing operation is unavailable or changed.")
+        preparation = store.read_disposable_resource_preparation(operation.operation_id)
+        if preparation is None or not preparation.resource_namespace:
+            raise ValueError("Capture the retained target before preparing replacement resources.")
     target = store.read_dokploy_target_record(context_name=request.context, instance_name="testing")
     target_id = store.read_dokploy_target_id_record(
         context_name=request.context, instance_name="testing"
@@ -234,9 +292,9 @@ def resource_plan(
     digest = canonical_json_sha256(
         {
             "product": product,
-            "request": request.model_dump(exclude={"mode", "reviewed_plan_sha256"}),
+            "request": resource_request_payload(request),
             "binding": binding,
-            "preparation": preparation.model_dump(mode="json"),
+            "preparation": resource_preparation_payload(preparation),
             "operation": operation.model_dump(mode="json"),
         }
     )
@@ -424,8 +482,21 @@ class TestingReplacementResourceAdapter:
             compose_id = str(compose["composeId"])
         return str(project["projectId"]), str(environment["environmentId"]), compose_id
 
+    def initial_admission(self) -> None:
+        self.require_initial_usage()
+        from control_plane.testing_initial_generation import require_initial_bootstrap_prerequisites
+
+        require_initial_bootstrap_prerequisites(self.store, self.product, self.request)
+
+    def require_initial_usage(self) -> None:
+        if self.request.initial_generation:
+            from control_plane.testing_initial_generation import require_initial_usage
+
+            require_initial_usage(self.root, self.store, self.product, self.request)
+
     def capture_checkpoint(self, old_check: Callable[[], None]) -> None:
         old_check()
+        self.require_initial_usage()
         with self.store.serialize_disposable_testing_resources():
             resource_context(self.store, product=self.product, request=self.request)
 
@@ -548,6 +619,7 @@ class TestingReplacementResourceAdapter:
 
     def checkpoint(self, expected: str, old_check: Callable[[], None]) -> None:
         old_check()
+        self.require_initial_usage()
         with self.store.serialize_disposable_testing_resources():
             resource_context(self.store, product=self.product, request=self.request)
             if self.configuration_sha256() != expected:
@@ -754,6 +826,39 @@ class TestingReplacementResourceAdapter:
             ),
         )
 
+    def release(self, reservation_scope: str, idempotency_key: str) -> dict[str, object]:
+        if not self.request.initial_generation or not self.request.reviewed_plan_sha256:
+            raise ValueError("Release requires the original reviewed initial preparation.")
+        with self.store.testing_replacement_execution_lock(self.request.operation_id) as check:
+            if check is None:
+                raise ValueError("Initial preparation executor is still active.")
+            preparation = self.store.read_disposable_resource_preparation(self.request.operation_id)
+            if (
+                preparation is None
+                or preparation.replacement_target_id
+                or preparation.initial_request_sha256
+                != canonical_json_sha256(resource_request_payload(self.request))
+            ):
+                raise ValueError(
+                    "Retain any dispatched or captured resources and the original intent."
+                )
+            # An empty journal alone does not establish provider absence.
+            if any(self.created_placement(preparation.resource_namespace)):
+                raise ValueError("Named provider placement exists or is incomplete.")
+            check()
+            self.store.release_initial_testing_preparation(
+                preparation,
+                reservation_scope=reservation_scope,
+                idempotency_key=idempotency_key,
+                reviewed_plan_sha256=self.request.reviewed_plan_sha256,
+                trace_id=self.trace_id,
+            )
+        return TestingInitialPreparationRelease(
+            product=self.product,
+            context=self.request.context,
+            operation_id=self.request.operation_id,
+        ).model_dump(mode="json")
+
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
@@ -800,6 +905,30 @@ class TestingReplacementResourceAdapter:
                 expected_retained = self.store.read_dokploy_target_record(
                     context_name=self.request.context, instance_name="testing"
                 )
+
+            if self.request.initial_generation:
+                try:
+                    self.store.activate_initial_testing_preparation(
+                        preparation,
+                        before_activation=self.initial_admission,
+                        validate=lambda: resource_context(
+                            self.store, product=self.product, request=self.request
+                        ),
+                    )
+                except DurableOperationAuthorizationDeniedError as error:
+                    raise ProviderMutationRejectedError(error) from error
+                except (ValueError, FileNotFoundError) as error:
+                    raise ProviderMutationRejectedError(
+                        TestingResourcePreparationRefused(
+                            "Initial preparation refused before any effect; re-read its lane."
+                        )
+                    ) from error
+                activated = self.store.read_disposable_resource_preparation(
+                    self.request.operation_id
+                )
+                if activated is None:
+                    raise ValueError("Initial testing preparation disappeared.")
+                preparation = activated
 
             def check() -> None:
                 lease.assert_current()

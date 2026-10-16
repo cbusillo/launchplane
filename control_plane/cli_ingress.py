@@ -79,6 +79,44 @@ def private_testing_plan(
     click.echo(json.dumps(result, indent=2, sort_keys=True))
 
 
+@ingress.command("private-testing-activate")
+@click.option("--service-url", required=True)
+@click.option("--bearer-token-env", default="LAUNCHPLANE_SERVICE_TOKEN", show_default=True)
+@click.option("--product", required=True)
+@click.option("--payload-file", required=True, type=click.Path(exists=True, path_type=Path))
+@click.option("--idempotency-key", default="")
+def private_testing_activate(
+    service_url: str, bearer_token_env: str, product: str, payload_file: Path, idempotency_key: str
+) -> None:
+    """Install/remove reviewed testing source through the service; never deploy."""
+    from control_plane.private_testing_activation import ROUTE, PrivateTestingActivationRequest
+    from control_plane.private_testing_transport import PRODUCT_PATTERN
+
+    if not service_url.startswith("https://") or not re.fullmatch(PRODUCT_PATTERN, product):
+        raise click.ClickException("Use the HTTPS service origin and canonical product.")
+    try:
+        request = PrivateTestingActivationRequest.model_validate_json(payload_file.read_bytes())
+    except (ValueError, OSError) as error:
+        raise click.ClickException(
+            "Private activation payload is invalid; no request sent."
+        ) from error
+    if request.mode != "dry-run" and (
+        not idempotency_key.strip() or not request.expected_plan_sha256
+    ):
+        raise click.ClickException("Use the original operation key and reviewed digest.")
+    token = os.environ.get(bearer_token_env, "").strip()
+    if not token:
+        raise click.ClickException(f"{bearer_token_env} is required.")
+    result = _post_launchplane_service_json(
+        service_url=service_url,
+        path=ROUTE.format(product=product),
+        payload=request.model_dump(mode="json"),
+        bearer_token=token,
+        idempotency_key=idempotency_key,
+    )
+    click.echo(json.dumps(result, indent=2, sort_keys=True))
+
+
 @ingress.command("route-apply")
 @click.option(
     "--service-url",

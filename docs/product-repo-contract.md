@@ -276,24 +276,10 @@ Launchplane rather than defining product topology, target inventory, domains, or
 runtime authority. Generic runtime health and revision checks should move to
 Launchplane drivers once the driver has the necessary profile data.
 
-When product smoke checks need Launchplane-backed generated-user setup or
-cleanup during the same browser run, the workflow should install a
-Launchplane-owned smoke maintenance client with
-`cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@<launchplane-sha>` and
-pass the generated client path to the product script. The workflow job must
-grant `id-token: write` so the client can request a GitHub OIDC token for
-Launchplane. The initial client covers VeriReel generated-user smoke
-maintenance; add new Launchplane-owned clients for other products rather than
-copying or generalizing product-specific route logic in product repos. The
-product script may pass primitive smoke facts such as action, email, context,
-instance, preview slug, and timeout. The client derives the Launchplane driver
-intent for supported smoke actions. The product script should not own
-Launchplane route paths, request envelopes, driver intent strings,
-idempotency-key recipes, GitHub OIDC token exchange, retry behavior, or
-driver-result failure rules. Launchplane resolves the target app URL and
-maintenance secret, then calls the app-owned internal maintenance endpoint for
-generated-user setup and cleanup; product images must not remain the long-term
-home for generated-user admin helper scripts.
+Product smoke checks own their fixture setup and cleanup. They do not call a
+Launchplane maintenance endpoint. The old generated smoke-maintenance client is
+retired; testing qualification still uses an internal fixture helper until its
+product checks move out of Launchplane.
 
 ## What Launchplane Owns
 
@@ -778,12 +764,9 @@ Odoo retains the product-driver connectors below. VeriReel uses the
 [shared generic-web workflows](#reusable-generic-web-lifecycle-workflows) and declared
 [application extensions](driver-development.md). Its old stable/environment,
 verification, reset/readiness, promotion and rollback connectors are retired.
-The existing app-maintenance extension connector remains for testing and preview
-fixture repair; normal migrations and billing execute in the declared lifecycle.
-
-The app-maintenance connector defaults to the VeriReel driver for compatibility,
-and callers can pass `driver: odoo` for the narrow Odoo post-deploy maintenance
-adapter backed by `/v1/drivers/odoo/app-maintenance`.
+Testing migration, explicit reset and billing use profile-declared generic-web
+maintenance and schedules. The remaining app-maintenance workflow requires
+`driver: odoo` and serves `/v1/drivers/odoo/app-maintenance` only.
 Callers whose maintenance must run once for each new deployment may pass the
 Launchplane-issued deployment or operation record id as `idempotency_scope`.
 Launchplane appends that bounded primitive only to the request idempotency key;
@@ -791,9 +774,8 @@ it does not enter the maintenance payload. Omitting the scope preserves the
 existing action/intent/user/application key for callers that require replay
 across workflow runs.
 Driver-owned maintenance commands must use executables shipped in the product
-runtime image and must not assume package-manager CLIs remain installed. The
-VeriReel driver therefore invokes the checked-in Prisma binary directly rather
-than relying on npm or `npx` in the hardened runtime stage.
+runtime image and must not assume package-manager CLIs remain installed. Profile commands name executables in the artifact rather than relying on a
+package-manager CLI in the hardened runtime stage.
 Product repos should pass an explicit `instance` only for a workflow whose
 admin input or job purpose genuinely selects a different lane.
 Production readiness wrappers may also accept expected runtime build identity
@@ -842,13 +824,6 @@ The wrapper owns the `/v1/drivers/odoo/prod-promotion-run` route, request ID,
 payload envelope, output mapping, fail-result paths, and legacy
 `opp:<context>:<run>` idempotency key shape so tenant repos do not keep Odoo
 promotion request construction locally.
-
-Generated-user smoke setup that must happen inside a product browser flow should
-use `setup-smoke-maintenance-client@<launchplane-sha>` instead of a workflow-level
-app-maintenance call. The setup action writes an importable Node ESM client into
-the product job so the browser script can keep its dynamic test email while
-Launchplane owns request shaping, driver intent derivation, and OIDC transport.
-The job using the generated client must include `permissions: id-token: write`.
 
 Same-repository preview jobs that need label normalization and preview image tag
 derivation should use `setup-preview-prepare-client@<launchplane-sha>` instead of carrying a

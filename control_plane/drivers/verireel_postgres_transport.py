@@ -221,6 +221,7 @@ def apply_verireel_preview_refresh_result(
         )
         try:
             driver_result = execute_verireel_preview_refresh(
+                record_store=record_store,
                 control_plane_root=control_plane_root,
                 request=request.refresh,
                 preview_id=generation_identity.preview_id,

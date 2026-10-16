@@ -597,7 +597,6 @@ records `already_absent` without claiming a GitHub mutation.
   - `POST /v1/drivers/odoo/prod-promotion-run` (native FastAPI)
   - `POST /v1/drivers/odoo/prod-promotion` (native FastAPI retained admin route)
   - `POST /v1/drivers/odoo/prod-rollback` (native FastAPI)
-  - `POST /v1/drivers/verireel/app-maintenance` (native FastAPI)
 
 ## Service Route Checklist
 
@@ -3338,7 +3337,6 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/generic-web/prod-promotion` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-rollback-plan` (native FastAPI)
 - `POST /v1/drivers/generic-web/prod-rollback` (native FastAPI)
-- `POST /v1/drivers/verireel/app-maintenance` (declared testing/preview extension repair)
 
 Driver route metadata remains descriptor-backed for UI/action discovery.
 VeriReel uses generic-web release and preview routes; its genuine application
@@ -3499,9 +3497,8 @@ Launchplane: Launchplane owns preview URL derivation from the
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment value, preview app naming,
 runtime refresh, inventory, and teardown. VeriReel still owns image
 build/publish, browser verification, and the follow-up preview evidence write.
-Browser verification uses the preview URL returned by the driver plus
-allow-listed app maintenance actions keyed by preview slug when it needs remote
-admin setup/cleanup.
+Browser verification uses the preview URL returned by the driver. Product-owned
+fixture setup belongs in the product checks, with no Launchplane call-in client.
 When a VeriReel preview-refresh request is syntactically valid but Launchplane
 cannot complete preflight because preview URL, runtime key-safety, managed
 secret, Dokploy target, or template `DATABASE_URL` configuration is incomplete,
@@ -3511,13 +3508,12 @@ evidence so product workflows and PR feedback can surface the actionable reason
 instead of a generic `invalid_request` rejection. Malformed request payloads and
 unauthorized calls still fail closed before provider mutation.
 
-VeriReel app maintenance requires an `intent` alongside the allow-listed
-action. Smoke/E2E helpers set the narrow intent, such as
-`stable-testing-remote-e2e-grant-sponsored`, `remote-e2e-grant-sponsored`,
-`remote-e2e-delete-user`, `owner-route-promote-owner`, or
-`owner-route-delete-user`, so Launchplane can validate the requested action
-against the expected stable or preview lane before it touches Dokploy schedules.
-Legacy action-only maintenance payloads are retired and fail request validation.
+Generic-web testing maintenance and billing schedules come from the lane's
+profile declarations. An explicit testing deploy may select `reset: true` only
+with a declared reset command and current disposable-lane evidence; production
+and rollback refuse it. See [profile maintenance](driver-development.md#profile-maintenance-and-explicit-testing-reset).
+The retired VeriReel maintenance route has no handler. Fixture setup is internal
+to the testing verification extension, not a workflow call-in capability.
 
 The first Odoo driver cuts are intentionally narrow as well: Launchplane owns the
 artifact publish handoff, remote post-deploy data-workflow trigger, and prod

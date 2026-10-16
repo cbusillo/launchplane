@@ -479,6 +479,25 @@ def product_repository_identity(
         ) from error
 
 
+def _scan_deploy_artifact(
+    profile: LaunchplaneProductProfileRecord,
+    plan: dict[str, object],
+    verified: VerifiedBuildArtifact | VerifiedGenericWebBuild,
+) -> bool:
+    from control_plane.artifact_scan import scan_product_artifact
+
+    if not profile.image.scan_enabled:
+        plan["artifact_scan"] = {"status": "disabled"}
+        return True
+    image = f"{verified.manifest.image.repository}@{verified.manifest.image.digest}"
+    result = scan_product_artifact(image)
+    plan["artifact_scan"] = result.model_dump(mode="json")
+    if result.status == "pass" and result.image_reference == image:
+        return True
+    plan.update(action="wait", held=True, reason="artifact_scan_refused")
+    return False
+
+
 def reconcile_testing_target(
     *,
     record_store: ProductReconcileStore,
@@ -660,6 +679,8 @@ def reconcile_testing_target(
                 f"{plan['last_failed_error_code']}: {plan['last_failed_error_summary']}"
             ),
         )
+    if not _scan_deploy_artifact(profile, plan, desired):
+        return ReconcileOutcome(plan)
     created_at = _utc_now()
     idempotency_key = attempt.idempotency_key
     try:
@@ -757,6 +778,13 @@ def _deploy_generic_web_testing(
         )
         plan["deploy_idempotency_key"] = idempotency_key
         request_fingerprint = _fingerprint(envelope.model_dump(mode="json"))
+        existing = record_store.read_idempotency_record(
+            scope=reconcile_reservation_scope(profile.product),
+            route_path=GENERIC_WEB_DEPLOY_ROUTE,
+            idempotency_key=idempotency_key,
+        )
+        if existing is None and not _scan_deploy_artifact(profile, plan, desired):
+            return ReconcileOutcome(plan)
         provider = (
             default_generic_web_deploy_provider(
                 record_store=record_store, control_plane_root=control_plane_root
@@ -1201,6 +1229,7 @@ TESTING_FAILURE_DESCRIPTIONS: dict[str, str] = {
 _UNKNOWN_TESTING_FAILURE = "The deploy failed with a code this Launchplane does not describe."
 # What each replacement-plan blocker code means, for ``plan_not_ready.<code>``.
 PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
+    "two_slot_cutover_required": "This lane requires its two-slot release path; stable target replacement would bypass traffic authority.",
     "fresh_testing_bootstrap_incomplete": "The original testing bootstrap has not committed its route and queue preparation.",
     "fresh_testing_authority_unverified": "The fresh testing generation's resource or credential authority is unverified.",
     "fresh_testing_restore_required": "The fresh testing generation must complete its sanitized production-copy restore first.",
@@ -1952,6 +1981,12 @@ def _run_preview_operation(
             else:
                 if observed.status != "reconcile_required" or not allow_retry:
                     return finish_result(observed, stored_plan)
+        retained_intent = reservation is not None and bool(
+            cast(PostgresRecordStore, record_store).read_original_mutation_intent(reservation)
+        )
+        if operation == "refresh" and verified is not None and not retained_intent:
+            if not _scan_deploy_artifact(profile, plan, verified):
+                return ReconcileOutcome(plan)
         inputs = preview_hooks.build_inputs(
             control_plane_root=control_plane_root,
             record_store=record_store,
@@ -2093,6 +2128,9 @@ def _run_generic_web_preview_operation(
             # Every sweep would otherwise run the same failing refresh again.
             plan["preview_result_status"] = previous_plan["preview_result_status"]
             return _preview_failure(plan, "preview_build_failed")
+    if isinstance(verified, VerifiedGenericWebBuild):
+        if not _scan_deploy_artifact(profile, plan, verified):
+            return ReconcileOutcome(plan)
     if decision.observed and _pull_request_moved(
         transport=transport,
         profile=profile,

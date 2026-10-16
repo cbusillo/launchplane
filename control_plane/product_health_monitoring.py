@@ -7,6 +7,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthPolicy
 
 from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 
@@ -59,6 +60,7 @@ class ProductHealthMonitoringApplyRequest(BaseModel):
     mode: ProductHealthMonitoringMode = "dry-run"
     reason: str
     reviewed_plan_sha256: str = ""
+    dependency_health: RuntimeDependencyHealthPolicy | None = None
 
     @model_validator(mode="after")
     def _validate_request(self) -> "ProductHealthMonitoringApplyRequest":
@@ -111,6 +113,14 @@ class ProductHealthMonitoringPlan(BaseModel):
     requested_check_kind: Literal["public_http", "private_http"]
     current_monitoring_intent: ProductLaneMonitoringIntent
     requested_monitoring_intent: ProductLaneMonitoringIntent
+    current_dependency_health: RuntimeDependencyHealthPolicy = Field(
+        default_factory=RuntimeDependencyHealthPolicy,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    requested_dependency_health: RuntimeDependencyHealthPolicy = Field(
+        default_factory=RuntimeDependencyHealthPolicy,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     operation: ProductHealthMonitoringOperation
     current_enabled: bool | None = None
     requested_enabled: bool
@@ -196,6 +206,7 @@ def build_product_health_monitoring_plan(
         lane=lane,
         candidate_check=candidate_check,
         monitoring_intent=request.monitoring_intent,
+        dependency_health=request.dependency_health,
     )
     resolved_url = (
         candidate_check.url or lane.health_url or lane.base_url
@@ -216,6 +227,7 @@ def build_product_health_monitoring_plan(
         existing_check is None
         or existing_check.model_dump(mode="json") != candidate_check.model_dump(mode="json")
         or lane.health_monitoring.monitoring_intent != candidate_policy.monitoring_intent
+        or lane.health_monitoring.dependency_health != candidate_policy.dependency_health
     )
     operation: ProductHealthMonitoringOperation
     if existing_check is None:
@@ -234,6 +246,7 @@ def build_product_health_monitoring_plan(
         "operation": operation,
         "current_monitoring_intent": lane.health_monitoring.monitoring_intent,
         "requested_monitoring_intent": candidate_policy.monitoring_intent,
+        "requested_dependency_health": candidate_policy.dependency_health.model_dump(mode="json"),
         "current_check": (
             existing_check.model_dump(mode="json") if existing_check is not None else None
         ),
@@ -253,6 +266,8 @@ def build_product_health_monitoring_plan(
         requested_check_kind=request.check_kind,
         current_monitoring_intent=lane.health_monitoring.monitoring_intent,
         requested_monitoring_intent=candidate_policy.monitoring_intent,
+        current_dependency_health=lane.health_monitoring.dependency_health,
+        requested_dependency_health=candidate_policy.dependency_health,
         operation=operation,
         current_enabled=existing_check.enabled if existing_check is not None else None,
         requested_enabled=request.enabled,
@@ -294,6 +309,7 @@ def updated_product_health_monitoring_profile(
         lane=lane,
         candidate_check=candidate_check,
         monitoring_intent=request.monitoring_intent,
+        dependency_health=request.dependency_health,
     )
     resolved_url = (
         candidate_check.url or lane.health_url or lane.base_url
@@ -416,6 +432,7 @@ def _candidate_policy(
     lane: ProductLaneProfile,
     candidate_check: ProductLaneHealthCheck,
     monitoring_intent: ProductLaneMonitoringIntent,
+    dependency_health: RuntimeDependencyHealthPolicy | None = None,
 ) -> ProductLaneHealthMonitoringPolicy:
     target_token = canonical_health_check_record_token(candidate_check.name)
     updated_checks: list[ProductLaneHealthCheck] = []
@@ -431,6 +448,7 @@ def _candidate_policy(
     return ProductLaneHealthMonitoringPolicy(
         monitoring_intent=monitoring_intent,
         checks=tuple(updated_checks),
+        dependency_health=dependency_health or lane.health_monitoring.dependency_health,
     )
 
 
