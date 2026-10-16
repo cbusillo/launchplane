@@ -33,9 +33,15 @@ _NOTE_LINK = re.compile(
     re.IGNORECASE,
 )
 
+_RELEASE_PROCESS_INSTRUCTION = re.compile(
+    r"(?P<join>,\s*then\s+|(?<=[.!?])\s+(?:then\s+)?|^[ \t]*(?:then\s+)?)"
+    r"(?P<instruction>(?:accept|approve)\b[^.!?]*[.!?]?)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tuple[str, bool]:
-    """Replace preview/revision-review links without changing the source PR body."""
+    """Remove obsolete review links and agent handoff conditions from Client checks."""
     recorded_hosts = {host.casefold().rstrip(".") for host in preview_hosts if host}
     changed = False
 
@@ -61,7 +67,26 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
         changed = True
         return "\nCheck this on the testing site.\n"
 
-    displayed = _NOTE_LINK.sub(replace, notes).strip()
+    def remove_process(match: re.Match[str]) -> str:
+        nonlocal changed
+        instruction = match["instruction"]
+        # An internal handoff condition is not a Client's testing obligation.
+        # Do not infer or rewrite arbitrary product instructions about acceptance.
+        if not all(
+            re.search(pattern, instruction, re.IGNORECASE)
+            for pattern in (
+                r"\brelease\b",
+                r"\bLaunchplane\b",
+                r"\b(?:cleanup|memory)\b",
+                r"\b(?:after|once|until|when)\b",
+            )
+        ):
+            return match[0]
+        changed = True
+        return "." if match["join"].startswith(",") else ""
+
+    displayed = _RELEASE_PROCESS_INSTRUCTION.sub(remove_process, notes)
+    displayed = _NOTE_LINK.sub(replace, displayed).strip()
     return displayed, changed
 
 
