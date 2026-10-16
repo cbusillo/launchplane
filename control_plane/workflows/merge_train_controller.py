@@ -324,6 +324,7 @@ def latest_merge_train_stack_collapse_progress_record(
         key=lambda record: (
             status_rank[record.plan.status],
             sum(mutation.status == "mutated" for mutation in record.plan.mutations),
+            sum(bool(mutation.expected_merge_tree_sha) for mutation in record.plan.mutations),
             sum(disposition.completed for disposition in record.plan.child_dispositions),
             record.updated_at,
             record.record_id,

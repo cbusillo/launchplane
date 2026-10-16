@@ -711,12 +711,14 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 {
                     "sha": "parent-after-child",
                     "commit": {
+                        "tree": {"sha": "planned-tree"},
                         "message": (
                             "Launchplane stack collapse collapse-123: merge PR #11 into PR #10"
-                        )
+                        ),
                     },
                     "parents": [{"sha": "parent-head"}, {"sha": "child-head"}],
                 },
+                {"head": {"sha": "child-head"}},
             )
         )
 
@@ -727,15 +729,16 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             child_head_sha="child-head",
             expected_parent_head_sha="parent-head",
             parent_head_ref="feature/root",
+            expected_merge_tree_sha="planned-tree",
             collapse_id="collapse-123",
             child_pull_request_number=11,
             parent_pull_request_number=10,
         )
 
         self.assertEqual(merge_commit_sha, "parent-after-child")
-        self.assertEqual(transport.requests[-1].method, "GET")
+        self.assertEqual(transport.requests[-2].method, "GET")
         self.assertEqual(
-            transport.requests[-1].path,
+            transport.requests[-2].path,
             "/repos/example/merge-train-repo/commits/parent-after-child",
         )
 
@@ -764,6 +767,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 child_head_sha="child-head",
                 expected_parent_head_sha="parent-head",
                 parent_head_ref="feature/root",
+                expected_merge_tree_sha="planned-tree",
                 collapse_id="collapse-123",
                 child_pull_request_number=11,
                 parent_pull_request_number=10,
@@ -787,6 +791,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 child_head_sha="child-head",
                 expected_parent_head_sha="parent-head",
                 parent_head_ref="feature/root",
+                expected_merge_tree_sha="planned-tree",
                 collapse_id="collapse-123",
                 child_pull_request_number=11,
                 parent_pull_request_number=10,

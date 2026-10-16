@@ -189,6 +189,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             branch_client=branch_client,
             child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
+            checkpoint=lambda progress: None,
         )
 
         self.assertEqual(executed_plan.status, "waiting_for_root_checks")
@@ -244,6 +245,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             child_readiness_reasons=_all_children_ready,
             effect_executor=executor,
             updated_at="2026-05-14T13:45:00Z",
+            checkpoint=lambda progress: None,
         )
 
         self.assertEqual(executed_plan.status, "waiting_for_root_checks")
@@ -273,6 +275,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
                 branch_client=branch_client,
                 child_readiness_reasons=_all_children_ready,
                 updated_at="2026-05-14T13:45:00Z",
+                checkpoint=lambda progress: None,
             )
 
         self.assertEqual(branch_client.requests, [])
@@ -299,6 +302,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ),
             child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
+            checkpoint=lambda progress: None,
         )
         plan_payload = executed_plan.model_dump(mode="json")
         plan_payload.pop("child_dispositions")
@@ -366,6 +370,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             branch_client=branch_client,
             child_readiness_reasons=record_readiness,
             updated_at="2026-05-14T13:45:00Z",
+            checkpoint=lambda progress: None,
         )
 
         self.assertEqual(executed_plan.status, "waiting_for_root_checks")
@@ -374,8 +379,8 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ["merge-32-31", "merge-31-30"],
         )
         self.assertEqual(len(branch_client.requests), 1)
-        # The already merged child is adopted, not re-read: GitHub closed it as merged.
-        self.assertEqual(readiness_reads, [31])
+        # Recovery rechecks the leaf; construction rechecks readiness before each new effect.
+        self.assertEqual(readiness_reads, [32, 31, 31])
 
     def test_execute_plan_does_not_recover_a_held_child(self) -> None:
         branch_client = _RecordingStackCollapseBranchClient(
@@ -437,6 +442,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ),
             child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
+            checkpoint=lambda progress: None,
         )
         disposition_client = _RecordingStackChildDispositionClient()
 
@@ -477,6 +483,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ),
             child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
+            checkpoint=lambda progress: None,
         )
         disposition_client = _RecordingStackChildDispositionClient()
         executor = Mock(spec=MergeTrainSemanticEffectExecutor)
@@ -519,6 +526,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ),
             child_readiness_reasons=_all_children_ready,
             updated_at="2026-05-14T13:45:00Z",
+            checkpoint=lambda progress: None,
         )
         disposition_client = _RecordingStackChildDispositionClient(
             failure=RuntimeError("child head moved")
@@ -614,6 +622,9 @@ class _RecordingStackCollapseBranchClient:
         self.failure = failure
         self.requests: list[dict[str, object]] = []
 
+    def plan_stack_child_merge_tree(self, **kwargs: object) -> str:
+        return f"tree:{kwargs['expected_parent_head_sha']}:{kwargs['child_head_sha']}"
+
     def find_stack_child_merge_commit(
         self,
         *,
@@ -621,6 +632,7 @@ class _RecordingStackCollapseBranchClient:
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -636,6 +648,7 @@ class _RecordingStackCollapseBranchClient:
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         protected_base_ref: str,
         collapse_id: str,
         child_pull_request_number: int,

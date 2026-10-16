@@ -480,14 +480,30 @@ Checks on the refreshed current head must still pass before admission.
 
 The same carry applies to active stack collapses, including intermediate parents:
 the current policy binding, latest persisted progress and exact merge parents
-must prove each edge back to the handed-off head. The admission reader never
-promotes a planned mutation from a provider commit alone. If a merge succeeded before its mutated progress was persisted, its
-unproven new head needs a fresh checked `gh-pr.py ready` handoff; matching commit
-messages and parents alone cannot renew readiness. Standalone execution saves
-each progress checkpoint. Blocked, retired or policy-stale plans cannot carry
-readiness. Retired ordinary-agent job records are excluded. Current source
-checks and Client gates still apply. Edited-comment diagnostics name the fresh
-checked handoff needed to resume.
+must prove each edge back to the handed-off head. Before a feature-branch merge,
+the executor constructs the merge from its immutable parent and child SHAs using
+the existing candidate-construction effects, then saves its expected tree in the
+`planned` mutation of the collapse progress record. Construction refs are removed
+after construction; a restart before the plan write can reconstruct them. A failed
+plan write prevents the feature-branch merge. Progress selection preserves a
+saved tree plan ahead of an otherwise equal unprepared checkpoint.
+
+If GitHub succeeds before the `mutated` checkpoint is saved, recovery accepts only
+the current branch tip with the saved tree, exact ordered parents and collapse
+message, and an unchanged child head. It checks current child readiness before
+checkpointing that recovered edge, without repeating the feature-branch merge or
+reconstructing the expected tree. A missing plan, different tree, changed head or
+hold refuses recovery. The original trusted handoff can follow a matching saved
+tree plan through the admission reader's read-only proof; the executor still owns
+the mutated checkpoint. Legacy progress without a saved tree cannot recover an
+uncheckpointed changed branch tip and needs a fresh checked `gh-pr.py ready`
+handoff and current-policy discovery. Messages and parents alone never renew
+readiness.
+
+Standalone execution saves each progress checkpoint. Blocked, retired or
+policy-stale plans cannot carry readiness. Retired ordinary-agent job records are
+excluded. Current source checks and Client gates still apply. Edited-comment
+diagnostics name the fresh checked handoff needed to resume.
 
 The handoff author must satisfy the existing enqueue policy: an allowed
 `repo_owner` or `repo_admin` role, or a numeric trusted-automation id. An App using a person's token

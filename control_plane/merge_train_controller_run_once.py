@@ -4189,6 +4189,7 @@ def _advance_planned_stack_collapse_record(
                 child_head_sha=current_head_shas[root_mutation.child_pull_request_number],
                 expected_parent_head_sha=expected_root_sha,
                 parent_head_ref=root_mutation.parent_head_ref,
+                expected_merge_tree_sha=root_mutation.expected_merge_tree_sha,
                 collapse_id=planned_collapse_record.plan.collapse_id,
                 child_pull_request_number=root_mutation.child_pull_request_number,
                 parent_pull_request_number=root_mutation.parent_pull_request_number,

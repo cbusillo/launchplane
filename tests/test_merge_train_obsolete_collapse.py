@@ -249,6 +249,7 @@ class ObsoleteCollapseTests(unittest.IsolatedAsyncioTestCase):
                 root_mutation = {
                     **plan["mutations"][0],
                     "status": "planned",
+                    "expected_merge_tree_sha": "",
                     "merge_commit_sha": "",
                 }
                 plan["mutations"] = [

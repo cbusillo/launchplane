@@ -56,6 +56,8 @@ class StackChildMergeEffect:
     child_pull_request_number: int
     parent_pull_request_number: int
 
+    expected_merge_tree_sha: str = ""
+
 
 @dataclass(frozen=True)
 class PullRequestLandingEffect:

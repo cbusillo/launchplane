@@ -41,6 +41,7 @@ class _StackTransport:
         self.heads = {"feature/root": "head-root", "feature/child": "head-child"}
         self.parents: dict[str, tuple[str, ...]] = {}
         self.messages: dict[str, str] = {}
+        self.trees: dict[str, str] = {}
         self.merge_requests: list[dict[str, object]] = []
 
     def contains(self, head: str, child: str) -> bool:
@@ -54,10 +55,25 @@ class _StackTransport:
         if method == "GET" and "/compare/" in path:
             child, head = unquote(path.split("/compare/")[1]).split("...")
             return {"status": "ahead" if self.contains(head, child) else "diverged"}
+        if method == "GET" and "/pulls/" in path:
+            number = int(path.rsplit("/", 1)[1])
+            reference = {1: "feature/root", 2: "feature/child", 3: "feature/leaf"}[number]
+            return {"head": {"sha": self.heads[reference]}}
+        if method == "GET" and "/git/commits/" in path:
+            head = path.rsplit("/", 1)[1]
+            return {
+                "sha": head,
+                "tree": {"sha": self.trees.get(head, f"tree:{head}")},
+                "parents": [{"sha": parent} for parent in self.parents.get(head, ())],
+            }
         if method == "GET" and "/commits/" in path:
             head = path.split("/commits/")[1]
             return {
-                "commit": {"message": self.messages.get(head, "unrelated root push")},
+                "sha": head,
+                "commit": {
+                    "message": self.messages.get(head, "unrelated root push"),
+                    "tree": {"sha": self.trees.get(head, f"tree:{head}")},
+                },
                 "parents": [{"sha": parent} for parent in self.parents.get(head, ())],
             }
         if method == "POST" and path.endswith("/merges"):
@@ -71,6 +87,7 @@ class _StackTransport:
             head = f"branch-merge-{len(self.merge_requests)}"
             self.parents[head] = (parent, child_head)
             self.messages[head] = message
+            self.trees[head] = f"tree:{parent}:{child_head}"
             self.heads[ref] = head
             return {"sha": head}
         raise AssertionError(f"unexpected provider request: {method} {path}")
@@ -233,6 +250,15 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         class Client(_FakeMergeTrainGitHubClient):
+            def plan_stack_child_merge_tree(self, **kwargs: object) -> str:
+                parent, child = (
+                    str(kwargs["expected_parent_head_sha"]),
+                    str(kwargs["child_head_sha"]),
+                )
+                if graph.contains(parent, child):
+                    return graph.trees.get(parent, f"tree:{parent}")
+                return super().plan_stack_child_merge_tree(**kwargs)
+
             @staticmethod
             def verify_unlanded_batch(
                 *,

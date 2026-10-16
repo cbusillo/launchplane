@@ -280,6 +280,9 @@ class _FakeMergeTrainGitHubClient:
     def branch_head_sha(self, *, repository: str, branch_ref: str) -> str:
         return f"branch-head:{branch_ref}"
 
+    def plan_stack_child_merge_tree(self, **kwargs: object) -> str:
+        return f"tree:{kwargs['expected_parent_head_sha']}:{kwargs['child_head_sha']}"
+
     def find_stack_child_merge_commit(
         self,
         *,
@@ -287,6 +290,7 @@ class _FakeMergeTrainGitHubClient:
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -300,6 +304,7 @@ class _FakeMergeTrainGitHubClient:
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         protected_base_ref: str,
         collapse_id: str,
         child_pull_request_number: int,
@@ -1039,6 +1044,7 @@ def _seed_executed_merge_train_stack_collapse_plan_record(
         branch_client=_FakeMergeTrainGitHubClient(transport=object()),
         child_readiness_reasons=lambda _pull_request_number: (),
         updated_at="2026-05-13T21:02:00Z",
+        checkpoint=lambda progress: None,
     )
     executed_record = build_merge_train_stack_collapse_plan_record(
         plan=executed_plan,
