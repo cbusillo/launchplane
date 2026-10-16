@@ -84,6 +84,11 @@ dry-run/apply API (`POST /v1/product-config/apply`). An activation session suppl
 the exact owned product/context/instance, a reason, and a secret entry with
 `scope="context_instance"`, `integration="odoo_diagnostics"`, an admin-chosen
 `name`, `binding_key="ODOO_DIAGNOSTIC_IDENTITY"`, and the JSON string as `value`.
+Recording these service credentials requires existing authorized admin authority
+(a signed-in GitHub admin or `local_admin` identity). A workflow or
+`local_operator` cannot write this integration, including through a mixed bundle
+or a stable lane. Existing plan authority still covers inert dry runs; no grant
+is added. Admin writes require a reason, idempotency and the matching dry-run.
 For previews, omit the top-level instance, use scope `context` and the fixed
 preview secret name above. The existing signed-in admin path supports this
 service-only write even when the preview context has no stable profile lane.
@@ -106,7 +111,9 @@ Global/context inheritance, another lane's records, disabled or ambiguous
 bindings, mismatched versions/payloads, and undecryptable values are unavailable;
 none selects an admin fallback. Mail and import APIs return HTTP 503 with
 `odoo_diagnostic_identity_unavailable` when the selected identity is unavailable
-or Odoo returns another UID. Calendar reads refuse and the release-window reader
+or Odoo authentication fails or returns another UID. A failed login establishes
+no session to destroy; a positive but unexpected UID is logged out before refusal.
+Calendar reads refuse and the release-window reader
 continues to hold a release when its calendar is unavailable. Responses and
 exceptions contain no secret payload, and mail text redacts both diagnostic and
 legacy bootstrap passwords. Existing HTTPS/domain, container image and runtime

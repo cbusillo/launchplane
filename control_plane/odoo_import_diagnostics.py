@@ -229,11 +229,9 @@ def read_applied_parameters(connection: reads.OdooRuntimeConnection) -> dict[str
         )
 
     health()
-    authenticated = reads._rpc(
-        opener,
-        origin,
-        "/web/session/authenticate",
-        authentication,
+    authenticated = reads.authenticate_diagnostic(
+        connection,
+        lambda: reads._rpc(opener, origin, "/web/session/authenticate", authentication),
     )
     keys = [
         prefix + "." + name for prefix in SOURCE_PREFIXES.values() for name in (*FIELDS, "password")

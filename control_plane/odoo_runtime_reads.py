@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from http.client import HTTPException as HTTPTransportError
@@ -341,11 +341,32 @@ def diagnostic_authentication(connection: OdooRuntimeConnection) -> dict[str, st
     }
 
 
+def has_odoo_session(authenticated: object) -> bool:
+    return (
+        isinstance(authenticated, dict)
+        and type(authenticated.get("uid")) is int
+        and authenticated["uid"] > 0
+    )
+
+
+def authenticate_diagnostic(
+    connection: OdooRuntimeConnection, authenticate: Callable[[], object]
+) -> object:
+    try:
+        authenticated = authenticate()
+    except OdooRuntimeReadError:
+        if _production_runtime(connection.selection):
+            raise
+        raise _diagnostic_unavailable() from None
+    if not has_odoo_session(authenticated):
+        require_diagnostic_user(connection, authenticated)
+    return authenticated
+
+
 def require_diagnostic_user(connection: OdooRuntimeConnection, authenticated: object) -> None:
     if (
         not isinstance(authenticated, dict)
-        or type(authenticated.get("uid")) is not int
-        or authenticated["uid"] <= 0
+        or not has_odoo_session(authenticated)
         or (
             not _production_runtime(connection.selection)
             and (
@@ -583,11 +604,9 @@ def read_outgoing_email(
     require_runtime_identity(
         connection.selection.identity, runtime_identity_from_health_payload(health)
     )
-    authenticated = _rpc(
-        opener,
-        base_url,
-        "/web/session/authenticate",
-        authentication,
+    authenticated = authenticate_diagnostic(
+        connection,
+        lambda: _rpc(opener, base_url, "/web/session/authenticate", authentication),
     )
     fields = [
         "id",

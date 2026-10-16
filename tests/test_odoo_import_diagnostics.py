@@ -16,7 +16,10 @@ from pymysql.constants import CLIENT, CR
 
 from control_plane import odoo_import_diagnostics as diagnostic
 from control_plane import odoo_runtime_reads as reads
-from control_plane.odoo_diagnostic_identity import OdooDiagnosticIdentity
+from control_plane.odoo_diagnostic_identity import (
+    OdooDiagnosticIdentity,
+    DIAGNOSTIC_IDENTITY_UNAVAILABLE,
+)
 from control_plane import odoo_source_probe as probe
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetPolicies
@@ -725,6 +728,12 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
             self.assertNotIn(PRIVATE, response.text)
+            execute.side_effect = reads._diagnostic_unavailable()
+            unavailable = await request(app, "GET", path)
+            self.assertEqual(unavailable.status_code, 503, unavailable.text)
+            self.assertEqual(unavailable.json()["detail"]["code"], DIAGNOSTIC_IDENTITY_UNAVAILABLE)
+            self.assertNotIn(PRIVATE, unavailable.text)
+            execute.side_effect = None
             execute.reset_mock()
             for bad_path in (
                 path.replace("/testing/", "/prod/"),

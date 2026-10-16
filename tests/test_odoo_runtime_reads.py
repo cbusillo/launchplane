@@ -29,6 +29,7 @@ from control_plane.odoo_runtime_reads import _NoRedirects
 from control_plane.odoo_diagnostic_identity import (
     DIAGNOSTIC_SECRET_INTEGRATION,
     DIAGNOSTIC_IDENTITY_KEY,
+    DIAGNOSTIC_IDENTITY_UNAVAILABLE,
     diagnostic_preview_secret_name,
 )
 from control_plane.secrets import SecretWriteStore, write_secret_value
@@ -543,7 +544,7 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
             self.store.write_secret_binding(binding.model_copy(update={"status": "disabled"}))
         response = await self.get(self.base + "/outgoing-email", self.filters)
         self.assertEqual(response.status_code, 503, response.text)
-        self.assertEqual(response.json()["error"]["code"], "odoo_diagnostic_identity_unavailable")
+        self.assertEqual(response.json()["error"]["code"], DIAGNOSTIC_IDENTITY_UNAVAILABLE)
         self.assertFalse(self.rpc_calls)
         logs = await self.get(self.base + "/logs")
         self.assertEqual(logs.status_code, 200, logs.text)

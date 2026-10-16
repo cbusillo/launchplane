@@ -22,6 +22,7 @@ from control_plane.odoo_runtime_reads import (
     connect_runtime,
     diagnostic_authentication,
     require_diagnostic_user,
+    authenticate_diagnostic,
     require_runtime_identity,
     select_stable_runtime,
 )
@@ -118,11 +119,9 @@ def read_company_calendar(
         )
 
     health()
-    authenticated = _rpc(
-        opener,
-        origin,
-        "/web/session/authenticate",
-        authentication,
+    authenticated = authenticate_diagnostic(
+        connection,
+        lambda: _rpc(opener, origin, "/web/session/authenticate", authentication),
     )
     try:
         require_diagnostic_user(connection, authenticated)

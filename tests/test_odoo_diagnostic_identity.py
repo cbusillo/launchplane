@@ -23,7 +23,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.service_auth import LaunchplaneAuthzPolicy, BearerIdentityConfig
 from tests.support.auth import _identity, _StubVerifier
 from tests.http_app_test_support import _post_product_config_apply
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
@@ -223,8 +223,8 @@ class DiagnosticIdentityTests(unittest.TestCase):
             lambda value: hours.read_company_calendar(value, company_id=7, observed_at=now),
             imports.read_applied_parameters,
         ):
-            for missing in (True, False):
-                with self.subTest(reader=reader, missing=missing), ExitStack() as stack:
+            for outcome in ("missing", "other_user", "failed_login", "login_error"):
+                with self.subTest(reader=reader, outcome=outcome), ExitStack() as stack:
                     calls: list[str] = []
 
                     def rpc(
@@ -232,8 +232,14 @@ class DiagnosticIdentityTests(unittest.TestCase):
                     ) -> object:
                         calls.append(path)
                         if path.endswith("authenticate"):
-                            return {"uid": 999}
+                            if outcome == "login_error":
+                                raise reads.OdooRuntimeReadError(
+                                    "odoo_read_rejected", "Private input"
+                                )
+                            return {"uid": False if outcome == "failed_login" else 999}
                         if path.endswith("destroy"):
+                            if outcome == "failed_login":
+                                raise reads.OdooRuntimeReadError("odoo_read_rejected", "No session")
                             return None
                         self.fail("A mismatched account must never read diagnostic models")
 
@@ -251,12 +257,19 @@ class DiagnosticIdentityTests(unittest.TestCase):
                             )
                         )
                     selected = (
-                        replace(connection, diagnostic_identity=None) if missing else connection
+                        replace(connection, diagnostic_identity=None)
+                        if outcome == "missing"
+                        else connection
                     )
-                    with self.assertRaises(reads.OdooRuntimeReadError):
+                    with self.assertRaises(reads.OdooRuntimeReadError) as caught:
                         reader(selected)
-                    if missing:
+                    self.assertEqual(
+                        caught.exception.code, diagnostic.DIAGNOSTIC_IDENTITY_UNAVAILABLE
+                    )
+                    if outcome == "missing":
                         self.assertEqual(calls, [])
+                    elif outcome in {"failed_login", "login_error"}:
+                        self.assertEqual(len(calls), 1)
                     else:
                         self.assertTrue(calls[0].endswith("authenticate"))
                         self.assertTrue(calls[-1].endswith("destroy"))
@@ -335,6 +348,15 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
             store.write_product_profile_record(profile)
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
+                    "local_admins": [
+                        {
+                            "subjects": ["fixture-admin"],
+                            "token_labels": ["fixture-label"],
+                            "products": [profile.product],
+                            "contexts": [profile.preview.context],
+                            "actions": ["product_config.plan", "product_config.apply"],
+                        }
+                    ],
                     "github_actions": [
                         {
                             "repository": "every/verireel",
@@ -343,16 +365,21 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                             ],
                             "event_names": ["pull_request"],
                             "products": [profile.product],
-                            "contexts": [profile.preview.context],
+                            "contexts": [profile.preview.context, "stable-context"],
                             "actions": ["product_config.plan", "product_config.apply"],
                         }
-                    ]
+                    ],
                 }
             )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 record_store_factory=lambda: store,
+                bearer_identity_config=BearerIdentityConfig(
+                    local_admin_token="synthetic-admin-token",
+                    local_admin_subject="fixture-admin",
+                    local_admin_token_label="fixture-label",
+                ),
             )
             runtime = RuntimeIdentity(
                 product=profile.product,
@@ -378,6 +405,7 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                 "mode": "dry-run",
                 "product": profile.product,
                 "context": runtime.context,
+                "reason": "TEST preview diagnostic activation",
                 "secrets": [
                     {
                         "scope": "context",
@@ -390,7 +418,38 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
             }
 
             async def send(body: dict[str, Any], key: str) -> Any:
-                return await _post_product_config_apply(app, body, idempotency_key=key)
+                return await _post_product_config_apply(
+                    app, body, idempotency_key=key, authorization="Bearer synthetic-admin-token"
+                )
+
+            for target in ("preview", "padded", "testing"):
+                denied = deepcopy(payload)
+                denied["mode"] = "apply"
+                if target == "padded":
+                    denied["secrets"][0]["integration"] = (
+                        " " + diagnostic.DIAGNOSTIC_SECRET_INTEGRATION + " "
+                    )
+                elif target == "testing":
+                    denied.update(context="stable-context", instance="testing")
+                    denied["secrets"][0].update(
+                        scope="context_instance",
+                        name="reader",
+                        value=json.dumps(
+                            {**identity, "context": "stable-context", "instance": "testing"}
+                        ),
+                    )
+                workflow = await _post_product_config_apply(
+                    app, denied, idempotency_key="workflow-refusal-" + target
+                )
+                self.assertEqual(workflow.status_code, 403, workflow.text)
+                self.assertEqual(store.list_secret_records(), ())
+            missing_reason = deepcopy(payload)
+            missing_reason.pop("reason")
+            self.assertEqual((await send(missing_reason, "missing-reason")).status_code, 400)
+            self.assertEqual((await send({**payload, "mode": "apply"}, "")).status_code, 400)
+            self.assertEqual(
+                (await send({**payload, "mode": "apply"}, "before-plan")).status_code, 409
+            )
 
             planned = await send(payload, "preview-plan")
             self.assertEqual(planned.status_code, 202, planned.text)
@@ -446,6 +505,8 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
             changed = deepcopy(payload)
             changed["mode"] = "apply"
             changed["secrets"][0]["value"] = json.dumps(identity)
+            changed_plan = await send({**changed, "mode": "dry-run"}, "changed-plan")
+            self.assertEqual(changed_plan.status_code, 202, changed_plan.text)
             before = tuple(store.list_secret_records())
             with patch.object(store, "write_product_authority_bundle", side_effect=changed_context):
                 refused = await send(changed, "preview-race")
