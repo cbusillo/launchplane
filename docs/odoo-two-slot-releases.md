@@ -97,11 +97,23 @@ before its guarded startup.
 
 The `OdooRecoveryTuple` records both backup IDs, image, selected database,
 recovery timestamp and dump/filestore hashes. Image-only rollback of a
-database-changing release refuses. Use the existing authorized coherent-tuple
+database-changing release refuses. Rollback target resolution and the product
+path check share that same refusal: `rollback_requires_coherent_restore` is a
+blocked image-rollback path, never a recorded usable target. Use the existing authorized coherent-tuple
 restore workflow; source cutover work never authorizes restoring a live site's
 data or overwriting later business writes.
 
 ## Records, retries and activation
+
+Stable logs and outgoing-email diagnostics select the slot in current serving
+inventory from the lane's recorded Compose coordinates. They inspect that
+slot's container/image/runtime identity and reject missing slot authority or an
+unfinished cutover. Switch-back events prove the retained runtime identity
+through their explicit deployment link. Mail diagnostics use the recorded
+public route host and independently verify its current runtime identity before
+authentication; private slots do not acquire public Dokploy domains. Selection
+is checked again after the read, so a concurrent switch cannot return stale
+diagnostics as current evidence.
 
 `DeploymentCutoverStore` stores typed checkpoints, slot/route identities,
 classification, maintenance/readiness/backup observations and the full
