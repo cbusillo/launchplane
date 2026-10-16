@@ -738,7 +738,10 @@ from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRequest,
 )
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
-from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_inventory_scan_record import (
+    PreviewInventoryScanRecord,
+    PREVIEW_INVENTORY_COLLECTION_SOURCE,
+)
 from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
@@ -824,6 +827,8 @@ from control_plane.disposable_lane_collection import (
     collect_disposable_lane_facts,
     disposable_collection_coverage,
 )
+from control_plane.odoo_testing_usage import read_odoo_testing_usage, OdooTestingUsage
+from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 
 from control_plane.disposable_lanes import (
     DisposableLaneSafetyUnknown,
@@ -2844,6 +2849,7 @@ class _PreviewLifecyclePlanApplyStore(Protocol):
         context_name: str | None = None,
         limit: int | None = 50,
         offset: int = 0,
+        exclude_source: str = "",
     ) -> tuple[PreviewInventoryScanRecord, ...]: ...
 
     def write_preview_lifecycle_plan_record(
@@ -23503,9 +23509,12 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
+        # Filter before limiting: background scans must not crowd lifecycle
+        # evidence out of its read window between daily sweeps.
         inventory_scans = plan_store.list_preview_inventory_scan_records(
             context_name=plan_request.context,
             limit=1,
+            exclude_source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
         )
         plan_record = build_preview_lifecycle_plan(
             product=plan_request.product,
@@ -23882,6 +23891,52 @@ def create_launchplane_fastapi_app(
             if observation.mode == "collect":
                 if observation.replaces_operation_id:
                     raise ValueError("This collector does not qualify replacement resources.")
+                observed_at = store.disposable_lane_observation_time()
+                odoo_usage = OdooTestingUsage()
+                if (
+                    profile.driver_id == "odoo"
+                    and observation.instance == "testing"
+                    and target is not None
+                    and target_id is not None
+                    and target.policies.staff_testing_hold is None
+                    and not any(
+                        item.target_id == target_id.target_id
+                        and (item.context, item.instance) != (target.context, target.instance)
+                        for item in store.list_dokploy_target_id_records()
+                    )
+                ):
+                    try:
+                        odoo_usage = await run_in_threadpool(
+                            read_odoo_testing_usage,
+                            target=target,
+                            target_id=target_id,
+                            control_plane_root=resolved_control_plane_root,
+                            database_url=store.database_url,
+                        )
+                    except NativeSourceAuthorizationDenied:
+                        raise _launchplane_http_error(
+                            status_code=403,
+                            trace_id=trace_id,
+                            code="authorization_denied",
+                            message="The provider refused the Odoo testing usage read.",
+                        ) from None
+                    current_profile = store.read_product_profile_record(profile.product)
+                    current_target = store.read_dokploy_target_record(
+                        context_name=observation.context, instance_name=observation.instance
+                    )
+                    current_id = store.read_dokploy_target_id_record(
+                        context_name=observation.context, instance_name=observation.instance
+                    )
+                    if fingerprint != disposable_lane_binding_sha256(
+                        current_profile,
+                        current_target,
+                        current_id,
+                        preview,
+                        disposable_lane_configuration(
+                            store, observation.context, observation.instance
+                        ),
+                    ):
+                        raise ValueError("The lane changed during usage collection; collect again.")
                 facts = collect_disposable_lane_facts(
                     store,
                     context=observation.context,
@@ -23889,11 +23944,14 @@ def create_launchplane_fastapi_app(
                     target=target,
                     target_id=target_id,
                     binding_sha256=fingerprint,
+                    odoo_usage=odoo_usage,
                 )
                 previous = store.read_disposable_lane_safety(
                     profile.product, observation.context, observation.instance
                 )
-                now = datetime.now(timezone.utc)
+                now = store.disposable_lane_observation_time()
+                if now >= observed_at + timedelta(seconds=observation.lifetime_seconds):
+                    raise ValueError("Usage collection expired; collect again.")
                 evidence = DisposableLaneSafety.model_validate(
                     {
                         "product": profile.product,
@@ -23904,12 +23962,13 @@ def create_launchplane_fastapi_app(
                         "observer_kind": "director_agent",
                         "replaces_operation_id": previous.replaces_operation_id if previous else "",
                         "replaced_target_id": previous.replaced_target_id if previous else "",
-                        "observed_at": now,
-                        "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
+                        "observed_at": observed_at,
+                        "expires_at": observed_at + timedelta(seconds=observation.lifetime_seconds),
                         **facts.payload(),
                     }
                 )
-                store.write_disposable_lane_safety(evidence)
+                if not store.publish_collected_disposable_lane_safety(evidence):
+                    raise ValueError("Newer or protected usage evidence exists; collect again.")
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={"product_profile": profile.product},
@@ -23920,6 +23979,7 @@ def create_launchplane_fastapi_app(
                         "observer_kind": evidence.observer_kind,
                         **facts.payload(),
                         "observed_at": evidence.observed_at.isoformat(),
+                        "odoo_usage": odoo_usage.payload(),
                         "expires_at": evidence.expires_at.isoformat(),
                         "provider_mutation": False,
                         "automatic_fact_collection": "limited_service_records",
@@ -23955,7 +24015,7 @@ def create_launchplane_fastapi_app(
                         "provider_mutation": False,
                     },
                 )
-            now = datetime.now(timezone.utc)
+            now = store.disposable_lane_observation_time()
             retained_target = ""
             if operation is not None:
                 preparation = store.read_disposable_replacement_preparation(operation.operation_id)
@@ -23990,7 +24050,8 @@ def create_launchplane_fastapi_app(
                     "production_resources": "unknown",
                 }
             )
-            store.write_disposable_lane_safety(evidence)
+            if not store.publish_collected_disposable_lane_safety(evidence):
+                raise ValueError("Protected usage evidence cannot be cleared by assertions.")
             return accepted_evidence_response(
                 trace_id=trace_id,
                 records={"product_profile": profile.product},
@@ -29677,6 +29738,17 @@ def create_launchplane_fastapi_app(
     )
     from control_plane.http_routes.testing_separation_resources import (
         register_testing_separation_resource_routes,
+    )
+
+    from control_plane.http_routes.private_testing_transport import (
+        register_private_testing_transport_routes,
+    )
+
+    register_private_testing_transport_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
     )
 
     register_testing_separation_resource_routes(

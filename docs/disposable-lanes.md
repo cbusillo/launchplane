@@ -22,6 +22,52 @@ A target ID also bound to another lane refuses it independently of the observati
 The existing Odoo preview-refresh exception below uses direct resource inspection
 and protected-use reports instead of positive occupancy/custody observations.
 Global and lane runtime configuration and secret metadata participate in the binding.
+
+For an Odoo testing lane, `collect` now reads recent successful logins from
+`res_users_log` in a transaction enforced read-only by PostgreSQL and checks the
+running web container's configured filesystem session store. The preceding
+24 hours count for interactive and `authenticate()` logins on every account,
+including administrator and portal accounts. Restored login rows can
+conservatively count as use. Any authenticated
+or partially authenticated session for that database counts regardless of age;
+device-log rows and old login timestamps cannot prove that a browser session has
+ended. Session contents, identifiers, account names and credentials never leave
+the container. The result exposes only two booleans. The filesystem check follows
+[Odoo's session storage contract](https://github.com/odoo/odoo/blob/19.0/odoo/http.py),
+without calling methods that create, refresh, migrate or delete session files.
+
+The service uses its existing registered Dokploy transport and fixed read-only
+programs; the agent needs no host shell or new SSH trust. The tracked compose,
+testing context/instance, local database endpoint, supported web configuration,
+complete single-web/database inventory and unchanged container/placement snapshots
+must agree. Missing databases or session directories, unreadable or malformed
+files, replicas, custom startup, oversized inventories and incomplete/provider
+failures leave usage unknown. A provider authorization denial returns its service
+trace and is never retried with another identity. Only complete negative login
+and session reads can produce `unused`; staff holds still protect the lane.
+Other drivers and previews retain their existing collection behavior.
+
+This is a bounded snapshot of browser/authenticate-login use, not a reservation
+against a future login or proof about anonymous browsing, unsaved work or
+stateless RPC/API-key traffic. Per-call API-key authentication need not create a
+login row or session file; the probe does not attest absence of that traffic.
+Collect immediately before a governed rebuild and use the staff-testing hold
+for a browser testing session or a stateless API test suite.
+The observation's expiry starts before provider collection; changed configuration
+or an elapsed lifetime rejects publication. A delayed collection cannot replace
+newer stored evidence; publication compares observation times under the shared
+authority lock. An unreadable collection also cannot clear observed use of the
+lane after a binding change, and caller assertions cannot clear it either;
+a complete subsequent negative read can. Production API replicas use the shared
+database clock to order these observations. Data custody and production isolation
+remain separate prerequisites and this read never starts a rebuild. Deploy the
+compatible service image, then use the existing `collect-disposable-lane.py`
+`inspect`/`collect` client. No schema migration or new grant is needed. Rollback to
+the prior image restores unknown usage collection; retained facts remain subject
+to their original binding and expiry. A lane with no readable application database
+still needs its supported bootstrap/never-served qualification; absence alone is
+not turned into an unused assertion.
+
 For an Odoo preview, the binding also includes its copied template-lane runtime
 settings, secret metadata and bootstrap override. Changing those inputs
 invalidates preview safety even when no record under the preview slug changes.
@@ -370,9 +416,9 @@ An older image cannot continue the new resource route. After activation, retain
 the qualifying image and forward-fix rather than erasing custody or restoring
 an old database to clear the fence.
 
-## First service collector
+## Service collection
 
-`collect` on the observation API resolves two existing service sources itself:
+`collect` on the observation API resolves existing service sources itself:
 an exact lane's staff-testing hold establishes protected usage, and the same
 Dokploy target ID and target kind bound to a `prod` lane establishes a shared
 production target. The source references bind the lane snapshot and a digest
@@ -380,11 +426,13 @@ of any matched production records. The authenticated agent requests collection;
 its supplied facts and references cannot affect the result. The existing stored
 actor kind and observation schema remain compatible with the previous image.
 
-This producer publishes only `in_use` and `shared`. Every fact permitting an
-apply stays unknown. Missing holds, distinct target IDs and old preview-generation
+For Odoo testing, the read-only login/session probe described above can also
+publish `unused`. Custody and physical isolation remain unknown. Missing holds,
+distinct target IDs and old preview-generation
 states do not establish occupancy, custody, physical isolation or executor
-exclusion. The response and bounded client name these coverage limits. Collection calls no provider,
-changes only lane evidence and uses its existing expiry cap. It does not qualify
+exclusion. The response and bounded client name these coverage limits. Collection
+changes only lane evidence, performs no provider mutation and uses its existing
+expiry cap. It does not qualify
 replacement resources or change production/Client permissions. Refresh preserves
 any existing retained-operation linkage, but keeps replacement eligibility unknown.
 
@@ -407,8 +455,8 @@ client supports only `inspect` and `collect`. Catalog-helper integration is
 coordinated on codex-skills#1308; that consumer must refresh its vendored
 projection before advertising its own support.
 
-**Remaining producer gap:** Launchplane has a positive staff-testing hold, but no
-complete authoritative occupancy or only-copy inventory and no supported
+**Remaining producer gap:** bounded Odoo authenticated-use evidence does not supply
+a universal occupancy or only-copy inventory, or a general
 inspection that proves every writable mount/backing store, live database,
 published port and credential relation. The schema does not pretend to supply
 that inspection. There is no universal producer of positive occupancy/custody facts permitting a

@@ -10,6 +10,19 @@ from control_plane.dokploy import api
 from control_plane.dokploy.source import DokployTargetDefinition
 from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 
+DOKPLOY_COMPOSE_METADATA_LABELS = frozenset(
+    {
+        "dokploy.organization.id",
+        "dokploy.project.id",
+        "dokploy.project",
+        "dokploy.environment.id",
+        "dokploy.environment",
+        "dokploy.application.id",
+        "dokploy.application",
+        "dokploy.service",
+    }
+)
+
 
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 ODOO_DATABASE_DATA_DIRECTORY = "/var/lib/postgresql/data"
@@ -88,9 +101,9 @@ def _render_odoo_web_traefik_labels(
     return "\n".join(lines) + "\n"
 
 
-_ODOO_WEB_START_COMMAND = (
-    "${ODOO_WEB_COMMAND:-python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf}"
-)
+ODOO_WEB_CONFIG_PATH = "/tmp/platform.odoo.conf"
+ODOO_WEB_START_COMMAND = f"python3 /volumes/scripts/run_odoo_startup.py -c {ODOO_WEB_CONFIG_PATH}"
+_ODOO_WEB_START_COMMAND = "${ODOO_WEB_COMMAND:-" + ODOO_WEB_START_COMMAND + "}"
 
 
 def _odoo_web_command(*, hold_until_integration_readback: bool) -> str:

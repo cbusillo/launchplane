@@ -360,7 +360,7 @@ def build_preview_lifecycle_sweep(
             entry.update({"status": "fail", "error_message": str(exc)})
             entries.append(entry)
             continue
-        inventory_scan_id = write_preview_inventory_scan_record(
+        inventory_scan = write_preview_inventory_scan_record(
             record_store=record_store,
             context=inventory_context,
             source=inventory_source,
@@ -389,10 +389,7 @@ def build_preview_lifecycle_sweep(
             desired_previews=desired_state.desired_previews,
             desired_state_id=desired_state_id,
             desired_state_error=desired_state.error_message,
-            latest_inventory_scan=_latest_preview_inventory_scan(
-                record_store=record_store,
-                context_name=profile.preview.context,
-            ),
+            latest_inventory_scan=inventory_scan,
         )
         lifecycle_plan_id = write_preview_lifecycle_plan_record(
             record_store=record_store,
@@ -418,7 +415,7 @@ def build_preview_lifecycle_sweep(
         entry.update(
             {
                 "status": cleanup_record.status,
-                "preview_inventory_scan_id": inventory_scan_id,
+                "preview_inventory_scan_id": inventory_scan.scan_id,
                 "preview_desired_state_id": desired_state_id,
                 "preview_lifecycle_plan_id": lifecycle_plan_id,
                 "preview_lifecycle_cleanup_id": cleanup_id,
@@ -451,40 +448,29 @@ def build_preview_lifecycle_sweep(
     }
 
 
-def _latest_preview_inventory_scan(
-    *, record_store: object, context_name: str
-) -> PreviewInventoryScanRecord | None:
-    list_scans = getattr(record_store, "list_preview_inventory_scan_records", None)
-    if not callable(list_scans):
-        return None
-    scans = list_scans(context_name=context_name, limit=1)
-    return next(iter(scans), None)
-
-
 def write_preview_inventory_scan_record(
     *,
     record_store: PreviewLifecycleSweepStore,
     context: str,
     source: str,
     preview_slugs: tuple[str, ...],
-) -> str:
+) -> PreviewInventoryScanRecord:
     scanned_at = utc_now_timestamp()
     scan_id = build_preview_inventory_scan_id(
         context_name=context,
         scanned_at=scanned_at,
     )
-    record_store.write_preview_inventory_scan_record(
-        PreviewInventoryScanRecord(
-            scan_id=scan_id,
-            context=context,
-            scanned_at=scanned_at,
-            source=source,
-            status="pass",
-            preview_count=len(preview_slugs),
-            preview_slugs=preview_slugs,
-        )
+    record = PreviewInventoryScanRecord(
+        scan_id=scan_id,
+        context=context,
+        scanned_at=scanned_at,
+        source=source,
+        status="pass",
+        preview_count=len(preview_slugs),
+        preview_slugs=preview_slugs,
     )
-    return scan_id
+    record_store.write_preview_inventory_scan_record(record)
+    return record
 
 
 def write_preview_desired_state_record(
