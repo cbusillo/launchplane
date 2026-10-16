@@ -49,6 +49,7 @@ def plan_odoo_secret_transport(
     bindings: tuple[SecretBinding, ...],
     source_label: str,
     repair_metadata: bool = False,
+    repair_binding_ids: frozenset[str] = frozenset(),
     secret_records: tuple[SecretRecord, ...] = (),
     audit_events: tuple[SecretAuditEvent, ...] = (),
 ) -> OdooSecretTransportPlan:
@@ -63,6 +64,7 @@ def plan_odoo_secret_transport(
             secret_records=secret_records,
             events=audit_events,
             now=now,
+            binding_ids=repair_binding_ids,
         )
         if repair_metadata
         else ((), ())
@@ -226,13 +228,17 @@ def plan_odoo_secret_transport(
                 "key": binding.binding_key,
                 "action": "metadata_pending",
                 "binding_id": binding.binding_id,
+                "old_binding_id": binding.binding_id,
+                "new_binding_id": binding.binding_id,
+                "old_binding_key": binding.binding_key,
+                "new_binding_key": binding.binding_key,
             }
         )
         events.append(
             SecretAuditEvent(
                 event_id=f"{binding.secret_id}-metadata-{uuid4().hex}",
                 secret_id=binding.secret_id,
-                event_type="validated",
+                event_type="relabelled",
                 recorded_at=now,
                 actor=source_label,
                 detail="Recovered omitted Odoo relabel metadata from retained provenance.",

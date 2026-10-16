@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timedelta
 from tempfile import TemporaryDirectory
 import unittest
 from typing import cast
@@ -114,6 +115,7 @@ class OdooSecretMetadataTests(unittest.TestCase):
         record: OdooInstanceOverrideRecord,
         *,
         events: tuple[SecretAuditEvent, ...] | None = None,
+        binding_ids: frozenset[str] = frozenset(),
     ) -> OdooSecretTransportPlan:
         return plan_odoo_secret_transport(
             record=record,
@@ -121,6 +123,7 @@ class OdooSecretMetadataTests(unittest.TestCase):
             bindings=store.list_secret_bindings(limit=None),
             source_label="metadata-fixture",
             repair_metadata=True,
+            repair_binding_ids=binding_ids,
             secret_records=store.list_secret_records(limit=None),
             audit_events=events
             if events is not None
@@ -136,6 +139,7 @@ class OdooSecretMetadataTests(unittest.TestCase):
                 self.assertIsNone(destination.declared_secret_class)
                 self.assertIsNone(destination.sharing_reason)
                 self.assertIsNone(destination.value_source)
+                before = store.list_secret_bindings(limit=None)
                 plan = self.plan(store, record)
                 self.assertEqual(
                     store.read_odoo_instance_override_record(
@@ -143,9 +147,7 @@ class OdooSecretMetadataTests(unittest.TestCase):
                     ),
                     record,
                 )
-                self.assertEqual(
-                    store.list_secret_bindings(limit=None)[0].secret_id, secret.secret_id
-                )
+                self.assertEqual(store.list_secret_bindings(limit=None), before)
                 self.assertEqual(plan.bundle.secret_versions, ())
                 store.write_product_authority_bundle(plan.bundle)
                 repaired = next(
@@ -191,41 +193,96 @@ class OdooSecretMetadataTests(unittest.TestCase):
         for failure in ("missing", "ambiguous", "rotated", "edited", "scope"):
             with self.subTest(failure=failure):
                 store, source, destination, secret, record = self.fixture()
+                later = (
+                    datetime.fromisoformat(destination.updated_at) + timedelta(seconds=1)
+                ).isoformat()
                 events = store.list_secret_audit_events(secret_id=secret.secret_id)
                 if failure == "missing":
                     events = ()
                 elif failure == "ambiguous":
                     events += (events[0].model_copy(update={"event_id": "duplicate"}),)
                 elif failure == "rotated":
-                    store.write_secret_record(
-                        secret.model_copy(update={"updated_at": "2099-01-01T00:00:00Z"})
-                    )
+                    store.write_secret_record(secret.model_copy(update={"updated_at": later}))
                 elif failure == "edited":
                     old = next(
                         item
                         for item in store.list_secret_bindings(limit=None)
                         if item.binding_id == source.binding_id
                     )
-                    store.write_secret_binding(
-                        old.model_copy(update={"updated_at": "2099-01-01T00:00:00Z"})
-                    )
+                    store.write_secret_binding(old.model_copy(update={"updated_at": later}))
                 else:
                     store.write_secret_binding(destination.model_copy(update={"context": "other"}))
                 before = store.list_secret_bindings(limit=None)
-                with self.assertRaisesRegex(ValueError, "ambiguous or stale relabel provenance"):
+                with self.assertRaises(ValueError) as refused:
                     self.plan(store, record, events=events)
+                self.assertIn(destination.binding_id, str(refused.exception))
+                self.assertIn("product-config-dry-run/product-config-apply", str(refused.exception))
                 self.assertEqual(store.list_secret_bindings(limit=None), before)
 
-    def test_explicit_destination_class_is_preserved_without_copying_conflicting_sharing(
+    def test_current_explicit_destination_edits_refuse_without_overwriting(
         self,
     ) -> None:
         store, _, destination, _, record = self.fixture()
-        explicit = destination.model_copy(update={"declared_secret_class": "non_prod"})
+        explicit = destination.model_copy(
+            update={
+                "declared_secret_class": "non_prod",
+                "updated_at": (
+                    datetime.fromisoformat(destination.updated_at) + timedelta(seconds=1)
+                ).isoformat(),
+            }
+        )
         store.write_secret_binding(explicit)
-        plan = self.plan(store, record)
-        repaired = plan.bundle.secret_bindings[0]
-        self.assertEqual(repaired.declared_secret_class, explicit.declared_secret_class)
-        self.assertIsNone(repaired.sharing_reason)
+        before = store.list_secret_bindings(limit=None)
+        with self.assertRaises(ValueError):
+            self.plan(store, record)
+        self.assertEqual(store.list_secret_bindings(limit=None), before)
+
+    def test_binding_selector_isolates_recoverable_history_from_unrelated_legacy_binding(
+        self,
+    ) -> None:
+        store, _, destination, _, record = self.fixture()
+        legacy = destination.model_copy(
+            update={
+                "binding_id": "unrelated-legacy",
+                "binding_key": addon_setting_secret_env_key(
+                    addon_name="other", setting_name="api_token"
+                ),
+            }
+        )
+        store.write_secret_binding(legacy)
+        record = record.model_copy(
+            update={
+                "addon_settings": (
+                    *record.addon_settings,
+                    OdooAddonSettingOverride(
+                        addon="other",
+                        setting="api_token",
+                        value=OdooOverrideValue(
+                            source="secret_binding", secret_binding_id=legacy.binding_id
+                        ),
+                    ),
+                )
+            }
+        )
+        store.write_odoo_instance_override_record(record)
+        with self.assertRaisesRegex(ValueError, "no retained relabel provenance"):
+            self.plan(store, record)
+        plan = self.plan(store, record, binding_ids=frozenset({destination.binding_id}))
+        self.assertEqual(
+            {binding.binding_id for binding in plan.bundle.secret_bindings},
+            {destination.binding_id},
+        )
+        store.write_product_authority_bundle(plan.bundle)
+        self.assertEqual(
+            next(
+                binding
+                for binding in store.list_secret_bindings(limit=None)
+                if binding.binding_id == legacy.binding_id
+            ),
+            legacy,
+        )
+        with self.assertRaisesRegex(ValueError, "referenced destinations"):
+            self.plan(store, record, binding_ids=frozenset({"wrong-destination"}))
 
     def test_concurrent_rotation_refuses_metadata_commit(self) -> None:
         for sql in (True, False):
@@ -253,6 +310,8 @@ class OdooSecretMetadataTests(unittest.TestCase):
             "--instance",
             "testing",
             "--repair-metadata-from-relabel-history",
+            "--repair-binding-id",
+            destination.binding_id,
         ]
         runner = CliRunner()
         dry = runner.invoke(main, command)

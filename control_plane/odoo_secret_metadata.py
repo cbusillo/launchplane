@@ -18,11 +18,13 @@ def recover_odoo_secret_metadata(
     secret_records: tuple[SecretRecord, ...],
     events: tuple[SecretAuditEvent, ...],
     now: str,
+    binding_ids: frozenset[str] = frozenset(),
 ) -> tuple[tuple[SecretBinding, ...], tuple[SecretRecord, ...]]:
     """Return metadata writes and current-version expectations; never read values."""
     by_id = {binding.binding_id: binding for binding in bindings}
     secrets = {secret.secret_id: secret for secret in secret_records}
     targets: dict[str, SecretBinding] = {}
+    referenced_ids: set[str] = set()
     for value, key in (
         *(
             (item.value, config_parameter_secret_env_key(item.key))
@@ -44,20 +46,30 @@ def recover_odoo_secret_metadata(
             if binding.binding_key == key
             else by_id.get(expected_secret_binding_id(secret_id=binding.secret_id, binding_key=key))
         )
-        if target is not None and (
-            target.declared_secret_class is None or target.value_source is None
+        if target is not None:
+            referenced_ids.add(target.binding_id)
+        if (
+            target is not None
+            and (not binding_ids or target.binding_id in binding_ids)
+            and (target.declared_secret_class is None or target.value_source is None)
         ):
             targets[target.binding_id] = target
+    if binding_ids - referenced_ids:
+        raise ValueError(
+            "Metadata recovery binding ids must identify this lane's referenced destinations."
+        )
 
     writes: list[SecretBinding] = []
     expectations: dict[str, SecretRecord] = {}
     for target in targets.values():
 
-        def refuse() -> ValueError:
+        def refuse(reason: str = "ambiguous or stale relabel provenance") -> ValueError:
             return ValueError(
-                f"Binding {target.binding_id!r} has ambiguous or stale relabel provenance; "
-                "retain the current records and use an explicitly reviewed local/bootstrap "
-                "metadata repair. Do not infer classification or value origin from the key."
+                f"Binding {target.binding_id!r} has {reason}; retain the current records. "
+                "Use the supported product-config-dry-run/product-config-apply value-writing "
+                "path with separately authorized supplied value and secret_class to re-establish "
+                "origin/classification. No metadata-only force repair is supported. "
+                "Use --repair-binding-id to isolate other recoverable destinations."
             )
 
         candidates = [
@@ -66,6 +78,8 @@ def recover_odoo_secret_metadata(
             if event.event_type == "relabelled"
             and event.metadata.get("new_binding_id") == target.binding_id
         ]
+        if not candidates:
+            raise refuse("no retained relabel provenance")
         if len(candidates) != 1:
             raise refuse()
         event = candidates[0]

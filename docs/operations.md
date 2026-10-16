@@ -3425,6 +3425,16 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   current secret metadata. It changes no value/version or source activation,
   records a metadata-only audit, and is idempotent after repair. Historical
   sources that never recorded classification or value origin cannot establish it.
+  Add repeatable `--repair-binding-id ID` to recover only selected referenced
+  destinations when unrelated legacy bindings have no relabel history. Unknown
+  destination ids refuse. Context-wide bindings, re-relabels and source metadata
+  missing classification or value origin are outside this bounded recovery.
+  For refused records, use the supported installed helper's
+  `product-config-dry-run` then `product-config-apply` value-writing path with
+  a separately authorized supplied value and `secret_class`; value origin is
+  established by that writer, never by a forced metadata edit. This issue grants
+  no value-write authority and asks for no credential. Current explicit edits
+  with later timestamps refuse and remain untouched.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
   persisted to the Dokploy compose target environment before the web container
