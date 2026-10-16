@@ -19,7 +19,8 @@ from control_plane.contracts.disposable_lane import (
     DisposableLaneSafety,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
-from control_plane.contracts.dokploy_target_record import PublicHostEffect
+from control_plane.contracts.dokploy_target_record import PublicHostEffect, DokployTargetRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
@@ -187,6 +188,88 @@ def bootstrap_plan_payload(plan: TestingReplacementBootstrapPlan) -> dict[str, o
     return payload
 
 
+def bootstrap_copy_prerequisites(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    target: DokployTargetRecord,
+    generation: FreshOdooTestingGeneration | None,
+    source_mode: Literal["ssh", "container-export"],
+) -> tuple[tuple[str, ...], str]:
+    product = profile.product
+    lane = next(
+        lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
+    )
+    production = [lane for lane in profile.lanes if lane.instance == "prod"]
+    if (
+        len(production) != 1
+        or not lane.odoo_data_policy.allows_rebuild_source("upstream_restore")
+        or lane.odoo_data_policy.upstream_source != f"{product}:{production[0].context}:prod"
+    ):
+        raise ValueError("Prepare the testing-only same-product production restore policy first.")
+    bindings = site_delivered_secret_bindings_from_store(
+        record_store=store, context_name=context, instance_name="testing"
+    )
+    omitted = frozenset(
+        {
+            *FRESH_TESTING_OMITTED_SETTINGS,
+            *(key for key in bindings if key not in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS),
+        }
+    )
+    if generation is not None:
+        if omitted.difference(generation.omitted_runtime_keys):
+            raise ValueError("Fresh testing credential delivery changed after review.")
+        omitted = frozenset(generation.omitted_runtime_keys)
+    bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE):
+        safety = evaluate_runtime_key_safety_for_live_target_sync(
+            record_store=store,
+            context_name=context,
+            instance_name="testing",
+            required_binding_keys=tuple(sorted(bindings)),
+        )
+        if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
+            raise ValueError("Testing credentials lack current non-production safety proof.")
+        for binding in bindings.values():
+            record = store.read_secret_record(binding.secret_id)
+            if (
+                record.scope != "context_instance"
+                or record.context != context
+                or record.instance != "testing"
+            ):
+                raise ValueError("Fresh testing cannot carry a shared or production credential.")
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED):
+        require_distinct_testing_credentials(store, profile, context)
+    source_values: dict[str, str] = {}
+    for scope in ("context", "instance"):
+        for runtime_record in store.list_runtime_environment_records(context_name=context):
+            if runtime_record.scope == scope and runtime_record.instance == (
+                "testing" if scope == "instance" else ""
+            ):
+                source_values.update({key: str(value) for key, value in runtime_record.env.items()})
+    source_values.update({key: str(value) for key, value in target.env.items()})
+    source_binding = ""
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED):
+        if source_mode == "container-export":
+            captured = (
+                recorded_native_testing_capture(store, generation)
+                if generation is not None
+                else None
+            )
+            source_binding = (
+                captured.source_binding_sha256
+                if captured is not None
+                else native_testing_source_authority(
+                    store, profile=profile, testing_context=context
+                ).binding_sha256
+            )
+        else:
+            encoded_restore_source(source_values)
+    if generation is not None and source_binding != generation.source_binding_sha256:
+        raise ValueError("The reviewed production source authority changed.")
+    return tuple(sorted(omitted)), source_binding
+
+
 def bootstrap_plan(
     store: PostgresRecordStore, product: str, request: TestingReplacementBootstrapRequest
 ) -> TestingReplacementBootstrapPlan:
@@ -217,13 +300,6 @@ def bootstrap_plan(
         or generation.request_sha256 != bootstrap_request_sha256(request)
     ):
         raise ValueError("Bootstrap request differs from its recorded generation.")
-    production = [lane for lane in profile.lanes if lane.instance == "prod"]
-    if (
-        len(production) != 1
-        or not lane.odoo_data_policy.allows_rebuild_source("upstream_restore")
-        or lane.odoo_data_policy.upstream_source != f"{product}:{production[0].context}:prod"
-    ):
-        raise ValueError("Prepare the testing-only same-product production restore policy first.")
     old_hosts = {urlsplit(value).hostname for value in (lane.base_url, lane.health_url)}
     old_hosts.update(target.domains)
     # The retained hostname is never moved or independently duplicated.
@@ -251,66 +327,9 @@ def bootstrap_plan(
         )
     ):
         raise ValueError("Fresh testing requires an independent, unbound hostname.")
-    bindings = site_delivered_secret_bindings_from_store(
-        record_store=store, context_name=request.context, instance_name="testing"
+    omitted, source_binding = bootstrap_copy_prerequisites(
+        store, profile, request.context, target, generation, request.source_mode
     )
-    omitted = frozenset(
-        {
-            *FRESH_TESTING_OMITTED_SETTINGS,
-            *(key for key in bindings if key not in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS),
-        }
-    )
-    if generation is not None:
-        if omitted.difference(generation.omitted_runtime_keys):
-            raise ValueError("Fresh testing credential delivery changed after review.")
-        omitted = frozenset(generation.omitted_runtime_keys)
-    bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
-    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE):
-        safety = evaluate_runtime_key_safety_for_live_target_sync(
-            record_store=store,
-            context_name=request.context,
-            instance_name="testing",
-            required_binding_keys=tuple(sorted(bindings)),
-        )
-        if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
-            raise ValueError("Testing credentials lack current non-production safety proof.")
-        for binding in bindings.values():
-            record = store.read_secret_record(binding.secret_id)
-            if (
-                record.scope != "context_instance"
-                or record.context != request.context
-                or record.instance != "testing"
-            ):
-                raise ValueError("Fresh testing cannot carry a shared or production credential.")
-    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED):
-        require_distinct_testing_credentials(store, profile, request.context)
-    source_values: dict[str, str] = {}
-    for scope in ("context", "instance"):
-        for runtime_record in store.list_runtime_environment_records(context_name=request.context):
-            if runtime_record.scope == scope and runtime_record.instance == (
-                "testing" if scope == "instance" else ""
-            ):
-                source_values.update({key: str(value) for key, value in runtime_record.env.items()})
-    source_values.update({key: str(value) for key, value in target.env.items()})
-    source_binding = ""
-    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED):
-        if request.source_mode == "container-export":
-            captured = (
-                recorded_native_testing_capture(store, generation)
-                if generation is not None
-                else None
-            )
-            source_binding = (
-                captured.source_binding_sha256
-                if captured is not None
-                else native_testing_source_authority(
-                    store, profile=profile, testing_context=request.context
-                ).binding_sha256
-            )
-        else:
-            encoded_restore_source(source_values)
-    if generation is not None and source_binding != generation.source_binding_sha256:
-        raise ValueError("The reviewed production source authority changed.")
     digest = canonical_json_sha256(
         {
             "request": bootstrap_request_payload(request),

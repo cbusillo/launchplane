@@ -84,6 +84,7 @@ class TestingReplacementResourcesRequest(BaseModel):
     instance: Literal["testing"] = "testing"
     operation_id: str = ""
     initial_generation: bool = False
+    source_mode: Literal["ssh", "container-export"] = "ssh"
     mode: Literal["dry-run", "apply", "readback", "release"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
@@ -140,6 +141,8 @@ class TestingInitialPreparationRelease(BaseModel):
 
 def resource_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
     payload = request.model_dump(mode="json")
+    if request.source_mode == "ssh":
+        payload.pop("source_mode")
     if not request.initial_generation:
         payload.pop("initial_generation")
     return payload
@@ -147,6 +150,8 @@ def resource_wire_payload(request: TestingReplacementResourcesRequest) -> dict[s
 
 def resource_request_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
     payload = request.model_dump(exclude={"mode", "reviewed_plan_sha256"})
+    if request.source_mode == "ssh":
+        payload.pop("source_mode")
     if not request.initial_generation:
         payload.pop("initial_generation")
     return payload
@@ -465,6 +470,12 @@ class TestingReplacementResourceAdapter:
                 raise ValueError("Fresh compose inventory has another identity.")
             compose_id = str(compose["composeId"])
         return str(project["projectId"]), str(environment["environmentId"]), compose_id
+
+    def initial_admission(self) -> None:
+        self.require_initial_usage()
+        from control_plane.testing_initial_generation import require_initial_bootstrap_prerequisites
+
+        require_initial_bootstrap_prerequisites(self.store, self.product, self.request)
 
     def require_initial_usage(self) -> None:
         if self.request.initial_generation:
@@ -829,6 +840,7 @@ class TestingReplacementResourceAdapter:
                 reservation_scope=reservation_scope,
                 idempotency_key=idempotency_key,
                 reviewed_plan_sha256=self.request.reviewed_plan_sha256,
+                trace_id=self.trace_id,
             )
         return TestingInitialPreparationRelease(
             product=self.product,
@@ -887,7 +899,7 @@ class TestingReplacementResourceAdapter:
                 try:
                     self.store.activate_initial_testing_preparation(
                         preparation,
-                        before_activation=self.require_initial_usage,
+                        before_activation=self.initial_admission,
                         validate=lambda: resource_context(
                             self.store, product=self.product, request=self.request
                         ),

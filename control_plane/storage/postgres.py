@@ -12506,6 +12506,7 @@ class PostgresRecordStore(HumanSessionStore):
                     resource_namespace=f"lp-testing-{uuid4().hex}",
                     retained_target_record=target,
                     initial_request_sha256=canonical_json_sha256(resource_request_payload(request)),
+                    initial_source_mode=request.source_mode,
                     initial_binding_sha256=disposable_lane_binding_sha256(
                         profile,
                         target,
@@ -12624,8 +12625,13 @@ class PostgresRecordStore(HumanSessionStore):
         reservation_scope: str,
         idempotency_key: str,
         reviewed_plan_sha256: str,
+        trace_id: str,
     ) -> None:
-        from control_plane.testing_replacement_resources import ROUTE
+        from control_plane.testing_replacement_resources import (
+            ROUTE,
+            TestingInitialPreparationRelease,
+        )
+        from control_plane.provider_operations import provider_operation_response_payload
 
         with self._session_factory() as session:
             self._lock_odoo_stable_lane(
@@ -12669,7 +12675,29 @@ class PostgresRecordStore(HumanSessionStore):
                     **row.payload,
                     "initial_released_at": self._database_mutation_timestamp(session),
                 }
-                session.commit()
+            if receipt is not None and receipt.state != "completed":
+                original = self._read_payload(
+                    model_type=LaunchplaneIdempotencyRecord, payload=receipt.payload
+                )
+                disposition = self._updated_idempotency_record(
+                    original,
+                    state="completed",
+                    updated_at=row.payload["initial_released_at"],
+                    recorded_at=row.payload["initial_released_at"],
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    response_payload=provider_operation_response_payload(
+                        trace_id=trace_id,
+                        records={"operation": expected.operation_id},
+                        result=TestingInitialPreparationRelease(
+                            product=expected.product,
+                            context=expected.context,
+                            operation_id=expected.operation_id,
+                        ).model_dump(mode="json"),
+                    ),
+                )
+                self._sync_idempotency_row(receipt, disposition)
+            session.commit()
 
     def prepare_disposable_testing_replacement(
         self, expected: OdooStableTargetReplacementOperationRecord, prepared_by: str

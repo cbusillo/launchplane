@@ -102,6 +102,7 @@ class DisposableTestingResourcePreparation(DisposableTestingReplacementPreparati
 
     initial_request_sha256: str = ""
     initial_binding_sha256: str = ""
+    initial_source_mode: Literal["", "ssh", "container-export"] = ""
     initial_apply_started_at: str = ""
     initial_released_at: str = ""
     initial_reconcile_requested_at: str = ""

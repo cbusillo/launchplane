@@ -10421,6 +10421,14 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 fixture.store.write_odoo_stable_target_replacement_operation_record(
                     fixture.operation
                 )
+                from tests.support.initial_testing import configure_initial_restore
+
+                configure_initial_restore(fixture.store, fixture.profile.product, fixture.context)
+                self.enterContext(
+                    patch(
+                        "control_plane.testing_replacement_bootstrap.require_distinct_testing_credentials"
+                    )
+                )
                 original_post = fixture.post
 
                 async def initial_post(**changes: object) -> Any:
@@ -11117,6 +11125,14 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
                 )
                 fixture.store.write_odoo_stable_target_replacement_operation_record(successful)
 
+                from tests.support.initial_testing import configure_initial_restore
+
+                configure_initial_restore(fixture.store, fixture.profile.product, fixture.context)
+                self.enterContext(
+                    patch(
+                        "control_plane.testing_replacement_bootstrap.require_distinct_testing_credentials"
+                    )
+                )
                 policy = LaunchplaneAuthzPolicy()
                 fixture.store.seed_authz_policy_if_absent(
                     LaunchplaneAuthzPolicyRecord(
@@ -11158,8 +11174,24 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
 
                         if failure == "use":
                             usage.return_value = OdooTestingUsage("in_use", True, True, "complete")
-                        with patch.object(
-                            TestingReplacementResourceAdapter, "created_placement", new=pre_effect
+                        original_apply = TestingReplacementResourceAdapter.apply
+
+                        def apply_with_checkpoint(adapter: Any, key: str, lease: Any) -> Any:
+                            if failure == "dispatched":
+                                lease.checkpoint_effect("fixture-dispatch")
+                            return original_apply(adapter, key, lease)
+
+                        with (
+                            patch.object(
+                                TestingReplacementResourceAdapter,
+                                "created_placement",
+                                new=pre_effect,
+                            ),
+                            patch.object(
+                                TestingReplacementResourceAdapter,
+                                "apply",
+                                new=apply_with_checkpoint,
+                            ),
                         ):
                             refused = await post(
                                 mode="apply", reviewed_plan_sha256=result["plan_sha256"]
@@ -11180,25 +11212,6 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
                             ) as owner:
                                 self.assertIsNone(owner)
                             return
-                        if failure == "dispatched":
-                            # A durable checkpoint is uncertain dispatch even with no captured target.
-                            # Resolve the exact fixture principal through the actual stored receipt.
-                            with fixture.store._session_factory() as session:
-                                from control_plane.storage.postgres import LaunchplaneIdempotencyRow
-
-                                row = session.scalar(
-                                    select(LaunchplaneIdempotencyRow).where(
-                                        LaunchplaneIdempotencyRow.idempotency_key
-                                        == "resource-fixture"
-                                    )
-                                )
-                                assert row is not None
-                                row.payload = {
-                                    **row.payload,
-                                    "provider_effect_started_at": successful.updated_at,
-                                    "provider_effect_phase": "create",
-                                }
-                                session.commit()
                         with patch.object(
                             TestingReplacementResourceAdapter,
                             "created_placement",
@@ -11217,6 +11230,37 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
                                 mode="release", reviewed_plan_sha256=result["plan_sha256"]
                             )
                             self.assertEqual(replay.json()["result"], released.json()["result"])
+                        # Releasing only the lane fence leaves the generic provider
+                        # target reservation busy for every future resource key.
+                        with fixture.store._session_factory() as session:
+                            from control_plane.storage.postgres import LaunchplaneIdempotencyRow
+
+                            original = session.scalar(
+                                select(LaunchplaneIdempotencyRow).where(
+                                    LaunchplaneIdempotencyRow.idempotency_key == "resource-fixture"
+                                )
+                            )
+                            assert original is not None
+                            from control_plane.contracts.idempotency_record import (
+                                LaunchplaneIdempotencyRecord,
+                            )
+
+                            original_record = LaunchplaneIdempotencyRecord.model_validate(
+                                original.payload
+                            )
+                            self.assertTrue(
+                                original.payload["response_payload"]["result"]["released"]
+                            )
+                        next_reservation = fixture.store.reserve_mutation(
+                            scope=original_record.scope,
+                            route_path=original_record.route_path,
+                            idempotency_key="new-reviewed-initial-key",
+                            request_fingerprint="fixture-new-intent",
+                            lease_owner="fixture-next",
+                            reconciliation_key="fixture-next-reconciliation",
+                            provider_target_key=original_record.provider_target_key,
+                        )
+                        self.assertEqual(next_reservation.status, "acquired")
                         self.assertEqual((await post()).status_code, 409)
                         with fixture.store.odoo_synchronous_lane_reservation(
                             product=fixture.profile.product,
@@ -11286,6 +11330,38 @@ class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
                 ),
                 successful,
             )
+
+    def test_release_cannot_race_a_live_executor(self) -> None:
+        from control_plane.testing_replacement_resources import (
+            TestingReplacementResourceAdapter,
+            TestingReplacementResourcesRequest,
+        )
+
+        scenario = self.scenario()
+        second = PostgresRecordStore(database_url=scenario.store.database_url)
+        self.addCleanup(second.close)
+        adapter = TestingReplacementResourceAdapter(
+            scenario.fixture.root,
+            second,
+            scenario.profile.product,
+            TestingReplacementResourcesRequest(
+                context=scenario.fixture.context,
+                operation_id=scenario.fixture.operation.operation_id,
+                initial_generation=True,
+                mode="release",
+                reason="fixture",
+                reviewed_plan_sha256="a" * 64,
+            ),
+            "fixture-trace",
+        )
+        with scenario.store.testing_replacement_execution_lock(
+            scenario.fixture.operation.operation_id
+        ) as held:
+            self.assertIsNotNone(held)
+            with patch.object(adapter, "created_placement") as provider:
+                with self.assertRaises(ValueError):
+                    adapter.release("fixture-scope", "fixture-key")
+                provider.assert_not_called()
 
     def test_durable_and_synchronous_admission_resume_only_after_queue(self) -> None:
         from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError

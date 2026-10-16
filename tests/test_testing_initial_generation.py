@@ -29,6 +29,14 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.store.write_odoo_stable_target_replacement_operation_record(self.success)
+        from tests.support.initial_testing import configure_initial_restore
+
+        configure_initial_restore(self.store, self.fixture.profile.product, self.fixture.context)
+        self.credentials = self.enterContext(
+            patch(
+                "control_plane.testing_replacement_bootstrap.require_distinct_testing_credentials"
+            )
+        )
         self.usage = self.enterContext(
             patch(
                 "control_plane.testing_initial_generation.read_odoo_testing_usage",
@@ -101,6 +109,21 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
         with scoped_agent_transport():
             self.assertEqual((await self.post()).status_code, 403)
         self.assertEqual((await self.post(key="")).status_code, 409)
+
+    async def test_missing_copy_prerequisite_refuses_before_allocation_effects(self) -> None:
+        self.credentials.side_effect = ValueError("fixture unavailable local credentials")
+        response = await self.post()
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            self.store.read_odoo_stable_target_replacement_operation_record(
+                self.success.operation_id
+            ),
+            self.success,
+        )
+        with self.store.odoo_synchronous_lane_reservation(
+            product=self.fixture.profile.product, context=self.fixture.context, instance="testing"
+        ) as owner:
+            self.assertIsNone(owner)
 
     async def test_provider_usage_denial_is_not_reclassified_as_safety_unknown(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied

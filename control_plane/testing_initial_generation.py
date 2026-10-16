@@ -49,6 +49,8 @@ def initial_resource_context(
         resource_request_payload(request)
     ):
         raise ValueError("Use the original initial resource intent.")
+    if preparation.initial_source_mode != request.source_mode:
+        raise ValueError("The initial bootstrap source mode changed.")
     store.require_initial_testing_lane_available(preparation, allow_bootstrap_resume)
     if not preparation.replacement_target_id:
         profile = store.read_product_profile_record(product)
@@ -66,6 +68,27 @@ def initial_resource_context(
         )
         if binding != preparation.initial_binding_sha256:
             raise ValueError("The original testing authority changed; review a new plan.")
+
+
+def require_initial_bootstrap_prerequisites(
+    store: PostgresRecordStore,
+    product: str,
+    request: TestingReplacementResourcesRequest,
+) -> None:
+    from control_plane.testing_replacement_bootstrap import bootstrap_copy_prerequisites
+
+    profile = store.read_product_profile_record(product)
+    target = store.read_dokploy_target_record(context_name=request.context, instance_name="testing")
+    # Adoption installs an empty target; source wiring that exists only on the
+    # retained target cannot qualify the future independent copy.
+    bootstrap_copy_prerequisites(
+        store,
+        profile,
+        request.context,
+        target.model_copy(update={"env": {}}),
+        None,
+        request.source_mode,
+    )
 
 
 def require_initial_usage(

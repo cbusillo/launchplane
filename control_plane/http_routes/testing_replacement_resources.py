@@ -78,6 +78,7 @@ def register_testing_replacement_resource_routes(
             from control_plane.testing_initial_generation import (
                 initial_preparation_id,
                 require_initial_usage,
+                require_initial_bootstrap_prerequisites,
             )
 
             try:
@@ -92,6 +93,9 @@ def register_testing_replacement_resource_routes(
                         lambda: record_store.prepare_initial_testing_generation(
                             product=product, request=body, prepared_by=idempotency_scope(identity)
                         )
+                    )
+                    await run_in_worker_thread(
+                        lambda: require_initial_bootstrap_prerequisites(record_store, product, body)
                     )
                     await run_in_worker_thread(
                         lambda: require_initial_usage(root, record_store, product, body)
@@ -118,7 +122,7 @@ def register_testing_replacement_resource_routes(
             adapter = TestingReplacementResourceAdapter(root, record_store, product, body, trace)
             try:
                 result = await run_in_worker_thread(
-                    lambda: adapter.release(idempotency_scope(identity), idempotency_key)
+                    lambda: adapter.release(idempotency_scope(identity), idempotency_key.strip())
                 )
             except DurableOperationAuthorizationDeniedError:
                 refuse(

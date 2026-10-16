@@ -29,6 +29,7 @@ def main() -> int:
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--operation-id", default="")
     parser.add_argument("--initial-generation", action="store_true")
+    parser.add_argument("--source-mode", choices=("ssh", "container-export"), default="ssh")
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--idempotency-key", default="")
@@ -63,6 +64,7 @@ def main() -> int:
         operation_id=args.operation_id,
         reason=args.reason,
         initial_generation=args.initial_generation,
+        source_mode=args.source_mode,
     )
     if args.initial_generation and not args.idempotency_key.strip():
         parser.error("Initial generation requires the original stable key in every mode.")
