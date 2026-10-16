@@ -13,6 +13,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.dokploy.api import DokployRequestFailed
+from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH, ODOO_WEB_START_COMMAND
 from control_plane.odoo_testing_usage import (
     ODOO_TESTING_USAGE_CONTAINER_PROGRAM,
     ODOO_TESTING_USAGE_HOST_PROGRAM,
@@ -74,7 +75,7 @@ class SessionInventoryTests(unittest.TestCase):
         connect = Mock(return_value=connection)
         self.driver.connect = connect  # type: ignore[attr-defined]
         config = MagicMock()
-        config.read.return_value = ["/tmp/platform.odoo.conf"]
+        config.read.return_value = [ODOO_WEB_CONFIG_PATH]
         config.__getitem__ = Mock(
             return_value={
                 "db_name": "testing_db",
@@ -84,7 +85,7 @@ class SessionInventoryTests(unittest.TestCase):
                 "db_password": "private-fixture",
             }
         )
-        process = SimpleNamespace(read_bytes=lambda: b"odoo\0-c\0/tmp/platform.odoo.conf\0")
+        process = SimpleNamespace(read_bytes=lambda: f"odoo\0-c\0{ODOO_WEB_CONFIG_PATH}\0".encode())
         env = {
             "PLATFORM_INSTANCE": "testing",
             "ODOO_DB_NAME": "testing_db",
@@ -106,6 +107,29 @@ class SessionInventoryTests(unittest.TestCase):
         connection.commit.assert_not_called()
         connection.close.assert_called()
         self.assertNotIn("private-fixture", json.dumps(result))
+
+    def test_startup_wrapper_alone_cannot_qualify_session_location(self) -> None:
+        config = MagicMock()
+        config.read.return_value = [ODOO_WEB_CONFIG_PATH]
+        config.__getitem__.return_value = {
+            "db_name": "testing_db",
+            "db_host": "database",
+            "data_dir": self.directory,
+        }
+        process = SimpleNamespace(
+            read_bytes=lambda: (
+                f"python3\0/volumes/scripts/run_odoo_startup.py\0-c\0{ODOO_WEB_CONFIG_PATH}\0".encode()
+            )
+        )
+        with (
+            patch.dict(
+                "os.environ", {"PLATFORM_INSTANCE": "testing", "ODOO_DB_NAME": "testing_db"}
+            ),
+            patch("configparser.ConfigParser", return_value=config),
+            patch.object(Path, "glob", return_value=[process]),
+            self.assertRaises(ValueError),
+        ):
+            self.namespace["probe"]()
 
 
 class UsageReaderTests(unittest.TestCase):
@@ -210,7 +234,14 @@ class UsageReaderTests(unittest.TestCase):
 
 
 class HostProbeTests(unittest.TestCase):
-    def run_probe(self, *, duplicate: bool = False, changed: bool = False) -> dict[str, Any]:
+    def run_probe(
+        self,
+        *,
+        duplicate: bool = False,
+        changed: bool = False,
+        wrong_context: bool = False,
+        custom_command: bool = False,
+    ) -> dict[str, Any]:
         def container(service: str) -> dict[str, Any]:
             return {
                 "Id": service,
@@ -227,7 +258,7 @@ class HostProbeTests(unittest.TestCase):
                     "Cmd": [
                         "/bin/sh",
                         "-lc",
-                        "python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf",
+                        ODOO_WEB_START_COMMAND,
                     ],
                 },
                 "State": {"Running": True, "StartedAt": "start"},
@@ -236,12 +267,16 @@ class HostProbeTests(unittest.TestCase):
             }
 
         web, database = container("web"), container("database")
+        if wrong_context:
+            web["Config"]["Env"][0] = "PLATFORM_CONTEXT=other"
+        if custom_command:
+            web["Config"]["Cmd"] = ["odoo --data-dir=/another-store"]
         calls: list[list[str]] = []
 
         def run(command: list[str], **kwargs: Any) -> Any:
             calls.append(command)
             if command[1] == "ps":
-                output = b"web database"
+                output = b"web database web2" if duplicate else b"web database"
             elif command[1] == "inspect":
                 values = [web, database, web] if duplicate else [web, database]
                 if changed and len(calls) > 3:
@@ -281,3 +316,5 @@ class HostProbeTests(unittest.TestCase):
     def test_duplicate_services_and_container_restarts_leave_usage_unknown(self) -> None:
         self.assertTrue(self.run_probe(duplicate=True)["unavailable"])
         self.assertTrue(self.run_probe(changed=True)["unavailable"])
+        self.assertTrue(self.run_probe(wrong_context=True)["unavailable"])
+        self.assertTrue(self.run_probe(custom_command=True)["unavailable"])

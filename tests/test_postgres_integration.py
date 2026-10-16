@@ -339,11 +339,46 @@ class AlembicFixtureConfigTests(unittest.TestCase):
 
 
 class RealPostgresOdooUsageTests(unittest.TestCase):
+    def test_concurrent_collectors_preserve_newer_in_use_evidence(self) -> None:
+        from control_plane.contracts.disposable_lane import DisposableLaneSafety
+
+        with _store_for_fresh_head_database() as store:
+            now = datetime.now(timezone.utc)
+            old = DisposableLaneSafety(
+                product="fixture",
+                context="fixture",
+                instance="testing",
+                observed_by="fixture",
+                observer_kind="director_agent",
+                binding_sha256="a" * 64,
+                usage="unused",
+                usage_evidence="fixture:usage",
+                observed_at=now - timedelta(seconds=2),
+                expires_at=now + timedelta(seconds=300),
+            )
+            newer = old.model_copy(
+                update={"usage": "in_use", "observed_at": now - timedelta(seconds=1)}
+            )
+            barrier = threading.Barrier(2)
+
+            def publish(record: DisposableLaneSafety) -> bool:
+                barrier.wait(timeout=5)
+                return store.publish_collected_disposable_lane_safety(record)
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                attempts = [pool.submit(publish, record) for record in (old, newer)]
+                for attempt in attempts:
+                    attempt.result(timeout=10)
+            self.assertEqual(
+                store.read_disposable_lane_safety("fixture", "fixture", "testing"), newer
+            )
+
     def test_login_window_and_read_only_probe_leave_application_data_unchanged(self) -> None:
         import psycopg
         from types import ModuleType, SimpleNamespace
         from unittest.mock import MagicMock
         from control_plane.odoo_testing_usage import ODOO_TESTING_USAGE_CONTAINER_PROGRAM
+        from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
 
         with _isolated_postgres_database() as url, TemporaryDirectory() as directory:
             conninfo = (
@@ -373,7 +408,7 @@ class RealPostgresOdooUsageTests(unittest.TestCase):
 
                 driver.connect = connect  # type: ignore[attr-defined]
                 config = MagicMock()
-                config.read.return_value = ["/tmp/platform.odoo.conf"]
+                config.read.return_value = [ODOO_WEB_CONFIG_PATH]
                 config.__getitem__.return_value = {
                     "db_name": database,
                     "db_host": "database",
@@ -381,7 +416,9 @@ class RealPostgresOdooUsageTests(unittest.TestCase):
                     "db_user": "fixture",
                     "db_password": "fixture",
                 }
-                process = SimpleNamespace(read_bytes=lambda: b"odoo\0-c\0/tmp/platform.odoo.conf\0")
+                process = SimpleNamespace(
+                    read_bytes=lambda: f"odoo\0-c\0{ODOO_WEB_CONFIG_PATH}\0".encode()
+                )
                 env = {
                     "PLATFORM_INSTANCE": "testing",
                     "ODOO_DB_NAME": database,

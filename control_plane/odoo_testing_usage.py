@@ -8,6 +8,7 @@ import click
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.dokploy import api, source
+from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH, ODOO_WEB_START_COMMAND
 from control_plane.dokploy.native_copy_stream import _read_remote, NativeSourceAuthorizationDenied
 
 
@@ -30,6 +31,7 @@ ODOO_TESTING_USAGE_CONTAINER_PROGRAM = r"""
 import configparser, json, os, stat
 from pathlib import Path
 import psycopg2
+CONFIG_PATH=__CONFIG_PATH__
 
 def read_sessions(path, database):
     # Count every authenticated or partially authenticated file, regardless of
@@ -71,7 +73,7 @@ def probe():
         raise ValueError('Testing only')
     database=os.environ['ODOO_DB_NAME']
     config=configparser.ConfigParser(interpolation=None)
-    if config.read('/tmp/platform.odoo.conf')!=['/tmp/platform.odoo.conf']:
+    if config.read(CONFIG_PATH)!=[CONFIG_PATH]:
         raise ValueError('Web configuration unavailable')
     options=config['options']
     if options.get('db_name')!=database or options.get('db_host')!='database':
@@ -83,9 +85,9 @@ def probe():
     # custom command or another config cannot qualify this read.
     processes=[[a for a in p.read_bytes().split(b'\0') if a]
                for p in Path('/proc').glob('[0-9]*/cmdline')]
-    config_args=[b'-c',b'/tmp/platform.odoo.conf']
+    config_args=[b'-c',CONFIG_PATH.encode()]
     if not any((p[1:]==config_args or p[2:]==config_args) and
-               any(arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin',b'run_odoo_startup.py'}
+               any(arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'}
                    for arg in p[:2]) for p in processes):
         raise ValueError('Serving configuration unavailable')
     session_use=read_sessions(data_dir/'sessions',database)
@@ -118,13 +120,14 @@ if __name__=='__main__':
     except Exception:
         result={'type':'complete','unavailable':True}
     print(json.dumps(result),flush=True)
-"""
+""".replace("__CONFIG_PATH__", repr(ODOO_WEB_CONFIG_PATH))
 
 
 ODOO_TESTING_USAGE_HOST_PROGRAM = r"""
 import base64,json,subprocess,sys
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
+START_COMMAND=__START_COMMAND__
 
 def docker(*args,stdin=None):
     return subprocess.run(['docker',*args],input=stdin,capture_output=True,check=True,timeout=25).stdout
@@ -156,7 +159,7 @@ def containers():
         raise ValueError('Testing identity unavailable')
     # A custom startup may select a different config/session store.
     command=web['Config'].get('Cmd') or []
-    if not any('run_odoo_startup.py -c /tmp/platform.odoo.conf' in arg for arg in command):
+    if not any(START_COMMAND in arg for arg in command):
         raise ValueError('Unsupported web command')
     networks=web['NetworkSettings']['Networks']
     db_networks=services['database']['NetworkSettings']['Networks']
@@ -180,7 +183,7 @@ try:
     print(prefix+json.dumps(result),flush=True)
 except Exception:
     print(prefix+json.dumps({'type':'complete','unavailable':True}),flush=True)
-"""
+""".replace("__START_COMMAND__", repr(ODOO_WEB_START_COMMAND))
 
 
 def read_odoo_testing_usage(

@@ -10483,6 +10483,35 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
+    def publish_collected_disposable_lane_safety(self, record: DisposableLaneSafety) -> bool:
+        """A delayed collector cannot erase a newer protective observation."""
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneDisposableLaneSafetyRow,
+                (record.product, record.context, record.instance),
+                with_for_update=True,
+            )
+            if row is not None:
+                previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
+                if previous.observed_at > record.observed_at or (
+                    previous.observed_at == record.observed_at
+                    and previous.usage == "in_use"
+                    and record.usage != "in_use"
+                ):
+                    return False
+            session.merge(
+                LaunchplaneDisposableLaneSafetyRow(
+                    product=record.product,
+                    context=record.context,
+                    instance=record.instance,
+                    payload=self._payload_dict(record),
+                )
+            )
+            session.commit()
+            return True
+
     def clear_disposable_lane_safety(self, product: str, context: str, instance: str) -> None:
         with self._session_factory() as session:
             self._begin_serialized_write(session)

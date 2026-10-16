@@ -60,7 +60,7 @@ def main() -> int:
                 path=DISPOSABLE_LANE_OBSERVATION_ROUTE,
                 settings=settings,
                 body=payload.model_dump(mode="json"),
-                timeout=150,
+                timeout=240,
             )
         result = response["result"]
         if result["mode"] != args.mode:

@@ -26,8 +26,9 @@ Global and lane runtime configuration and secret metadata participate in the bin
 For an Odoo testing lane, `collect` now reads recent successful logins from
 `res_users_log` in a transaction enforced read-only by PostgreSQL and checks the
 running web container's configured filesystem session store. The preceding
-24 hours count for every account, including administrator, portal and automation
-accounts. Restored login rows can conservatively count as use. Any authenticated
+24 hours count for interactive and `authenticate()` logins on every account,
+including administrator and portal accounts. Restored login rows can
+conservatively count as use. Any authenticated
 or partially authenticated session for that database counts regardless of age;
 device-log rows and old login timestamps cannot prove that a browser session has
 ended. Session contents, identifiers, account names and credentials never leave
@@ -46,11 +47,16 @@ trace and is never retried with another identity. Only complete negative login
 and session reads can produce `unused`; staff holds still protect the lane.
 Other drivers and previews retain their existing collection behavior.
 
-This is a bounded snapshot of authenticated use, not a reservation against a
-future login or proof about anonymous browsing or unsaved work. Collect immediately
-before a governed rebuild and use the staff-testing hold for a testing session.
+This is a bounded snapshot of browser/authenticate-login use, not a reservation
+against a future login or proof about anonymous browsing, unsaved work or
+stateless RPC/API-key traffic. Per-call API-key authentication need not create a
+login row or session file; the probe does not attest absence of that traffic.
+Collect immediately before a governed rebuild and use the staff-testing hold
+for a browser testing session or a stateless API test suite.
 The observation's expiry starts before provider collection; changed configuration
-or an elapsed lifetime rejects publication. Data custody and production isolation
+or an elapsed lifetime rejects publication. A delayed collection cannot replace
+newer stored evidence; publication compares observation times under the shared
+authority lock. Data custody and production isolation
 remain separate prerequisites and this read never starts a rebuild. Deploy the
 compatible service image, then use the existing `collect-disposable-lane.py`
 `inspect`/`collect` client. No schema migration or new grant is needed. Rollback to
