@@ -4,6 +4,8 @@ from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_app_identity import ADVISORY_GITHUB_APP_ID_ENV_KEY
 from types import SimpleNamespace
 from typing import Any, cast
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from email.message import Message
 from http.client import IncompleteRead
 from unittest.mock import patch
@@ -58,6 +60,9 @@ from control_plane.merge_train_candidate_failures import classify_candidate_chec
 
 from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, SCOPED_MINOR
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.support.profiles import product_profile_payload
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
@@ -3156,6 +3161,30 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
 
 class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
+    def test_veto_queries_the_profiles_preserved_repository_spelling(self) -> None:
+        repository = "CBusillo/SellYourOutboard"
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            payload = product_profile_payload("site")
+            payload.update(
+                repository=repository, owner={"github_login": "client", "github_id": "901"}
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(payload)
+            )
+            store.write_product_review_decision_record(
+                _client_veto_record(repository=repository, head_sha="head-42")
+            )
+            reader = GitHubMergeTrainSnapshotReader(
+                transport=RecordingMergeTrainGitHubTransport(responses=()),
+                branch_refresh_store=cast(Any, store),
+            )
+            self.assertTrue(
+                reader.client_veto(
+                    repository=repository.casefold(), pull_request_number=42, head_sha="head-42"
+                )
+            )
+
     def test_engineering_only_notes_do_not_clear_current_client_veto(self) -> None:
         rejection = ProductReviewDecisionRecord(
             record_id="client-veto",

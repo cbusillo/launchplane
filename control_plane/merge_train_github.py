@@ -4157,10 +4157,10 @@ class GitHubMergeTrainSnapshotReader:
         )
         if not profiles:
             return False
-        decisions = store.list_product_review_decision_records(
-            repository=repository, pull_request_number=pull_request_number
-        )
         for profile in profiles:
+            decisions = store.list_product_review_decision_records(
+                repository=profile.repository, pull_request_number=pull_request_number
+            )
             current = next(
                 (
                     decision
