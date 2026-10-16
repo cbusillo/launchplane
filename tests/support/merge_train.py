@@ -65,6 +65,10 @@ class _LandingPlanRecordUpdater(Protocol):
     ) -> None: ...
 
 
+def planned_stack_merge_tree(parent_sha: str, child_sha: str) -> str:
+    return f"tree:{parent_sha}:{child_sha}"
+
+
 class _FakeMergeTrainGitHubClient:
     land_batch_candidate_calls = 0
     cleanup_batch_candidate_ref_calls = 0
@@ -280,6 +284,11 @@ class _FakeMergeTrainGitHubClient:
     def branch_head_sha(self, *, repository: str, branch_ref: str) -> str:
         return f"branch-head:{branch_ref}"
 
+    def plan_stack_child_merge_tree(self, **kwargs: object) -> str:
+        return planned_stack_merge_tree(
+            str(kwargs["expected_parent_head_sha"]), str(kwargs["child_head_sha"])
+        )
+
     def find_stack_child_merge_commit(
         self,
         *,
@@ -287,6 +296,7 @@ class _FakeMergeTrainGitHubClient:
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         collapse_id: str,
         child_pull_request_number: int,
         parent_pull_request_number: int,
@@ -300,6 +310,7 @@ class _FakeMergeTrainGitHubClient:
         child_head_sha: str,
         expected_parent_head_sha: str,
         parent_head_ref: str,
+        expected_merge_tree_sha: str = "",
         protected_base_ref: str,
         collapse_id: str,
         child_pull_request_number: int,
@@ -1039,6 +1050,7 @@ def _seed_executed_merge_train_stack_collapse_plan_record(
         branch_client=_FakeMergeTrainGitHubClient(transport=object()),
         child_readiness_reasons=lambda _pull_request_number: (),
         updated_at="2026-05-13T21:02:00Z",
+        checkpoint=lambda progress: None,
     )
     executed_record = build_merge_train_stack_collapse_plan_record(
         plan=executed_plan,
