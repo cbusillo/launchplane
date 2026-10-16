@@ -64,14 +64,14 @@ for (const view of ["index", "workspace", "environment"] as const) {
     const detailUrl = `${productUrl}/environments/prod`;
     const target = view === "index" ? "**/v1/products" : view === "workspace" ? productUrl : detailUrl;
     if (view !== "index") await page.route("**/v1/products", async route => {
-      serviceTime = await page.evaluate(() => Date.now());
+      serviceTime = browserTime;
       return route.fulfill({ json: { status: "ok", products: [response(fixture.product)] } });
     });
     await page.route(target, async route => {
       reads++;
       const name = lastName = `Cadence observation ${reads}`;
       if (unavailable) return route.fulfill({ status: 503, json: { error: { code: "read_unavailable", message: "Cadence fixture unavailable" } } });
-      serviceTime = await page.evaluate(() => Date.now());
+      serviceTime = browserTime;
       const payload = view === "environment"
         ? { environment: { ...response(fixture.detail), display_name: name } }
         : view === "workspace"
@@ -89,13 +89,21 @@ for (const view of ["index", "workspace", "environment"] as const) {
     const healthy = view === "environment" ? "pass" : "verified";
     await expect(signal).toHaveAttribute(attribute, healthy);
     await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
-    const advance = async (milliseconds: number, tone: string) => {
-      const previousName = lastName;
+    const advanceRead = async (milliseconds: number) => {
+      // Both clocks use the phase's explicit wall time. The publisher still
+      // follows its independent minute cadence and delayed publication. No
+      // extra browser RPC is needed inside each intercepted response.
       browserTime += milliseconds;
       await page.clock.runFor(milliseconds);
+    };
+    const advance = async (milliseconds: number, tone: string) => {
+      const previousName = lastName;
+      await advanceRead(milliseconds);
       // Check response replacement and its freshness in one browser assertion.
       // Retained loading data cannot match because it still has the old name.
-      const nextSurface = main.filter({ hasNot: page.getByText(previousName, { exact: true }) });
+      const previousObservation = page.locator(view === "index" ? ".directory-product strong" : "h1")
+        .filter({ hasText: new RegExp(`^${previousName}$`) });
+      const nextSurface = main.filter({ hasNot: previousObservation });
       await expect(findSignal(nextSurface)).toHaveAttribute(attribute, tone);
     };
     for (let minute = 0; minute < 31; minute++) {
@@ -108,17 +116,16 @@ for (const view of ["index", "workspace", "environment"] as const) {
     await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-${view}-${testInfo.project.name}.png`, fullPage: true });
     // Successful GETs must not renew stopped monitor evidence.
     stoppedAt = serviceTime;
-    await page.clock.runFor(cadence);
-    await expect(signal).toHaveAttribute(attribute, "warning");
+    await advance(cadence, "warning");
     // Repeated successful reads cannot renew the stopped observation, and the
     // short follow-up ends after one cadence rather than spinning forever.
-    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
-    await expect(signal).toHaveAttribute(attribute, "warning");
+    await advance(READ_REFRESH_INTERVAL_MS, "warning");
     const stoppedReads = reads;
+    browserTime += DEADLINE_RETRY_INTERVAL_MS * 2;
     await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS * 2);
     expect(reads).toBe(stoppedReads);
     unavailable = true;
-    await page.clock.runFor(READ_REFRESH_INTERVAL_MS);
+    await advanceRead(READ_REFRESH_INTERVAL_MS);
     await expect(page.getByText("Cadence fixture unavailable", { exact: false }).first()).toBeVisible();
     await expect(signal).toHaveAttribute(attribute, "warning");
     expect(mutations).toEqual([]);
