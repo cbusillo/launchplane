@@ -45,6 +45,8 @@ from control_plane.odoo_testing_drill import (
 )
 from control_plane.odoo_testing_resources import OdooTestingResources
 from control_plane.odoo_testing_restore import generation_binding
+from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
+from control_plane.odoo_testing_storage import prepare_drill_storage
 from control_plane.storage.postgres import (
     PostgresRecordStore,
     LaunchplaneDisposableReplacementPreparationRow,
@@ -80,6 +82,12 @@ class TestingDrillScenario(unittest.TestCase):
                                 upstream_source=f"{self.profile.product}:{production.context}:prod",
                             ),
                             "odoo_testing_drill_enabled": True,
+                            "odoo_testing_drill_storage": OdooTestingDrillStorageBudget(
+                                database_bytes=100,
+                                filestore_bytes=100,
+                                staging_bytes=100,
+                                reserve_bytes=100,
+                            ),
                         }
                     )
                     if lane.instance == "testing"
@@ -226,6 +234,18 @@ class TestingDrillScenario(unittest.TestCase):
         self.signins = self.enterContext(
             patch("control_plane.odoo_testing_drill.read_drill_recent_signins", return_value=False)
         )
+        self.storage_executor = self.enterContext(
+            patch(
+                "control_plane.odoo_testing_storage.execute_maintenance",
+                side_effect=lambda root, target, spec, dispatch: (
+                    dispatch(lambda: None)
+                    or {
+                        "capacity": True,
+                        "disposals": ["disposed"] * len(spec["storage_maintenance"]["copies"]),
+                    }
+                ),
+            )
+        )
 
     def evidence(self) -> Any:
         return testing_drill_evidence(self.store, self.profile.product, self.context, "testing")
@@ -280,6 +300,9 @@ class TestingDrillScenario(unittest.TestCase):
                 lease_expires_at=datetime.fromtimestamp(self.now + 300, timezone.utc).isoformat(),
             )
         assert operation is not None
+        prepare_drill_storage(
+            self.store, operation, Path("."), now=self.now, checkpoint=lambda: None
+        )
         self.store.activate_odoo_testing_drill(operation, self.now)
         return operation
 
@@ -545,6 +568,27 @@ class TestingDrillTests(TestingDrillScenario):
         self.assertTrue(self.evidence().alert_delivered)
         self.assertNotIn("private provider", str(self.notifications.call_args))
         self.assertEqual(self.operation().operation_id, operation.operation_id)
+
+    def test_legacy_cleanup_marker_does_not_repeat_failed_restore_alert(self) -> None:
+        self.scheduler.run_once()
+        self.complete("fail")
+        operation = self.operation()
+        assert operation.result is not None
+        result = operation.result.model_copy(
+            update={
+                "post_deploy_override_evidence": {
+                    "post_deploy_readback_testing_drill_disposal_deferred": "true"
+                }
+            }
+        )
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(update={"result": result})
+        )
+        self.scheduler.run_once()
+        self.assertEqual(self.evidence().step, "restore_failed")
+        self.assertTrue(self.evidence().alert_delivered)
+        self.scheduler.run_once()
+        self.assertEqual(self.notifications.call_count, 1)
 
     def test_queue_starvation_alerts_and_retains_original_operation(self) -> None:
         self.scheduler.run_once()
