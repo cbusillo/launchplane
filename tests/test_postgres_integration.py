@@ -11281,6 +11281,12 @@ class RealPostgresRecipientRecoveryTests(unittest.TestCase):
     def test_capture_only_or_uncertain_recovery_never_qualifies_on_postgres(self) -> None:
         self.fixture.test_capture_only_wrong_binding_or_uncertain_recovery_never_qualifies()
 
+    def test_host_receipt_adoption_keeps_original_key_on_postgres(self) -> None:
+        self.fixture.test_lost_host_reply_is_adopted_from_original_witness_without_recapture()
+
+    def test_terminal_host_failure_retries_only_original_key_on_postgres(self) -> None:
+        self.fixture.test_terminal_clean_failure_retries_original_key_with_host_witness()
+
 
 class RealPostgresProductionRecipientTests(unittest.TestCase):
     def setUp(self) -> None:

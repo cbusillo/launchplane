@@ -171,4 +171,5 @@ class RecipientRecoveryPlan(BaseModel):
     recovered: bool = False
     capture_sha256: str = ""
     recovered_at: str = ""
+    captured_database_empty: bool | None = None
     bootstrap_eligible: Literal[False] = False

@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from dataclasses import replace
+from datetime import datetime
 import json
 from typing import Any
 import unittest
@@ -184,6 +185,108 @@ class RecipientUpstreamTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             qualified_render(record, self.values)
 
+    def assert_rejected_apply(self, *, passed: bool, wrong_binding: bool) -> None:
+        fixture = self.fixture
+        fixture.document = json.loads(self.record.compose_source)
+        fixture.store.write_secret_record(self.secret)
+        fixture.store.write_secret_binding(self.binding)
+        fixture.store.write_secret_version(
+            SecretVersion(
+                version_id=self.secret.current_version_id,
+                secret_id=self.secret.secret_id,
+                created_at=self.secret.created_at,
+                ciphertext="opaque-fixture",
+            )
+        )
+        fixture.adapter.request = self.record.request.model_copy(
+            update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+        )
+
+        def managed_values(store: Any, root: Any, record: Any) -> dict[str, str]:
+            return {
+                **self.values,
+                **{key: record.volumes[role] for role, key in record.request.volume_keys.items()},
+            }
+
+        with patch("control_plane.production_recipient.runtime_values", side_effect=managed_values):
+            preparation = fixture.adapter.current()
+            fixture.adapter.request = fixture.adapter.request.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": preparation.plan_sha256}
+            )
+
+            def refused(
+                root: Any, record: Any, spec: Any, program: Any, checkpoint: Any, **kwargs: Any
+            ) -> dict[str, str]:
+                checkpoint("upstream_probe")
+                return {
+                    "recipient_upstreams_ok": str(passed).lower(),
+                    "recipient_upstreams_binding": "f" * 64 if wrong_binding else spec["binding"],
+                }
+
+            with patch(
+                "control_plane.production_recipient_host.run_recipient_program", side_effect=refused
+            ):
+                self.assertEqual(fixture.run_operation().status, "reconcile_required")
+            stored = custody(fixture.store, fixture.product, fixture.context)
+            assert stored is not None
+            self.assertFalse(stored.qualified_at)
+            self.assertFalse(stored.upstream_proof)
+        fixture.assert_old_preserved()
+
+    def test_apply_refuses_a_failed_read_only_probe(self) -> None:
+        self.assert_rejected_apply(passed=False, wrong_binding=False)
+
+    def test_apply_refuses_a_substituted_probe_binding(self) -> None:
+        self.assert_rejected_apply(passed=True, wrong_binding=True)
+
+    def test_successful_apply_persists_exact_upstream_probe_binding(self) -> None:
+        fixture = self.fixture
+        fixture.document = json.loads(self.record.compose_source)
+        fixture.store.write_secret_record(self.secret)
+        fixture.store.write_secret_binding(self.binding)
+        fixture.store.write_secret_version(
+            SecretVersion(
+                version_id=self.secret.current_version_id,
+                secret_id=self.secret.secret_id,
+                created_at=self.secret.created_at,
+                ciphertext="opaque-fixture",
+            )
+        )
+        fixture.adapter.request = self.record.request.model_copy(
+            update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+        )
+
+        def managed_values(store: Any, root: Any, record: Any) -> dict[str, str]:
+            return {
+                **self.values,
+                **{key: record.volumes[role] for role, key in record.request.volume_keys.items()},
+            }
+
+        with patch("control_plane.production_recipient.runtime_values", side_effect=managed_values):
+            preparation = fixture.adapter.current()
+            fixture.adapter.request = fixture.adapter.request.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": preparation.plan_sha256}
+            )
+
+            def host(
+                root: Any, record: Any, spec: Any, program: Any, checkpoint: Any, **kwargs: Any
+            ) -> dict[str, str]:
+                checkpoint("upstream_probe")
+                return {
+                    "recipient_upstreams_ok": "true",
+                    "recipient_upstreams_binding": spec["binding"],
+                }
+
+            with patch(
+                "control_plane.production_recipient_host.run_recipient_program", side_effect=host
+            ):
+                self.assertEqual(fixture.run_operation().response_status_code, 202)
+            stored = custody(fixture.store, fixture.product, fixture.context)
+            assert stored is not None
+            self.assertTrue(stored.qualified_at)
+            self.assertEqual(stored.upstream_proof["binding"], upstream_binding(stored))
+        fixture.assert_old_preserved()
+
 
 class RecipientRecoveryTests(unittest.TestCase):
     database_url = ""
@@ -227,6 +330,10 @@ class RecipientRecoveryTests(unittest.TestCase):
             "recipient_recovery_ok": "true",
             "recipient_recovery_binding": spec["recovery_binding"],
             "recipient_recovery_capture": "f" * 64,
+            "recipient_recovery_empty": "true",
+            "recipient_recovery_epoch": str(
+                int(datetime.fromisoformat(self.record.qualified_at).timestamp())
+            ),
         }
 
     def run_recovery(self, adapter: Any = None, store: Any = None) -> Any:
@@ -324,3 +431,47 @@ class RecipientRecoveryTests(unittest.TestCase):
             self.assertEqual(self.run_recovery().response_status_code, 202)
         self.assertEqual(outcomes[0].status, "target_busy")
         self.assertEqual(len(self.calls), 1)
+
+    def test_lost_host_reply_is_adopted_from_original_witness_without_recapture(self) -> None:
+        def host(
+            root: Any, record: Any, spec: Any, program: Any, checkpoint: Any
+        ) -> dict[str, str]:
+            if not spec.get("inspect"):
+                checkpoint("capture_recovery")
+                self.calls.append(spec)
+                raise TimeoutError("lost completed host reply")
+            return self.host(root, record, spec, program, checkpoint)
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program", side_effect=host
+        ):
+            self.assertEqual(self.run_recovery().status, "reconcile_required")
+            recovered = self.run_recovery()
+            self.assertEqual(recovered.response_status_code, 202)
+            self.assertTrue(recovered.response_payload["result"]["recovered"])
+            self.assertEqual(sum(not row.get("inspect", False) for row in self.calls), 1)
+        self.fixture.assert_old_preserved()
+
+    def test_terminal_clean_failure_retries_original_key_with_host_witness(self) -> None:
+        attempts = []
+
+        def host(
+            root: Any, record: Any, spec: Any, program: Any, checkpoint: Any
+        ) -> dict[str, str]:
+            checkpoint("inspect_or_recover")
+            if spec.get("inspect"):
+                return {
+                    "recipient_recovery_binding": spec["recovery_binding"],
+                    "recipient_recovery_retry_safe": "true",
+                }
+            attempts.append(spec)
+            if len(attempts) == 1:
+                raise TimeoutError("known terminal host failure; cleanup witnessed")
+            return self.host(root, record, spec, program, checkpoint)
+
+        with patch(
+            "control_plane.production_recipient_recovery.run_recipient_program", side_effect=host
+        ):
+            self.assertEqual(self.run_recovery().status, "reconcile_required")
+            self.assertEqual(self.run_recovery().response_status_code, 202)
+        self.assertEqual(len(attempts), 2)

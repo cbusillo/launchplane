@@ -192,6 +192,8 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
         "production_recipient_resources_ok",
         "recipient_upstreams_ok",
         "recipient_recovery_ok",
+        "recipient_recovery_retry_safe",
+        "recipient_recovery_empty",
         ODOO_PREVIEW_RESOURCES_OK_MARKER,
         TESTING_RESOURCES_INCOMPLETE_MARKER,
         "connection_isolation_resources_ok",
@@ -201,7 +203,11 @@ ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS = frozenset(
     }
 )
 ODOO_POST_DEPLOY_NUMERIC_READBACK_MARKERS = frozenset(
-    {"website_bootstrap_website_id", INTEGRATION_READBACK_CHECKED_MARKER}
+    {
+        "website_bootstrap_website_id",
+        INTEGRATION_READBACK_CHECKED_MARKER,
+        "recipient_recovery_epoch",
+    }
 )
 ODOO_POST_DEPLOY_READBACK_MARKERS = (
     ODOO_POST_DEPLOY_BOOLEAN_READBACK_MARKERS

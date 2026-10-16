@@ -10,12 +10,18 @@ import sys
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
 from control_plane.dokploy.api import JsonObject
-from control_plane.production_recipient_host import RECOVERY_LIBRARY, upstream_program
+from control_plane.production_recipient_host import (
+    RECOVERY_LIBRARY,
+    RecipientProbeCleanupError,
+    run_recipient_program,
+    upstream_program,
+)
 from control_plane.production_recipient_resources import RESOURCE_LIBRARY
+from tests import test_production_recipient as preparation_tests
 
 
 class UpstreamProgramTests(unittest.TestCase):
@@ -71,10 +77,6 @@ class UpstreamProgramTests(unittest.TestCase):
                             "State": {"ExitCode": 0},
                             "Config": {"Labels": {"io.launchplane.upstream-probe": name}},
                         }
-                        self.assertEqual(
-                            kwargs["env"]["MYSQL_PWD"],
-                            spec["connections"][0]["settings"]["password"],
-                        )
                         self.assertNotIn(spec["connections"][0]["settings"]["password"], args)
                         result = name
                     elif call[0] == "start":
@@ -115,6 +117,109 @@ class UpstreamProgramTests(unittest.TestCase):
                     self.assertEqual(evidence["recipient_upstreams_binding"], spec["binding"])
 
 
+class HostTransportTests(unittest.TestCase):
+    def setUp(self) -> None:
+        fixture = preparation_tests.ProductionRecipientTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.root = fixture.root
+        self.record = fixture.adapter.current().model_copy(update={"target_id": "prepared"})
+
+    def test_private_spec_is_not_in_process_arguments_and_cleanup_ignores_authority_drift(
+        self,
+    ) -> None:
+        password = "private-fixture-never-process-argv"
+        spec = {"connections": [{"settings": {"password": password}}]}
+        guard = Mock()
+
+        def checkpoint(phase: str) -> None:
+            if phase == "scrub_upstream_probe":
+                raise ValueError("authority changed during probe")
+
+        def run(**kwargs: Any) -> dict[str, str]:
+            completed = subprocess.run(
+                ["bash"],
+                input=kwargs["schedule_payload"]["script"],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            self.assertNotIn(password, completed.stdout)
+            self.assertNotIn(base64.b64encode(json.dumps(spec).encode()).decode(), completed.stdout)
+            return {"recipient_upstreams_ok": "true"}
+
+        with (
+            patch(
+                "control_plane.production_recipient_host.api.fetch_dokploy_target_payload",
+                return_value={"serverId": self.record.request.destination_server_id},
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", "destination", "project", "destination"),
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy.run_manual_data_schedule",
+                side_effect=run,
+            ),
+            patch("control_plane.production_recipient_host.api.upsert_dokploy_schedule") as scrub,
+        ):
+            result = run_recipient_program(
+                self.root,
+                self.record,
+                spec,
+                "import json; print(json.dumps(sys.orig_argv))",
+                checkpoint,
+                scrub_guard=guard,
+            )
+        self.assertEqual(result["recipient_upstreams_ok"], "true")
+        guard.assert_called_once()
+        self.assertNotIn(password, str(scrub.call_args))
+        self.assertNotIn(base64.b64encode(json.dumps(spec).encode()).decode(), str(scrub.call_args))
+
+    def test_probe_failure_still_scrubs_and_failed_scrub_is_explicit(self) -> None:
+        spec = {"connections": [{"settings": {"password": "private-fixture"}}]}
+        guard = Mock()
+        with (
+            patch(
+                "control_plane.production_recipient_host.api.fetch_dokploy_target_payload",
+                return_value={"serverId": self.record.request.destination_server_id},
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", "destination", "project", "destination"),
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy.run_manual_data_schedule",
+                side_effect=TimeoutError("unknown probe"),
+            ),
+            patch("control_plane.production_recipient_host.api.upsert_dokploy_schedule") as scrub,
+        ):
+            with self.assertRaises(TimeoutError):
+                run_recipient_program(
+                    self.root, self.record, spec, "", lambda phase: None, scrub_guard=guard
+                )
+            scrub.assert_called_once()
+            scrub.side_effect = OSError("provider unavailable")
+            with self.assertRaises(RecipientProbeCleanupError):
+                run_recipient_program(
+                    self.root, self.record, spec, "", lambda phase: None, scrub_guard=guard
+                )
+
+    def test_foreign_destination_refuses_before_host_dispatch(self) -> None:
+        with (
+            patch(
+                "control_plane.production_recipient_host.api.fetch_dokploy_target_payload",
+                return_value={"serverId": "another-host"},
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy.run_manual_data_schedule"
+            ) as dispatch,
+        ):
+            with self.assertRaises(ValueError):
+                run_recipient_program(self.root, self.record, {}, "", lambda phase: None)
+        dispatch.assert_not_called()
+
+
 class RecoveryProgramTests(unittest.TestCase):
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
@@ -136,6 +241,7 @@ class RecoveryProgramTests(unittest.TestCase):
         self.containers: dict[str, dict[str, Any]] = {}
         self.network = "none"
         self.fail_check = False
+        self.check_output = ""
         self.calls: list[tuple[str, ...]] = []
         self.namespace["docker"] = self.docker
 
@@ -156,7 +262,7 @@ class RecoveryProgramTests(unittest.TestCase):
         if args[0] == "exec":
             if self.fail_check:
                 raise ValueError("corrupt recovery")
-            return ""
+            return self.check_output
         if args[:2] == ("image", "inspect"):
             return json.dumps([{"Config": {"Env": []}}])
         if args[0] == "inspect":
@@ -184,18 +290,28 @@ class RecoveryProgramTests(unittest.TestCase):
         self.assertEqual(evidence["recipient_recovery_binding"], self.spec["recovery_binding"])
         self.assertEqual(before, [self.namespace["manifest"](path) for path in self.paths])
         destination = self.root / "captures" / self.spec["recovery_binding"]
-        self.assertTrue((destination / "capture.tar").exists())
-        self.assertTrue((destination / "receipt.json").exists())
+        receipt = json.loads((destination / "outcome.json").read_text())
+        self.assertTrue((destination / receipt["archive"]).exists())
+        self.assertEqual(receipt["state"], "passed")
         self.assertFalse(self.containers)
-        with self.assertRaises(FileExistsError):
-            self.recover()
+        before_calls = list(self.calls)
+        self.assertEqual(
+            self.recover().splitlines(),
+            list(evidence_key + "=" + value for evidence_key, value in evidence.items()),
+        )
+        self.assertEqual(self.calls, before_calls)
 
     def test_live_network_corrupt_database_or_symlink_never_produces_a_receipt(self) -> None:
         self.network = "bridge"
         with self.assertRaises(ValueError):
             self.recover()
         self.assertFalse(
-            (self.root / "captures" / self.spec["recovery_binding"] / "receipt.json").exists()
+            json.loads(
+                (
+                    self.root / "captures" / self.spec["recovery_binding"] / "outcome.json"
+                ).read_text()
+            )["state"]
+            == "passed"
         )
         self.assertFalse(self.containers)
         (self.paths[1] / "alias").symlink_to(self.paths[0] / "table.data")
@@ -208,7 +324,44 @@ class RecoveryProgramTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.recover()
         self.assertEqual((self.paths[0] / "table.data").read_bytes(), before)
-        self.assertTrue(
-            (self.root / "captures" / self.spec["recovery_binding"] / "capture.tar").exists()
+        destination = self.root / "captures" / self.spec["recovery_binding"]
+        self.assertTrue(list(destination.glob("attempt-*/capture.tar")))
+        self.assertFalse(self.containers)
+
+    def test_zero_exit_corrupt_table_refuses_and_original_key_can_retry_after_cleanup(self) -> None:
+        self.check_output = "fixture.items\nError : Incorrect file format\nerror : Corrupt\n"
+        with self.assertRaises(ValueError):
+            self.recover()
+        destination = self.root / "captures" / self.spec["recovery_binding"]
+        self.assertEqual(
+            json.loads((destination / "outcome.json").read_text())["state"], "failed_safe"
         )
         self.assertFalse(self.containers)
+        self.check_output = ""
+        self.assertIn("recipient_recovery_ok=true", self.recover())
+        self.assertEqual(json.loads((destination / "outcome.json").read_text())["state"], "passed")
+
+    def test_inspection_adopts_completed_witness_and_rejects_changed_capture(self) -> None:
+        self.recover()
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.namespace["inspect_recovery"](self.spec, base=self.root / "captures")
+        self.assertIn("recipient_recovery_ok=true", output.getvalue())
+        destination = self.root / "captures" / self.spec["recovery_binding"]
+        receipt = json.loads((destination / "outcome.json").read_text())
+        (destination / receipt["archive"]).write_bytes(b"wrong-capture")
+        with self.assertRaises(ValueError):
+            self.namespace["inspect_recovery"](self.spec, base=self.root / "captures")
+
+    def test_insufficient_disk_refuses_before_capture_and_allows_only_witnessed_retry(self) -> None:
+        with patch("shutil.disk_usage", return_value=Mock(free=0)):
+            with self.assertRaises(ValueError):
+                self.recover()
+        self.assertFalse(self.calls)
+        destination = self.root / "captures" / self.spec["recovery_binding"]
+        self.assertFalse(list(destination.glob("attempt-*/capture.tar")))
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.namespace["inspect_recovery"](self.spec, base=self.root / "captures")
+        self.assertIn("recipient_recovery_retry_safe=true", output.getvalue())
+        self.assertIn("recipient_recovery_ok=true", self.recover())

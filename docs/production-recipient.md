@@ -49,7 +49,8 @@ be `shared_safe` with recorded read-only-source evidence. These classifications
 are prerequisites, never proof of permissions. Local database credentials, borrowed
 testing bindings, undeclared external hosts, and external database URLs refuse.
 
-During leased preparation, a bounded MariaDB client from the immutable database
+Both the application and database images must be immutable before planning can
+pass. During leased preparation, a bounded MariaDB client from the database
 image connects with TLS verification from the recipient's own private default
 network. The conservative existing source-grant classifier must observe only
 read privileges, with no roles, grant option, writer privilege or unknown syntax.
@@ -57,6 +58,10 @@ The private network has exact project/custody labels and IPv6 disabled; neither
 an arbitrary existing network nor a caller's connection assertion is adopted.
 No application starts. Managed values remain inside the service/provider path;
 terminal receipts contain neither endpoint values, credentials nor grant text.
+Private probe inputs travel in the script's stdin, never process arguments.
+The manual-only script is scrubbed after success or failure under its execution
+lease, even if authority changes during the probe. Unverified cleanup is reported
+as `recipient_probe_cleanup_unverified` and never qualifies preparation.
 The source observation is bound to the preparation, destination and managed
 versions. Readback retains its original observation time and does not renew it.
 Later bootstrap must requalify the actual connections; a historical proof cannot
@@ -120,20 +125,47 @@ must pass before a service-owned recovery result is committed. A nonempty tree
 that is not MariaDB, a capture-only result, a writable/outbound verifier, changed
 authority or uncertain cleanup never qualifies. Source trees and the retained
 production recipient are never restored, stopped or deleted.
+The receipt and terminal plan distinguish an empty captured database from an
+initialized one through `captured_database_empty`; initializing an empty restored
+copy is never presented as recovery of populated business data. Integrity success
+requires both a successful checker exit and no `--silent` diagnostics, because
+MariaDB can report corrupt tables while exiting zero. File and archive hashes
+are streamed. Capture requires space for archive and restored trees, their
+metadata, and 2 GiB of database/verifier overhead before writing either copy.
 
 The service receipt binds capture digest, immutable application/database images,
 recipient, destination, storage allocation, preparation and authority revisions.
 CAS custody and the shared target reservation exclude competing recoveries. A
-lost reply after committed completion replays the original receipt. Unknown host
-effects remain fenced under the original key; absence of a service receipt is
-never permission to repeat capture or restore. The complete original archive is
-retained at `/var/lib/launchplane/recipient-recovery/<recovery-binding>/capture.tar`,
-with a value-free host receipt beside it. Failed or uncertain attempts retain
+lost reply after committed completion replays the original receipt. A lost host
+reply before service commit can be adopted under the same key from its retained
+terminal host witness after the archive digest is verified. A per-binding file
+lock excludes an active or late host writer. Only a terminal failure with verified
+verifier cleanup permits another attempt under the original key; every attempt
+keeps its own capture and receipt. Absence, lock contention or uncertain effects
+never authorize a retry. The archives are retained at
+`/var/lib/launchplane/recipient-recovery/<recovery-binding>/attempt-*/capture.tar`,
+with per-attempt receipts and an atomic `outcome.json` pointer. Failed or uncertain attempts retain
 their archive and any scratch state whose cleanup could not be verified. No
 automatic archive deletion or shared-backup retention change is introduced.
 After the move's recovery obligations end, the maintaining session reviews that exact
 archive directory for retirement. This scoped capture does not replace Gate C's
 independent destination backup qualification on shiny-infra-ops#528.
+
+After changing either verifier, the implementing agent runs the focused host and
+adapter tests plus the real storage gates before handoff. PostgreSQL uses the
+repository's normal integration gate. The explicit disposable MariaDB proof is:
+
+```bash
+LAUNCHPLANE_TEST_MARIADB_IMAGE=<reviewed-immutable-mariadb-image> \
+LAUNCHPLANE_TEST_MARIADB_DIRECTORY=<task-local-docker-accessible-directory> \
+uv run --extra dev python -m unittest tests.test_production_recipient_mariadb
+```
+
+This gate proves empty restoration, populated restoration with a recovered-row
+query, and rejection of a real corrupt Aria table. It needs a local Docker engine
+and no live product data or credential. Record the exact image and result on the
+PR. Ordinary unittest/CI runs explicitly skip it without that fixture input;
+their success alone is not the real MariaDB proof.
 
 Before any later bootstrap or cutover, separately qualify destination capture and
 isolated recovery, the accepted production artifact/release, actual enforced

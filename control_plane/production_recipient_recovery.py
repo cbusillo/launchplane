@@ -1,6 +1,7 @@
 """Original-key isolated cold-data recovery, preserving every serving authority."""
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 import re
 
@@ -28,7 +29,6 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
 )
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.ship import utc_now_timestamp
 
 RECOVERY_ROUTE = "/v1/products/{product}/production-recipient/recovery"
 
@@ -102,14 +102,86 @@ class RecipientRecoveryAdapter:
             recovered=bool(proof),
             capture_sha256=str(proof.get("capture_sha256", "")),
             recovered_at=str(proof.get("recovered_at", "")),
+            captured_database_empty=proof.get("captured_database_empty"),
         )
+
+    def host_spec(
+        self, record: ProductionRecipientRecord, result: RecipientRecoveryPlan
+    ) -> dict[str, object]:
+        rendered = qualified_render(record, runtime_values(self.store, self.root, record))
+        return {
+            **resource_spec(record),
+            "prepare": False,
+            "recover": True,
+            "recovery_binding": result.plan_sha256,
+            "database_image": rendered["services"][record.request.database_service]["image"],
+        }
+
+    def record_host_result(
+        self,
+        record: ProductionRecipientRecord,
+        result: RecipientRecoveryPlan,
+        evidence: dict[str, str],
+    ) -> RecipientRecoveryPlan:
+        if (
+            evidence.get("recipient_recovery_ok") != "true"
+            or evidence.get("recipient_recovery_binding") != result.plan_sha256
+            or re.fullmatch(r"[a-f0-9]{64}", evidence.get("recipient_recovery_capture", "")) is None
+            or evidence.get("recipient_recovery_empty") not in {"true", "false"}
+            or not evidence.get("recipient_recovery_epoch", "").isdigit()
+        ):
+            raise ValueError("Capture alone, uncertain recovery or isolation cannot qualify.")
+        _, current = self.current()
+        if current.recovered:
+            return current
+        replacement = record.model_copy(
+            update={
+                "recovery_proof": {
+                    "binding": result.plan_sha256,
+                    "original_key": self.original_key,
+                    "capture_sha256": evidence["recipient_recovery_capture"],
+                    "recovered_at": datetime.fromtimestamp(
+                        int(evidence["recipient_recovery_epoch"]), timezone.utc
+                    ).isoformat(),
+                    "captured_database_empty": evidence["recipient_recovery_empty"] == "true",
+                    "network": "none",
+                    "verifier": "cold_mariadb_integrity",
+                    "recipient": record.target_id,
+                    "artifact": record.image_reference,
+                }
+            }
+        )
+        self.store.write_production_recipient(
+            expected=record.model_dump(mode="json"), replacement=replacement.model_dump(mode="json")
+        )
+        return self.current()[1]
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
         try:
-            _, result = self.current()
-            if result.recovered and result.plan_sha256 == reconciliation_key:
+            record, result = self.current()
+            if result.plan_sha256 != reconciliation_key or not self.original_key:
+                return ProviderObservation("unknown")
+            if not result.recovered:
+                # Inspect only the terminal host witness under its own file lock.
+                # No capture/restore is dispatched by reconciliation observation.
+                def observe_checkpoint(phase: str) -> None:
+                    self.current()
+
+                evidence = run_recipient_program(
+                    self.root,
+                    record,
+                    {**self.host_spec(record, result), "inspect": True},
+                    RECOVERY_PROGRAM,
+                    observe_checkpoint,
+                )
+                if evidence.get("recipient_recovery_binding") != reconciliation_key:
+                    return ProviderObservation("unknown")
+                if evidence.get("recipient_recovery_retry_safe") == "true":
+                    return ProviderObservation("absent", retry_safe=True)
+                result = self.record_host_result(record, result, evidence)
+            if result.recovered:
                 return ProviderObservation(
                     "present",
                     response_payload=provider_operation_response_payload(
@@ -145,50 +217,15 @@ class RecipientRecoveryAdapter:
                 lease.checkpoint_effect(phase)
                 started = True
 
-            rendered = qualified_render(record, runtime_values(self.store, self.root, record))
             evidence = run_recipient_program(
                 self.root,
                 record,
-                {
-                    **resource_spec(record),
-                    "prepare": False,
-                    "recover": True,
-                    "recovery_binding": result.plan_sha256,
-                    "database_image": rendered["services"][record.request.database_service][
-                        "image"
-                    ],
-                },
+                self.host_spec(record, result),
                 RECOVERY_PROGRAM,
                 checkpoint,
             )
-            if (
-                evidence.get("recipient_recovery_ok") != "true"
-                or evidence.get("recipient_recovery_binding") != result.plan_sha256
-                or re.fullmatch(r"[a-f0-9]{64}", evidence.get("recipient_recovery_capture", ""))
-                is None
-            ):
-                raise ValueError("Capture alone, uncertain recovery or isolation cannot qualify.")
             lease.assert_current()
-            self.current()
-            replacement = record.model_copy(
-                update={
-                    "recovery_proof": {
-                        "binding": result.plan_sha256,
-                        "original_key": self.original_key,
-                        "capture_sha256": evidence["recipient_recovery_capture"],
-                        "recovered_at": utc_now_timestamp(),
-                        "network": "none",
-                        "verifier": "cold_mariadb_integrity",
-                        "recipient": record.target_id,
-                        "artifact": record.image_reference,
-                    }
-                }
-            )
-            self.store.write_production_recipient(
-                expected=record.model_dump(mode="json"),
-                replacement=replacement.model_dump(mode="json"),
-            )
-            _, completed = self.current()
+            completed = self.record_host_result(record, result, evidence)
             return ProviderMutationOutcome(
                 202,
                 provider_operation_response_payload(

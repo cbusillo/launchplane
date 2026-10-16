@@ -54,7 +54,7 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
         self.assertEqual(list(self.paths[0].iterdir()), [])
         self.assertEqual(list(self.paths[1].iterdir()), [])
 
-    def test_populated_cold_database_and_config_survive_real_recovery(self) -> None:
+    def seed_database(self, engine: str = "InnoDB") -> None:
         name = "lp-recovery-fixture-" + uuid.uuid4().hex
         identifier = self.docker(
             "run",
@@ -95,10 +95,13 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
             "mariadb",
             "--protocol=socket",
             "--user=root",
-            "--execute=CREATE DATABASE fixture; CREATE TABLE fixture.items (note VARCHAR(80)); INSERT INTO fixture.items VALUES ('restored-business-row');",
+            f"--execute=CREATE DATABASE fixture; CREATE TABLE fixture.items (note VARCHAR(80)) ENGINE={engine}; INSERT INTO fixture.items VALUES ('restored-business-row');",
         )
         self.docker("stop", "--time", "30", identifier)
         (self.paths[1] / "settings").write_text("retained fixture settings")
+
+    def test_populated_cold_database_and_config_survive_real_recovery(self) -> None:
+        self.seed_database()
         before = [self.namespace["manifest"](path) for path in self.paths]
         actual = self.namespace["docker"]
 
@@ -123,3 +126,15 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
         self.namespace["docker"] = check
         self.assertIn("recipient_recovery_ok=true", self.run_capture())
         self.assertEqual(before, [self.namespace["manifest"](path) for path in self.paths])
+
+    def test_corrupt_aria_table_is_refused_even_when_check_exits_zero(self) -> None:
+        self.seed_database("Aria")
+        (self.paths[0] / "fixture" / "items.MAI").write_bytes(b"corrupt index")
+        before = [self.namespace["manifest"](path) for path in self.paths]
+        with self.assertRaises(ValueError):
+            self.run_capture()
+        self.assertEqual(before, [self.namespace["manifest"](path) for path in self.paths])
+        outcome = json.loads(
+            (self.root / "captures" / self.spec["recovery_binding"] / "outcome.json").read_text()
+        )
+        self.assertEqual(outcome["state"], "failed_safe")

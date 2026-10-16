@@ -199,6 +199,18 @@ def _qualified_render(record: ProductionRecipientRecord, values: dict[str, str])
     services = document.get("services", {})
     if set(services) != {record.request.application_service, record.request.database_service}:
         raise ValueError("Fresh-state preparation supports one application and one database.")
+    import re
+
+    if (
+        re.fullmatch(
+            r"[A-Za-z0-9./:_-]+@sha256:[a-f0-9]{64}",
+            str(services[record.request.database_service].get("image", "")),
+        )
+        is None
+    ):
+        raise ValueError(
+            "The database verifier requires an immutable database image in product source."
+        )
     # Runtime limits are product-owned source, not a service-host override. The
     # actual converted provider definition must agree with this exact source.
     for name, service in services.items():
@@ -870,6 +882,7 @@ class ProductionRecipientAdapter:
                     },
                     upstream_program(),
                     checkpoint,
+                    scrub_guard=lambda: lease.checkpoint_effect("scrub_upstream_probe"),
                 )
                 if (
                     evidence.get("recipient_upstreams_ok") != "true"
