@@ -1626,7 +1626,9 @@ one-minute UTC slots and testing lanes in five-minute slots, independently of
 GitHub cron. Separate workers and renewed leases isolate the two cadences.
 Other declared stable-lane instances use the production cadence. Each scheduled
 batch runs at most 16 probes concurrently, retaining existing per-request
-timeouts and reusing the same bound for identity-confirmation retries. Manual
+timeouts and reusing the same bound for identity-confirmation retries. Finished
+probes publish independently of slower probes and later executor waves; identity
+mismatches publish only after confirmation. Manual
 runs retain sequential probing unless their caller explicitly selects concurrency.
 The service lifespan starts and stops the scheduler; DB-backed completion records
 survive restarts, and a renewed DB lease serializes replicas across slots.
@@ -1638,7 +1640,13 @@ private-endpoint, route and provider-target changes wake the local scheduler.
 Five-second polling also detects changes committed by another process, including
 deploy-fence recovery. Only changed lanes are probed between scheduled runs.
 Persisted authority digests suppress duplicate change runs across replicas and
-restarts; a change during a probe remains due on the next pass. Sensor writes
+restarts; a change during a probe remains due on the next pass. A change run
+yields at the next scheduled slot, including interrupting its confirmation wait,
+and the worker retries immediately without an additional polling delay. Its
+cancelled batch writes no completion receipt; already published observations
+remain valid, and the scheduled run checks all due lanes. In-flight requests
+retain their existing timeout, so an actual slow request can still delay the
+next batch. Sensor writes
 and scheduler receipts do not wake another probe. Probes retain their existing
 timeouts and the single runtime-identity confirmation wait, so a slow/failing
 batch can miss its deadline; expired evidence stays stale. Batch latency and

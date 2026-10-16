@@ -81,6 +81,7 @@ class HealthMonitorScheduler:
         self._unsubscribe: Callable[[], None] | None = None
         self._threads: list[Thread] = []
         self._last_report: dict[str, tuple[int, bool]] = {}
+        self._probe_deadline: dict[str, float] = {}
 
     def _read(self, key: str) -> LaunchplaneIdempotencyRecord | None:
         return self.store.read_idempotency_record(
@@ -182,7 +183,7 @@ class HealthMonitorScheduler:
             try:
                 action()
             except MonitorRunCancelled:
-                pass
+                continue
             except Exception:  # noqa: BLE001 - keep the watchdog and next attempt alive.
                 _LOGGER.exception("Health monitor scheduler pass failed")
             (wake or self._stop).wait(MONITOR_POLL_SECONDS)
@@ -235,6 +236,8 @@ class HealthMonitorScheduler:
             if heartbeat is None:
                 return False
             # Read authority and receipts after claiming, so replicas cannot duplicate probes.
+            slot = monitor_slot(self.clock(), instance)
+            key = monitor_key(str(slot), instance)
             revisions = self._revisions(instance)
             scheduled = self._read(key) is None
             selected = {
@@ -246,7 +249,14 @@ class HealthMonitorScheduler:
             }
             if not selected:
                 return False
-            self.run_monitor(frozenset(selected))
+            if not scheduled:
+                self._probe_deadline[instance] = (slot + 1) * health_monitor_interval_seconds(
+                    instance
+                )
+            try:
+                self.run_monitor(frozenset(selected))
+            finally:
+                self._probe_deadline.pop(instance, None)
             if self._stop.is_set():
                 raise MonitorRunCancelled()
             heartbeat.assert_current()
@@ -350,12 +360,23 @@ class HealthMonitorScheduler:
         return missed
 
     def _run_monitor(self, lanes: frozenset[LaneKey]) -> object:
+        instance = "testing" if next(iter(lanes))[2] == "testing" else "prod"
+        deadline = self._probe_deadline.get(instance)
+
+        def should_stop() -> bool:
+            return self._stop.is_set() or (deadline is not None and self.clock() >= deadline)
+
+        def wait(seconds: float) -> None:
+            if deadline is not None:
+                seconds = min(seconds, max(0, deadline - self.clock()))
+            self._wait(seconds)
+
         return run_public_ingress_monitor_once(
             record_store=self.store,
             notification_drivers=public_ingress_notification_drivers(record_store=self.store),
             runtime_identity_confirmation_delay_seconds=30,
-            should_stop=self._stop.is_set,
-            sleep=self._wait,
+            should_stop=should_stop,
+            sleep=wait,
             lane_keys=lanes,
             max_concurrent_probes=MONITOR_MAX_CONCURRENT_PROBES,
         )
