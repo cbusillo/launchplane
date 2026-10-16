@@ -48,8 +48,8 @@ class TestingGenerationRetirementPlan(BaseModel):
     context: str
     instance: Literal["testing"] = "testing"
     operation_id: str
-    plan_sha256: str
-    generation_binding_sha256: str
+    plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    generation_binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     original_authority: Literal["unverified"] = "unverified"
     historical_provider_effects: Literal["unknown"] = "unknown"
     operation_fence_retained: Literal[True] = True

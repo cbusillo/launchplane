@@ -10365,7 +10365,13 @@ class PostgresRecordStore(HumanSessionStore):
             if (
                 current_record.status == "reconciliation_required"
                 and service_testing_operation(current_record)
-                and expected_record is None
+                and (
+                    expected_record is None
+                    or session.get(
+                        LaunchplaneRetainedTestingGenerationRow, current_record.operation_id
+                    )
+                    is not None
+                )
             ):
                 return False
             if expected_record is not None:

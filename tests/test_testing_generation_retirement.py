@@ -210,6 +210,42 @@ class TestingGenerationRetirementTests(unittest.TestCase):
         self.assertEqual(self.store.list_product_profile_records(), profiles)
         self.assertEqual(self.store.list_dokploy_target_records(), targets)
         self.assertEqual(self.store.list_runtime_environment_records(), runtimes)
+        from control_plane.contracts.durable_operation_authorization import (
+            DurableOperationCancellation,
+            DurableOperationReconciliationAttestation,
+        )
+
+        assert self.operation.authorization is not None
+        cancellation = DurableOperationCancellation(
+            reason="Synthetic stale recovery observation",
+            cancelled_at=stamp(),
+            caller=self.operation.authorization.caller,
+            reconciliation_attestation=DurableOperationReconciliationAttestation(
+                provider_inspected_at=stamp(),
+                provider_state="Synthetic quiescent observation",
+                evidence_reference="fixture:stale-observation",
+                safe_to_release=True,
+            ),
+        )
+        stale = self.operation.model_copy(
+            update={
+                "status": "cancelled",
+                "phase": "cancelled",
+                "finished_at": cancellation.cancelled_at,
+                "cancellation": cancellation,
+                "error_code": "",
+                "error_message": "",
+            }
+        )
+        with patch(
+            "control_plane.testing_replacement_recovery.current_binding_fingerprint",
+            return_value=self.operation.recovery_journal.target_fingerprint,
+        ):
+            self.assertFalse(
+                self.store.cancel_pending_odoo_stable_target_replacement_operation_record(
+                    stale, expected_record=self.operation
+                )
+            )
         # Only the already-reviewed isolated successor path may supersede it.
         with (
             patch.object(
