@@ -54,13 +54,14 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             kind="promote",
             reason="Reconcile original outcome",
         )
+        f.store.write_release_review_decision_record(self.decision)
         replacement = patch(
             "control_plane.production_recipient_release_recovery.releases._covering_decision",
             return_value=(f.fixture.profile, self.decision),
         )
         replacement.start()
         self.addCleanup(replacement.stop)
-        self.key = self.decision.record_id + ":promote-1"
+        self.key = releases._step_key(self.decision, releases.ClientReleaseStep("promote", 1))
 
     def recover(self, request: Any = None, key: str | None = None) -> Any:
         f = self.fixture
@@ -79,7 +80,7 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
             idempotency_key=self.key,
             request_fingerprint="e" * 64,
             lease_owner="original-release",
-            reconciliation_key="original",
+            reconciliation_key=self.fixture.adapter.reconciliation_key(),
         )
 
     def test_no_recovery_without_original_step_or_with_an_alternate_key(self) -> None:
@@ -93,7 +94,8 @@ class RecipientReleaseRecoveryTests(unittest.TestCase):
 
     def test_saved_review_resumes_only_the_existing_operation(self) -> None:
         self.reserve()
-        draft = self.recover()
+        draft = self.recover(key="")
+        self.assertEqual(draft.original_key, self.key)
         with patch(
             "control_plane.production_recipient_release_recovery.releases._run_generic_web_promotion"
         ) as run:

@@ -136,12 +136,8 @@ def register_production_recipient_routes(
             def read() -> dict[str, object]:
                 if body.mode == "custody":
                     retained = custody(record_store, product, body.context)
-                    if retained is None or (
-                        retained.actor,
-                        retained.scope,
-                        retained.original_key,
-                    ) != (actor(identity), scope, idempotency_key.strip()):
-                        raise ValueError("Read custody under its original caller and key.")
+                    if retained is None:
+                        raise ValueError("No retained preparation exists for this product lane.")
                     return plan(retained)
                 record = adapter.current()
                 adapter.require_unchanged(record)
@@ -584,34 +580,33 @@ def register_production_recipient_routes(
                 )
 
             def read_writer() -> dict[str, object]:
-                result = adapter.current()[2]
                 if body.mode == "readback":
-                    adapter.request = body.model_copy(
-                        update={"reviewed_plan_sha256": result.plan_sha256}
+                    from control_plane.production_recipient_writer_control import (
+                        retained_writer_receipt,
                     )
-                    from control_plane.provider_operations import build_provider_operation_key
 
                     row = record_store.read_idempotency_record(
                         scope=idempotency_scope(identity),
                         route_path=WRITER_ROUTE.format(product=product),
                         idempotency_key=idempotency_key.strip(),
                     )
-                    if row is None:
+                    retained = custody(record_store, product, body.context)
+                    if row is None or retained is None:
                         raise ValueError("Readback requires the original writer-control key.")
-                    original = build_provider_operation_key(
-                        scope=row.scope,
-                        route_path=row.route_path,
-                        idempotency_key=row.idempotency_key,
-                        request_fingerprint=row.request_fingerprint,
-                        reconciliation_key=row.reconciliation_key,
-                    )
-                    observed = adapter.observe(original, "", result.plan_sha256)
-                    if observed.outcome != "present":
-                        raise ValueError("No terminal writer witness is available.")
-                    return RecipientWriterPlan.model_validate(
-                        observed.response_payload.get("result")
+                    entries = [
+                        entry
+                        for entry in retained.writer_custody
+                        if entry.get("record_id") == row.record_id
+                    ]
+                    if len(entries) != 1 or any(
+                        entries[0]["request"].get(key) != getattr(body, key)
+                        for key in ("action", "binding_id", "preparation_plan_sha256")
+                    ):
+                        raise ValueError("The writer-control key belongs to another request.")
+                    return retained_writer_receipt(
+                        root, retained, entries[0], lambda _phase: None
                     ).model_dump(mode="json")
-                return result.model_dump(mode="json")
+                return adapter.current()[2].model_dump(mode="json")
 
             return accepted_evidence_response(
                 trace_id=trace, records={}, result=await run_in_worker_thread(read_writer)
@@ -719,6 +714,133 @@ def register_production_recipient_routes(
         response_model_exclude_none=True,
         operation_id="recover_production_recipient_release",
         summary="Reconcile an existing Client release step without changing its operation key",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
+        },
+    )
+
+    from control_plane.production_recipient_inverse import (
+        INVERSE_ROUTE,
+        RecipientInverseRequest,
+        RecipientInversePlan,
+        RecipientInverseAdapter,
+        inverse_plan,
+    )
+
+    async def invert_publication(
+        product: Annotated[str, PathParameter(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")],
+        body: RecipientInverseRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace = dependencies.next_trace_id()
+        apply = body.mode == "apply"
+
+        def authorize() -> None:
+            if (
+                not dependencies.authorization_allows(
+                    identity=identity,
+                    action="generic_web_rollback.execute" if apply else "product_profile.read",
+                    product=product,
+                    context=body.context,
+                    target=AuthorizationTarget(scope="instance", instances=("prod",)),
+                )
+                or apply
+                and isinstance(identity, TerminalAgentIdentity)
+            ):
+                raise dependencies.http_error(
+                    status_code=403,
+                    trace_id=trace,
+                    code="authorization_denied",
+                    message="Existing production rollback authority is required for the exact inverse.",
+                )
+
+        authorize()
+        if (
+            not isinstance(record_store, PostgresRecordStore)
+            or apply
+            and record_store.database_dialect_name != "postgresql"
+        ):
+            raise dependencies.http_error(
+                status_code=503,
+                trace_id=trace,
+                code="postgresql_required",
+                message="Service-owned inverse custody is required.",
+            )
+        try:
+            if body.mode == "receipt":
+                row = record_store.read_idempotency_record(
+                    scope=idempotency_scope(identity),
+                    route_path=INVERSE_ROUTE.format(product=product),
+                    idempotency_key=idempotency_key.strip(),
+                )
+                if not idempotency_key.strip() or row is None or row.state != "completed":
+                    raise ValueError("Read the completed inverse under its original key.")
+                result = RecipientInversePlan.model_validate(row.response_payload.get("result"))
+                if (
+                    result.product,
+                    result.context,
+                    result.preparation_plan_sha256,
+                    result.publication_sha256,
+                ) != (product, body.context, body.preparation_plan_sha256, body.publication_sha256):
+                    raise ValueError("The inverse receipt belongs to another publication.")
+                return accepted_evidence_response(
+                    trace_id=trace, records={}, result=result.model_dump(mode="json")
+                )
+            record = await run_in_worker_thread(
+                lambda: custody(record_store, product, body.context)
+            )
+            if record is None:
+                raise ValueError("The retained publication is required.")
+            if apply:
+                if not idempotency_key.strip() or not body.reviewed_plan_sha256:
+                    raise ValueError("Inverse apply requires exact review and its original key.")
+                adapter = RecipientInverseAdapter(
+                    root, record_store, record, trace, authorize, request=body
+                )
+                return await run_provider_mutation(
+                    record_store=record_store,
+                    identity=identity,
+                    route_path=INVERSE_ROUTE.format(product=product),
+                    idempotency_key=idempotency_key.strip(),
+                    request_fingerprint=request_fingerprint(
+                        {"product": product, **body.model_dump(mode="json")}
+                    ),
+                    trace_id=trace,
+                    adapter=adapter,
+                    in_progress_message="The exact inverse remains under its original key.",
+                    reconcile_message="Retain both recipients, the original inverse key and every writer witness.",
+                )
+            result = await run_in_worker_thread(lambda: inverse_plan(record_store, record, body))
+            if body.mode == "readback" and not result.completed:
+                raise ValueError("The exact inverse has not completed.")
+            return accepted_evidence_response(
+                trace_id=trace, records={}, result=result.model_dump(mode="json")
+            )
+        except (
+            ValueError,
+            FileNotFoundError,
+            RuntimeError,
+            OSError,
+            click.ClickException,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="recipient_inverse_unverified",
+                message="Preserve changed authority, both recipients and the original inverse key.",
+            ) from error
+
+    app.add_api_route(
+        INVERSE_ROUTE,
+        invert_publication,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="invert_production_recipient_publication",
+        summary="Review and apply only the exact retained recipient inverse",
         responses={
             code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
         },

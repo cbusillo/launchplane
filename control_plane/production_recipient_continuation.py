@@ -25,6 +25,8 @@ from control_plane.storage.postgres import (
     LaunchplaneIdempotencyRow,
 )
 
+from control_plane.production_recipient_evidence import EXECUTION_FENCE_MARKER
+
 CONTINUATION_ROUTE = "/v1/products/{product}/production-recipient/continuation"
 
 
@@ -179,6 +181,17 @@ def supersede_recipient(
         for row in observed
     ):
         raise ValueError("The original execution lease is still active.")
+    from control_plane.production_recipient_writer_control import retained_writer_receipt
+
+    writer_entries = {
+        entry["record_id"]: entry for entry in current.writer_custody if entry.get("record_id")
+    }
+    writer_receipts = {}
+    for reservation in observed:
+        if reservation.state != "completed" and reservation.record_id in writer_entries:
+            writer_receipts[reservation.record_id] = retained_writer_receipt(
+                root, current, writer_entries[reservation.record_id], checkpoint
+            )
     # A completed operation's witness is retained. An uncertain operation must
     # first be expired, then fenced. Time alone never proves provider absence.
     host_possible = current.phase not in {
@@ -229,7 +242,7 @@ def supersede_recipient(
                 checkpoint,
                 retire_execution=True,
             )
-            if evidence.get("recipient_execution_fenced") != current.plan_sha256:
+            if evidence.get(EXECUTION_FENCE_MARKER) != current.plan_sha256:
                 raise ValueError("Late host execution was not fenced.")
         host_fenced = True
     with store._session_factory() as session:
@@ -268,6 +281,24 @@ def supersede_recipient(
         for reservation_row, reservation in zip(locked, actual, strict=True):
             if reservation.state == "completed":
                 continue
+            if reservation.record_id in writer_receipts:
+                from control_plane.provider_operations import provider_operation_response_payload
+
+                terminal = store._updated_idempotency_record(
+                    reservation,
+                    state="completed",
+                    updated_at=now,
+                    recorded_at=now,
+                    response_status_code=202,
+                    response_trace_id="recipient-custody-continuation",
+                    response_payload=provider_operation_response_payload(
+                        trace_id="recipient-custody-continuation",
+                        records={},
+                        result=writer_receipts[reservation.record_id].model_dump(mode="json"),
+                    ),
+                )
+                store._sync_idempotency_row(reservation_row, terminal)
+                continue
             # Fence service workers atomically with custody replacement. A late
             # create may still materialize in the retained namespace; it cannot
             # pass its next lease checkpoint or write into the new generation.
@@ -291,6 +322,9 @@ def supersede_recipient(
                     "reviewed_plan_sha256": request.reviewed_plan_sha256,
                     "original_key": current.original_key,
                     "retained_reservations": [r.model_dump(mode="json") for r in actual],
+                    "terminal_writer_receipts": {
+                        key: value.model_dump(mode="json") for key, value in writer_receipts.items()
+                    },
                     "retained_namespace": current.namespace,
                     "host_execution_fenced": host_fenced,
                     "continued_at": now,

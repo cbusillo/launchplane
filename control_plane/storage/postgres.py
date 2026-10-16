@@ -10742,14 +10742,25 @@ class PostgresRecordStore(HumanSessionStore):
                 from control_plane.production_recipient_publication import require_publication_lease
 
                 require_publication_lease(self, session, reservation)
-            from control_plane.production_recipient import authority_snapshot
+            from control_plane.production_recipient import (
+                authority_snapshot,
+                same_recipient_authority,
+            )
 
             superseding = expected is not None and expected.get("plan_sha256") != record.plan_sha256
             if (
-                expected is None or superseding or (record.qualified_at and not record.publication)
+                expected is None
+                or superseding
+                or (
+                    record.qualified_at
+                    and not record.publication
+                    and record.phase not in {"rolled_back", "preflight_refused"}
+                )
             ) and (
-                authority_snapshot(self, record.product, record.context)
-                != record.authority_snapshot
+                not same_recipient_authority(
+                    authority_snapshot(self, record.product, record.context),
+                    record.authority_snapshot,
+                )
             ):
                 raise ValueError("Production authority changed before custody committed.")
             row = session.get(

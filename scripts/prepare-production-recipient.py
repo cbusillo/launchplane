@@ -43,6 +43,13 @@ from control_plane.production_recipient_release_recovery import (
 )
 
 
+from control_plane.production_recipient_inverse import (
+    INVERSE_ROUTE,
+    RecipientInverseRequest,
+    RecipientInversePlan,
+)
+
+
 def save(path: Path, payload: object) -> None:
     if path.is_symlink():
         raise ValueError("Preserve the original evidence.")
@@ -94,6 +101,11 @@ def main() -> int:
         action="store_true",
         help="Reconcile the original Client release operation.",
     )
+    operation.add_argument(
+        "--inverse",
+        action="store_true",
+        help="Review the exact scoped inverse through existing production rollback authority.",
+    )
     args = parser.parse_args()
     submitted = False
     try:
@@ -117,6 +129,7 @@ def main() -> int:
             | type[RecipientCutoverRequest]
             | type[RecipientWriterRequest]
             | type[RecipientReleaseRecoveryRequest]
+            | type[RecipientInverseRequest]
         )
         result_type: (
             type[ProductionRecipientPlan]
@@ -125,8 +138,15 @@ def main() -> int:
             | type[RecipientCutoverPlan]
             | type[RecipientWriterPlan]
             | type[RecipientReleaseRecoveryPlan]
+            | type[RecipientInversePlan]
         )
-        if args.release_recovery:
+        if args.inverse:
+            request_type, result_type, route = (
+                RecipientInverseRequest,
+                RecipientInversePlan,
+                INVERSE_ROUTE,
+            )
+        elif args.release_recovery:
             request_type, result_type, route = (
                 RecipientReleaseRecoveryRequest,
                 RecipientReleaseRecoveryPlan,
@@ -177,9 +197,13 @@ def main() -> int:
             args.idempotency_key = draft.original_key
         path = route.format(product=args.product)
         if args.mode == "apply":
+            evidence = json.loads(args.evidence_file.read_text())
+            if args.release_recovery and not args.idempotency_key.strip():
+                args.idempotency_key = RecipientReleaseRecoveryPlan.model_validate(
+                    evidence["result"]
+                ).original_key
             if not args.idempotency_key.strip() or not args.reviewed_dry_run:
                 raise ValueError("Apply requires saved review and the original stable key.")
-            evidence = json.loads(args.evidence_file.read_text())
             if evidence["request"] != body or evidence["path"] != path:
                 raise ValueError("The review belongs to another preparation.")
             body["reviewed_plan_sha256"] = result_type.model_validate(

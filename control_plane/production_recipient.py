@@ -13,6 +13,7 @@ from control_plane import runtime_environments
 from control_plane.integration_allowances import canonical_sha256
 from control_plane.contracts.production_recipient import (
     ProductionRecipientPlan,
+    RecipientWriterReference,
     ProductionRecipientRecord,
     ProductionRecipientRequest,
 )
@@ -151,6 +152,20 @@ def authority_snapshot(store: PostgresRecordStore, product: str, context: str) -
             )
         ],
     }
+
+
+def authority_identity(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Binding timestamps are bookkeeping; identity, version and all owned revisions stay exact."""
+    result = dict(snapshot)
+    result["bindings"] = [
+        {key: value for key, value in row.items() if key not in {"created_at", "updated_at"}}
+        for row in snapshot.get("bindings", [])
+    ]
+    return result
+
+
+def same_recipient_authority(actual: dict[str, Any], expected: dict[str, Any]) -> bool:
+    return authority_identity(actual) == authority_identity(expected)
 
 
 def runtime_values(
@@ -355,7 +370,7 @@ def build_recipient(
     if existing and not retained_supersession:
         if (
             existing.request == intent
-            and existing.authority_snapshot == snapshot
+            and same_recipient_authority(existing.authority_snapshot, snapshot)
             and existing.retained_provider_sha256 == provider_binding_digest(old)
         ):
             if original_key and original_key != existing.original_key:
@@ -397,6 +412,7 @@ def build_recipient(
         scope=scope,
         original_key=original_key,
         execution_fence_version=1,
+        writer_custody=existing.writer_custody if existing and retained_supersession else [],
         request=intent,
         plan_sha256="",
         namespace="lp-prod-recipient-" + plan_digest[:32],
@@ -430,9 +446,19 @@ def build_recipient(
 
 def plan(record: ProductionRecipientRecord) -> dict[str, Any]:
     return ProductionRecipientPlan(
+        writer_operations=tuple(
+            RecipientWriterReference(
+                operation_id=entry["record_id"],
+                binding_id=entry["request"]["binding_id"],
+                preparation_plan_sha256=entry["request"]["preparation_plan_sha256"],
+                action=entry["request"]["action"],
+            )
+            for entry in record.writer_custody
+        ),
         product=record.product,
         context=record.context,
         plan_sha256=record.plan_sha256,
+        publication_sha256=str(record.publication.get("published_sha256") or ""),
         source_commit=record.request.source_commit,
         image_reference=record.image_reference,
         retained_binding_sha256=canonical_sha256(
@@ -488,9 +514,8 @@ class ProductionRecipientAdapter:
         )
 
     def require_unchanged(self, record: ProductionRecipientRecord) -> None:
-        if (
-            authority_snapshot(self.store, self.product, record.context)
-            != record.authority_snapshot
+        if not same_recipient_authority(
+            authority_snapshot(self.store, self.product, record.context), record.authority_snapshot
         ):
             raise ValueError("Production authority changed after review.")
         host, token = source.read_dokploy_config(control_plane_root=self.root)

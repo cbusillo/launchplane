@@ -12,7 +12,9 @@ from typing import Any
 import unittest
 from unittest.mock import patch
 
-from control_plane.production_recipient_cutover import WRITER_LIBRARY
+from control_plane.production_recipient_cutover import WRITER_LIBRARY, WRITER_RECEIPT_LIBRARY
+from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
+from control_plane.production_recipient_evidence import WRITER_ACTION_MARKER, WRITER_BINDING_MARKER
 from control_plane.production_recipient_fence import (
     HOST_FENCE_LIBRARY,
     fenced_program,
@@ -81,16 +83,22 @@ class RecipientWriterProgramTests(unittest.TestCase):
             scope: dict[str, Any] = {}
             exec(WRITER_LIBRARY, scope)
             scope["coordinate_writer"]({**self.spec, "action": action}, base=self.root / "writers")
-        return output.getvalue()
+        text = output.getvalue()
+        evidence = extract_odoo_post_deploy_readback_markers({"logs": text})
+        self.assertEqual(evidence[WRITER_ACTION_MARKER], action)
+        self.assertEqual(evidence[WRITER_BINDING_MARKER], self.spec["binding"])
+        return text
 
     def test_pause_receipt_resume_and_late_pause_preserve_only_original_writer(self) -> None:
         self.run_program("pause")
         self.assertFalse(self.row["State"]["Running"])
-        self.assertIn("recipient_writer_action=receipt_pause", self.run_program("receipt_pause"))
+        self.run_program("receipt_pause")
+        self.assertFalse(self.row["State"]["Running"])
         self.assertEqual(self.effects, ["stop"])
         self.run_program("resume")
         self.assertTrue(self.row["State"]["Running"])
-        self.assertIn("recipient_writer_action=receipt_resume", self.run_program("receipt_resume"))
+        self.run_program("receipt_resume")
+        self.assertTrue(self.row["State"]["Running"])
         with self.assertRaises(ValueError):
             self.run_program("pause")
         self.assertEqual(self.effects, ["stop", "start"])
@@ -109,12 +117,48 @@ class RecipientWriterProgramTests(unittest.TestCase):
         self.spec["binding"] = "b" * 64
         self.run_program("pause")
         self.assertFalse(self.row["State"]["Running"])
+        second = self.spec["binding"]
+        self.spec["binding"] = original
+        with self.assertRaises(ValueError):
+            self.run_program("resume")
+        self.assertFalse(self.row["State"]["Running"])
+        self.spec["binding"] = second
         self.run_program("resume")
         self.assertTrue(self.row["State"]["Running"])
         self.spec["binding"] = original
         with self.assertRaises(ValueError):
             self.run_program("pause")
         self.assertEqual(self.effects, ["stop", "start", "stop", "start"])
+
+    def test_historical_receipt_survives_container_retirement_without_docker_effect(self) -> None:
+        self.run_program("pause")
+        scope: dict[str, Any] = {}
+        exec(WRITER_RECEIPT_LIBRARY, scope)
+        for action, completed in (("receipt_pause", True), ("receipt_resume", False)):
+            with self.subTest(action=action):
+                output = io.StringIO()
+                with (
+                    patch(
+                        "subprocess.run",
+                        side_effect=AssertionError("Historical reads cannot run Docker"),
+                    ),
+                    redirect_stdout(output),
+                ):
+                    if completed:
+                        scope["read_writer_receipt"](
+                            {**self.spec, "action": action}, base=self.root / "writers"
+                        )
+                    else:
+                        with self.assertRaises(ValueError):
+                            scope["read_writer_receipt"](
+                                {**self.spec, "action": action}, base=self.root / "writers"
+                            )
+                if completed:
+                    evidence = extract_odoo_post_deploy_readback_markers(
+                        {"logs": output.getvalue()}
+                    )
+                    self.assertEqual(evidence[WRITER_BINDING_MARKER], self.spec["binding"])
+        self.assertEqual(self.effects, ["stop"])
 
     def test_container_identity_change_or_missing_terminal_witness_refuses_adoption(self) -> None:
         with self.assertRaises(ValueError):

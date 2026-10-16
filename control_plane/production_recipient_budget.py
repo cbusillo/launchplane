@@ -58,6 +58,18 @@ def guarded_targets(
                     target_id=target_id,
                 )
             )
+    for entry in record.writer_custody:
+        retained = entry["provider"]
+        targets.add((retained["context"], retained["instance"], retained["target_id"]))
+        keys.add(
+            generic_web_provider_target_key(
+                provider_id=retained["provider_id"],
+                context=retained["context"],
+                instance=retained["instance"],
+                target_type=retained.get("provider_target_type") or retained["target_category"],
+                target_id=retained["target_id"],
+            )
+        )
     consumers = [
         *record.activation["writer_bindings"],
         *(
@@ -91,9 +103,20 @@ def conflicts(
     record: ProductionRecipientRecord,
     reservation: LaunchplaneIdempotencyRecord,
 ) -> bool:
+    from control_plane.production_recipient_writer_control import WRITER_ROUTE
+
+    if reservation.route_path == WRITER_ROUTE.format(
+        product=record.product
+    ) and reservation.reconciliation_key.startswith(
+        "production-recipient-writer:pause:" + record.plan_sha256 + ":"
+    ):
+        return False
+    from control_plane.production_recipient_cutover import cutover_reconciliation_key
+    from control_plane.production_recipient_inverse import inverse_reconciliation_key
+
     if reservation.reconciliation_key in {
-        "production-recipient-cutover:" + record.plan_sha256,
-        "production-recipient-inverse:" + record.plan_sha256,
+        cutover_reconciliation_key(record.plan_sha256),
+        inverse_reconciliation_key(record.plan_sha256),
     }:
         return False
     keys, targets = guarded_targets(store, record)

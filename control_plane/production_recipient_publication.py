@@ -24,7 +24,7 @@ from control_plane.contracts.idempotency_record import (
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.integration_allowances import canonical_sha256
-from control_plane.production_recipient import authority_snapshot
+from control_plane.production_recipient import authority_snapshot, same_recipient_authority
 from control_plane.storage.product_authority_bundle import (
     ProductAuthorityBundle,
     ProviderTargetWrite,
@@ -170,7 +170,9 @@ def commit_publication(
         )
         if row is None or ProductionRecipientRecord.model_validate(row.payload) != record:
             raise ValueError("Recipient custody changed before publication.")
-        if authority_snapshot(store, record.product, record.context) != expected_authority:
+        if not same_recipient_authority(
+            authority_snapshot(store, record.product, record.context), expected_authority
+        ):
             raise ValueError("Production authority changed before publication.")
         validate_release()
         before = expected_authority
@@ -277,12 +279,40 @@ def commit_publication(
         return result
 
 
+class RecipientOwnedAuthorityChanged(ValueError):
+    """A scoped inverse must preserve an intervening edit to a row it would restore."""
+
+
+def require_owned_publication_rows(
+    store: PostgresRecordStore, record: ProductionRecipientRecord
+) -> None:
+    published = RecipientPublication.model_validate(record.publication["published"])
+    current = authority_snapshot(store, record.product, record.context)
+    expected = published.model_dump(mode="json")
+    for key in ("target", "target_id", "provider", "inventory"):
+        if current[key] != expected[key]:
+            raise RecipientOwnedAuthorityChanged(
+                "An owned authority row changed; preserve it for review."
+            )
+    current_endpoints = {r["endpoint_key"]: r for r in current["health_endpoints"]}
+    if any(current_endpoints.get(r["endpoint_key"]) != r for r in expected["health_endpoints"]):
+        raise RecipientOwnedAuthorityChanged(
+            "An owned monitor row changed; preserve it for review."
+        )
+    current_policies = {
+        r["policy_id"]: r for r in current["backup_policies"] if r["status"] == "active"
+    }
+    if any(current_policies.get(r["policy_id"]) != r for r in expected["backup_policies"]):
+        raise RecipientOwnedAuthorityChanged("An owned backup row changed; preserve it for review.")
+
+
 def rollback_publication(
     store: PostgresRecordStore,
     record: ProductionRecipientRecord,
     *,
     stop_replacement: Callable[[], None],
     reservation: LaunchplaneIdempotencyRecord | None = None,
+    inverse_writer_binding: str = "",
 ) -> ProductionRecipientRecord:
     """Stop only the replacement writer, then invert unchanged task-owned rows.
 
@@ -300,6 +330,7 @@ def rollback_publication(
         raise ValueError("The retained inventory is unavailable.")
     # No transaction/authority lock is held over host I/O. The current lease
     # fences the exact replacement stop; the CAS below repeats every row check.
+    require_owned_publication_rows(store, record)
     stop_replacement()
     with store._session_factory() as session:
         store._begin_serialized_write(session)
@@ -312,19 +343,7 @@ def rollback_publication(
         )
         if row is None or ProductionRecipientRecord.model_validate(row.payload) != record:
             raise ValueError("Recipient custody changed before inverse publication.")
-        current = authority_snapshot(store, record.product, record.context)
-        expected = published.model_dump(mode="json")
-        for key in ("target", "target_id", "provider", "inventory"):
-            if current[key] != expected[key]:
-                raise ValueError("An owned authority row changed; preserve it for review.")
-        current_endpoints = {r["endpoint_key"]: r for r in current["health_endpoints"]}
-        if any(current_endpoints.get(r["endpoint_key"]) != r for r in expected["health_endpoints"]):
-            raise ValueError("An owned monitor row changed; preserve it for review.")
-        current_policies = {
-            r["policy_id"]: r for r in current["backup_policies"] if r["status"] == "active"
-        }
-        if any(current_policies.get(r["policy_id"]) != r for r in expected["backup_policies"]):
-            raise ValueError("An owned backup row changed; preserve it for review.")
+        require_owned_publication_rows(store, record)
         original_provider = ProviderTargetRecord.model_validate(before["provider"])
         store._write_product_authority_bundle(
             ProductAuthorityBundle(
@@ -386,6 +405,7 @@ def rollback_publication(
                 "publication": {
                     **saved,
                     "inverse_backup_policies": inverse_policies,
+                    "inverse_writer_binding": inverse_writer_binding,
                     "rolled_back_at": utc_now_timestamp(),
                 },
             }
@@ -446,7 +466,10 @@ def republication_snapshot(
         raise ValueError("The exact recorded inverse is required before re-promotion.")
     current = authority_snapshot(store, record.product, record.context)
     before = saved["before"]
-    if any(current[key] != before[key] for key in before if key != "backup_policies"):
+    if not same_recipient_authority(
+        {key: value for key, value in current.items() if key != "backup_policies"},
+        {key: value for key, value in before.items() if key != "backup_policies"},
+    ):
         raise ValueError("Authority changed outside this release's scoped inverse.")
     expected = {row["record_id"]: dict(row) for row in before["backup_policies"]}
     for row in saved["published"]["backup_policies"]:

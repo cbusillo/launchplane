@@ -11783,6 +11783,15 @@ class RealPostgresRecipientCutoverTests(unittest.TestCase):
     def test_unrelated_product_checkpoint_survives_missing_peer_target(self) -> None:
         self.fixture.test_missing_peer_target_does_not_block_an_unrelated_products_effect()
 
+    def test_lost_rollback_journal_can_complete_with_terminal_host_receipts(self) -> None:
+        self.fixture.test_terminal_host_rollback_can_finish_its_journal_after_a_lost_write()
+
+    def test_inverse_peer_preflight_refusal_keeps_original_key_retryable(self) -> None:
+        self.fixture.test_inverse_preflight_peer_refusal_can_retry_under_the_same_key()
+
+    def test_reviewed_native_inverse_uses_exact_retained_publication(self) -> None:
+        self.fixture.test_reviewed_native_inverse_works_without_minting_a_client_release_step()
+
     def test_effect_checkpoint_and_budget_admission_serialize_on_two_connections(self) -> None:
         from control_plane.production_recipient_budget import require_budget_checkpoint
         from control_plane.workflows.generic_web_deploy_provider import (

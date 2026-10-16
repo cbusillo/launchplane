@@ -137,13 +137,31 @@ class ProductionRecipientRecord(BaseModel):
         return {"database": self.namespace + "-db", "config": self.namespace + "-config"}
 
 
+class RecipientWriterReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation_id: str = Field(min_length=1)
+    binding_id: str = Field(min_length=1)
+    preparation_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    action: Literal["pause", "resume"]
+
+
 class ProductionRecipientPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    writer_operations: tuple[RecipientWriterReference, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     product: str
     context: str
     instance: Literal["prod"] = "prod"
     plan_sha256: str
+    publication_sha256: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     source_commit: str
     image_reference: str
     retained_binding_sha256: str

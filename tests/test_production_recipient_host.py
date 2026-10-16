@@ -124,7 +124,9 @@ class HostTransportTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         self.root = fixture.root
-        self.record = fixture.adapter.current().model_copy(update={"target_id": "prepared"})
+        self.record = fixture.adapter.current().model_copy(
+            update={"target_id": "prepared", "app_name": "prepared-recipient"}
+        )
 
     def test_writer_actions_keep_distinct_slots_and_retirement_scrubs_only_this_namespace(
         self,
@@ -192,14 +194,18 @@ class HostTransportTests(unittest.TestCase):
                 "scheduleId": "foreign",
             }
             preserved = dict(slots[foreign])
-            run_recipient_program(
-                self.root,
-                self.record,
-                {"namespace": self.record.namespace, "binding": self.record.plan_sha256},
-                RETIRE_EXECUTION_PROGRAM,
-                lambda _phase: None,
-                retire_execution=True,
-            )
+            with patch(
+                "control_plane.production_recipient_host.api.fetch_dokploy_target_payload",
+                side_effect=FileNotFoundError("disposable target removed"),
+            ):
+                run_recipient_program(
+                    self.root,
+                    self.record,
+                    {"namespace": self.record.namespace, "binding": self.record.plan_sha256},
+                    RETIRE_EXECUTION_PROGRAM,
+                    lambda _phase: None,
+                    retire_execution=True,
+                )
         self.assertEqual(slots[foreign], preserved)
         for key in original:
             self.assertFalse(slots[key]["enabled"])
@@ -208,6 +214,34 @@ class HostTransportTests(unittest.TestCase):
             )
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse(result.stdout)
+
+    def test_custodied_host_read_refuses_any_writer_mutation_or_arbitrary_program(self) -> None:
+        from control_plane.production_recipient_cutover import (
+            WRITER_PROGRAM,
+            WRITER_RECEIPT_PROGRAM,
+        )
+
+        for program, spec in (
+            (WRITER_PROGRAM, {"inspect": True, "action": "resume"}),
+            (WRITER_RECEIPT_PROGRAM, {"inspect": False, "action": "receipt_pause"}),
+            ("print('unowned')", {"inspect": True, "action": "parked"}),
+        ):
+            with (
+                self.subTest(spec=spec),
+                patch(
+                    "control_plane.production_recipient_host.source.read_dokploy_config"
+                ) as config,
+            ):
+                with self.assertRaises(ValueError):
+                    run_recipient_program(
+                        self.root,
+                        self.record,
+                        spec,
+                        program,
+                        lambda _phase: None,
+                        custodied_read=True,
+                    )
+                config.assert_not_called()
 
     def test_private_spec_is_not_in_process_arguments_and_cleanup_ignores_authority_drift(
         self,

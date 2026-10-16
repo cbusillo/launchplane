@@ -61,7 +61,17 @@ from control_plane.workflows.production_promotion_backup import (
 )
 from control_plane.dokploy import api, source
 
+from control_plane.production_recipient_evidence import (
+    WRITER_ACTION_MARKER,
+    WRITER_BINDING_MARKER,
+    RUNTIME_OK_MARKER,
+)
+
 CUTOVER_ROUTE = "/v1/products/{product}/production-recipient/cutover"
+
+
+def cutover_reconciliation_key(preparation: str) -> str:
+    return "production-recipient-cutover:" + preparation
 
 
 class RecipientCutoverRequest(BaseModel):
@@ -216,10 +226,12 @@ def cutover_intent(
         raise ValueError(
             "The API writer binding must be delivered only to the application, independently of data credentials."
         )
-    from control_plane.production_recipient_budget import writer_bindings
+    from control_plane.production_recipient_budget import writer_bindings, binding_identities
 
-    consumers = writer_bindings(
-        store, record.model_copy(update={"activation": {"writer_secret_id": binding.secret_id}})
+    consumers = binding_identities(
+        writer_bindings(
+            store, record.model_copy(update={"activation": {"writer_secret_id": binding.secret_id}})
+        )
     )
     intent = request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"})
     return {
@@ -228,7 +240,7 @@ def cutover_intent(
         "destination_backup": operation.model_dump(mode="json"),
         "writer_secret_id": binding.secret_id,
         "writer_version_id": secret.current_version_id,
-        "binding": binding.model_dump(mode="json"),
+        "binding": binding_identities([binding.model_dump(mode="json")])[0],
         "writer_bindings": consumers,
         "plan_sha256": canonical_sha256(
             {
@@ -246,7 +258,7 @@ def cutover_intent(
                 ),
                 "sources": source_records,
                 "destination_backup": operation.model_dump(mode="json"),
-                "binding": binding.model_dump(mode="json"),
+                "binding": binding_identities([binding.model_dump(mode="json")])[0],
                 "writer_bindings": consumers,
                 "version": secret.current_version_id,
             }
@@ -274,9 +286,11 @@ def save_cutover_intent(
 
 
 def require_writer_exclusive(store: PostgresRecordStore, record: ProductionRecipientRecord) -> None:
-    from control_plane.production_recipient_budget import writer_bindings
+    from control_plane.production_recipient_budget import writer_bindings, binding_identities
 
-    if writer_bindings(store, record) != record.activation["writer_bindings"]:
+    if binding_identities(writer_bindings(store, record)) != binding_identities(
+        record.activation["writer_bindings"]
+    ):
         raise ValueError("Shared API writer consumers changed after review.")
     if (
         store.read_secret_record(record.activation["writer_secret_id"]).current_version_id
@@ -291,6 +305,7 @@ def require_peers_parked(
     record: ProductionRecipientRecord,
     checkpoint: Callable[[str], None],
 ) -> None:
+    inspected = set()
     for binding in record.activation["writer_bindings"]:
         if binding["instance"] == "prod":
             continue
@@ -307,6 +322,55 @@ def require_peers_parked(
             update={"target_id": peer.target_id, "app_name": str(payload.get("appName") or "")}
         )
         writer_action(root, projected, old=False, action="parked", checkpoint=checkpoint)
+        inspected.add(
+            (
+                peer.target_id,
+                str(payload.get("serverId") or ""),
+                str(payload.get("appName") or ""),
+                record.request.application_service,
+            )
+        )
+    for entry in record.writer_custody:
+        retained = entry.get("host")
+        if retained is None or "service" not in retained:
+            raise ValueError("A retained peer has incomplete host custody.")
+        key = (
+            retained["target_id"],
+            retained["server_id"],
+            retained["app_name"],
+            retained["service"],
+        )
+        if key in inspected:
+            continue
+        inspected.add(key)
+        projected = record.model_copy(
+            update={
+                "target_id": retained["target_id"],
+                "app_name": retained["app_name"],
+                "request": record.request.model_copy(
+                    update={"destination_server_id": retained["server_id"]}
+                ),
+            }
+        )
+        evidence = run_recipient_program(
+            root,
+            projected,
+            {
+                "project": retained["app_name"],
+                "service": retained["service"],
+                "binding": record.plan_sha256,
+                "action": "parked",
+                "inspect": True,
+            },
+            WRITER_PROGRAM,
+            checkpoint,
+            custodied_read=True,
+        )
+        if (
+            evidence.get(WRITER_ACTION_MARKER) != "parked"
+            or evidence.get(WRITER_BINDING_MARKER) != record.plan_sha256
+        ):
+            raise ValueError("A retained historical API writer is not verified parked.")
 
 
 def writer_action(
@@ -367,17 +431,24 @@ def writer_action(
         checkpoint,
     )
     if (
-        evidence.get("recipient_writer_action") != action
-        or evidence.get("recipient_writer_binding") != witness_binding
+        evidence.get(WRITER_ACTION_MARKER) != action
+        or evidence.get(WRITER_BINDING_MARKER) != witness_binding
     ):
         raise ValueError("Writer coordination was not verified.")
 
 
-WRITER_LIBRARY = r"""
+WRITER_LIBRARY = (
+    "WRITER_ACTION_MARKER="
+    + repr(WRITER_ACTION_MARKER)
+    + "\nWRITER_BINDING_MARKER="
+    + repr(WRITER_BINDING_MARKER)
+    + "\n"
+    + r"""
 import base64,hashlib,json,os,re,subprocess,sys,uuid
 from pathlib import Path
+WRITER_CUSTODY_ROOT=Path('/var/lib/launchplane/recipient-writers')
 def coordinate_writer(spec, *, base=None):
-    base=base or Path('/var/lib/launchplane/recipient-writers')
+    base=base or WRITER_CUSTODY_ROOT
     requested=spec['action']
     receipt=requested.startswith('receipt_')
     action=requested.removeprefix('receipt_')
@@ -390,8 +461,8 @@ def coordinate_writer(spec, *, base=None):
         return result.stdout
     ids=docker('ps','-aq','--filter','label=com.docker.compose.project='+spec['project'],'--filter','label=com.docker.compose.service='+spec['service']).splitlines()
     if not ids and action=='parked':
-        print('recipient_writer_action=parked')
-        print('recipient_writer_binding='+spec['binding'])
+        print(WRITER_ACTION_MARKER+'=parked')
+        print(WRITER_BINDING_MARKER+'='+spec['binding'])
         sys.exit(0)
     if len(ids)!=1:
         raise ValueError('writer identity is absent or ambiguous')
@@ -450,8 +521,8 @@ def coordinate_writer(spec, *, base=None):
             if not witness.get('released'):
                 witness['released']=True
                 persist()
-            if witness['was_running']:
-                docker('start',ids[0])
+                if witness['was_running']:
+                    docker('start',ids[0])
     state=json.loads(docker('inspect',ids[0]))[0]
     wanted=action=='inspect' or action=='resume' and witness['was_running']
     if state.get('State',{}).get('Running') is not wanted or state.get('Image')!=expected['image']:
@@ -464,13 +535,42 @@ def coordinate_writer(spec, *, base=None):
         else:
             witness[terminal]=True
             persist()
-    print('recipient_writer_action='+requested)
-    print('recipient_writer_binding='+spec['binding'])
+    print(WRITER_ACTION_MARKER+'='+requested)
+    print(WRITER_BINDING_MARKER+'='+spec['binding'])
 """
+)
 
 WRITER_PROGRAM = (
     WRITER_LIBRARY
     + "\ncoordinate_writer(json.loads(base64.b64decode(sys.argv[1],validate=True)))\n"
+)
+
+
+WRITER_RECEIPT_LIBRARY = (
+    WRITER_LIBRARY
+    + r"""
+def read_writer_receipt(spec, *, base=None):
+    base=base or WRITER_CUSTODY_ROOT
+    if not re.fullmatch(r'[a-f0-9]{64}',spec['binding']) or any(not re.fullmatch(r'[A-Za-z0-9_-]+',spec[key]) for key in ('project','service')) or spec['action'] not in ('receipt_pause','receipt_resume'):
+        raise ValueError('invalid retained writer receipt')
+    writer=hashlib.sha256(json.dumps([spec['project'],spec['service']]).encode()).hexdigest()
+    directory=base/spec['binding']/writer
+    path=directory/'before.json'
+    if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
+        raise ValueError('invalid retained writer custody')
+    witness=json.loads(path.read_text())
+    if any(witness.get(key)!=spec[key] for key in ('project','service')) or type(witness.get('was_running')) is not bool or not witness.get('id') or not witness.get('image'):
+        raise ValueError('retained writer witness changed')
+    terminal='paused' if spec['action']=='receipt_pause' else 'resumed'
+    if witness.get(terminal) is not True or terminal=='resumed' and witness.get('released') is not True:
+        raise ValueError('no terminal retained writer witness')
+    print(WRITER_ACTION_MARKER+'='+spec['action'])
+    print(WRITER_BINDING_MARKER+'='+spec['binding'])
+"""
+)
+WRITER_RECEIPT_PROGRAM = (
+    WRITER_RECEIPT_LIBRARY
+    + "\nread_writer_receipt(json.loads(base64.b64decode(sys.argv[1],validate=True)))\n"
 )
 
 
@@ -482,6 +582,7 @@ class RecipientCutoverAdapter:
     trace_id: str
     backup_record_id: str
     validate_release: Callable[[], None]
+    rollback_observed: bool = False
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -493,7 +594,7 @@ class RecipientCutoverAdapter:
         )
 
     def reconciliation_key(self) -> str:
-        return "production-recipient-cutover:" + self.record.plan_sha256
+        return cutover_reconciliation_key(self.record.plan_sha256)
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
@@ -516,13 +617,23 @@ class RecipientCutoverAdapter:
                 ),
             )
         if current and current.plan_sha256 == self.record.plan_sha256:
+            self.record = current
+            attempt = canonical_sha256(provider_operation_key)
             if current.phase == "rolled_back":
-                return ProviderObservation(
-                    "present",
-                    response_payload=self.result("fail", rollback_status="pass").response_payload,
-                )
+                if current.execution.get("native_inverse") or current.execution.get(
+                    attempt + ":rollback_completed_at"
+                ):
+                    return ProviderObservation(
+                        "present",
+                        response_payload=self.result(
+                            "fail", rollback_status="pass"
+                        ).response_payload,
+                    )
+                return ProviderObservation("absent", retry_safe=True)
+            if self.rollback_witnessed(current, provider_operation_key):
+                self.rollback_observed = True
+                return ProviderObservation("absent", retry_safe=True)
             if current.execution:
-                attempt = canonical_sha256(provider_operation_key)
                 if current.execution.get(attempt + ":old_pause_dispatched_at"):
                     try:
                         writer_action(
@@ -545,7 +656,9 @@ class RecipientCutoverAdapter:
                                 old=False,
                                 action="receipt_resume",
                                 checkpoint=lambda _phase: None,
-                                binding=current.publication.get("writer_binding") or None,
+                                binding=current.publication.get("inverse_writer_binding")
+                                or current.publication.get("writer_binding")
+                                or None,
                             )
                     except Exception:
                         return ProviderObservation("unknown")
@@ -562,6 +675,40 @@ class RecipientCutoverAdapter:
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease
     ) -> ProviderMutationOutcome:
+        if self.record.phase in {"reverting", "inverse_published"}:
+            raise ProviderMutationRejectedError(
+                ValueError("Finish the original inverse before another forward operation.")
+            )
+        if self.rollback_observed:
+            if not isinstance(lease, ProviderEvidenceLease) or not self.rollback_witnessed(
+                self.record, provider_operation_key
+            ):
+                raise ProviderMutationUnknownError("Original rollback completion is not verified.")
+            lease.assert_current()
+            record = self.record.model_copy(
+                update={
+                    "phase": "rolled_back",
+                    "execution": {
+                        **self.record.execution,
+                        canonical_sha256(provider_operation_key)
+                        + ":rollback_completed_at": utc_now_timestamp(),
+                    },
+                }
+            )
+            self.store.write_production_recipient(
+                expected=self.record.model_dump(mode="json"),
+                replacement=record.model_dump(mode="json"),
+                reservation=lease.evidence_reservation(),
+            )
+            self.record = record
+            self.fail_pending_promotion(provider_operation_key, lease)
+            return self.result("fail", rollback_status="pass", provider_effect_performed=False)
+        if self.record.execution.get("native_inverse"):
+            raise ProviderMutationRejectedError(
+                ValueError(
+                    "The operator inverted this publication; review a new generation before another release."
+                )
+            )
         if not self.record.execution:
             self.validate_release()
         if not isinstance(lease, ProviderEvidenceLease):
@@ -765,6 +912,10 @@ class RecipientCutoverAdapter:
                     target_type="compose",
                     target_id=record.retained_target_id.target_id,
                 )
+                if provider_binding_digest(
+                    retained
+                ) != record.retained_provider_sha256 or not retained.get("appName"):
+                    raise ValueError("The retained writer host changed before dispatch.")
                 save(
                     execution={
                         **record.execution,
@@ -812,7 +963,9 @@ class RecipientCutoverAdapter:
                     old=False,
                     action="resume",
                     checkpoint=checkpoint,
-                    binding=record.publication.get("writer_binding") or None,
+                    binding=record.publication.get("inverse_writer_binding")
+                    or record.publication.get("writer_binding")
+                    or None,
                 )
                 terminal_deployment = True
             elif record.execution.get("trigger_requested_at"):
@@ -1010,7 +1163,13 @@ class RecipientCutoverAdapter:
                         checkpoint=recovery_checkpoint,
                         binding=writer_binding,
                     )
-                    save(phase="rolled_back")
+                    save(
+                        phase="rolled_back",
+                        execution={
+                            **record.execution,
+                            attempt_prefix + "rollback_completed_at": utc_now_timestamp(),
+                        },
+                    )
                     if pending is not None:
                         self.store.write_promotion_record(
                             pending.model_copy(
@@ -1028,7 +1187,67 @@ class RecipientCutoverAdapter:
                 "Retain exact cutover custody; reconcile before restarting either writer."
             ) from error
 
-    def result(self, status: Literal["pass", "fail"], **extra: str) -> ProviderMutationOutcome:
+    def rollback_witnessed(
+        self, record: ProductionRecipientRecord, provider_operation_key: str
+    ) -> bool:
+        attempt = canonical_sha256(provider_operation_key)
+        if not record.execution.get(attempt + ":old_pause_dispatched_at"):
+            return False
+        binding = canonical_sha256(
+            {"preparation": record.plan_sha256, "operation": provider_operation_key}
+        )
+        try:
+            if (
+                self.store.read_provider_target_record(
+                    context_name=record.context, instance_name="prod"
+                )
+                != record.retained_provider
+            ):
+                return False
+            writer_action(
+                self.root,
+                record,
+                old=True,
+                action="receipt_resume",
+                checkpoint=lambda _phase: None,
+                binding=binding,
+            )
+            if record.execution.get("trigger_requested_at"):
+                writer_action(
+                    self.root,
+                    record,
+                    old=False,
+                    action="receipt_pause",
+                    checkpoint=lambda _phase: None,
+                    binding=binding,
+                )
+            return True
+        except Exception:
+            return False
+
+    def fail_pending_promotion(self, key: str, lease: ProviderOperationLease) -> None:
+        if not isinstance(lease, ProviderEvidenceLease):
+            raise ValueError("Promotion failure evidence requires a live lease.")
+        try:
+            pending = self.store.read_promotion_record(
+                "promotion-recipient-" + canonical_sha256(key)[:24]
+            )
+        except FileNotFoundError:
+            return
+        with self.store.provider_evidence_guard(lease.evidence_reservation):
+            self.store.write_promotion_record(
+                pending.model_copy(
+                    update={"deploy": pending.deploy.model_copy(update={"status": "fail"})}
+                )
+            )
+
+    def result(
+        self,
+        status: Literal["pass", "fail"],
+        *,
+        provider_effect_performed: bool = True,
+        **extra: str,
+    ) -> ProviderMutationOutcome:
         return ProviderMutationOutcome(
             202,
             provider_operation_response_payload(
@@ -1040,6 +1259,7 @@ class RecipientCutoverAdapter:
                     **extra,
                 },
             ),
+            provider_effect_performed=provider_effect_performed,
         )
 
     def terminal_deployment(self, deployment_id: str) -> dict[str, Any] | None:
@@ -1163,7 +1383,7 @@ class RecipientCutoverAdapter:
             RUNTIME_PROGRAM,
             checkpoint,
         )
-        if evidence.get("recipient_runtime_ok") != "true":
+        if evidence.get(RUNTIME_OK_MARKER) != "true":
             raise ValueError("Actual recipient images and resource enforcement are unverified.")
 
     def publication(
@@ -1253,7 +1473,11 @@ class RecipientCutoverAdapter:
         )
 
 
-RUNTIME_PROGRAM = r"""
+RUNTIME_PROGRAM = (
+    "RUNTIME_OK_MARKER="
+    + repr(RUNTIME_OK_MARKER)
+    + "\n"
+    + r"""
 import base64,json,subprocess,sys
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 def docker(*args):
@@ -1286,5 +1510,6 @@ for service,limits in spec['services'].items():
     ports={key:bindings[0].get('HostPort') for key,bindings in host.get('PortBindings',{}).items() if len(bindings)==1}
     if ports!=limits['ports'] or len(ports)!=len(host.get('PortBindings',{})):
         raise ValueError('runtime listener bindings differ from review')
-print('recipient_runtime_ok=true')
+print(RUNTIME_OK_MARKER+'=true')
 """
+)

@@ -26,6 +26,8 @@ from control_plane.provider_operations import (
     provider_operation_response_payload,
 )
 
+from control_plane.production_recipient_evidence import WRITER_ACTION_MARKER, WRITER_BINDING_MARKER
+
 WRITER_ROUTE = "/v1/products/{product}/production-recipient/testing-writer"
 
 
@@ -53,6 +55,62 @@ class RecipientWriterPlan(BaseModel):
     completed: bool = False
 
 
+def retained_writer_receipt(
+    root: Path,
+    record: ProductionRecipientRecord,
+    entry: dict[str, object],
+    checkpoint: Callable[[str], None],
+) -> RecipientWriterPlan:
+    from typing import cast, Any
+    from control_plane.production_recipient_host import run_recipient_program
+    from control_plane.production_recipient_cutover import WRITER_RECEIPT_PROGRAM
+
+    saved = cast(dict[str, Any], entry)
+    host = saved["host"]
+    request = RecipientWriterRequest.model_validate(saved["request"])
+    projected = record.model_copy(
+        update={
+            "target_id": host["target_id"],
+            "app_name": host["app_name"],
+            "request": record.request.model_copy(
+                update={"destination_server_id": host["server_id"]}
+            ),
+        }
+    )
+    action = "receipt_" + request.action
+    evidence = run_recipient_program(
+        root,
+        projected,
+        {
+            "project": host["app_name"],
+            "service": host["service"],
+            "binding": saved["witness_binding"],
+            "action": action,
+            "inspect": True,
+        },
+        WRITER_RECEIPT_PROGRAM,
+        checkpoint,
+        custodied_read=True,
+    )
+    if (
+        evidence.get(WRITER_ACTION_MARKER) != action
+        or evidence.get(WRITER_BINDING_MARKER) != saved["witness_binding"]
+    ):
+        raise ValueError("The original writer completion has no terminal host witness.")
+    return RecipientWriterPlan(
+        product=record.product,
+        context=record.context,
+        plan_sha256=request.reviewed_plan_sha256,
+        preparation_plan_sha256=request.preparation_plan_sha256,
+        binding_id=request.binding_id,
+        action=request.action,
+        completed=True,
+        pause_operation_id=saved["record_id"]
+        if request.action == "pause"
+        else request.pause_operation_id,
+    )
+
+
 @dataclass
 class RecipientWriterAdapter:
     root: Path
@@ -69,7 +127,7 @@ class RecipientWriterAdapter:
         if (
             record is None
             or record.plan_sha256 != self.request.preparation_plan_sha256
-            or not record.activation
+            or (not record.activation and self.request.action != "resume")
         ):
             raise ValueError("Testing writer control requires the exact armed production move.")
         binding = next(
@@ -89,7 +147,10 @@ class RecipientWriterAdapter:
                 if lane.instance == "testing"
             }
             or binding.instance != "testing"
-            or binding.secret_id != record.activation["writer_secret_id"]
+            or (
+                self.request.action == "pause"
+                and binding.secret_id != record.activation["writer_secret_id"]
+            )
         ):
             raise ValueError("Only a recorded testing peer of this exact API budget is eligible.")
         target = self.store.read_provider_target_record(
@@ -106,6 +167,12 @@ class RecipientWriterAdapter:
         payload = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=target.target_id
         )
+        import re
+
+        if payload.get("composeId") != target.target_id or not re.fullmatch(
+            r"[A-Za-z0-9_-]+", str(payload.get("appName") or "")
+        ):
+            raise ValueError("Testing host custody requires the exact provider app identity.")
         projected = record.model_copy(
             update={
                 "target_id": target.target_id,
@@ -183,14 +250,21 @@ class RecipientWriterAdapter:
         )
 
     def reconciliation_key(self) -> str:
-        return self.request.reviewed_plan_sha256
+        return (
+            "production-recipient-writer:"
+            + self.request.action
+            + ":"
+            + self.request.preparation_plan_sha256
+            + ":"
+            + self.request.reviewed_plan_sha256
+        )
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
         try:
-            record, target, plan = self.current()
-            if plan.plan_sha256 != reconciliation_key:
+            record = custody(self.store, self.product, self.request.context)
+            if record is None or self.reconciliation_key() != reconciliation_key:
                 return ProviderObservation("unknown")
             entries = [
                 entry
@@ -199,36 +273,11 @@ class RecipientWriterAdapter:
             ]
             if len(entries) != 1:
                 return ProviderObservation("unknown")
-            record = record.model_copy(
-                update={
-                    "execution": {
-                        **record.execution,
-                        "writer_binding": entries[0]["witness_binding"],
-                    }
-                }
-            )
-            # Host receipts require the completed stop/start response and readback,
-            # not just a currently stopped/running container or an idle lock.
-            writer_action(
-                self.root,
-                record,
-                old=False,
-                action="receipt_pause" if self.request.action == "pause" else "receipt_resume",
-                checkpoint=lambda _phase: None,
-            )
+            result = retained_writer_receipt(self.root, record, entries[0], lambda _phase: None)
             return ProviderObservation(
                 "present",
                 response_payload=provider_operation_response_payload(
-                    trace_id=self.trace_id,
-                    records={},
-                    result=plan.model_copy(
-                        update={
-                            "completed": True,
-                            "pause_operation_id": entries[0]["record_id"]
-                            if self.request.action == "pause"
-                            else self.request.pause_operation_id,
-                        }
-                    ).model_dump(mode="json"),
+                    trace_id=self.trace_id, records={}, result=result.model_dump(mode="json")
                 ),
             )
         except Exception:
@@ -267,6 +316,7 @@ class RecipientWriterAdapter:
                                     "target_id": record.target_id,
                                     "server_id": record.request.destination_server_id,
                                     "app_name": record.app_name,
+                                    "service": record.request.application_service,
                                 },
                                 "request": self.request.model_dump(mode="json"),
                                 "provider": self.current()[1].model_dump(mode="json"),

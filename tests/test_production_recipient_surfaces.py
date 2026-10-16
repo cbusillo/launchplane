@@ -212,6 +212,21 @@ class HttpBoundaryTests(unittest.TestCase):
             self.fixture.store.read_production_recipient(self.fixture.product, self.fixture.context)
         )
 
+    def test_authorized_read_identity_can_inspect_custody_without_the_original_writer_scope(
+        self,
+    ) -> None:
+        self.fixture.run_operation()
+        self.identity = TerminalAgentIdentity("read-agent", "fixture", director_agent=True)
+        self.allowed_effects = {"read", "plan"}
+        before = list(self.fixture.effects)
+        response = self.post(
+            self.fixture.body.model_copy(update={"mode": "custody"}).model_dump(mode="json")
+        )
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertTrue(response.json()["result"]["custody_sha256"])
+        self.assertEqual(self.fixture.effects, before)
+        self.mutate.assert_not_awaited()
+
     def test_terminal_or_denied_existing_setup_authority_never_mutates(self) -> None:
         self.identity = TerminalAgentIdentity("agent", "fixture", director_agent=True)
         response = self.post(self.fixture.body.model_dump(mode="json"))
@@ -226,9 +241,21 @@ class HttpBoundaryTests(unittest.TestCase):
         from control_plane.production_recipient_cutover import CUTOVER_ROUTE
         from control_plane.production_recipient_continuation import CONTINUATION_ROUTE
         from control_plane.production_recipient_release_recovery import RELEASE_RECOVERY_ROUTE
+        from control_plane.production_recipient_inverse import INVERSE_ROUTE
 
         self.identity = TerminalAgentIdentity("agent", "fixture", director_agent=True)
         requests = (
+            (
+                INVERSE_ROUTE,
+                {
+                    "context": self.fixture.context,
+                    "preparation_plan_sha256": "a" * 64,
+                    "publication_sha256": "b" * 64,
+                    "reason": "review",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": "c" * 64,
+                },
+            ),
             (
                 CUTOVER_ROUTE,
                 {

@@ -12,6 +12,8 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.production_recipient_cutover import RUNTIME_PROGRAM
+from control_plane.production_recipient_evidence import RUNTIME_OK_MARKER
+from control_plane.dokploy.post_deploy import extract_odoo_post_deploy_readback_markers
 
 
 class RecipientRuntimeProgramTests(unittest.TestCase):
@@ -73,14 +75,17 @@ class RecipientRuntimeProgramTests(unittest.TestCase):
         return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
 
     def run_program(self) -> None:
+        output = io.StringIO()
         with (
             patch.object(
                 sys, "argv", ["runtime", base64.b64encode(json.dumps(self.spec).encode()).decode()]
             ),
             patch("subprocess.run", side_effect=self.docker),
-            redirect_stdout(io.StringIO()),
+            redirect_stdout(output),
         ):
             exec(compile(RUNTIME_PROGRAM, "<runtime>", "exec"), {})
+        evidence = extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})
+        self.assertEqual(evidence[RUNTIME_OK_MARKER], "true")
 
     def test_actual_runtime_accepts_only_reviewed_images_limits_storage_and_ports(self) -> None:
         self.run_program()

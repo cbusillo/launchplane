@@ -1,6 +1,10 @@
 """The accepted-release adapter uses real custody, backup records and publication."""
 
 from datetime import UTC, datetime, timedelta
+from contextlib import redirect_stdout
+import io
+import json
+import subprocess
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -21,6 +25,7 @@ from control_plane.production_recipient_cutover import (
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.runtime_environments import SiteRuntimeEnvironment
 from control_plane.dokploy import api
+from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.workflows.production_backup_gate import enqueue_production_backup_gate
 from control_plane.workflows.production_backup_gate_operation_worker import (
     run_production_backup_gate_operation_worker_once,
@@ -252,20 +257,68 @@ class RecipientCutoverTests(unittest.TestCase):
         checkpoint: Any,
         binding: str | None = None,
     ) -> None:
-        checkpoint("writer_" + action)
+        from control_plane.production_recipient_cutover import WRITER_LIBRARY
+
+        checkpoint(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
         self.actions.append((action, old))
-        if action == "pause":
-            if old:
-                self.old_running = False
+        project = "old-production" if old else record.app_name
+        identity = (
+            record.authority_snapshot["inventory"]["runtime_identity"]
+            if old
+            else record.execution.get("runtime_identity")
+        )
+
+        def docker(args: list[str], **kwargs: Any) -> Any:
+            command = args[1]
+            identifier = "old-writer" if old else "new-writer"
+            if command == "ps":
+                output = identifier if old or self.deploys else ""
+            elif command == "inspect":
+                output = json.dumps(
+                    [
+                        {
+                            "Image": identifier + "-image",
+                            "State": {"Running": self.old_running if old else self.new_running},
+                            "Config": {
+                                "Image": record.image_reference,
+                                "Labels": {
+                                    "com.docker.compose.project": project,
+                                    "com.docker.compose.service": record.request.application_service,
+                                },
+                                "Env": [
+                                    "LAUNCHPLANE_RUNTIME_IDENTITY_JSON=" + json.dumps(identity)
+                                ],
+                            },
+                        }
+                    ]
+                )
+            elif command in {"start", "stop"}:
+                self.assertEqual(args[-1], identifier)
+                if old:
+                    self.old_running = command == "start"
+                else:
+                    self.new_running = command == "start"
+                output = identifier
             else:
-                self.new_running = False
-        if action == "resume":
-            if old:
-                self.old_running = True
-            else:
-                self.new_running = True
-        if action == "inspect":
-            self.assertTrue(self.new_running)
+                self.fail("Unexpected writer operation")
+            return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+
+        scope: dict[str, Any] = {}
+        with patch("subprocess.run", side_effect=docker), redirect_stdout(io.StringIO()):
+            exec(WRITER_LIBRARY, scope)
+            scope["coordinate_writer"](
+                {
+                    "project": project,
+                    "service": record.request.application_service,
+                    "binding": binding
+                    or record.execution.get("writer_binding", record.plan_sha256),
+                    "action": action,
+                    "expected_identity": identity,
+                    "image": record.image_reference,
+                    "owned_replacement": not old,
+                },
+                base=self.fixture.root.resolve() / "writer-custody",
+            )
 
     def deploy(self, **kwargs: Any) -> None:
         kwargs["before_provider_mutation"]("target_update")
@@ -437,6 +490,14 @@ class RecipientCutoverTests(unittest.TestCase):
             )
             if row.promotion_action == self.publication_case.policy.promotion_action
         )
+        binding = next(
+            row
+            for row in self.store.list_secret_bindings()
+            if row.binding_id == self.request.writer_binding_id
+        )
+        self.store.write_secret_binding(
+            binding.model_copy(update={"updated_at": "2026-10-16T11:00:00Z"})
+        )
         backup = self.capture(policy, "second-release-backup")
         adapter = RecipientCutoverAdapter(
             self.fixture.root,
@@ -567,7 +628,18 @@ class RecipientCutoverTests(unittest.TestCase):
         self.run_release()
         record = custody(self.store, self.record.product, self.record.context)
         assert record is not None
-        future = datetime.now(UTC) + timedelta(days=365)
+        maximum = max(
+            self.destination_policy.fast_snapshot.max_evidence_age_seconds,
+            self.destination_policy.independent_backup.max_evidence_age_seconds,
+        )
+        future = max(
+            datetime.now(UTC) + timedelta(seconds=maximum + 1),
+            *(
+                datetime.fromisoformat(row["review_after"].replace("Z", "+00:00"))
+                + timedelta(seconds=1)
+                for row in record.activation["source_records"]
+            ),
+        )
 
         class FutureDate(datetime):
             @classmethod
@@ -695,7 +767,7 @@ class RecipientCutoverTests(unittest.TestCase):
         def unknown(*args: Any, **kwargs: Any) -> None:
             if kwargs.get("old") and kwargs.get("action") == "pause":
                 pauses.append("pause")
-                kwargs["checkpoint"]("post_deploy_schedule_trigger")
+                kwargs["checkpoint"](ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
                 self.old_running = False
                 raise TimeoutError("host pause response lost")
             if kwargs.get("action") in {"resume", "receipt_pause"}:
@@ -761,3 +833,140 @@ class RecipientCutoverTests(unittest.TestCase):
         )
         self.assertFalse(replacement.execution)
         self.assertFalse(replacement.activation)
+
+    def test_terminal_host_rollback_can_finish_its_journal_after_a_lost_write(self) -> None:
+        original = self.store.write_production_recipient
+        failed: list[bool] = []
+
+        def lose_final_write(**kwargs: Any) -> None:
+            if kwargs["replacement"]["phase"] == "rolled_back" and not failed:
+                failed.append(True)
+                self.store.write_product_profile_record(
+                    self.fixture.profile.model_copy(update={"updated_at": "2026-10-16T11:00:00Z"})
+                )
+                raise RuntimeError("rollback journal reply lost")
+            original(**kwargs)
+
+        with (
+            patch.object(self.store, "write_production_recipient", side_effect=lose_final_write),
+            patch(
+                "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
+                return_value=HealthcheckEvidence(status="fail"),
+            ),
+        ):
+            self.assertEqual(self.run_release().response_status_code, 409)
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+        result = self.run_release()
+        self.assertEqual(result.response_status_code, 202, result.response_payload)
+        self.assertEqual(result.response_payload["result"]["promotion_status"], "fail")
+        self.assertEqual(self.deploys, 1)
+        self.assertEqual(self.actions.count(("pause", True)), 1)
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        self.assertEqual(current.phase, "rolled_back")
+
+    def test_inverse_preflight_peer_refusal_can_retry_under_the_same_key(self) -> None:
+        from control_plane.production_recipient_inverse import RecipientInverseAdapter
+
+        self.run_release()
+
+        def inverse() -> Any:
+            current = custody(self.store, self.record.product, self.record.context)
+            assert current is not None
+            adapter = RecipientInverseAdapter(
+                self.fixture.root, self.store, current, self.adapter.trace_id, self.validate_release
+            )
+            return run_durable_provider_operation(
+                store=self.store,
+                scope="client-release",
+                route_path="/fixture/inverse",
+                idempotency_key="same-inverse",
+                request_fingerprint="d" * 64,
+                lease_owner="inverse",
+                response_trace_id="launchplane_req_inverse",
+                adapter=adapter,
+            )
+
+        def running_peer(root: Any, store: Any, record: Any, checkpoint: Any) -> None:
+            checkpoint(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
+            raise ValueError("peer is running")
+
+        with (
+            patch(
+                "control_plane.production_recipient_inverse.writer_action", side_effect=self.writer
+            ),
+            patch(
+                "control_plane.production_recipient_inverse._verify_health_evidence_with_identity",
+                side_effect=self.health,
+            ),
+        ):
+            with patch(
+                "control_plane.production_recipient_inverse.require_peers_parked",
+                side_effect=running_peer,
+            ):
+                self.assertEqual(inverse().response_status_code, 409)
+            current = custody(self.store, self.record.product, self.record.context)
+            assert current is not None
+            self.assertEqual(current.phase, "published")
+            self.assertTrue(self.new_running)
+            self.assertEqual(inverse().response_status_code, 202)
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+
+    def test_reviewed_native_inverse_works_without_minting_a_client_release_step(self) -> None:
+        from control_plane.production_recipient_inverse import (
+            RecipientInverseAdapter,
+            RecipientInverseRequest,
+            inverse_plan,
+            INVERSE_ROUTE,
+        )
+        from control_plane.integration_allowances import canonical_sha256
+
+        self.run_release()
+        current = custody(self.store, self.record.product, self.record.context)
+        assert current is not None
+        request = RecipientInverseRequest(
+            context=current.context,
+            preparation_plan_sha256=current.plan_sha256,
+            publication_sha256=current.publication["published_sha256"],
+            reason="Restore only this publication's unchanged rows and retained writer",
+        )
+        plan = inverse_plan(self.store, current, request)
+        request = request.model_copy(
+            update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+        )
+        adapter = RecipientInverseAdapter(
+            self.fixture.root,
+            self.store,
+            current,
+            "native-inverse",
+            self.validate_release,
+            request=request,
+        )
+        with (
+            patch(
+                "control_plane.production_recipient_inverse.writer_action", side_effect=self.writer
+            ),
+            patch(
+                "control_plane.production_recipient_inverse._verify_health_evidence_with_identity",
+                side_effect=self.health,
+            ),
+        ):
+            result = run_durable_provider_operation(
+                store=self.store,
+                scope="native-admin",
+                route_path=INVERSE_ROUTE.format(product=current.product),
+                idempotency_key="reviewed-inverse",
+                request_fingerprint=canonical_sha256(request.model_dump(mode="json")),
+                lease_owner="native-inverse",
+                response_trace_id="launchplane_req_native_inverse",
+                adapter=adapter,
+            )
+        self.assertEqual(result.response_status_code, 202, result.response_payload)
+        payload = result.response_payload["result"]
+        assert isinstance(payload, dict)
+        self.assertTrue(payload["completed"])
+        self.assertEqual(payload["plan_sha256"], plan.plan_sha256)
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)

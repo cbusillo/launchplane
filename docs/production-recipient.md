@@ -217,9 +217,20 @@ intent binds all current authority, consumer bindings and managed versions. Befo
 execution, a fresh reviewed intent can replace an expired destination capture;
 every earlier intent stays in custody history. Once execution begins its admitted
 intent stays fixed, and recovery does not expire the already-admitted destination
-capture while resolving that execution.
+capture while resolving that admitted release, including its drill's resume of
+the same already-bootstrapped recipient. The fresh source-backup gate and live
+identity, readiness, resource and upstream checks still apply.
 Source backup and destination capture must be current; the isolated recipient
 recovery proof is also required. Capture alone does not qualify recovery.
+
+The bounded custody result includes `publication_sha256` after publication.
+`--inverse` uses that digest, the preparation digest and context to review and apply
+`POST /v1/products/{product}/production-recipient/inverse` through existing production
+rollback authority. It works independently of whether this release has a drill.
+Apply requires its saved exact review and original inverse key; terminal agents
+cannot apply. It never grants authority or starts a new release. An operator
+inverse ends this generation's automatic forward continuation; a later move needs
+a freshly reviewed generation and the Client accepted-release path.
 
 Only the existing Client accepted-release worker starts bootstrap. It checks the
 exact accepted artifact/commit, live release grant and production backup gate
@@ -251,7 +262,12 @@ product profile's actual testing context, including when it differs from prod.
 Only the recorded application container is stopped or restored; the database and
 unrelated containers remain untouched. A resume restores the witnessed original
 running state. A stopped writer stays stopped. Host terminal witnesses support
-receipt/readback after a lost reply. Missing completion evidence remains unknown.
+receipt/readback after a lost reply. Bounded custody lists the original writer
+operation and binding references, including carried pauses after supersession.
+Historical receipts read the retained host witness even if the provider target
+was removed; they prove the original completion only. Cutover separately checks
+that every current and retained testing peer is parked. Missing completion
+evidence remains unknown.
 
 Rollback stops only the exact replacement application writer and conditionally
 inverts task-owned authority rows, then resumes the retained writer only after
@@ -261,13 +277,15 @@ restored and no data volume is deleted. Backup history receives a new inverse
 revision rather than being rewritten. The release worker and reviewed recovery
 path retain both recipients when a deploy or writer outcome remains uncertain.
 `--release-recovery` reviews and resumes an existing Client release step with its
-original decision, kind, attempt and exact idempotency key. It cannot invent a
+original decision, kind and attempt. Planning returns the existing original
+idempotency key; apply takes it from the saved review rather than minting a key. It cannot invent a
 step or bypass acceptance, backup gates, leases or terminal provider evidence.
 
 ## Retained original-key continuation
 
-After an unknown create or authority drift, read `custody` under the original
-preparer, caller scope and preparation key. This read intentionally reports the
+After an unknown create or authority drift, authorized product readers can read
+`custody` without borrowing the original preparer's identity. Continuation writes
+retain the original preparer, caller scope and preparation key. This read intentionally reports the
 retained record even when fresh qualification fails; it grants no bootstrap
 eligibility. Use `--continuation` to review that custody digest, the original key,
 a replacement preparation request and a reason. Apply requires the exact saved
@@ -286,14 +304,16 @@ unwitnessed host effects remain fenced until positive terminal evidence exists.
 An active or uncertain cutover cannot use preparation supersession as recovery.
 A settled inverse or a refusal before writer dispatch can be reviewed for a new
 generation, retaining its original execution records and fencing every recorded
-recipient or peer host before supersession. Missing writer completion evidence
+recipient or peer host before supersession. Unknown testing-writer operations require a positive retained terminal receipt
+before adoption, and that receipt stays in continuation history. Missing writer completion evidence
 never proves that a queued pause cannot still run. The original release recovery
 keeps that fence until positive terminal evidence exists.
 
 Host custody lives under `/var/lib/launchplane/recipient-execution/<namespace>/`
 and `/var/lib/launchplane/recipient-writers/<binding>/`. Execution tombstones and
 writer witnesses are fsynced and retained. A permanent writer-release marker
-rejects delayed pauses after restoration. Preserve these directories and recovery
+rejects delayed pauses after restoration. A repeated resume never starts a
+container again, so an older resume cannot undo a later pause. Preserve these directories and recovery
 archives through host maintenance and rollback; removing them would remove the
 late-worker fence. There is no automatic host-custody or old-volume cleanup.
 Retirement remains a separate scoped operation after the successful-cutover

@@ -46,12 +46,22 @@ def recover_release_step(
     original_key: str,
 ) -> RecipientReleaseRecoveryPlan:
     record = custody(store, product, request.context)
-    covered = releases._covering_decision(
-        store, product, decision_record_id=request.decision_record_id
-    )
-    if record is None or record.plan_sha256 != request.preparation_plan_sha256 or covered is None:
-        raise ValueError("Retain the original recipient and current Client release decision.")
-    profile, decision = covered
+    if record is None or record.plan_sha256 != request.preparation_plan_sha256:
+        raise ValueError("Retain the original recipient generation.")
+    if request.mode == "apply":
+        covered = releases._covering_decision(
+            store, product, decision_record_id=request.decision_record_id
+        )
+        if covered is None:
+            raise ValueError("The Client decision no longer admits this release step.")
+        profile, decision = covered
+    else:
+        profile = store.read_product_profile_record(product)
+        decision = store.read_release_review_decision_record(
+            product=product, record_id=request.decision_record_id
+        )
+        if decision.product != product:
+            raise ValueError("The decision belongs to another product.")
     if profile.driver_id != "generic-web" or releases._prod_context(profile) != request.context:
         raise ValueError("The release belongs to another product lane.")
     step = releases.ClientReleaseStep(request.kind, request.attempt)
@@ -66,8 +76,23 @@ def recover_release_step(
     reservation = store.read_idempotency_record(
         scope=releases.CLIENT_RELEASE_IDEMPOTENCY_SCOPE, route_path=route, idempotency_key=key
     )
-    if reservation is None or original_key != key:
-        raise ValueError("Only the existing original release operation can be reconciled.")
+    from control_plane.production_recipient_cutover import cutover_reconciliation_key
+    from control_plane.production_recipient_inverse import inverse_reconciliation_key
+
+    expected_reconciliation = (
+        cutover_reconciliation_key(record.plan_sha256)
+        if request.kind == "promote"
+        else inverse_reconciliation_key(record.plan_sha256)
+    )
+    if (
+        reservation is None
+        or (original_key or request.mode == "apply")
+        and original_key != key
+        or reservation.reconciliation_key != expected_reconciliation
+    ):
+        raise ValueError(
+            "Only the existing original recipient release operation can be reconciled."
+        )
     digest = canonical_sha256(
         {
             "request": request.model_dump(mode="json", exclude={"mode", "reviewed_plan_sha256"}),

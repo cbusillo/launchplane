@@ -1,3 +1,5 @@
+from control_plane.production_recipient_evidence import EXECUTION_FENCE_MARKER
+
 """Durable host tombstones fence queued workers before retiring their namespace."""
 
 HOST_FENCE_LIBRARY = r"""
@@ -62,5 +64,7 @@ RETIRE_EXECUTION_PROGRAM = (
     HOST_FENCE_LIBRARY
     + "\n_spec=json.loads(base64.b64decode(sys.argv[1],validate=True))\n"
     + "with recipient_execution(_spec,retire=True):\n"
-    + "    print('recipient_execution_fenced='+_spec['binding'])\n"
+    + "    print("
+    + repr(EXECUTION_FENCE_MARKER)
+    + "+'='+_spec['binding'])\n"
 )

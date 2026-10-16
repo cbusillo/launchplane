@@ -13,6 +13,7 @@ from control_plane.contracts.production_recipient import ProductionRecipientReco
 from control_plane.dokploy import api, post_deploy, source
 from control_plane.production_recipient_resources import RESOURCE_LIBRARY
 from control_plane.production_recipient_fence import fenced_program
+from control_plane.production_recipient_evidence import EXECUTION_FENCE_MARKER
 
 
 class RecipientProbeCleanupError(RuntimeError):
@@ -28,6 +29,7 @@ def run_recipient_program(
     *,
     scrub_guard: Callable[[], None] | None = None,
     retire_execution: bool = False,
+    custodied_read: bool = False,
 ) -> dict[str, str]:
     if retire_execution:
         from control_plane.production_recipient_fence import RETIRE_EXECUTION_PROGRAM
@@ -37,9 +39,34 @@ def run_recipient_program(
             "binding": record.plan_sha256,
         }:
             raise ValueError("Only the fixed namespace retirement fence can bypass execution.")
+    if custodied_read:
+        from control_plane.production_recipient_cutover import (
+            WRITER_RECEIPT_PROGRAM,
+            WRITER_PROGRAM,
+        )
+
+        if (
+            retire_execution
+            or not spec.get("inspect")
+            or not (
+                program == WRITER_RECEIPT_PROGRAM
+                and spec.get("action") in {"receipt_pause", "receipt_resume"}
+                or program == WRITER_PROGRAM
+                and spec.get("action") == "parked"
+            )
+        ):
+            raise ValueError("Custodied host access permits only fixed writer reads.")
     host, token = source.read_dokploy_config(control_plane_root=root)
-    payload = api.fetch_dokploy_target_payload(
-        host=host, token=token, target_type="compose", target_id=record.target_id
+    payload: api.JsonObject = (
+        {
+            "composeId": record.target_id,
+            "serverId": record.request.destination_server_id,
+            "appName": record.app_name,
+        }
+        if retire_execution or custodied_read
+        else api.fetch_dokploy_target_payload(
+            host=host, token=token, target_type="compose", target_id=record.target_id
+        )
     )
     if str(payload.get("serverId") or "") != record.request.destination_server_id:
         raise ValueError("Recipient destination changed.")
@@ -88,7 +115,7 @@ def run_recipient_program(
         + "]\n"
         + (
             program
-            if retire_execution
+            if retire_execution or custodied_read
             else fenced_program(program, record.namespace, record.plan_sha256)
         )
         + "\nLP_QUALIFY\n",
@@ -112,7 +139,7 @@ def run_recipient_program(
             resolved_schedule_execution_timeout_seconds=300,
             before_provider_mutation=checkpoint,
         )
-        if retire_execution and evidence.get("recipient_execution_fenced") == record.plan_sha256:
+        if retire_execution and evidence.get(EXECUTION_FENCE_MARKER) == record.plan_sha256:
             for old in api.list_dokploy_schedules(
                 host=host, token=token, target_id=lookup, schedule_type=kind
             ):

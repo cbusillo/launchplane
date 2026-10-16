@@ -1,6 +1,6 @@
 """Writer-control receipts support repeatable cycles against actual fixed host code."""
 
-from contextlib import redirect_stdout
+from contextlib import redirect_stdout, nullcontext
 import io
 import json
 from typing import Any, Literal
@@ -14,6 +14,7 @@ from control_plane.production_recipient_writer_control import (
     WRITER_ROUTE,
 )
 from control_plane.production_recipient_cutover import WRITER_LIBRARY
+from control_plane.dokploy.post_deploy import ODOO_POST_DEPLOY_SCHEDULE_TRIGGER
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.integration_allowances import canonical_sha256
 from tests import test_production_recipient_cutover as cutover_fixtures
@@ -32,6 +33,17 @@ class RecipientWriterControlTests(unittest.TestCase):
             original()
             case = self.fixture.publication_case
             f = case.fixture
+            f.profile = f.profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(update={"context": lane.context + "-testing-peer"})
+                        if lane.instance == "testing"
+                        else lane
+                        for lane in f.profile.lanes
+                    )
+                }
+            )
+            f.store.write_product_profile_record(f.profile)
             lane = next(lane for lane in f.profile.lanes if lane.instance == "testing")
             target = f.old.model_copy(
                 update={
@@ -105,7 +117,7 @@ class RecipientWriterControlTests(unittest.TestCase):
         self.bindings: list[str] = []
 
     def writer(self, root: Any, record: Any, *, old: bool, action: str, checkpoint: Any) -> None:
-        checkpoint("post_deploy_schedule_trigger")
+        checkpoint(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
         binding = record.execution["writer_binding"]
         self.bindings.append(binding)
         scope: dict[str, Any] = {}
@@ -116,7 +128,14 @@ class RecipientWriterControlTests(unittest.TestCase):
                 base=self.host.root / "writer-custody",
             )
 
-    def run_action(self, key: str, action: Literal["pause", "resume"], pause: str = "") -> Any:
+    def run_action(
+        self,
+        key: str,
+        action: Literal["pause", "resume"],
+        pause: str = "",
+        *,
+        disposable: bool = True,
+    ) -> Any:
         f = self.fixture
         request = RecipientWriterRequest(
             context=f.record.context,
@@ -134,7 +153,9 @@ class RecipientWriterControlTests(unittest.TestCase):
             update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
         )
         with (
-            patch("control_plane.production_recipient_writer_control.require_disposable_lane"),
+            patch("control_plane.production_recipient_writer_control.require_disposable_lane")
+            if disposable
+            else nullcontext(),
             patch(
                 "control_plane.production_recipient_writer_control.writer_action",
                 side_effect=self.writer,
@@ -166,3 +187,78 @@ class RecipientWriterControlTests(unittest.TestCase):
         self.assertEqual(self.bindings[2], self.bindings[3])
         self.assertNotEqual(self.bindings[0], self.bindings[2])
         self.assertEqual(self.host.effects, ["stop", "start", "stop", "start"])
+
+    def test_carried_pause_can_restore_its_writer_after_original_key_supersession(self) -> None:
+        from control_plane.production_recipient import custody
+        from control_plane.production_recipient_continuation import (
+            RecipientContinuationRequest,
+            continuation_plan,
+            supersede_recipient,
+        )
+
+        first = self.run_action("pause-before-drift", "pause")
+        f = self.fixture
+        current = custody(f.store, f.record.product, f.record.context)
+        assert current is not None
+        f.store.write_product_profile_record(
+            f.fixture.profile.model_copy(update={"updated_at": "2026-10-16T11:00:00Z"})
+        )
+        request = RecipientContinuationRequest(
+            context=current.context,
+            original_key=current.original_key,
+            expected_custody_sha256=canonical_sha256(current.model_dump(mode="json")),
+            replacement=current.request.model_copy(
+                update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+            ),
+            reason="Retain and fence the original namespace after drift",
+        )
+        draft = continuation_plan(
+            f.fixture.root, f.store, current.product, request, current.actor, current.scope
+        )[2]
+        with patch(
+            "control_plane.production_recipient_continuation.run_recipient_program",
+            return_value={"recipient_execution_fenced": current.plan_sha256},
+        ):
+            supersede_recipient(
+                f.fixture.root,
+                f.store,
+                current.product,
+                request.model_copy(
+                    update={"mode": "apply", "reviewed_plan_sha256": draft["plan_sha256"]}
+                ),
+                current.actor,
+                current.scope,
+                lambda _phase: None,
+            )
+        replacement = custody(f.store, current.product, current.context)
+        assert replacement is not None
+        self.assertFalse(replacement.activation)
+        self.assertTrue(replacement.writer_custody)
+        f.record = replacement
+        self.run_action("restore-carried-pause", "resume", first["pause_operation_id"])
+        self.assertTrue(self.host.row["State"]["Running"])
+
+    def test_budget_allows_parking_a_peer_and_refuses_resuming_it(self) -> None:
+        from control_plane.production_recipient import custody
+
+        f = self.fixture
+        current = custody(f.store, f.record.product, f.record.context)
+        assert current is not None
+        f.store.write_production_recipient(
+            expected=current.model_dump(mode="json"),
+            replacement=current.model_copy(update={"phase": "bootstrapping"}).model_dump(
+                mode="json"
+            ),
+        )
+        first = self.run_action("park-under-budget", "pause")
+        self.assertFalse(self.host.row["State"]["Running"])
+        with self.assertRaises(ValueError):
+            self.run_action("resume-under-budget", "resume", first["pause_operation_id"])
+        self.assertFalse(self.host.row["State"]["Running"])
+        self.assertEqual(self.host.effects, ["stop"])
+
+    def test_missing_disposable_evidence_refuses_before_any_writer_effect(self) -> None:
+        with self.assertRaises(ValueError):
+            self.run_action("unqualified-pause", "pause", disposable=False)
+        self.assertTrue(self.host.row["State"]["Running"])
+        self.assertEqual(self.host.effects, [])
