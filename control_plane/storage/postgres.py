@@ -26537,6 +26537,107 @@ class PostgresRecordStore(HumanSessionStore):
     def write_route_binding_record(self, record: EnvironmentRouteBindingRecord) -> None:
         self._write_row(self._route_binding_row(record))
 
+    def publish_testing_public_ingress_binding(
+        self,
+        *,
+        expected: dict[str, object],
+        replacement: EnvironmentRouteBindingRecord,
+        audit: IngressRouteAuditRecord,
+    ) -> None:
+        """CAS every reviewed source with the testing-only edge authority publication."""
+        from control_plane.odoo_testing_restore import generation_binding
+
+        if (
+            replacement.instance != "testing"
+            or replacement.product != audit.product
+            or replacement.context != audit.context
+            or replacement.source.source_kind != "service"
+            or replacement.ingress.provider != audit.provider
+            or replacement.ingress.endpoint_key != audit.edge_endpoint_key
+            or replacement.ingress.endpoint_key
+            != EdgeEndpointRecord.model_validate(expected["endpoint"]).endpoint_key
+            or replacement.ingress.provider_evidence.get("audit_record") != audit.record_id
+            or replacement.tls.owner != audit.tls_owner
+            or replacement.tls.provider_evidence.get("provider_certificate_ref")
+            != audit.provider_certificate_ref
+            or audit.status != "applied"
+            or audit.testing_generation_sha256 != expected["generation"]
+            or not audit.testing_authority_sha256
+            or audit.requested_domains != tuple(d.domain_name for d in replacement.domains)
+        ):
+            raise ValueError("Testing edge publication cannot change another lane.")
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_route_binding_write(session, binding_key=replacement.binding_key)
+            for orm, model, identity, field in (
+                (
+                    LaunchplaneProductProfileRow,
+                    LaunchplaneProductProfileRecord,
+                    replacement.product,
+                    "profile",
+                ),
+                (
+                    LaunchplaneDokployTargetRow,
+                    DokployTargetRecord,
+                    (replacement.context, "testing"),
+                    "target",
+                ),
+                (
+                    LaunchplaneDokployTargetIdRow,
+                    DokployTargetIdRecord,
+                    (replacement.context, "testing"),
+                    "target_id",
+                ),
+                (
+                    LaunchplaneProviderTargetRow,
+                    ProviderTargetRecord,
+                    (replacement.context, "testing"),
+                    "provider",
+                ),
+                (
+                    LaunchplaneRouteBindingRow,
+                    EnvironmentRouteBindingRecord,
+                    (replacement.product, replacement.context, "testing"),
+                    "binding",
+                ),
+                (
+                    LaunchplaneEdgeEndpointRow,
+                    EdgeEndpointRecord,
+                    replacement.ingress.endpoint_key,
+                    "endpoint",
+                ),
+            ):
+                row = session.get(orm, identity, with_for_update=True)
+                if (
+                    row is None
+                    or model.model_validate(getattr(row, "payload", None)).model_dump(
+                        mode="json", exclude_none=True
+                    )
+                    != expected[field]
+                ):
+                    raise ValueError("Testing edge authority changed before publication.")
+            generation_row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow,
+                (replacement.product, replacement.context),
+                with_for_update=True,
+            )
+            if (
+                generation_row is None
+                or generation_binding(
+                    FreshOdooTestingGeneration.model_validate(generation_row.payload)
+                )
+                != expected["generation"]
+            ):
+                raise ValueError("The reviewed testing generation changed.")
+            audit_row = session.get(
+                LaunchplaneIngressRouteAuditRow, audit.record_id, with_for_update=True
+            )
+            if audit_row is None or audit_row.payload != self._payload_dict(audit):
+                raise ValueError("Testing edge audit changed before publication.")
+            session.merge(self._route_binding_row(replacement))
+            session.commit()
+
     def reconcile_route_binding_record(
         self,
         *,

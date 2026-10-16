@@ -734,6 +734,91 @@ generation, key and copy custody; do not edit its digest or invent a safe-releas
 attestation. A forward fix for new journals does not establish recovery of an
 already stranded legacy operation.
 
+### Continue a restored generation's public edge
+
+An independent Dokploy hostname does not provision its public edge. With a
+separate TLS-terminating proxy, origin ACME HTTP-01 can hit that proxy's default
+host instead of the origin: HTTP redirects to HTTPS, the default certificate
+fails public verification, and the challenge returns 404. Qualify DNS, the
+effective edge host and origin evidence before changing anything. A healthy
+container does not prove public TLS.
+
+`POST /v1/products/{product}/testing-public-ingress` supplies the bounded
+Director-agent continuation for the **current** fresh Odoo testing generation.
+It uses the same Director-agent identity boundary as testing preparation;
+generic instance ingress remains adoption-only, and no policy grant, credential,
+workflow or broader ingress authority is added. The request names only the
+product, context and original generation operation, reason and mode. It accepts
+no hostname, provider ID, upstream, certificate, raw config or source-copy input.
+
+The service derives the new domain from the current generation/profile/target,
+and its edge from the lane's existing active service-owned NPMplus binding.
+Live provider placement must agree with that recorded endpoint. The existing
+edge host must be public, enabled, free of custom locations/config/access
+controls, and use an existing unexpired certificate covering the new domain.
+The only allowed template config is this operation's own audited identity
+comment. Its generated comment is preserved by the current provider API;
+legacy `meta` is neither accepted on writes nor returned by that API.
+Fresh provider reads must show loaded Nginx configuration and no private TLS,
+extra location/directory config or authentication upstream before publication
+and during readback.
+Only that certificate's public metadata is read; DNS credentials and private
+keys never leave the provider. No certificate is issued by this operation.
+Unknown placement, certificate coverage, foreign/wildcard edge authority,
+staff hold, shared target or changed records refuse the operation. Missing
+prerequisites are reported, not repaired through another identity or provider.
+
+```bash
+uv run python scripts/prepare-testing-public-ingress.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product example-odoo --context example \
+  --operation-id original-testing-generation-operation \
+  --reason 'Publish the current restored testing hostname at its existing edge' \
+  --evidence-file /private/operator-evidence/testing-public-ingress.json
+```
+
+After reviewing the receipt, use `apply` with exactly the same inputs and
+private evidence, `--reviewed-dry-run` and one stable `--idempotency-key`. Then
+use `readback` with that same evidence. The deployed API must include this
+capability and use PostgreSQL fencing; running the client from a newer checkout
+does not activate it. Keep the original bootstrap/resource requests, keys,
+generation and copy-capture witness. The operation creates only the new exact
+edge host, writes its audit and compare-and-writes the testing route binding
+against every reviewed source. It preserves the profile, origin routes,
+targets, storage, passwords, restored database and capture records.
+
+Recovery is forward-only under the original edge key: a lost create response
+can adopt only the exact provider route carrying the reviewed plan's marker.
+That marker is a generated Nginx comment, with no directives or caller-supplied
+config. The service also refuses active redirection/404 host claims before
+creation. Provider legacy protocol settings must retain their supported
+defaults; enable/disable remains the provider's separate lifecycle operation.
+Existing disabled hosts retain that state during updates and can use the normal
+lifecycle endpoints. The provider always creates hosts enabled, so a request
+to create a disabled host refuses before transport rather than briefly exposing
+it. This continuation deliberately publishes an enabled public testing route.
+Its pending audit binds the generation, route authority and exact provider
+payload, so certificate renewal with the same ID and unrelated metadata refresh
+do not strand adoption. Meaningful authority or payload drift still refuses;
+publication revalidates current records and uses a fresh compare-and-write.
+An absent or foreign route after a dispatched create stays unknown and is
+never created again. `readback` checks actual route, certificate and binding;
+a terminal apply replay is historical evidence, not a fresh health check.
+Do not issue a new key, edit records, replay bootstrap/restore, recapture data,
+change the origin certificate policy, or dismiss an incident to resolve TLS.
+Retain private review/receipts outside the checkout for same-key recovery.
+The retained edge host and its certificate are not changed or removed.
+
+Existing provider certificate renewal remains its maintenance path. A changed
+certificate ID or route is drift requiring the supported ingress maintenance
+path and fresh review; this create-only continuation never updates, disables
+or deletes a host. No global proxy restart or verification setting changes.
+After edge publication the operational parent still proves strict public
+HTTPS, exact runtime identity and monitor-driven incident resolution through
+the existing service checks. `public_health_verified` remains false in these
+configuration receipts; source tests or private HTTP success cannot clear the
+real incident.
+
 ### Retire an incomplete legacy generation into custody
 
 When the original full authority preimage is unavailable, a Director agent can
