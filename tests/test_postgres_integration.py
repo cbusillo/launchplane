@@ -12449,6 +12449,8 @@ class RealPostgresNeverServedTests(unittest.TestCase):
                     fixture.doCleanups()
 
     def test_concurrent_dispatch_revocation_cannot_leave_a_published_negative(self) -> None:
+        import psycopg
+
         from tests.test_testing_never_served import NeverServedTestingTests
         from tests.support.disposable_lanes import record_safety
         from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
@@ -12473,7 +12475,6 @@ class RealPostgresNeverServedTests(unittest.TestCase):
             )
             assert evidence is not None
             reading = threading.Event()
-            writing = threading.Event()
             release = threading.Event()
             read_original = fixture.store.read_testing_non_use_records
             lock_original = second._lock_product_authority_bundle_write
@@ -12486,7 +12487,10 @@ class RealPostgresNeverServedTests(unittest.TestCase):
                 return result
 
             def observe_writer(session: Any) -> None:
-                writing.set()
+                session.execute(
+                    text("SELECT set_config('lock_timeout', :timeout, true)"),
+                    {"timeout": LOCK_WAIT_TIMEOUT},
+                )
                 lock_original(session)
 
             with (
@@ -12506,14 +12510,18 @@ class RealPostgresNeverServedTests(unittest.TestCase):
                     revoke = pool.submit(
                         second.invalidate_testing_non_use, fixture.product, fixture.context
                     )
-                    self.assertTrue(writing.wait(10))
+                    with self.assertRaises(OperationalError) as blocked:
+                        revoke.result(timeout=10)
+                    self.assertIsInstance(blocked.exception.orig, psycopg.errors.LockNotAvailable)
                 finally:
                     release.set()
                 self.assertTrue(publish.result(timeout=10))
-                revoke.result(timeout=10)
+            second.invalidate_testing_non_use(fixture.product, fixture.context)
             self.assertIsNone(
                 fixture.store.read_disposable_lane_safety(
                     fixture.product, fixture.context, "testing"
                 )
             )
             self.assertEqual(fixture.read().usage, "unknown")
+            # The reverse order must refuse the stale negative, too.
+            self.assertFalse(fixture.store.publish_collected_disposable_lane_safety(evidence))

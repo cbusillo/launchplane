@@ -42,6 +42,7 @@ from control_plane.odoo_target_replacement_apply_http import (
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     generation_binding,
+    generation_snapshot_matches,
     read_current_testing_generation,
 )
 from control_plane.odoo_testing_drill_usage import (
@@ -174,9 +175,7 @@ def collect_drill_admission(
     current = read_current_testing_generation(
         store, product=generation.product, context=generation.context, instance="testing"
     )
-    if current is None or current.model_dump(
-        exclude={"non_use_invalidated"}
-    ) != generation.model_dump(exclude={"non_use_invalidated"}):
+    if not generation_snapshot_matches(current, generation):
         raise DrillSkipped("drill_admission_snapshot_changed")
     try:
         used = read_drill_recent_signins(

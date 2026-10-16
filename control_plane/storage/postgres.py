@@ -150,7 +150,10 @@ from control_plane.contracts.disposable_lane import (
     DisposableTestingReplacementPreparation,
     DisposableTestingResourcePreparation,
 )
-from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
+from control_plane.odoo_testing_restore import (
+    FreshOdooTestingGeneration,
+    generation_snapshot_matches,
+)
 from control_plane.contracts.odoo_testing_source import NativeTestingCopyCapture
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.durable_operation_authorization import (
@@ -11547,9 +11550,7 @@ class PostgresRecordStore(HumanSessionStore):
             if row is None:
                 raise ValueError("Fresh testing generation is unavailable.")
             current = FreshOdooTestingGeneration.model_validate(row.payload)
-            if current.model_dump(exclude={"non_use_invalidated"}) != generation.model_dump(
-                exclude={"non_use_invalidated"}
-            ):
+            if not generation_snapshot_matches(current, generation):
                 raise ValueError("Fresh testing generation changed before queueing.")
             operation = session.get(
                 LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id

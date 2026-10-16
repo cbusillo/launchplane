@@ -260,6 +260,15 @@ def generation_binding(generation: FreshOdooTestingGeneration) -> str:
     return canonical_json_sha256(generation_identity_payload(generation))
 
 
+def generation_snapshot_matches(
+    current: FreshOdooTestingGeneration | None, expected: FreshOdooTestingGeneration
+) -> bool:
+    """Monotonic non-use revocation is protection, not a new execution plan."""
+    return current is not None and current.model_dump(
+        exclude={"non_use_invalidated"}
+    ) == expected.model_dump(exclude={"non_use_invalidated"})
+
+
 def generation_identity_payload(generation: FreshOdooTestingGeneration) -> dict[str, object]:
     payload = generation.model_dump(
         mode="json",

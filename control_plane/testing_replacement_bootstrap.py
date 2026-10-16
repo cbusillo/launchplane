@@ -36,6 +36,7 @@ from control_plane.odoo_testing_restore import (
     TestingCredentialsOverlap,
     TestingCredentialVersionsMissing,
     generation_binding,
+    generation_snapshot_matches,
     encoded_restore_source,
     FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
     FRESH_TESTING_OMITTED_SETTINGS,
@@ -431,7 +432,7 @@ class TestingReplacementBootstrapAdapter:
             self.store, product=self.product, context=self.request.context, instance="testing"
         )
         if (
-            current != generation
+            not generation_snapshot_matches(current, generation)
             or not generation.reconcile_requested_at
             or not self._domains(generation)
         ):
