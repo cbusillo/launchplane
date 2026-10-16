@@ -86,30 +86,21 @@ the readback must exactly match its name, cron expression, type, shell,
 command, application id, enabled state, and timezone. Duplicate managed names
 for one application fail closed instead of being selected arbitrarily.
 
-VeriReel uses one deterministic `verireel-billing-recovery` schedule per
-application:
+Testing and preview maintenance and billing commands are product-profile
+declarations under the [generic-web lifecycle](driver-development.md#profile-maintenance-and-explicit-testing-reset).
+Launchplane pauses owned schedules before changing the image, runs maintenance,
+checks health, and canaries enabled jobs before activation. Pre-image failure
+restores the baseline only with proved application restoration. After an image
+effect, failure holds jobs disabled. Preview refresh saves the same deployment
+receipts used by stable lanes, so removing or renaming a declaration pauses and
+removes the previous job without touching unrelated provider schedules. Preview
+destroy removes the application and its attached schedules together.
 
-- stable testing runs at `2,17,32,47 * * * *` UTC and stable prod at
-  `7,22,37,52 * * * *` UTC, keeping the long-lived lanes on a staggered
-  15-minute cadence;
-- preview runs at `12,27,42,57 * * * *` UTC through the same authenticated
-  recovery endpoint, while VeriReel's runtime identity and preview build
-  checks restrict execution to commission maturity only;
-- stable deploy and prod promotion quiesce an existing schedule before the
-  provider mutation, restore its previous enabled state after a failed deploy,
-  migration, or canary/health check, and enable the reconciled schedule only
-  after a disabled-schedule canary succeeds;
-- preview refresh follows the same quiesce/restore behavior, creates or
-  refreshes the schedule only after preview health succeeds, and removes the
-  exact managed schedule before deleting the preview application.
-
-The managed command invokes VeriReel's in-image cron wrapper over loopback. The
-wrapper reads `VERIREEL_CRON_SECRET` from the application environment, sends it
-as the bearer credential without placing its value in the schedule spec, and
-treats a processor-lock overlap as a successful skipped execution. Before
-production enablement, prove against testing that Dokploy automatically fires
-two consecutive schedule runs, the app records `CRON` as the trigger, and no
-secret value appears in the schedule spec or captured output.
+Command timeouts belong to each profile declaration. Dispatch is attempted once:
+a timeout or ambiguous schedule result is not authority to replay a potentially
+completed migration. A caller can retry through the recorded operation's
+supported recovery after resolving its provider state. Production declarations
+and schedules are outside this nonproduction conversion.
 
 Create a product-specific driver only when the service needs behavior beyond
 this contract, such as data migrations, product-specific smoke checks,

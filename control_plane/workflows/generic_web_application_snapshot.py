@@ -101,6 +101,7 @@ def application_snapshot_for_deploy(
     proved_pre_image_retry: bool = False,
     rollback_source_deployment_record_id: str = "",
     rollback_target_deployment_record_id: str = "",
+    previous_deployment_record_id: str = "",
 ) -> ApplicationLifecycleSnapshot | None:
     reader = cast(_ApplicationLifecycleStore, store)
 
@@ -147,6 +148,10 @@ def application_snapshot_for_deploy(
                     if previous_record.artifact_identity is not None:
                         previous_artifact = previous_record.artifact_identity.artifact_id
                         previous_source = previous_record.source_git_ref
+    if previous_deployment_record_id and prior is None:
+        prior = read_snapshot(previous_deployment_record_id)
+        if prior is not None:
+            previous_artifact, previous_source = prior.artifact_id, prior.source_git_ref
     receipts: list[ApplicationLifecycleSnapshot] = []
     if callable(getattr(store, "list_deployment_records", None)):
         # A paused attempt may not have deployed an image or written inventory.

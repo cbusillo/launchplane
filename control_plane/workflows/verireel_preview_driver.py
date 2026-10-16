@@ -1128,6 +1128,7 @@ def execute_verireel_preview_refresh(
     request: VeriReelPreviewRefreshRequest,
     preview_id: str = "",
     preview_generation_id: str = "",
+    record_store: object | None = None,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> VeriReelPreviewRefreshResult:
     try:
@@ -1292,6 +1293,7 @@ def execute_verireel_preview_refresh(
         if existing_snapshot is None:
             created_application_id = application_id
         lifecycle = preview_application_lifecycle(
+            record_store=record_store,
             host=host,
             token=token,
             application_id=application_id,

@@ -25,6 +25,7 @@ from control_plane.workflows.generic_web_application_snapshot import (
 from control_plane.workflows.generic_web_application_lifecycle import (
     DokployApplicationLifecycle,
     schedule_payload,
+    preview_application_lifecycle,
 )
 from control_plane.workflows.generic_web_deploy import execute_generic_web_deploy
 from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
@@ -167,6 +168,52 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         self.assertEqual(self.commands[0], reset_command.command)
         self.assertNotIn(self.extensions.maintenance[0].command, self.commands)
         self.assertTrue(self.schedules["billing-recovery"]["enabled"])
+
+    def _preview_lifecycle(
+        self, store: object, extensions: GenericWebLaneExtensions
+    ) -> DokployApplicationLifecycle:
+        return preview_application_lifecycle(
+            host="https://provider.example",
+            token="fixture-token",
+            application_id="app-123",
+            product="sample",
+            context="sample-previews",
+            instance="pr-42",
+            artifact_id="sample-image",
+            source_git_ref="a" * 40,
+            extensions=extensions,
+            record_store=store,
+        )
+
+    def test_removing_a_preview_schedule_pauses_then_removes_previously_owned_job(self) -> None:
+        self._api_context()
+        store = _GenericWebDeployStore(_profile())
+        self.schedules["unrelated-job"] = {**self.original, "name": "unrelated-job"}
+        first = self._preview_lifecycle(store, self.extensions)
+        first.capture()
+        first.prepare()
+        first.maintain()
+        first.complete()
+        self.assertTrue(self.schedules["billing-recovery"]["enabled"])
+        next_attempt = self._preview_lifecycle(store, GenericWebLaneExtensions())
+        next_attempt.capture()
+        next_attempt.prepare()
+        self.assertFalse(self.schedules["billing-recovery"]["enabled"])
+        next_attempt.complete()
+        self.assertNotIn("billing-recovery", self.schedules)
+        self.assertTrue(self.schedules["unrelated-job"]["enabled"])
+
+    def test_preview_receipt_storage_failure_cannot_pause_a_job(self) -> None:
+        self._api_context()
+        store = _GenericWebDeployStore(_profile())
+        lifecycle = self._preview_lifecycle(store, self.extensions)
+        with patch.object(
+            store, "write_deployment_record", side_effect=RuntimeError("storage unavailable")
+        ):
+            with self.assertRaises(RuntimeError):
+                lifecycle.capture()
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        self.assertEqual(self.phases, [])
 
     def test_production_reset_is_refused_before_any_schedule_mutation(self) -> None:
         self._api_context()

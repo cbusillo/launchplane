@@ -37,8 +37,6 @@ class GenericWebApplicationSchedule(GenericWebMaintenanceCommand):
 class GenericWebLaneExtensions(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1, le=1)
-
     verification_extension: Literal["", "verireel-testing"] = Field(
         default="",
         exclude_if=lambda value: not value,

@@ -3,7 +3,8 @@
 from dataclasses import dataclass, field
 from pathlib import Path
 from collections.abc import Callable
-from typing import Protocol, runtime_checkable
+from typing import Protocol, runtime_checkable, cast
+from uuid import uuid4
 
 import click
 
@@ -14,7 +15,17 @@ from control_plane.contracts.generic_web_extensions import (
 )
 from control_plane.dokploy import api, source
 from control_plane.dokploy.post_deploy import DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION
-from control_plane.workflows.generic_web_application_snapshot import ApplicationLifecycleSnapshot
+from control_plane.workflows.generic_web_application_snapshot import (
+    ApplicationLifecycleSnapshot,
+    application_snapshot_for_deploy,
+    recorded_application_lifecycle,
+)
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    PostDeployUpdateEvidence,
+)
 
 
 def schedule_payload(
@@ -293,6 +304,69 @@ def dokploy_application_lifecycle(
     return DokployApplicationLifecycle(host, token, target_id, snapshot, checkpoint, effect_started)
 
 
+class _PreviewLifecycleStore(Protocol):
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+    def write_deployment_record(self, record: DeploymentRecord) -> object: ...
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
+
+
+@dataclass
+class RecordedPreviewApplicationLifecycle(DokployApplicationLifecycle):
+    store: _PreviewLifecycleStore | None = None
+    record_id: str = ""
+
+    def _save(self) -> None:
+        if self.store is None:
+            return
+        snapshot = self.snapshot
+        qualified = snapshot.state == "qualified"
+        self.store.write_deployment_record(
+            DeploymentRecord(
+                record_id=self.record_id,
+                artifact_identity=ArtifactIdentityReference(artifact_id=snapshot.artifact_id),
+                context=snapshot.context,
+                instance=snapshot.instance,
+                source_git_ref=snapshot.source_git_ref,
+                delegated_executor="control-plane.preview-application-lifecycle",
+                deploy=DeploymentEvidence(
+                    target_name=self.application_id,
+                    target_type="application",
+                    deploy_mode="preview-lifecycle",
+                    status="pass" if qualified else "pending",
+                    started_at=snapshot.captured_at,
+                ),
+                post_deploy_update=PostDeployUpdateEvidence(
+                    attempted=qualified or self.effect_attempted,
+                    status="pass" if qualified else "fail" if self.effect_attempted else "skipped",
+                    evidence=snapshot.evidence(),
+                ),
+            )
+        )
+
+    def capture(self) -> None:
+        super().capture()
+        # Persist ownership and the full baseline before pausing any job.
+        self._save()
+
+    def complete(self) -> dict[str, str]:
+        evidence = super().complete()
+        self.snapshot.state = "qualified"
+        self._save()
+        return evidence
+
+    def hold(self) -> None:
+        super().hold()
+        self.snapshot.state = "held"
+        self._save()
+
+    def restore(self) -> None:
+        super().restore()
+        self.snapshot.state = "restored"
+        self._save()
+
+
 def preview_application_lifecycle(
     *,
     host: str,
@@ -303,19 +377,64 @@ def preview_application_lifecycle(
     instance: str,
     artifact_id: str,
     source_git_ref: str,
-    extensions: "GenericWebLaneExtensions",
+    extensions: GenericWebLaneExtensions,
+    record_store: object | None = None,
 ) -> DokployApplicationLifecycle:
-    snapshot = ApplicationLifecycleSnapshot(
-        product=product,
-        context=context,
-        instance=instance,
-        provider_id="dokploy",
-        target_id=application_id,
-        artifact_id=artifact_id,
-        source_git_ref=source_git_ref,
-        extensions=extensions,
-        managed_names=tuple(item.name for item in extensions.schedules),
+    can_record = all(
+        callable(getattr(record_store, name, None))
+        for name in ("read_deployment_record", "write_deployment_record", "list_deployment_records")
     )
-    return DokployApplicationLifecycle(
-        host, token, application_id, snapshot, lambda _phase: None, lambda: None
+    if extensions.configured and not can_record:
+        raise click.ClickException(
+            "Preview application lifecycle requires deployment receipt storage."
+        )
+    store = cast(_PreviewLifecycleStore, record_store) if can_record else None
+    record_id = "deployment-preview-lifecycle-" + uuid4().hex
+    snapshot = None
+    if store is not None:
+        previous: list[tuple[ApplicationLifecycleSnapshot, str]] = []
+        for record in store.list_deployment_records(context_name=context, instance_name=instance):
+            receipt = recorded_application_lifecycle(record)
+            if receipt is not None and (
+                receipt.product,
+                receipt.target_id,
+                receipt.provider_id,
+            ) == (product, application_id, "dokploy"):
+                previous.append((receipt, record.record_id))
+        previous_id = max(previous, key=lambda item: item[0].captured_at)[1] if previous else ""
+        snapshot = application_snapshot_for_deploy(
+            store=store,
+            product=product,
+            context=context,
+            instance=instance,
+            provider_id="dokploy",
+            target_id=application_id,
+            artifact_id=artifact_id,
+            source_git_ref=source_git_ref,
+            deployment_record_id=record_id,
+            extensions=extensions,
+            rollback=False,
+            previous_deployment_record_id=previous_id,
+        )
+    if snapshot is None:
+        snapshot = ApplicationLifecycleSnapshot(
+            product=product,
+            context=context,
+            instance=instance,
+            provider_id="dokploy",
+            target_id=application_id,
+            artifact_id=artifact_id,
+            source_git_ref=source_git_ref,
+            extensions=extensions,
+            managed_names=tuple(item.name for item in extensions.schedules),
+        )
+    return RecordedPreviewApplicationLifecycle(
+        host,
+        token,
+        application_id,
+        snapshot,
+        lambda _phase: None,
+        lambda: None,
+        store=store,
+        record_id=record_id,
     )

@@ -10275,13 +10275,6 @@
             "title": "Schedules",
             "type": "array"
           },
-          "schema_version": {
-            "default": 1,
-            "maximum": 1.0,
-            "minimum": 1.0,
-            "title": "Schema Version",
-            "type": "integer"
-          },
           "verification_extension": {
             "default": "",
             "enum": [
@@ -10428,6 +10421,16 @@
             ],
             "title": "Data Transport Mode",
             "type": "string"
+          },
+          "generic_web_extensions": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/GenericWebLaneExtensions"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "transport_database_prefix": {
             "default": "",
@@ -15376,7 +15379,7 @@
             "type": "integer"
           },
           "schema_version": {
-            "default": 1,
+            "default": 2,
             "minimum": 1.0,
             "title": "Schema Version",
             "type": "integer"

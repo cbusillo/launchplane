@@ -93,7 +93,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "intent"):
             VeriReelAppMaintenanceRequest.model_validate({"action": "migrate"})
 
-    def test_rejects_migration_for_preview_context(self) -> None:
+    def test_rejects_retired_migration_action(self) -> None:
         with self.assertRaises(ValueError):
             VeriReelAppMaintenanceRequest.model_validate(
                 {

@@ -13,6 +13,7 @@ from tests.test_generic_web_deploy import _profile
 class ApplicationLifecycleMigrationTests(unittest.TestCase):
     def payload(self) -> dict[str, Any]:
         payload = _profile().model_dump(mode="json")
+        payload["schema_version"] = 1  # Historical stored profile.
         payload["lanes"] = [
             {
                 "context": "sample",
@@ -48,9 +49,15 @@ class ApplicationLifecycleMigrationTests(unittest.TestCase):
         self.assertTrue(profile.preview.generic_web_extensions.maintenance)
         self.assertTrue(profile.preview.generic_web_extensions.schedules)
         self.assertEqual(migrate_product_application_lifecycle_payload(migrated), migrated)
-        # Saving a later operator edit must never restore removed behavior.
-        saved = profile.model_dump(mode="json")
-        saved["lanes"][0]["generic_web_extensions"]["maintenance"] = []
+        # Empty declarations serialize without extension fields. They still must
+        # remain empty after saving and reading the converted schema.
+        saved = profile.model_copy(
+            update={
+                "preview": profile.preview.model_copy(
+                    update={"generic_web_extensions": GenericWebLaneExtensions()}
+                )
+            }
+        ).model_dump(mode="json")
         self.assertEqual(migrate_product_application_lifecycle_payload(saved), saved)
 
     def test_generic_profiles_have_no_product_defaults(self) -> None:

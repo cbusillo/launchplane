@@ -1557,6 +1557,7 @@ def _execute_generic_web_preview_refresh_unserialized(
         if created_application:
             created_application_id = application_id
         lifecycle = preview_application_lifecycle(
+            record_store=record_store,
             host=host,
             token=token,
             application_id=application_id,

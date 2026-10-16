@@ -9,6 +9,7 @@ from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.config_authority_audit import ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
 from control_plane.config_authority_audit import build_config_authority_audit
 from control_plane.config_authority_audit import evaluate_config_authority_gate
 from control_plane.config_authority_audit import render_config_authority_markdown
@@ -3877,9 +3878,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             payload = build_config_authority_audit(control_plane_root=root)
         findings = {finding["key"]: finding for finding in _findings(payload)}
         self.assertEqual(
-            findings["CUSTOMER_AUTH_SECRET"]["allow_reason"], "operator_supplied_runtime_input"
+            findings["CUSTOMER_AUTH_SECRET"]["allow_reason"],
+            ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT,
         )
-        self.assertEqual(findings["OTHER_SECRET"]["classification"], "needs_classification")
+        self.assertFalse(findings["OTHER_SECRET"]["allow_reason"])
 
     def test_product_repo_gate_rejects_managed_secret_binding_fixtures(self) -> None:
         with TemporaryDirectory() as temp_dir:

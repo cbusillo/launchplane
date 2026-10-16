@@ -1,29 +1,35 @@
 """One-time conversion of retired nonproduction extension behavior to declarations."""
 
 from copy import deepcopy
+from control_plane.contracts.product_profile_record import (
+    APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION,
+)
 
 
 def migrate_product_application_lifecycle_payload(payload: object) -> object:
     if not isinstance(payload, dict) or payload.get("driver_id") != "generic-web":
         return payload
+    if payload.get("schema_version", 1) >= APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION:
+        return payload
     migrated = deepcopy(payload)
+    converted = False
     for lane in migrated.get("lanes", []):
         extensions = lane.get("generic_web_extensions", {})
         if (
             lane.get("instance") == "testing"
             and extensions.get("verification_extension") == "verireel-testing"
-            and "schema_version" not in extensions
         ):
+            converted = True
             _convert(extensions, preview=False)
             lane["generic_web_extensions"] = extensions
     preview = migrated.get("preview", {})
     extensions = preview.get("generic_web_extensions", {})
-    if (
-        preview.get("transport_extension") == "verireel-postgres"
-        and "schema_version" not in extensions
-    ):
+    if preview.get("transport_extension") == "verireel-postgres":
+        converted = True
         _convert(extensions, preview=True)
         preview["generic_web_extensions"] = extensions
+    if converted:
+        migrated["schema_version"] = APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION
     return migrated
 
 
@@ -62,4 +68,3 @@ def _convert(extensions: dict[str, object], *, preview: bool) -> None:
                 "timeout_seconds": 180,
             }
         )
-    extensions["schema_version"] = 1

@@ -505,7 +505,9 @@ calls a Launchplane maintenance route.
 Testing lanes and `preview.generic_web_extensions` declare their own maintenance
 commands and recurring schedules. Preview refresh pauses declared schedules,
 runs maintenance after deploying, verifies runtime health, then canaries each
-enabled schedule before enabling it. A failed refresh after an image effect
+enabled schedule before enabling it. Preview deployment receipts preserve owned
+job names and baselines across refreshes, including interrupted attempts and
+removal of declarations. A failed refresh after an image effect
 keeps jobs paused. Destroying the preview application removes its attached jobs.
 
 Commands normally run on deploy. A command with `on_reset: true` runs only when

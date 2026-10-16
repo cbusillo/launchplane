@@ -789,7 +789,6 @@ export type GenericWebLaneDeclaration = {
 export type GenericWebLaneExtensions = {
     maintenance: Array<GenericWebMaintenanceCommand>;
     schedules: Array<GenericWebApplicationSchedule>;
-    schema_version: number;
     verification_extension?: '' | 'verireel-testing';
 };
 
@@ -803,6 +802,7 @@ export type GenericWebMaintenanceCommand = {
 export type GenericWebPreviewDeclaration = {
     app_name_suffix?: string;
     data_transport_mode: 'none' | 'driver';
+    generic_web_extensions?: GenericWebLaneExtensions | null;
     transport_database_prefix?: string;
     transport_extension?: '' | 'verireel-postgres';
 };

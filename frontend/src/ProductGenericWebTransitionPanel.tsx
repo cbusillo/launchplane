@@ -16,6 +16,7 @@ interface Review { request: TransitionRequest; changed: boolean; driverBefore: s
 function declarations(profile: LaunchplaneProductProfileRecord): Declarations {
   return { lanes: profile.lanes.map(lane => ({ context: lane.context, instance: lane.instance, extensions: lane.generic_web_extensions ?? { maintenance: [], schedules: [] } })), preview: {
     data_transport_mode: profile.preview.data_transport_mode,
+    generic_web_extensions: profile.preview.generic_web_extensions,
     transport_extension: profile.preview.transport_extension ?? "",
     transport_database_prefix: profile.preview.transport_database_prefix ?? "",
     app_name_suffix: profile.preview.app_name_suffix ?? "",

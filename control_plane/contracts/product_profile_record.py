@@ -659,10 +659,14 @@ class ProductOwnerProfile(BaseModel):
 ReleaseOnAcceptance = Literal["held", "promote", "promote_with_rollback_drill", "director_standing"]
 
 
+APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION = 2
+CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION = APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION
+
+
 class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: int = Field(default=1, ge=1)
+    schema_version: int = Field(default=CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION, ge=1)
     lifecycle_state: ProductLifecycleState = "active"
     # Unknown existing records require review; only explicit prelaunch records are exempt.
     production_use: Literal["unknown", "prelaunch", "live"] = "unknown"
