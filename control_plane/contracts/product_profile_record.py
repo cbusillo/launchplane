@@ -842,7 +842,6 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError(
                 "Legacy extension writes require a fresh current-schema profile; read the current profile and use the reviewed generic-web transition to preserve or remove declarations explicitly."
             )
-        self.schema_version = max(self.schema_version, CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION)
         for lane in self.lanes:
             for check in lane.health_monitoring.checks:
                 if not check.enabled:
