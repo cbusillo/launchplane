@@ -339,6 +339,15 @@ class AlembicFixtureConfigTests(unittest.TestCase):
 
 
 class RealPostgresOdooUsageTests(unittest.TestCase):
+    def test_observation_time_comes_from_the_shared_database_clock(self) -> None:
+        with _store_for_fresh_head_database() as store:
+            with store._engine.connect() as connection:
+                before = connection.scalar(text("SELECT clock_timestamp()"))
+                observed = store.disposable_lane_observation_time()
+                after = connection.scalar(text("SELECT clock_timestamp()"))
+            self.assertLessEqual(before, observed)
+            self.assertLessEqual(observed, after)
+
     def test_concurrent_collectors_preserve_newer_in_use_evidence(self) -> None:
         from control_plane.contracts.disposable_lane import DisposableLaneSafety
 
@@ -379,6 +388,7 @@ class RealPostgresOdooUsageTests(unittest.TestCase):
         from unittest.mock import MagicMock
         from control_plane.odoo_testing_usage import ODOO_TESTING_USAGE_CONTAINER_PROGRAM
         from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
+        from tests.test_odoo_testing_usage import supported_odoo_argv
 
         with _isolated_postgres_database() as url, TemporaryDirectory() as directory:
             conninfo = (
@@ -417,7 +427,7 @@ class RealPostgresOdooUsageTests(unittest.TestCase):
                     "db_password": "fixture",
                 }
                 process = SimpleNamespace(
-                    read_bytes=lambda: f"odoo\0-c\0{ODOO_WEB_CONFIG_PATH}\0".encode()
+                    read_bytes=lambda: b"\0".join(supported_odoo_argv(str(database))) + b"\0"
                 )
                 env = {
                     "PLATFORM_INSTANCE": "testing",

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 import click
+from websockets.exceptions import WebSocketException
 
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -28,10 +29,34 @@ class OdooTestingUsage:
 # Runs inside the existing web container. No ORM, registry, HTTP authentication,
 # session-store get/save/GC, account names, tokens or session IDs leave it.
 ODOO_TESTING_USAGE_CONTAINER_PROGRAM = r"""
-import configparser, json, os, stat
+import argparse, configparser, json, os, re, stat
 from pathlib import Path
 import psycopg2
 CONFIG_PATH=__CONFIG_PATH__
+
+def serving_configured(process, options, database):
+    arguments=[arg.decode() for arg in process]
+    if not arguments:
+        return False
+    if arguments[0].rsplit('/',1)[-1].startswith('python'):
+        arguments=arguments[1:]
+    if not arguments or arguments[0].rsplit('/',1)[-1] not in {'odoo','odoo-bin'}:
+        return False
+    parser=argparse.ArgumentParser(add_help=False,allow_abbrev=False,exit_on_error=False)
+    parser.add_argument('-c','--config')
+    parser.add_argument('-d','--database')
+    for name in ('db_host','db_port','db_user','db-filter'):
+        parser.add_argument('--'+name)
+    try:
+        args,unknown=parser.parse_known_args(arguments[1:])
+    except (argparse.ArgumentError,SystemExit):
+        return False
+    # Reject unknown switches, especially session-directory/config overrides.
+    return (not unknown and args.config==CONFIG_PATH and args.database==database
+            and args.db_host==options['db_host']
+            and args.db_port==options.get('db_port','5432')
+            and args.db_user==options['db_user']
+            and args.db_filter=='^'+re.escape(database)+'$')
 
 def read_sessions(path, database):
     # Count every authenticated or partially authenticated file, regardless of
@@ -85,10 +110,9 @@ def probe():
     # custom command or another config cannot qualify this read.
     processes=[[a for a in p.read_bytes().split(b'\0') if a]
                for p in Path('/proc').glob('[0-9]*/cmdline')]
-    config_args=[b'-c',CONFIG_PATH.encode()]
-    if not any((p[1:]==config_args or p[2:]==config_args) and
-               any(arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'}
-                   for arg in p[:2]) for p in processes):
+    odoo_processes=[p for p in processes if any(
+        arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'} for arg in p[:2])]
+    if not odoo_processes or not all(serving_configured(p,options,database) for p in odoo_processes):
         raise ValueError('Serving configuration unavailable')
     session_use=read_sessions(data_dir/'sessions',database)
     connection=psycopg2.connect(
@@ -202,7 +226,7 @@ def read_odoo_testing_usage(
         provider = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=target_id.target_id
         )
-        if str(provider.get("name") or "") != target.target_name:
+        if not isinstance(provider, dict) or str(provider.get("name") or "") != target.target_name:
             return OdooTestingUsage()
         project = str(provider.get("appName") or "")
         if not project:
@@ -224,7 +248,9 @@ def read_odoo_testing_usage(
         current = api.fetch_dokploy_target_payload(
             host=host, token=token, target_type="compose", target_id=target_id.target_id
         )
-        if any(current.get(key) != provider.get(key) for key in ("name", "appName", "serverId")):
+        if not isinstance(current, dict) or any(
+            current.get(key) != provider.get(key) for key in ("name", "appName", "serverId")
+        ):
             return OdooTestingUsage()
         if (
             len(frames) != 1
@@ -242,5 +268,13 @@ def read_odoo_testing_usage(
         if error.status_code in {401, 403}:
             raise NativeSourceAuthorizationDenied("The provider refused the usage read.") from None
         return OdooTestingUsage()
-    except (ValueError, OSError, RuntimeError, click.ClickException):
+    except (
+        ValueError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        AttributeError,
+        WebSocketException,
+        click.ClickException,
+    ):
         return OdooTestingUsage()

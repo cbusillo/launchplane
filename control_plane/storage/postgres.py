@@ -10495,11 +10495,7 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if row is not None:
                 previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
-                if (
-                    previous.binding_sha256 == record.binding_sha256
-                    and previous.usage == "in_use"
-                    and record.usage == "unknown"
-                ):
+                if previous.usage == "in_use" and record.usage == "unknown":
                     return False
                 if previous.observed_at > record.observed_at or (
                     previous.observed_at == record.observed_at
@@ -10517,6 +10513,16 @@ class PostgresRecordStore(HumanSessionStore):
             )
             session.commit()
             return True
+
+    def disposable_lane_observation_time(self) -> datetime:
+        """Use the database clock shared by API replicas for collection ordering."""
+        if self.database_dialect_name != "postgresql":
+            return datetime.now(timezone.utc)
+        with self._session_factory() as session:
+            value = session.scalar(select(func.clock_timestamp()))
+        if not isinstance(value, datetime) or value.utcoffset() is None:
+            raise ValueError("The observation clock is unavailable.")
+        return value.astimezone(timezone.utc)
 
     def clear_disposable_lane_safety(self, product: str, context: str, instance: str) -> None:
         with self._session_factory() as session:

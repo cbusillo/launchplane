@@ -1,7 +1,10 @@
 import base64
+import ast
 from contextlib import redirect_stdout
 import io
 import json
+import re
+import shlex
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import ModuleType, SimpleNamespace
@@ -13,12 +16,41 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied
 from control_plane.dokploy.api import DokployRequestFailed
+from websockets.exceptions import WebSocketException
 from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH, ODOO_WEB_START_COMMAND
 from control_plane.odoo_testing_usage import (
     ODOO_TESTING_USAGE_CONTAINER_PROGRAM,
     ODOO_TESTING_USAGE_HOST_PROGRAM,
     read_odoo_testing_usage,
 )
+
+
+def supported_odoo_argv(database: str = "testing_db") -> list[bytes]:
+    """Execute the command builder from the tracked immutable startup artifact."""
+    source = Path(__file__).parent / "fixtures/website-settings/legacy_startup.txt"
+    tree = ast.parse(source.read_text())
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_build_odoo_command"
+    )
+    namespace: dict[str, Any] = {
+        "StartupSettings": SimpleNamespace,
+        "_is_public_runtime": lambda _: True,
+        "_database_filter_pattern": lambda name: "^" + re.escape(name) + "$",
+    }
+    exec(compile(ast.Module(body=[function], type_ignores=[]), str(source), "exec"), namespace)
+    settings = SimpleNamespace(
+        config_path=ODOO_WEB_CONFIG_PATH,
+        database_name=database,
+        database_host="database",
+        database_port=5432,
+        database_user="fixture",
+    )
+    return [
+        value.encode()
+        for value in ["python3", *namespace["_build_odoo_command"](settings, stop_after_init=False)]
+    ]
 
 
 class SessionInventoryTests(unittest.TestCase):
@@ -64,7 +96,9 @@ class SessionInventoryTests(unittest.TestCase):
                     elif mode == "alias":
                         file.symlink_to(self.path)
                     else:
-                        file.write_bytes(b" " * (1024 * 1024 + 1))
+                        file.write_text(
+                            json.dumps({"db": "another_db", "padding": "x" * (1024 * 1024)})
+                        )
                 with self.assertRaises((ValueError, OSError)):
                     self.namespace["read_sessions"](path, "testing_db")
 
@@ -85,7 +119,7 @@ class SessionInventoryTests(unittest.TestCase):
                 "db_password": "private-fixture",
             }
         )
-        process = SimpleNamespace(read_bytes=lambda: f"odoo\0-c\0{ODOO_WEB_CONFIG_PATH}\0".encode())
+        process = SimpleNamespace(read_bytes=lambda: b"\0".join(supported_odoo_argv()) + b"\0")
         env = {
             "PLATFORM_INSTANCE": "testing",
             "ODOO_DB_NAME": "testing_db",
@@ -118,7 +152,7 @@ class SessionInventoryTests(unittest.TestCase):
         }
         process = SimpleNamespace(
             read_bytes=lambda: (
-                f"python3\0/volumes/scripts/run_odoo_startup.py\0-c\0{ODOO_WEB_CONFIG_PATH}\0".encode()
+                b"\0".join(value.encode() for value in shlex.split(ODOO_WEB_START_COMMAND)) + b"\0"
             )
         )
         with (
@@ -130,6 +164,23 @@ class SessionInventoryTests(unittest.TestCase):
             self.assertRaises(ValueError),
         ):
             self.namespace["probe"]()
+
+    def test_real_startup_allows_database_flags_but_rejects_session_or_config_overrides(
+        self,
+    ) -> None:
+        options = {"db_host": "database", "db_port": "5432", "db_user": "fixture"}
+        argv = supported_odoo_argv()
+        self.assertTrue(self.namespace["serving_configured"](argv, options, "testing_db"))
+        for suffix in (
+            [b"--data-dir=/other"],
+            [b"-D", b"/other"],
+            [b"--config=/other"],
+            [b"-d", b"other_db"],
+        ):
+            with self.subTest(suffix=suffix):
+                self.assertFalse(
+                    self.namespace["serving_configured"](argv + suffix, options, "testing_db")
+                )
 
 
 class UsageReaderTests(unittest.TestCase):
@@ -172,7 +223,7 @@ class UsageReaderTests(unittest.TestCase):
             database_url="sqlite+pysqlite://",
         )
 
-    def test_unused_requires_both_complete_false_facts_and_never_excludes_admin(self) -> None:
+    def test_unused_requires_both_complete_false_facts(self) -> None:
         for recent, sessions in ((False, False), (True, False), (False, True), (True, True)):
             with self.subTest(recent=recent, sessions=sessions):
                 self.remote.side_effect = lambda **kw: kw["receive"](
@@ -215,6 +266,20 @@ class UsageReaderTests(unittest.TestCase):
         with self.assertRaises(NativeSourceAuthorizationDenied) as caught:
             self.read()
         self.assertNotIn("private-provider-error", str(caught.exception))
+
+    def test_invalid_provider_shapes_and_unmapped_websocket_errors_stay_unknown(self) -> None:
+        payloads: tuple[object, ...] = (None, [], "private-provider-payload")
+        for payload in payloads:
+            with self.subTest(payload=payload):
+                self.provider.return_value = payload
+                self.assertEqual(self.read().usage, "unknown")
+        self.provider.return_value = {
+            "name": self.target.target_name,
+            "appName": "fixture",
+            "serverId": "fixture",
+        }
+        self.remote.side_effect = WebSocketException("private-websocket-error")
+        self.assertEqual(self.read().usage, "unknown")
 
     def test_production_and_changed_placement_cannot_qualify(self) -> None:
         self.target = self.target.model_copy(update={"instance": "prod"})
@@ -278,7 +343,7 @@ class HostProbeTests(unittest.TestCase):
             if command[1] == "ps":
                 output = b"web database web2" if duplicate else b"web database"
             elif command[1] == "inspect":
-                values = [web, database, web] if duplicate else [web, database]
+                values = [web, database, {**web, "Id": "web2"}] if duplicate else [web, database]
                 if changed and len(calls) > 3:
                     web["State"]["StartedAt"] = "restarted"
                 output = json.dumps(values).encode()

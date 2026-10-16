@@ -304,24 +304,67 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         assert evidence is not None
         self.assertEqual(evidence.usage, "in_use")
 
-    async def test_unreadable_collection_cannot_clear_observed_use_of_the_same_lane(self) -> None:
+    async def test_service_collection_runs_real_reader_against_provider_fixture(self) -> None:
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        inspected = await self.observe()
+        module = "control_plane.odoo_testing_usage."
+        with (
+            patch(
+                module + "source.read_dokploy_config",
+                return_value=("https://provider.invalid", "private-token"),
+            ),
+            patch(
+                module + "api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": target.target_name,
+                    "appName": "fixture-project",
+                    "serverId": "fixture-server",
+                },
+            ),
+            patch(
+                module + "_read_remote",
+                side_effect=lambda **kw: kw["receive"](
+                    {"type": "complete", "recent_signins": False, "authenticated_sessions": False}
+                ),
+            ) as transport,
+        ):
+            response = await self.observe(
+                mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+            )
+        self.assertEqual(response.status_code, 202, response.text)
+        transport.assert_called_once()
+        self.assertEqual(response.json()["result"]["usage"], "unused")
+        self.assertNotIn("private-token", response.text)
+
+    async def test_unknown_reads_and_assertions_cannot_clear_use_after_binding_change(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage
 
         profile = self.store.read_product_profile_record("example-site")
         self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
         record_safety(self.store, "example-site", self.context, "testing", usage="in_use")
         before = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
-        inspected = await self.observe()
-        with patch(
-            "control_plane.http_app.read_odoo_testing_usage", return_value=OdooTestingUsage()
-        ):
-            response = await self.observe(
-                mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
-            )
-        self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(
-            self.store.read_disposable_lane_safety("example-site", self.context, "testing"), before
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
         )
+        target.env["FIXTURE_SETTING"] = "changed"
+        self.store.write_dokploy_target_record(target)
+        inspected = await self.observe()
+        for mode in ("collect", "record"):
+            with patch(
+                "control_plane.http_app.read_odoo_testing_usage", return_value=OdooTestingUsage()
+            ):
+                response = await self.observe(
+                    mode=mode, expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+                )
+            self.assertEqual(response.status_code, 409, response.text)
+            self.assertEqual(
+                self.store.read_disposable_lane_safety("example-site", self.context, "testing"),
+                before,
+            )
 
     async def test_expired_collection_and_aliased_targets_cannot_publish_unused(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage
@@ -330,11 +373,11 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
         inspected = await self.observe()
         started = datetime.now(timezone.utc)
-        with patch("control_plane.http_app.datetime") as clock:
-            clock.now.return_value = started
+        with patch.object(self.store, "disposable_lane_observation_time") as clock:
+            clock.return_value = started
 
             def expired(**kwargs: object) -> OdooTestingUsage:
-                clock.now.return_value = started + timedelta(seconds=2)
+                clock.return_value = started + timedelta(seconds=2)
                 return OdooTestingUsage("unused", False, False)
 
             with patch("control_plane.http_app.read_odoo_testing_usage", side_effect=expired):

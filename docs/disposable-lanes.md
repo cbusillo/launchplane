@@ -57,7 +57,9 @@ The observation's expiry starts before provider collection; changed configuratio
 or an elapsed lifetime rejects publication. A delayed collection cannot replace
 newer stored evidence; publication compares observation times under the shared
 authority lock. An unreadable collection also cannot clear observed use of the
-same bound lane; a complete subsequent negative read can. Data custody and production isolation
+lane after a binding change, and caller assertions cannot clear it either;
+a complete subsequent negative read can. Production API replicas use the shared
+database clock to order these observations. Data custody and production isolation
 remain separate prerequisites and this read never starts a rebuild. Deploy the
 compatible service image, then use the existing `collect-disposable-lane.py`
 `inspect`/`collect` client. No schema migration or new grant is needed. Rollback to

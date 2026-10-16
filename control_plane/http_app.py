@@ -23828,7 +23828,7 @@ def create_launchplane_fastapi_app(
             if observation.mode == "collect":
                 if observation.replaces_operation_id:
                     raise ValueError("This collector does not qualify replacement resources.")
-                observed_at = datetime.now(timezone.utc)
+                observed_at = store.disposable_lane_observation_time()
                 odoo_usage = OdooTestingUsage()
                 if (
                     profile.driver_id == "odoo"
@@ -23886,7 +23886,7 @@ def create_launchplane_fastapi_app(
                 previous = store.read_disposable_lane_safety(
                     profile.product, observation.context, observation.instance
                 )
-                now = datetime.now(timezone.utc)
+                now = store.disposable_lane_observation_time()
                 if now >= observed_at + timedelta(seconds=observation.lifetime_seconds):
                     raise ValueError("Usage collection expired; collect again.")
                 evidence = DisposableLaneSafety.model_validate(
@@ -23952,7 +23952,7 @@ def create_launchplane_fastapi_app(
                         "provider_mutation": False,
                     },
                 )
-            now = datetime.now(timezone.utc)
+            now = store.disposable_lane_observation_time()
             retained_target = ""
             if operation is not None:
                 preparation = store.read_disposable_replacement_preparation(operation.operation_id)
@@ -23987,7 +23987,8 @@ def create_launchplane_fastapi_app(
                     "production_resources": "unknown",
                 }
             )
-            store.write_disposable_lane_safety(evidence)
+            if not store.publish_collected_disposable_lane_safety(evidence):
+                raise ValueError("Protected usage evidence cannot be cleared by assertions.")
             return accepted_evidence_response(
                 trace_id=trace_id,
                 records={"product_profile": profile.product},
