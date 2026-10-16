@@ -34,14 +34,22 @@ export function useEvidenceRefresh<T>(
     }
     const pending = deadlineReads.current.pending;
     for (const [deadline, retryUntil] of pending) {
-      if (!deadlines.includes(deadline) || now < deadline ||
+      if (!deadlines.includes(deadline) ||
           now >= deadline + READ_REFRESH_INTERVAL_MS || performance.now() >= retryUntil) {
         pending.delete(deadline);
       }
     }
+    // Watch every future deadline before a pending read or hidden tab can
+    // cross it. Expired proof first encountered in a response gets no window.
+    for (const deadline of deadlines) {
+      if (deadline > now && !pending.has(deadline)) {
+        pending.set(deadline, performance.now() + deadline - now + READ_REFRESH_INTERVAL_MS);
+      }
+    }
+    const retryDue = [...pending.keys()].some(deadline => deadline <= now);
     const nextExpiry = Math.min(...deadlines.filter(value => value > now));
     const interval = Math.min(READ_REFRESH_INTERVAL_MS, nextExpiry - now,
-      pending.size ? DEADLINE_RETRY_INTERVAL_MS : Infinity);
+      retryDue ? DEADLINE_RETRY_INTERVAL_MS : Infinity);
     const dueAt = performance.now() + interval;
     const wallDueAt = now + interval;
     const update = () => {
@@ -57,12 +65,6 @@ export function useEvidenceRefresh<T>(
       }
       requested = true;
       window.clearTimeout(timer);
-      // A monitor publishes after probing, so a deadline read may still return
-      // its previous observation. Retry that exact deadline for at most one
-      // cadence, without renewing proof or creating an unbounded read loop.
-      if (nextExpiry === wallDueAt) {
-        pending.set(nextExpiry, performance.now() + READ_REFRESH_INTERVAL_MS);
-      }
       refreshRef.current();
     };
     timer = window.setTimeout(update, interval);

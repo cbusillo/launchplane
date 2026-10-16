@@ -117,7 +117,8 @@ for (const view of ["index", "workspace", "environment"] as const) {
   });
 }
 
-test("staggered lane deadlines recover independently", async ({ page }) => {
+for (const heldRead of [false, true]) {
+test(`staggered lane deadlines recover independently${heldRead ? " across a pending read" : ""}`, async ({ page }) => {
   await page.goto("/ui/products?fixture=products");
   const fixture = await page.evaluate(async () => {
     const modulePath = "/ui/src/dev-fixtures.ts";
@@ -136,9 +137,12 @@ test("staggered lane deadlines recover independently", async ({ page }) => {
   await setClockTime(page, start);
   let reads = 0;
   let lastName = "";
+  let holdRead = false;
+  let releaseRead: (() => void) | undefined;
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", identity: fixture.identity } }));
   await page.route("**/v1/products", async route => {
     const name = lastName = `Staggered observation ${++reads}`;
+    if (holdRead) await new Promise<void>(resolve => { releaseRead = resolve; });
     const now = await page.evaluate(() => Date.now());
     const product = structuredClone(fixture.product);
     product.display_name = name;
@@ -174,14 +178,28 @@ test("staggered lane deadlines recover independently", async ({ page }) => {
     await waitForState(() => reads).toBeGreaterThan(before);
     await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
   };
-  await advance(5_001);
-  await expect(prod).toHaveAttribute("data-operational", "warning");
-  await expect(testing).toHaveAttribute("data-operational", "verified");
-  await advance(2_000);
-  await expect(testing).toHaveAttribute("data-operational", "warning");
+  holdRead = heldRead;
+  if (heldRead) {
+    await page.clock.runFor(5_001);
+    await waitForState(() => Boolean(releaseRead)).toBe(true);
+    await expect(prod).toHaveAttribute("data-operational", "warning");
+    await expect(testing).toHaveAttribute("data-operational", "verified");
+    await page.clock.runFor(2_000);
+    await expect(testing).toHaveAttribute("data-operational", "warning");
+    holdRead = false;
+    releaseRead!();
+    await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
+  } else {
+    await advance(5_001);
+    await expect(prod).toHaveAttribute("data-operational", "warning");
+    await expect(testing).toHaveAttribute("data-operational", "verified");
+    await advance(2_000);
+    await expect(testing).toHaveAttribute("data-operational", "warning");
+  }
   await advance(10_000);
   await expect(prod).toHaveAttribute("data-operational", "verified");
   await expect(testing).toHaveAttribute("data-operational", "warning");
-  await advance(15_000);
+  await advance(30_000 + DEADLINE_RETRY_INTERVAL_MS - 17_001);
   await expect(testing).toHaveAttribute("data-operational", "verified");
 });
+}
