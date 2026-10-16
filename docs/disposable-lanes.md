@@ -32,7 +32,7 @@ conservatively count as use. Any authenticated
 or partially authenticated session for that database counts regardless of age;
 device-log rows and old login timestamps cannot prove that a browser session has
 ended. Session contents, identifiers, account names and credentials never leave
-the container. The result exposes only two booleans. The filesystem check follows
+the container. The result exposes only two booleans and a bounded `reason_code`. The filesystem check follows
 [Odoo's session storage contract](https://github.com/odoo/odoo/blob/19.0/odoo/http.py),
 without calling methods that create, refresh, migrate or delete session files.
 
@@ -46,6 +46,41 @@ failures leave usage unknown. A provider authorization denial returns its servic
 trace and is never retried with another identity. Only complete negative login
 and session reads can produce `unused`; staff holds still protect the lane.
 Other drivers and previews retain their existing collection behavior.
+
+Collection returns the first failed checkpoint as an allowlisted code, never
+exception text, command lines, session identifiers, account names or topology.
+The bounded client preserves that code and rejects malformed diagnostics.
+A code introduced by a newer service is mapped to `diagnostics_unrecognized`
+without echoing it, preserving validated facts and the trace. Such a code cannot
+qualify non-use: when diagnostics are present, `unused` requires `complete`. A
+service image predating diagnostics is reported as `diagnostics_unavailable`;
+that means deploy the compatible collector before diagnosing the lane, not that
+any particular runtime checkpoint failed. Inspecting only the binding does not
+run the probe.
+
+An unhealthy web container can qualify if the supported Odoo process still
+serves the matching configuration and both login and session reads complete
+negative, with unchanged container and provider snapshots. Health alone proves
+neither use nor non-use. `serving_process_absent` means the running container has
+no qualifying Odoo process (for example, it is waiting at a startup gate);
+`serving_configuration_mismatch` means the observed process arguments do not
+qualify the configured session store. Neither permits treating an empty or
+unreadable store as historical non-use. `web_configuration_unavailable`,
+`session_store_unavailable`, `session_file_unreadable`,
+`database_connection_unavailable` and `login_history_unavailable` identify the
+missing read. Provider transport, ambiguous/stopped services and changed runtime
+snapshots have separate codes. All these failures leave usage UNKNOWN with null
+booleans; `complete` accompanies the qualified positive or negative read.
+
+For a stranded runtime, deliver the diagnostics image through the normal service
+deploy and collect again through the same client, without starting, restarting or
+repairing that lane to obtain evidence. Record its code and service trace. If it
+cannot read the original served configuration/database/session store, that exact
+prerequisite remains unsupported: a stopped process, missing database or absent
+staff hold is not a substitute. Preserve the original lane and custody and leave
+its rebuild blocked. No alternative credential, direct database qualification or
+new grant is needed for diagnosis. The service read is the proof of the concrete
+failed checkpoint; a fixture qualification or an old generic UNKNOWN is not.
 
 This is a bounded snapshot of browser/authenticate-login use, not a reservation
 against a future login or proof about anonymous browsing, unsaved work or
