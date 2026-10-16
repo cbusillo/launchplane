@@ -961,6 +961,161 @@
         "title": "ArtifactReleaseCompatibility",
         "type": "object"
       },
+      "ArtifactRetentionPlan": {
+        "additionalProperties": false,
+        "properties": {
+          "candidates": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "image_repository": {
+            "title": "Image Repository",
+            "type": "string"
+          },
+          "mode": {
+            "const": "dry-run",
+            "default": "dry-run",
+            "title": "Mode",
+            "type": "string"
+          },
+          "observed_at": {
+            "title": "Observed At",
+            "type": "string"
+          },
+          "permission": {
+            "const": "unconfirmed",
+            "default": "unconfirmed",
+            "title": "Permission",
+            "type": "string"
+          },
+          "reason": {
+            "default": "",
+            "title": "Reason",
+            "type": "string"
+          },
+          "retained": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Retained",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "available",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "image_repository",
+          "observed_at"
+        ],
+        "title": "ArtifactRetentionPlan",
+        "type": "object"
+      },
+      "ArtifactRetentionResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "retention": {
+            "$ref": "#/components/schemas/ArtifactRetentionPlan"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "retention"
+        ],
+        "title": "ArtifactRetentionResponse",
+        "type": "object"
+      },
+      "ArtifactScanResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "scan": {
+            "$ref": "#/components/schemas/ArtifactScanResult"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "scan"
+        ],
+        "title": "ArtifactScanResponse",
+        "type": "object"
+      },
+      "ArtifactScanResult": {
+        "additionalProperties": false,
+        "properties": {
+          "critical": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "Critical",
+            "type": "integer"
+          },
+          "high": {
+            "default": 0,
+            "minimum": 0.0,
+            "title": "High",
+            "type": "integer"
+          },
+          "image_reference": {
+            "title": "Image Reference",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "scanned_at": {
+            "title": "Scanned At",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "unavailable"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "image_reference",
+          "status",
+          "reason",
+          "scanned_at"
+        ],
+        "title": "ArtifactScanResult",
+        "type": "object"
+      },
       "ArtifactSourceBuild": {
         "additionalProperties": false,
         "description": "GitHub build run Launchplane verified for this artifact (docs/artifact-provenance.md).",
@@ -33708,6 +33863,12 @@
             "default": "",
             "title": "Repository",
             "type": "string"
+          },
+          "scan_enabled": {
+            "default": false,
+            "title": "Scan Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "ProductImageProfile",
@@ -54158,6 +54319,186 @@
           }
         },
         "summary": "Read protected artifact inventory"
+      }
+    },
+    "/v1/artifacts/retention": {
+      "get": {
+        "operationId": "read_artifact_retention",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactRetentionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read a dry-run image retention plan"
+      }
+    },
+    "/v1/artifacts/scan": {
+      "get": {
+        "operationId": "qualify_product_artifact_scan",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArtifactScanResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Qualify a verified artifact scan without deploying or activating it"
       }
     },
     "/v1/auth/session": {

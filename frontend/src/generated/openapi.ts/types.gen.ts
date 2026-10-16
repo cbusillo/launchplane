@@ -3352,6 +3352,7 @@ export type ProductHealthMonitoringSummary = {
 
 export type ProductImageProfile = {
     repository: string;
+    scan_enabled?: boolean;
 };
 
 export type ProductIncidentDetail = {

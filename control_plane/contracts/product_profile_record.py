@@ -35,6 +35,11 @@ class ProductImageProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repository: str = ""
+    scan_enabled: bool = Field(
+        default=False,
+        exclude_if=lambda value: value is False,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_image(self) -> "ProductImageProfile":

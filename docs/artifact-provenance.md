@@ -4,6 +4,8 @@ Status: built in `control_plane/build_provenance.py` (#2604). Event handling is
 built too (#2605); see [event-driven deploys](event-driven-deploys.md).
 
 A product repository builds its own artifact and never calls Launchplane.
+After provenance verification, event-driven deploys use the shared
+[artifact scan gate](artifact-security.md) before deployment effects.
 Launchplane decides for itself which artifact came from which commit by reading
 GitHub's record of the build run. It trusts no image tag or image label. It
 trusts the manifest's digest only because it has verified the run that produced

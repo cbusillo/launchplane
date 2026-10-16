@@ -28596,6 +28596,12 @@
             "default": "",
             "title": "Repository",
             "type": "string"
+          },
+          "scan_enabled": {
+            "default": false,
+            "title": "Scan Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "ProductImageProfile",
