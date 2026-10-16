@@ -31,16 +31,43 @@ title: Testing Style
 
 ## Local test loop
 
-Run focused behavior tests for the changed contract first:
+During the one-week [Q326 trial](https://github.com/cbusillo/codex-skills/issues/1884#issuecomment-6194586961)
+approved October 15, 2026, routine changes use focused local behavior tests for
+the changed code, plus lint, type checks, and IDE inspection. Choose the
+relevant modules or test cases; substitute them in the targeted command rather
+than running an unselected unittest discovery:
 
 ```bash
 uv run --extra dev python -m unittest tests.test_module_name
 uv run --extra dev python -m unittest tests.test_module_name.TestCaseName.test_behavior
 ```
 
-Run the official local full-suite gate before review when the change spans shared
-contracts, storage, authorization, generated surfaces, or another broad risk, or
-when `.github/github.json` names it as the applicable required gate:
+The Supervisor owns the measured comparison and brings the keep-or-revert
+decision to the Director on the linked trial issue. The rule becomes permanent
+only if the numbers support it.
+
+Use `.github/github.json` for the lint and type-check commands and inspection
+configuration. `qualityGate.test.local` is the focused command template;
+`qualityGate.test.ci` names the full-suite command, also available locally for
+the exceptions below. For a documentation or metadata change with no affected code,
+record why behavior tests or IDE inspection do not apply; do not add tests that
+assert instruction wording or config text.
+
+For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
+and build validation, with browser smoke for UI changes as described below.
+
+The full sharded suite remains CI's required gate before merge. Wait for green
+current-head CI before the checked `gh-pr.py ready` handoff; a local test pass
+does not replace that evidence. The trial does not change CI workflows or
+required checks.
+
+Safety, authorization, approval-rule, destructive-helper, and shared-infrastructure
+changes are excluded from the focused-only trial and still run the full local
+suite before review. Credential handling falls under the safety and authorization
+exceptions. Shared test helpers, shard tooling, and CI runner selection are
+shared infrastructure. Broaden local validation when an affected shared contract,
+storage boundary, generated surface, observed failure, or other risk requires
+it. The full local suite remains available through:
 
 ```bash
 uv run --extra dev launchplane ci unittest-shard local
@@ -197,7 +224,8 @@ the run. An `always()` aggregate can retain the old workflow's concurrency slot
 while it waits for a runner, preventing the new head's CI from starting.
 
 GitHub Actions remains the source of truth for required pull-request gates.
-Local validation should be proportionate: use targeted behavior proof by
+Follow the mandatory full-local exceptions in [Local test loop](#local-test-loop).
+Otherwise, local validation should be proportionate: use targeted behavior proof by
 default, then add the full suite, PostgreSQL integration, browser, generated-
 contract, or other gate when the affected boundary or observed risk requires it.
 When PostgreSQL storage semantics require proof, the PostgreSQL integration
