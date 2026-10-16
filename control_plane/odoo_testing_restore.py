@@ -44,6 +44,9 @@ class FreshOdooTestingGeneration(BaseModel):
     omitted_runtime_keys: tuple[str, ...] = ()
     prepared_at: str
     completed_at: str = ""
+    # No backfill: legacy generations lack a complete lifetime witness.
+    non_use_tracking_started_at: str = Field(default="", exclude_if=lambda value: not value)
+    non_use_invalidated: bool = Field(default=False, exclude_if=lambda value: not value)
     reconcile_requested_at: str = ""
     source_mode: Literal["ssh", "container-export"] = "ssh"
     source_binding_sha256: str = Field(default="", pattern=r"^(|[a-f0-9]{64})$")
@@ -257,8 +260,25 @@ def generation_binding(generation: FreshOdooTestingGeneration) -> str:
     return canonical_json_sha256(generation_identity_payload(generation))
 
 
+def generation_snapshot_matches(
+    current: FreshOdooTestingGeneration | None, expected: FreshOdooTestingGeneration
+) -> bool:
+    """Monotonic non-use revocation is protection, not a new execution plan."""
+    return current is not None and current.model_dump(
+        exclude={"non_use_invalidated"}
+    ) == expected.model_dump(exclude={"non_use_invalidated"})
+
+
 def generation_identity_payload(generation: FreshOdooTestingGeneration) -> dict[str, object]:
-    payload = generation.model_dump(mode="json", exclude={"completed_at", "reconcile_requested_at"})
+    payload = generation.model_dump(
+        mode="json",
+        exclude={
+            "completed_at",
+            "reconcile_requested_at",
+            "non_use_tracking_started_at",
+            "non_use_invalidated",
+        },
+    )
     if generation.source_mode == "ssh":
         payload.pop("source_mode")
         payload.pop("source_binding_sha256")

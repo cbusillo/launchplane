@@ -313,6 +313,28 @@ def require_disposable_lane(
         )
     if rehearsal_binding and evidence.binding_sha256 != rehearsal_binding:
         raise DisposableLaneSafetyUnknown("The rehearsal's original lane binding changed.")
+    from control_plane.testing_never_served import (
+        NON_USE_EVIDENCE_PREFIX,
+        read_never_served_testing_usage,
+    )
+
+    if evidence.usage_evidence.startswith(NON_USE_EVIDENCE_PREFIX):
+        reader = getattr(store, "read_testing_non_use_records", None)
+        qualified = (
+            read_never_served_testing_usage(
+                store, product=product, context=context, target_id=target_id.target_id
+            )
+            if callable(reader) and target_id is not None
+            else None
+        )
+        if (
+            qualified is None
+            or qualified.usage != "unused"
+            or evidence.usage_evidence != NON_USE_EVIDENCE_PREFIX + qualified.proof_sha256
+        ):
+            raise DisposableLaneSafetyUnknown(
+                "The never-served generation proof is no longer current."
+            )
     allowed_resources = {"isolated", "separation_ready"} if separation_only else {"isolated"}
     if (
         usage.protected

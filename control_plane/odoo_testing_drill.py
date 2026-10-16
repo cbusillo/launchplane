@@ -42,6 +42,7 @@ from control_plane.odoo_target_replacement_apply_http import (
 from control_plane.odoo_testing_restore import (
     FreshOdooTestingGeneration,
     generation_binding,
+    generation_snapshot_matches,
     read_current_testing_generation,
 )
 from control_plane.odoo_testing_drill_usage import (
@@ -182,12 +183,10 @@ def collect_drill_admission(
 ) -> DisposableLaneSafety:
     """Q347 evidence belongs to this drill, never the universal observation API."""
     require_drill_use_unprotected(store, generation.product, generation.context)
-    if (
-        read_current_testing_generation(
-            store, product=generation.product, context=generation.context, instance="testing"
-        )
-        != generation
-    ):
+    current = read_current_testing_generation(
+        store, product=generation.product, context=generation.context, instance="testing"
+    )
+    if not generation_snapshot_matches(current, generation):
         raise DrillSkipped("drill_admission_snapshot_changed")
     profile = store.read_product_profile_record(generation.product)
     target = store.read_dokploy_target_record(
