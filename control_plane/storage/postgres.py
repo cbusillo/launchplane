@@ -10495,6 +10495,12 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if row is not None:
                 previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
+                if (
+                    previous.binding_sha256 == record.binding_sha256
+                    and previous.usage == "in_use"
+                    and record.usage == "unknown"
+                ):
+                    return False
                 if previous.observed_at > record.observed_at or (
                     previous.observed_at == record.observed_at
                     and previous.usage == "in_use"

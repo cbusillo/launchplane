@@ -257,6 +257,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
         initial = self.store.read_product_profile_record("example-site")
         for used in (False, True, None):
+            self.store.clear_disposable_lane_safety("example-site", self.context, "testing")
             with patch(
                 "control_plane.http_app.read_odoo_testing_usage",
                 return_value=OdooTestingUsage(
@@ -302,6 +303,25 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         evidence = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
         assert evidence is not None
         self.assertEqual(evidence.usage, "in_use")
+
+    async def test_unreadable_collection_cannot_clear_observed_use_of_the_same_lane(self) -> None:
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
+        profile = self.store.read_product_profile_record("example-site")
+        self.store.write_product_profile_record(profile.model_copy(update={"driver_id": "odoo"}))
+        record_safety(self.store, "example-site", self.context, "testing", usage="in_use")
+        before = self.store.read_disposable_lane_safety("example-site", self.context, "testing")
+        inspected = await self.observe()
+        with patch(
+            "control_plane.http_app.read_odoo_testing_usage", return_value=OdooTestingUsage()
+        ):
+            response = await self.observe(
+                mode="collect", expected_binding_sha256=inspected.json()["result"]["binding_sha256"]
+            )
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            self.store.read_disposable_lane_safety("example-site", self.context, "testing"), before
+        )
 
     async def test_expired_collection_and_aliased_targets_cannot_publish_unused(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage

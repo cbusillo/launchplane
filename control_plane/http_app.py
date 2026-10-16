@@ -23905,7 +23905,7 @@ def create_launchplane_fastapi_app(
                     }
                 )
                 if not store.publish_collected_disposable_lane_safety(evidence):
-                    raise ValueError("Newer usage evidence exists; collect again.")
+                    raise ValueError("Newer or protected usage evidence exists; collect again.")
                 return accepted_evidence_response(
                     trace_id=trace_id,
                     records={"product_profile": profile.product},
