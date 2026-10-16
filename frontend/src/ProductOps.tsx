@@ -324,7 +324,7 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
           </span>
           <EvidenceBadge
             state={product.trust_state}
-            qualifier="Lane evidence"
+            qualifier={product.environments.length ? "Lane evidence" : "Profile"}
           />
         </span>
         <DirectoryLane environment={testing} lane="testing" />
@@ -436,7 +436,7 @@ function ProductWorkspace({
               {product.display_name}
             </h1>
             <EvidenceBadge
-              qualifier="Lane evidence"
+              qualifier={product.environments.length ? "Lane evidence" : "Profile"}
               state={product.trust_state}
             />
           </div>
@@ -1220,7 +1220,7 @@ function compareEnvironments(
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
   if (environment.topology.desired.public_website === "none") {
     const tone = environmentOperationalTone(environment);
-    return tone === "verified" ? "Private checks passed" : tone === "danger" ? "Private monitoring needs attention" : "Private verification incomplete";
+    return tone === "verified" ? "Private checks passed" : tone === "danger" ? "Monitoring needs attention" : "Verification incomplete";
   }
   const summary = environment.public_ingress.summary.trim();
   if (summary) {

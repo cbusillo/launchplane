@@ -233,6 +233,9 @@ separately from operational health. A product profile's edit date is labelled as
 a profile update, never presented as the age of its lanes' verification.
 Topology evidence badges include route, placement and observation evidence;
 runtime observation timestamps describe their own evidence.
+Combined lane and product evidence expire when their topology expires, even if
+the health observation has a later deadline; that does not change the separate
+operational health decision for advisory route records.
 An explicit no-public-website declaration makes the public endpoint and TLS
 not applicable when no observation is returned, while existing observations,
 private checks, identity and incidents remain visible.

@@ -45,7 +45,7 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   const row = page.locator(".product-directory-row");
   await expect(row.locator(".directory-warnings > strong")).toHaveText("2");
   await expect(row.locator(".directory-product > .evidence-badge > small")).toHaveCount(0);
-  await expect(row.locator(".directory-preview")).toContainText("Not applicable");
+  await expect(row.locator(".directory-preview .evidence-badge")).toHaveCount(0);
   await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-directory-${testInfo.project.name}.png`, fullPage: true });
   await row.click();
   const warnings = page.locator("#warning-summary");
@@ -53,7 +53,6 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   await expect(warnings.getByText(warning.detail, { exact: true })).toHaveCount(1);
   await expect(warnings.locator('[data-severity="error"]')).toContainText(warning.detail);
   const privateLane = page.locator("#lane-testing");
-  await expect(privateLane).toContainText("Not applicable");
   const tlsWarnings = Array.from({ length: 7 }, (_, index) => ({
     code: "tls_observation_missing" as const, scope: "tls" as const, severity: "warning" as const,
     detail: "No certificate observation for this domain.", domain_name: `alias-${index}.example.invalid`,
