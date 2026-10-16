@@ -16,6 +16,7 @@ from pymysql.constants import CLIENT, CR
 
 from control_plane import odoo_import_diagnostics as diagnostic
 from control_plane import odoo_runtime_reads as reads
+from control_plane.dokploy import api, source as dokploy_source
 from control_plane.odoo_diagnostic_identity import (
     OdooDiagnosticIdentity,
     DIAGNOSTIC_IDENTITY_UNAVAILABLE,
@@ -199,6 +200,7 @@ class DiagnosticFixture:
 class DiagnosticTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = DiagnosticFixture()
+        self.real_connect_runtime = reads.connect_runtime
         self.environment = {RUNTIME_IDENTITY_ENV_KEY: self.fixture.identity.model_dump_json()}
         for name, prefix in diagnostic.SOURCE_PREFIXES.items():
             for key in (*diagnostic.FIELDS, "password"):
@@ -272,16 +274,35 @@ class DiagnosticTests(unittest.TestCase):
         self.assertEqual(writes, [])
 
     def test_runtime_only_read_needs_no_odoo_identity_or_http_login(self) -> None:
-        self.mocks[0].return_value = self.fixture.connection.__class__(
-            **{**self.fixture.connection.__dict__, "diagnostic_identity": None}
-        )
-        with patch.object(reads, "_rpc", side_effect=AssertionError("Odoo login is forbidden")):
-            result = diagnostic.diagnose_runtime_source_grants(
-                store=self.fixture.store,
-                product=self.fixture.profile.product,
-                control_plane_root=Path("fixture"),
-                database_url=None,
-            )
+        self.mocks[0].side_effect = self.real_connect_runtime
+        self.environment["ODOO_DB_NAME"] = "fixture_db"
+        with (
+            patch.object(
+                dokploy_source,
+                "read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture-token"),
+            ),
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={
+                    "appName": self.fixture.connection.app_name,
+                    "serverId": self.fixture.connection.server_id,
+                    "name": "fixture-target",
+                },
+            ),
+            patch.object(api, "dokploy_request", return_value=[]),
+            patch.object(
+                api,
+                "select_dokploy_compose_container",
+                return_value={"containerId": self.fixture.connection.evidence.container_id},
+            ),
+            patch.object(
+                reads, "read_diagnostic_identity", side_effect=reads._diagnostic_unavailable()
+            ) as identity,
+            patch.object(reads, "_rpc", side_effect=AssertionError("Odoo login is forbidden")),
+        ):
+            result = self.run_runtime_diagnostic()
         self.assertEqual(result.runtime, "verified")
         self.assertTrue(
             all(source.applied_connection_grants == "read_only" for source in result.sources)
@@ -292,6 +313,7 @@ class DiagnosticTests(unittest.TestCase):
                 for source in result.sources
             )
         )
+        identity.assert_not_called()
         self.mocks[2].assert_not_called()
         self.mocks[-1].assert_not_called()
         self.assertNotIn(PRIVATE, result.model_dump_json())
