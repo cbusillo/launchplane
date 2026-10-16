@@ -1761,6 +1761,41 @@ class RealPostgresNoTargetRetirementTests(unittest.IsolatedAsyncioTestCase):
 
 
 class RealPostgresSchemaIntegrationTests(unittest.TestCase):
+    def test_notification_policy_id_cannot_be_claimed_by_two_scopes(self) -> None:
+        from control_plane.contracts.public_ingress_monitoring import (
+            NotificationPolicyScopeConflict,
+            PublicIngressNotificationPolicyRecord,
+        )
+        from tests.http_app_test_support import _public_ingress_notification_policy_record
+
+        with _store_for_fresh_head_database() as store:
+            base = _public_ingress_notification_policy_record().model_copy(
+                update={
+                    "purpose": "release_digest",
+                    "instance": "prod",
+                }
+            )
+            barrier = threading.Barrier(2)
+
+            def create(product: str) -> PublicIngressNotificationPolicyRecord | None:
+                candidate = base.model_copy(
+                    update={"product": product, "context": product + "-prod"}
+                )
+                barrier.wait(timeout=30)
+                try:
+                    store.write_public_ingress_notification_policy_record(
+                        candidate, protect_scope=True
+                    )
+                    return candidate
+                except NotificationPolicyScopeConflict:
+                    return None
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                outcomes = tuple(executor.map(create, ("first-site", "second-site")))
+            accepted = tuple(record for record in outcomes if record is not None)
+            self.assertEqual(len(accepted), 1)
+            self.assertEqual(store.list_public_ingress_notification_policy_records(), accepted)
+
     def test_delivery_index_migration_backfills_existing_production_history(self) -> None:
         from importlib import import_module
         from control_plane.storage.postgres import LaunchplaneDeploymentRow

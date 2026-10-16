@@ -765,7 +765,10 @@ from control_plane.contracts.route_binding_record import (
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.secret_reencryption_request import SecretReencryptionRequest
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord
-from control_plane.contracts.public_ingress_monitoring import PublicIngressNotificationPolicyRecord
+from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressNotificationPolicyRecord,
+    NotificationPolicyScopeConflict,
+)
 from control_plane.drivers import native_routes
 from control_plane.drivers.route_paths import (
     INGRESS_ROUTE_APPLY_ROUTE as _INGRESS_ROUTE_APPLY_ROUTE,
@@ -893,6 +896,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
+from control_plane.release_digest import ReleaseDigestScheduler
 from control_plane.health_monitor_status import (
     HealthMonitorSlotRangeError,
     HealthMonitorStatusResponse,
@@ -2410,7 +2414,11 @@ class PublicIngressNotificationPolicyApplyEnvelope(BaseModel):
     @model_validator(mode="after")
     def _validate_request(self) -> "PublicIngressNotificationPolicyApplyEnvelope":
         self.reason = self.reason.strip()
-        if self.policy.product and self.policy.product != "launchplane":
+        if (
+            self.policy.purpose != "release_digest"
+            and self.policy.product
+            and self.policy.product != "launchplane"
+        ):
             raise ValueError(
                 "public ingress notification policy apply requires product 'launchplane'"
             )
@@ -2802,6 +2810,8 @@ class _PublicIngressNotificationPolicyApplyStore(Protocol):
     def write_public_ingress_notification_policy_record(
         self,
         record: PublicIngressNotificationPolicyRecord,
+        *,
+        protect_scope: bool = False,
     ) -> object: ...
 
 
@@ -3835,6 +3845,7 @@ def _public_ingress_notification_policy_summary(
         "instance": policy.instance,
         "status": policy.status,
         "reminder_interval_seconds": policy.reminder_interval_seconds,
+        "purpose": policy.purpose,
         "destination_count": len(policy.destinations),
         "destination_kinds": sorted({destination.kind for destination in policy.destinations}),
         "created_at": policy.created_at,
@@ -4314,6 +4325,7 @@ def create_launchplane_fastapi_app(
     health_monitor_scheduler: HealthMonitorScheduler | None = None,
     testing_drill_scheduler: OdooTestingDrillScheduler | None = None,
     preview_lifecycle_scheduler: PreviewLifecycleScheduler | None = None,
+    release_digest_scheduler: ReleaseDigestScheduler | None = None,
     odoo_cutover_provider_factory: Callable[[OdooCutoverPlan], OdooCutoverProvider] | None = None,
 ) -> FastAPI:
     resolved_control_plane_root = (
@@ -4390,6 +4402,8 @@ def create_launchplane_fastapi_app(
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         try:
+            if release_digest_scheduler is not None:
+                await run_in_threadpool(release_digest_scheduler.start)
             if health_monitor_scheduler is not None:
                 await run_in_threadpool(health_monitor_scheduler.start)
             if testing_drill_scheduler is not None:
@@ -4405,6 +4419,8 @@ def create_launchplane_fastapi_app(
                 await run_in_threadpool(confirm_startup, startup_record_store)
             yield
         finally:
+            if release_digest_scheduler is not None:
+                await run_in_threadpool(release_digest_scheduler.stop)
             if preview_lifecycle_scheduler is not None:
                 await run_in_threadpool(preview_lifecycle_scheduler.stop)
             if testing_drill_scheduler is not None:
@@ -25720,10 +25736,19 @@ def create_launchplane_fastapi_app(
         if replayed_response is not None:
             return replayed_response
         if policy_request.mode == "apply":
-            cast(
-                _PublicIngressNotificationPolicyApplyStore,
-                database_store,
-            ).write_public_ingress_notification_policy_record(policy_request.policy)
+            try:
+                cast(
+                    _PublicIngressNotificationPolicyApplyStore, database_store
+                ).write_public_ingress_notification_policy_record(
+                    policy_request.policy, protect_scope=True
+                )
+            except NotificationPolicyScopeConflict as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="notification_policy_scope_conflict",
+                    message=str(error),
+                ) from error
         response = accepted_evidence_response(
             trace_id=trace_id,
             records={"public_ingress_notification_policy_id": policy_request.policy.policy_id},

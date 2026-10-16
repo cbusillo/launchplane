@@ -41160,6 +41160,15 @@
             "title": "Product",
             "type": "string"
           },
+          "purpose": {
+            "default": "incident_alerts",
+            "enum": [
+              "incident_alerts",
+              "release_digest"
+            ],
+            "title": "Purpose",
+            "type": "string"
+          },
           "reminder_interval_seconds": {
             "default": 21600,
             "maximum": 604800.0,
