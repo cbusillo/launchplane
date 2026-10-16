@@ -36,15 +36,24 @@ Do not switch identities or use another operation to carry a denied call.
 The Director decides any new grant through the existing policy approval path.
 An exact `local_operator` subject/token-label rule may leave product and context
 selectors empty and select only `instances=["testing"]` to cover current and
-future testing lanes. The execution boundary, rather than a per-lane policy
+future testing lanes. The subject and token label must be literal values without
+selector patterns. The Director's existing observation authority supplies the
+`.plan` dry run across those lanes; the proposed execution rule does not need
+to broaden other actions. The execution boundary, rather than a per-lane policy
 list, enforces current connection isolation: the shared SQL readback must pass
 before planning, in each native account transaction, and at each browser
 checkpoint. Missing, failed or unreadable isolation refuses; no repair is
-performed by the walkthrough. This restriction also covers cleanup. If a lane
-loses isolation, use the supported
+performed by the walkthrough. This restriction also covers cleanup. On a
+generic refusal, first check identity, copy and isolation through their supported
+readbacks; do not assume isolation is the cause. If a lane loses isolation, use
+the supported
 [connection-isolation repair and readback](operations.md#repair-copied-carrier-and-customer-sms-connections)
-before retrying cleanup. Outcome reconciliation remains read-only and does not
-require passing isolation to observe an already dispatched operation.
+before retrying cleanup. That repair refuses under a staff hold or protected
+use; resolve that protection through its supported path before repair. Until
+isolation passes, the account remains active and its native sessions are not
+revoked by the service consumption deadline. Outcome reconciliation remains
+read-only and does not require passing isolation to observe an already
+dispatched operation.
 Dry runs take only a transient lane reservation and perform authenticated
 provider/host reads; they create no account, secret or operative request.
 
@@ -59,7 +68,8 @@ reserved-looking logins without a matching account/copy marker remain protected.
 copied login history before preparation is excluded. An unreadable check
 refuses. Launchplane consumes a task credential for at most four hours;
 this does not expire the native Odoo account. Cleanup is required to revoke it,
-and remains available after the service consumption deadline.
+and may run after the service consumption deadline once its current copy and
+isolation prerequisites pass.
 An existing staff login can never be adopted or reset.
 
 Account groups are explicit native group XML IDs. The default is
@@ -136,7 +146,8 @@ persisted in Launchplane. Durable receipts retain their SHA-256 digests; exact
 replays omit the PNGs. The harness keeps needed screenshots in its task evidence.
 Masks protect credential surfaces; screenshots may still show restored business
 data or personal information. Keep them in the task's approved evidence location.
-Each step rechecks runtime identity and staff usage, so a long checklist can
+Each step rechecks runtime identity, connection isolation and staff usage, so a
+long checklist can
 take several minutes. Use short checklist segments; an HTTP timeout does not
 cancel the worker, and a same-key retry reports a live lease until it finishes.
 If that HTTP response is lost, preserve the original transaction receipt and
@@ -159,7 +170,8 @@ Business records created by a walkthrough remain TEST-marked and are removed
 under that product's supported testing-data procedure; cleanup does not erase
 the walkthrough's business evidence or staff data.
 Cleanup may revoke its own account while a staff hold or recent staff sign-in
-protects the lane. Its separate read-only physical qualification still requires
+protects the lane only if current connection isolation still passes. Its separate
+read-only physical qualification still requires
 the original current copy, isolated resources and exact runtime. It never lifts
 the staff hold or reads login history to authorize cleanup. After a copy is
 replaced, old accounts/secrets remain under that retained copy's custody;
@@ -181,7 +193,8 @@ deadline, a future consumer refuses before account writes, and an already
 running transaction prevents a quiescent observation. It
 does not replan the current lane or repeat browser/account work. Recovery can
 therefore settle the original receipt even after expiry or a staff hold.
-Then run cleanup with a fresh reviewed digest and key. A live lease or changed
+Then, once isolation and the cleanup prerequisites pass, run cleanup with a fresh
+reviewed digest and key. A live lease or changed
 copy/target still refuses. Preserve the original receipt/key and use supported
 operation recovery; do not reset fences or modify a retained old database.
 An absent/incomplete journal can settle only after that deadline and positive

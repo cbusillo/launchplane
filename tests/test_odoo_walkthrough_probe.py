@@ -3,6 +3,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timezone
 import io
 import json
+import sqlite3
 from pathlib import Path
 import subprocess
 import sys
@@ -28,7 +29,8 @@ from control_plane.dokploy.odoo_walkthrough import (
     WALKTHROUGH_JOURNAL_DIRECTORY,
 )
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
-from control_plane.odoo_connection_isolation import CONNECTION_ISOLATION_PARAMETERS
+from control_plane.odoo_connection_isolation import connection_isolation_library
+from tests.test_odoo_connection_isolation import SqliteCursor, seed
 
 
 class ProbeConnection:
@@ -42,11 +44,20 @@ class ProbeConnection:
         self.active = True
         self.statement = ""
         self.parameters: tuple[object, ...] = ()
-        self.isolated = True
+        self.database = sqlite3.connect(":memory:")
+        seed(self.database)
+        self.sql = SqliteCursor(self.database)
+        namespace: dict[str, Any] = {}
+        exec(connection_isolation_library(), namespace)
+        self.repair = namespace["connection_isolation"]
+        self.repair(self.sql, apply=True)
+        self.sql_result = False
         self.isolation_readable = True
 
     def set_session(self, *, readonly: bool, autocommit: bool) -> None:
         self.readonly = readonly and not autocommit
+        if not self.isolation_readable:
+            raise RuntimeError("Database read is unavailable")
 
     def cursor(self) -> "ProbeConnection":
         return self
@@ -61,19 +72,27 @@ class ProbeConnection:
         if not self.readonly or not statement.strip().upper().startswith(("SELECT", "SET", "WITH")):
             raise AssertionError("Probe attempted a write")
         self.statement, self.parameters = statement, parameters
-        if "SELECT count(*) FROM ir_config_parameter" in statement and not self.isolation_readable:
-            raise RuntimeError("Isolation read is unavailable")
+        self.sql_result = not any(
+            marker in statement
+            for marker in (
+                "SET LOCAL",
+                "pg_try_advisory_xact_lock",
+                "res_users_log",
+                "SELECT value FROM ir_config_parameter WHERE key=%s",
+                "SELECT login,active FROM res_users",
+            )
+        )
+        if self.sql_result:
+            self.sql.execute(statement, parameters)
 
     def fetchone(self) -> tuple[object, ...]:
-        if "SELECT count(*) FROM ir_config_parameter" in self.statement:
-            return (len(CONNECTION_ISOLATION_PARAMETERS) if self.isolated else 0,)
+        if self.sql_result:
+            return tuple(self.sql.fetchone())
         if "pg_try_advisory_xact_lock" in self.statement:
             return (self.free,)
         if "res_users_log" in self.statement:
             return (self.used,)
         if "ir_config_parameter" in self.statement:
-            if "SELECT EXISTS" in self.statement:
-                return (False,)
             if self.parameters[0] == TESTING_COPY_COMPLETION_PARAMETER:
                 return (self.copy,)
             return (
@@ -90,9 +109,7 @@ class ProbeConnection:
         raise AssertionError("Unexpected database read")
 
     def fetchall(self) -> list[tuple[str]]:
-        if "information_schema.columns" in self.statement:
-            return []
-        raise AssertionError("Unexpected database read")
+        return list(self.sql.fetchall())
 
     def rollback(self) -> None:
         pass
@@ -130,6 +147,7 @@ class NativeProbeTests(unittest.TestCase):
             "probe": ACCOUNT_DATABASE_PROBE,
         }
         self.connection = ProbeConnection(self.spec)
+        self.addCleanup(self.connection.database.close)
         self.environment = {
             **runtime_identity_env(self.identity),
             "PLATFORM_INSTANCE": "testing",
@@ -234,11 +252,16 @@ class NativeProbeTests(unittest.TestCase):
         for mode in ("lane_usage", "usage", "isolation"):
             with self.subTest(mode=mode):
                 self.spec["mode"] = mode
-                self.connection.isolated = True
+                self.connection.repair(self.connection.sql, apply=True)
                 self.connection.isolation_readable = True
                 self.assertTrue(self.run_probe())
-                self.connection.isolated = False
-                self.assertFalse(self.run_probe())
-                self.connection.isolated = True
+                for mutation in (
+                    "UPDATE res_company SET stock_move_sms_validation = true",
+                    "UPDATE iap_account SET account_token = 'live-fixture-key'",
+                    "UPDATE delivery_carrier SET prod_environment = true",
+                ):
+                    self.connection.database.execute(mutation)
+                    self.assertFalse(self.run_probe())
+                    self.connection.repair(self.connection.sql, apply=True)
                 self.connection.isolation_readable = False
                 self.assertFalse(self.run_probe())
