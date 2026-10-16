@@ -135,7 +135,12 @@ releases cannot bypass another unfinished cutover; recover it first. Configured
 two-slot lanes also refuse an in-place rollback after a switch-back event.
 Authorization is checked again at recovery boundaries. Denial performs no
 effects and keeps the unfinished cutover's lane hold without consuming the
-provider retry budget. A refused finished-release replay preserves its existing
+provider retry budget. Held cutover reconciliation yields to pending release
+queues, including rollback and replacement. Product reconciliation remains
+available between delayed recovery attempts. A persisted
+30-second delay after the last recovery update prevents immediate reclaims
+after denial and survives worker restarts; other eligible lanes remain claimable.
+A refused finished-release replay preserves its existing
 promotion audit record. Switch-back intent persists its start time so a crash
 before publishing the deployment event cannot replace it with retry times.
 The direct promotion
