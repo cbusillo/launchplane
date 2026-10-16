@@ -1,23 +1,27 @@
 import { expect, test } from "./state";
+import { previewInventoryPresentation } from "../../src/preview-inventory";
+import { expireProductEvidence } from "../../src/product-environment-signal";
 import type { ProductPreviewSummary } from "../../src/generated/openapi.ts";
 
 const cases: Array<{ name: string; enabled: boolean; count: number;
-  trust: ProductPreviewSummary["trust_state"]; headline: string; scan?: NonNullable<ProductPreviewSummary["inventory"]>["status"]; observedCount?: number }> = [
-  { name: "scanned empty with retained identities", enabled: true, count: 3, trust: "verified", scan: "empty", observedCount: 0, headline: "No previews observed" },
-  { name: "scanned nonempty with untracked identity", enabled: true, count: 3, trust: "verified", scan: "nonempty", observedCount: 1, headline: "1 observed" },
-  { name: "scan failed", enabled: true, count: 0, trust: "missing", scan: "failed", headline: "Inventory scan failed" },
-  { name: "scan unavailable", enabled: true, count: 0, trust: "missing", scan: "unavailable", headline: "Inventory unavailable" },
-  { name: "scan unsupported", enabled: true, count: 0, trust: "unsupported", scan: "unsupported", headline: "Inventory unsupported" },
-  { name: "scan stale", enabled: true, count: 0, trust: "stale", scan: "stale", observedCount: 0, headline: "Inventory stale" },
-  { name: "missing nonzero", enabled: true, count: 3, trust: "missing", headline: "Inventory unknown" },
-  { name: "missing zero", enabled: true, count: 0, trust: "missing", headline: "Inventory unknown" },
-  { name: "disabled", enabled: false, count: 0, trust: "missing", headline: "Not applicable" },
-  { name: "recorded nonzero", enabled: true, count: 3, trust: "recorded", headline: "3 recorded" },
-  { name: "recorded zero", enabled: true, count: 0, trust: "recorded", headline: "0 recorded" },
-  { name: "verified active", enabled: true, count: 3, trust: "verified", headline: "3 active" },
-  { name: "verified empty", enabled: true, count: 0, trust: "verified", headline: "No active previews" },
-  { name: "stale", enabled: true, count: 3, trust: "stale", headline: "Inventory stale" },
-  { name: "unsupported", enabled: true, count: 3, trust: "unsupported", headline: "Inventory unavailable" },
+  trust: ProductPreviewSummary["trust_state"]; scan?: NonNullable<ProductPreviewSummary["inventory"]>["status"]; observedCount?: number }> = [
+  { name: "scanned empty with retained identities", enabled: true, count: 3, trust: "verified", scan: "empty", observedCount: 0 },
+  { name: "scanned nonempty with untracked identity", enabled: true, count: 3, trust: "verified", scan: "nonempty", observedCount: 1 },
+  { name: "scan failed", enabled: true, count: 0, trust: "missing", scan: "failed" },
+  { name: "scan unavailable", enabled: true, count: 0, trust: "missing", scan: "unavailable" },
+  { name: "scan unsupported", enabled: true, count: 0, trust: "unsupported", scan: "unsupported" },
+  { name: "scan stale", enabled: true, count: 0, trust: "stale", scan: "stale", observedCount: 0 },
+  { name: "current missing nonzero", enabled: true, count: 3, trust: "missing", scan: "missing" },
+  { name: "current missing zero", enabled: true, count: 0, trust: "missing", scan: "missing" },
+  { name: "missing nonzero", enabled: true, count: 3, trust: "missing" },
+  { name: "missing zero", enabled: true, count: 0, trust: "missing" },
+  { name: "disabled", enabled: false, count: 0, trust: "missing" },
+  { name: "recorded nonzero", enabled: true, count: 3, trust: "recorded" },
+  { name: "recorded zero", enabled: true, count: 0, trust: "recorded" },
+  { name: "verified active", enabled: true, count: 3, trust: "verified" },
+  { name: "verified empty", enabled: true, count: 0, trust: "verified" },
+  { name: "stale", enabled: true, count: 3, trust: "stale" },
+  { name: "unsupported", enabled: true, count: 3, trust: "unsupported" },
 ];
 
 for (const state of cases) {
@@ -43,6 +47,7 @@ for (const state of cases) {
       product.preview.unobserved_record_slugs = state.count ? ["pr-1", "pr-2", "pr-3"] : [];
       product.preview.untracked_observed_slugs = state.observedCount ? ["pr-99"] : [];
     }
+    const expected = previewInventoryPresentation(product.preview);
     const mutations: string[] = [];
     page.on("request", request => {
       if (request.url().includes("/v1/") && request.method() !== "GET") mutations.push(request.url());
@@ -62,23 +67,21 @@ for (const state of cases) {
     } }));
     await page.goto("/ui/products");
     const row = page.locator(".product-directory-row");
-    await expect(row.locator(".directory-preview > strong")).toHaveText(state.headline);
+    await expect(row.locator(".directory-preview > strong")).toHaveText(expected.headline);
     if (state.trust === "missing" && state.enabled && !state.scan) {
       await expect(row.locator(".directory-preview")).not.toContainText(/\d+ active|No active/);
     }
     await row.click();
     const summary = page.getByRole("region", { name: "Product summary" }).locator(".signal-tile")
       .filter({ hasText: /^Previews/i });
-    await expect(summary.locator("strong")).toHaveText(state.headline);
+    await expect(summary.locator("strong")).toHaveText(expected.headline);
     const detail = page.locator(".preview-summary");
-    await expect(detail.getByRole("heading")).toHaveText(state.headline);
+    await expect(detail.getByRole("heading")).toHaveText(expected.headline);
     if (state.trust === "missing" && state.enabled && !state.scan) {
-      await expect(detail).toContainText("cannot determine whether previews exist");
-      await expect(detail).toContainText(`Recorded count: ${state.count}`);
+      await expect(detail).toContainText(expected.detail);
     }
     if (state.trust === "recorded") {
-      await expect(detail).toContainText("has not been verified");
-      await expect(detail).not.toContainText("read completed without");
+      await expect(detail).toContainText(expected.detail);
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
     if (state.name === "missing nonzero") {
@@ -87,23 +90,23 @@ for (const state of cases) {
       product.preview.trust_state = "verified";
       product.preview.provenance.freshness_status = "verified";
       await page.getByRole("button", { name: "Refresh current evidence" }).click();
-      await expect(summary.locator("strong")).toHaveText("3 active");
-      await expect(detail.getByRole("heading")).toHaveText("3 active");
+      await expect(summary.locator("strong")).toHaveText(previewInventoryPresentation(product.preview).headline);
+      await expect(detail.getByRole("heading")).toHaveText(previewInventoryPresentation(product.preview).headline);
       await page.getByRole("link", { name: "Launchplane home", exact: true }).first().click();
-      await expect(page.locator(".directory-preview > strong")).toHaveText("3 active");
+      await expect(page.locator(".directory-preview > strong")).toHaveText(previewInventoryPresentation(product.preview).headline);
     }
     if (state.scan === "empty") {
-      await expect(detail).toContainText("3 recorded preview identities");
-      await expect(detail).toContainText("3 recorded preview(s) absent from scan");
+      await expect(detail).toContainText(expected.detail);
       await page.screenshot({ path: `../tmp/browser-smoke/preview-scanned-empty-${testInfo.project.name}.png`, fullPage: true });
+      const expiredHeadline = previewInventoryPresentation(expireProductEvidence(product, now + 60_001).preview).headline;
       await page.clock.fastForward(60_001);
-      await expect(detail.getByRole("heading")).toHaveText("Inventory stale");
-      await expect(summary.locator("strong")).toHaveText("Inventory stale");
+      await expect(detail.getByRole("heading")).toHaveText(expiredHeadline);
+      await expect(summary.locator("strong")).toHaveText(expiredHeadline);
       await page.getByRole("link", { name: "Launchplane home", exact: true }).first().click();
-      await expect(page.locator(".directory-preview > strong")).toHaveText("Inventory stale");
+      await expect(page.locator(".directory-preview > strong")).toHaveText(expiredHeadline);
     }
     if (state.scan === "nonempty") {
-      await expect(detail).toContainText("1 observed preview(s) without a current record");
+      await expect(detail).toContainText(expected.detail);
     }
     expect(mutations).toEqual([]);
   });

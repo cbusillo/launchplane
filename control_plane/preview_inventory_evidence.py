@@ -9,6 +9,7 @@ from control_plane.contracts.data_provenance import DataProvenance
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 
 PREVIEW_INVENTORY_STALE_AFTER = timedelta(minutes=30)
+PREVIEW_INVENTORY_SCAN_READ_LIMIT = 100
 
 
 class PreviewInventoryEvidence(BaseModel):
@@ -23,7 +24,7 @@ def read_preview_inventory_evidence(
 ) -> PreviewInventoryEvidence:
     read = getattr(record_store, "list_preview_inventory_scan_records", None)
     status: Literal["missing", "unsupported", "unavailable"] = "missing"
-    detail = "Launchplane has not recorded a preview inventory scan for this context."
+    detail = "No matching scoped preview inventory scan is available in the recent record window."
     scan = None
     if not callable(read):
         status, detail = "unsupported", "The record store does not support preview inventory scans."
@@ -33,7 +34,7 @@ def read_preview_inventory_evidence(
             # enumerated (or whether applications versus composes were read).
             candidates = (
                 item
-                for item in read(context_name=context, limit=None)
+                for item in read(context_name=context, limit=PREVIEW_INVENTORY_SCAN_READ_LIMIT)
                 if item.context == context
                 and item.product == product
                 and item.repository == repository

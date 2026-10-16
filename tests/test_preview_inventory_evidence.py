@@ -175,3 +175,72 @@ class PreviewInventoryEvidenceTests(unittest.TestCase):
             assert denied.preview.inventory is not None
             self.assertEqual(denied.preview.inventory.observed_slugs, ())
             self.assertEqual(denied.preview.untracked_observed_slugs, ())
+
+    def test_new_payloads_remain_readable_by_the_immutable_v1_reader(self) -> None:
+        # This is the original persisted-reader contract, intentionally frozen for
+        # image rollback compatibility; it is not a current config/schema copy.
+        from typing import Literal
+        from pydantic import BaseModel, ConfigDict
+
+        class V1Scan(BaseModel):
+            model_config = ConfigDict(extra="forbid")
+            schema_version: int
+            scan_id: str
+            context: str
+            scanned_at: str
+            source: str
+            status: Literal["pass", "fail"]
+            preview_count: int
+            preview_slugs: tuple[str, ...]
+            error_message: str
+
+        for outcome in ("pass", "fail", "unsupported", "unavailable"):
+            scan = PreviewInventoryScanRecord.model_validate(
+                {
+                    "scan_id": "scoped-scan",
+                    "context": "preview",
+                    "product": "example-site",
+                    "repository": "example/site",
+                    "source": "service-preview-inventory",
+                    "scanned_at": datetime.now(timezone.utc).isoformat(),
+                    "preview_count": 0,
+                    "status": outcome,
+                }
+            )
+            payload = scan.model_dump_json()
+            old = V1Scan.model_validate_json(payload)
+            self.assertEqual(old.status, "pass" if outcome == "pass" else "fail")
+            restored = PreviewInventoryScanRecord.model_validate_json(payload)
+            self.assertEqual(restored, scan)
+
+    def test_old_malformed_history_does_not_poison_current_bounded_evidence(self) -> None:
+        from control_plane.preview_inventory_evidence import (
+            PREVIEW_INVENTORY_SCAN_READ_LIMIT,
+            read_preview_inventory_evidence,
+        )
+
+        scan = PreviewInventoryScanRecord(
+            scan_id="recent",
+            context="preview",
+            product="site",
+            repository="example/site",
+            scanned_at=datetime.now(timezone.utc).isoformat(),
+            source="provider",
+            status="pass",
+            preview_count=0,
+        )
+        raw_history = [scan.model_dump()] * PREVIEW_INVENTORY_SCAN_READ_LIMIT + [{}]
+
+        def read(**kwargs: object) -> tuple[PreviewInventoryScanRecord, ...]:
+            limit = kwargs.get("limit")
+            selected = raw_history[:limit] if isinstance(limit, int) else raw_history
+            return tuple(PreviewInventoryScanRecord.model_validate(item) for item in selected)
+
+        result = read_preview_inventory_evidence(
+            record_store=SimpleNamespace(list_preview_inventory_scan_records=read),
+            context=scan.context,
+            product=scan.product,
+            repository=scan.repository,
+        )
+        self.assertEqual(result.status, "empty")
+        self.assertEqual(result.provenance.source_record_id, scan.scan_id)

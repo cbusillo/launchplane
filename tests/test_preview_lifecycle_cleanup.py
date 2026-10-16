@@ -342,6 +342,82 @@ class PreviewLifecycleCleanupTests(unittest.TestCase):
             self.assertEqual(preview.state, "destroyed")
             self.assertEqual(preview.destroy_reason, "test_cleanup")
 
+    def test_sweep_uses_its_own_scan_when_background_collection_races(self) -> None:
+        from datetime import datetime, timezone
+        from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+        from control_plane.preview_lifecycle_cleanup_routes import (
+            PreviewLifecycleSweepEnvelope,
+            build_preview_lifecycle_sweep,
+        )
+        from control_plane.workflows.generic_web_preview import (
+            GenericWebPreviewInventoryResult,
+            GenericWebPreviewInventoryItem,
+        )
+
+        profile = _profile()
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            store = FilesystemRecordStore(root / "state")
+            store.write_product_profile_record(profile)
+
+            def desired(**_kwargs: object) -> PreviewDesiredStateRecord:
+                store.write_preview_inventory_scan_record(
+                    PreviewInventoryScanRecord(
+                        scan_id="concurrent-background-failure",
+                        context=profile.preview.context,
+                        product=profile.product,
+                        repository=profile.repository,
+                        scanned_at=datetime.now(timezone.utc).isoformat(),
+                        source="service-preview-inventory",
+                        status="fail",
+                        preview_count=0,
+                    )
+                )
+                return build_preview_desired_state_record(
+                    product=profile.product,
+                    context=profile.preview.context,
+                    source="test",
+                    discovered_at=datetime.now(timezone.utc).isoformat(),
+                    repository=profile.repository,
+                    anchor_repo=profile.repository.partition("/")[2],
+                    preview_slug_prefix="pr-",
+                    desired_previews=(),
+                )
+
+            with (
+                patch(
+                    "control_plane.preview_lifecycle_cleanup_routes.execute_generic_web_preview_inventory",
+                    return_value=GenericWebPreviewInventoryResult(
+                        product=profile.product,
+                        context=profile.preview.context,
+                        source="lifecycle",
+                        app_name_prefix="site-preview",
+                        previews=(
+                            GenericWebPreviewInventoryItem(
+                                applicationId="app",
+                                applicationName="site-preview-pr-7",
+                                previewSlug="pr-7",
+                            ),
+                        ),
+                    ),
+                ),
+                patch(
+                    "control_plane.preview_lifecycle_cleanup_routes.discover_generic_web_preview_desired_state",
+                    side_effect=desired,
+                ),
+            ):
+                result = build_preview_lifecycle_sweep(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=PreviewLifecycleSweepEnvelope(),
+                )
+            plan = store.list_preview_lifecycle_plan_records()[0]
+            entries = result["profiles"]
+            assert isinstance(entries, list)
+            self.assertEqual(plan.inventory_scan_id, entries[0]["preview_inventory_scan_id"])
+            self.assertEqual(plan.actual_slugs, ("pr-7",))
+            self.assertEqual(plan.status, "pass")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -4188,9 +4188,12 @@ returned URL with generation status and cleanup outcome.
 Launchplane also collects preview inventory independently of lifecycle planning.
 The service's existing lease/slot runner collects once per ten-minute UTC slot
 (one third of inventory's 30-minute freshness window), across replicas and
-restarts. Each active preview-enabled profile produces a product/repository-bound
+restarts. Both schedulers are signaled before shutdown joins either thread.
+Each active preview-enabled profile produces a product/repository-bound
 scan: generic web uses complete application inventory; Odoo uses complete compose
-inventory. Provider reads produce append-only scan evidence only. No desired-state
+inventory. Provider reads produce append-only scan evidence only. Product reads examine at most
+100 recent scans per context; no matching scoped evidence in that window is
+unknown, never empty. No desired-state
 discovery, lifecycle plan, cleanup apply, deployment or record destruction runs in
 this job. Unsupported drivers and read/collection failures remain explicit scans;
 a failure is retried in the next slot rather than every poll. Shutdown stops between
@@ -4203,8 +4206,8 @@ Successful empty scans say no previews observed; disabled previews are not
 applicable. Missing or unsuccessful scans cannot establish absence. Do not edit
 records to renew freshness. Service logs and the separate
 `launchplane:preview-inventory-scheduler:v1` slot receipts retain collection outcomes.
-Rollback is the normal previous-service-image rollback: scans remain compatible
-append-only payloads, the prior daily job remains supported, and evidence naturally
+Rollback is the normal previous-service-image rollback: scans retain the strict v1 payload shape with versioned scope metadata in the
+existing source field, the prior daily job remains supported, and evidence naturally
 expires if collection stops. No grants, workflow settings or credentials are added
 or removed by this source change; #3514 still owns its settings-retirement proof.
 

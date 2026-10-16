@@ -9,6 +9,7 @@ import uuid
 import click
 
 from control_plane.contracts.preview_inventory_scan_record import (
+    PREVIEW_INVENTORY_COLLECTION_SOURCE,
     PreviewInventoryScanRecord,
     PreviewInventoryScanStatus,
     build_preview_inventory_scan_id,
@@ -81,6 +82,9 @@ def collect_preview_inventory(
                 raise click.ClickException(
                     "Provider inventory has ambiguous duplicate preview slugs."
                 )
+        except FileNotFoundError:
+            status, slugs = "unsupported", ()
+            error_message = "Preview inventory is unsupported for this driver."
         except click.ClickException:
             status, slugs = "fail", ()
             error_message = "Provider inventory scan failed or returned incomplete inventory."
@@ -99,7 +103,7 @@ def collect_preview_inventory(
             product=profile.product,
             repository=profile.repository,
             scanned_at=scanned_at,
-            source="service-preview-inventory",
+            source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
             status=status,
             preview_count=len(slugs),
             preview_slugs=slugs,

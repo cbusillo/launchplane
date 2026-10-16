@@ -244,6 +244,20 @@ class PreviewLifecycleSchedulerTests(unittest.TestCase):
             self.assertTrue(self.make_scheduler().run_once())
         self.sweep.assert_called_once()
 
+    def test_shutdown_signals_both_jobs_before_joining_either(self) -> None:
+        scheduler = self.make_scheduler()
+        inventory_thread = Mock()
+        scheduler.inventory_scheduler._thread = inventory_thread
+        inventory_thread.join.side_effect = lambda: self.assertTrue(scheduler._stop.is_set())
+        lifecycle_thread = Mock()
+        scheduler._thread = lifecycle_thread
+        lifecycle_thread.join.side_effect = lambda: self.assertTrue(
+            scheduler.inventory_scheduler._stop.is_set()
+        )
+        scheduler.stop()
+        inventory_thread.join.assert_called_once()
+        lifecycle_thread.join.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

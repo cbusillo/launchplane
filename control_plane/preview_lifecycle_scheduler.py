@@ -5,8 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_STALE_AFTER
-from control_plane.preview_inventory_collection import collect_preview_inventory
 import logging
 from pathlib import Path
 from threading import Event, Thread
@@ -25,6 +23,8 @@ from control_plane.preview_lifecycle_cleanup_routes import (
     build_preview_lifecycle_sweep,
     require_preview_lifecycle_sweep_store,
 )
+from control_plane.preview_inventory_evidence import PREVIEW_INVENTORY_STALE_AFTER
+from control_plane.preview_inventory_collection import collect_preview_inventory
 from control_plane.provider_operations import _ReservationHeartbeat
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -118,7 +118,7 @@ class _PreviewScheduler:
             try:
                 self.run_once()
             except Exception:  # noqa: BLE001 - keep the next slot alive.
-                _LOGGER.exception("Preview lifecycle sweep schedule pass failed")
+                _LOGGER.exception("Preview scheduler %s pass failed", self.route)
             self._stop.wait(SWEEP_POLL_SECONDS)
 
     def _read(self, key: str) -> LaunchplaneIdempotencyRecord | None:
@@ -138,7 +138,7 @@ class _PreviewScheduler:
                 idempotency_key=key,
                 request_fingerprint=self.fingerprint,
                 response_status_code=200,
-                response_trace_id=f"preview-lifecycle-sweep:{key}",
+                response_trace_id=f"{self.route}:{key}",
                 recorded_at=_timestamp(now),
                 response_payload={"completed_at": _timestamp(now), **payload},
             )
@@ -186,12 +186,12 @@ class _PreviewScheduler:
             except Exception as error:
                 # A failed slot waits for the next one, like the daily workflow did;
                 # retrying every poll would repeat provider and GitHub reads all day.
-                _LOGGER.exception("Preview lifecycle sweep slot %s failed", key)
+                _LOGGER.exception("Preview scheduler %s slot %s failed", self.route, key)
                 summary = {"status": "error", "apply": False, "error": type(error).__name__}
             heartbeat.assert_current()
             self._write_completion(key, summary)
         log = _LOGGER.warning if summary["status"] in {"fail", "error"} else _LOGGER.info
-        log("Preview lifecycle sweep slot %s completed: %s", key, summary["status"])
+        log("Preview scheduler %s slot %s completed: %s", self.route, key, summary["status"])
         return True
 
     def _run_sweep(self) -> dict[str, object]:
@@ -244,5 +244,7 @@ class PreviewLifecycleScheduler(_PreviewScheduler):
         super().start()
 
     def stop(self) -> None:
+        self._stop.set()
+        self.inventory_scheduler._stop.set()
         self.inventory_scheduler.stop()
         super().stop()

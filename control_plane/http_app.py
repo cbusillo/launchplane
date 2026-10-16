@@ -726,7 +726,10 @@ from control_plane.contracts.detached_application_retirement import (
     DetachedApplicationRetirementRequest,
 )
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
-from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_inventory_scan_record import (
+    PreviewInventoryScanRecord,
+    PREVIEW_INVENTORY_COLLECTION_SOURCE,
+)
 from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
@@ -23389,9 +23392,15 @@ def create_launchplane_fastapi_app(
                 code="database_storage_required",
                 message=str(error),
             ) from error
-        inventory_scans = plan_store.list_preview_inventory_scan_records(
-            context_name=plan_request.context,
-            limit=1,
+        # Preserve the explicit lifecycle inventory boundary; report-only
+        # background collection cannot replace a caller's lifecycle scan.
+        inventory_scans = tuple(
+            scan
+            for scan in plan_store.list_preview_inventory_scan_records(
+                context_name=plan_request.context,
+                limit=100,
+            )
+            if scan.source != PREVIEW_INVENTORY_COLLECTION_SOURCE
         )
         plan_record = build_preview_lifecycle_plan(
             product=plan_request.product,

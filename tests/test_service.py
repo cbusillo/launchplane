@@ -5486,12 +5486,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
             store = _verireel_route_test_store(state_dir)
+            profile = store.read_product_profile_record("verireel")
             store.write_preview_inventory_scan_record(
                 PreviewInventoryScanRecord(
                     scan_id="preview-inventory-scan-verireel-testing-20260420T100500Z",
                     context="verireel-testing",
                     scanned_at="2026-04-20T10:05:00Z",
                     source="verireel-preview-inventory",
+                    product=profile.product,
+                    repository=profile.repository,
                     status="pass",
                     preview_count=0,
                     preview_slugs=(),

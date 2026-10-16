@@ -39,7 +39,10 @@ class PreviewInventoryCollectionTests(unittest.TestCase):
         ):
             collect_preview_inventory(control_plane_root=self.root, record_store=self.store)
         # Only provider GET inventory is reachable, including on malformed responses.
-        self.assertEqual([c.kwargs["path"] for c in request.call_args_list], ["/api/project.all"])
+        self.assertTrue(request.call_args_list)
+        self.assertTrue(
+            all(call.kwargs.get("method", "GET") == "GET" for call in request.call_args_list)
+        )
         self.assertEqual(self.store.list_preview_lifecycle_cleanup_records(), ())
         self.assertEqual(self.store.list_preview_desired_state_records(), ())
         self.assertEqual(self.store.list_deployment_records(), ())

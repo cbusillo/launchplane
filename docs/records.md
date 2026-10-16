@@ -2763,7 +2763,12 @@ credential, runtime grant, or stored record is changed by this code retirement.
 - One append-only record per provider inventory scan for a preview context.
 - Record the scan id, context, scanned timestamp, source, pass/fail status,
   observed preview slugs, and failure message when the scan could not complete.
-- New inventory-only scans bind product and repository as well as context. Legacy
+- New inventory-only scans bind product and repository as well as context.
+  The persisted payload preserves the strict v1 reader shape: a versioned envelope
+  in the existing opaque `source` string carries scope and detailed outcome;
+  v1 sees only pass/fail, with unsupported/unavailable/truncated outcomes failing
+  closed. New readers decode the envelope. This keeps a prior service image able
+  to read records after rollback, without changing or deleting evidence. Legacy
   context-only scans remain history; they cannot verify which product/repository
   or provider resource type was scanned. Natural collection supplies scoped proof. Failed, unavailable, unsupported, truncated and
   stale scans cannot establish empty inventory. A new unsuccessful scan supersedes
