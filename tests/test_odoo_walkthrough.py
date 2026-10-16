@@ -49,7 +49,11 @@ from control_plane.odoo_runtime_reads import (
     OdooRuntimeEvidence,
     OdooRuntimeSelection,
 )
-from control_plane.odoo_walkthrough import WalkthroughPlan
+from control_plane.odoo_walkthrough import (
+    WalkthroughPlan,
+    WalkthroughPrerequisite,
+    WalkthroughPrerequisiteError,
+)
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
 from control_plane.odoo_connection_isolation import connection_isolation_library
 from control_plane.service_auth import (
@@ -314,6 +318,37 @@ class TaskRouteTests(unittest.TestCase):
         stale = task_request(mode="apply", reviewed_plan_sha256="d" * 64)
         self.assertEqual(self.invoke(stale, "stale")[0], 409)
         self.account.assert_not_called()
+
+    def test_prerequisite_refusals_are_value_free_and_never_dispatch(self) -> None:
+        for mode in ("dry-run", "apply"):
+            for code in WalkthroughPrerequisite:
+                with self.subTest(mode=mode, checkpoint=code):
+                    error = WalkthroughPrerequisiteError(code)
+                    error.args = ("private-password private-provider.example private-copy-id",)
+                    self.planner.side_effect = error
+                    status, response = self.invoke(
+                        task_request(
+                            mode=mode,
+                            reviewed_plan_sha256=self.plan.digest if mode == "apply" else "",
+                        ),
+                        "refused",
+                    )
+                    self.assertEqual(status, 409)
+                    self.assertEqual(response["detail"]["code"], code.value)
+                    self.assertEqual(response["detail"]["trace_id"], "trace-fixture")
+                    self.assertNotIn("private-", json.dumps(response))
+        self.account.assert_not_called()
+        self.browser.assert_not_called()
+        self.assertEqual(self.store.list_secret_records(), ())
+
+    def test_unclassified_failure_retains_generic_refusal_without_private_details(self) -> None:
+        self.planner.side_effect = RuntimeError("private-password private-provider.example")
+        status, response = self.invoke(task_request())
+        self.assertEqual(status, 409)
+        self.assertEqual(response["detail"]["code"], "testing_task_refused")
+        self.assertNotIn("private-", json.dumps(response))
+        self.account.assert_not_called()
+        self.assertEqual(self.store.list_secret_records(), ())
 
     def test_provision_replay_browser_and_cleanup_keep_password_internal(self) -> None:
         provision = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)
