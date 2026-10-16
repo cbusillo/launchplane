@@ -50453,6 +50453,11 @@
             "title": "Domain Host",
             "type": "string"
           },
+          "initial_generation": {
+            "default": false,
+            "title": "Initial Generation",
+            "type": "boolean"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -50625,6 +50630,11 @@
             "title": "Context",
             "type": "string"
           },
+          "initial_generation": {
+            "default": false,
+            "title": "Initial Generation",
+            "type": "boolean"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -50642,7 +50652,7 @@
             "type": "string"
           },
           "operation_id": {
-            "minLength": 1,
+            "default": "",
             "title": "Operation Id",
             "type": "string"
           },
@@ -50660,7 +50670,6 @@
         },
         "required": [
           "context",
-          "operation_id",
           "reason"
         ],
         "title": "TestingReplacementResourcesRequest",

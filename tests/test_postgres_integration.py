@@ -10298,6 +10298,18 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_initial_resources_use_existing_creation_replay_and_readback(self) -> None:
+        self._fresh_resource_preparation_case("normal", initial_generation=True)
+
+    def test_initial_partial_resources_resume_on_the_original_allocation(self) -> None:
+        self._fresh_resource_preparation_case("partial", initial_generation=True)
+
+    def test_initial_unknown_adoption_is_reconciled_without_another_create(self) -> None:
+        self._fresh_resource_preparation_case("lost-adoption", initial_generation=True)
+
+    def test_initial_alias_drift_refuses_publication(self) -> None:
+        self._fresh_resource_preparation_case("alias", initial_generation=True)
+
     def test_resource_guard_excludes_absent_configuration_alias_and_evidence_writers(self) -> None:
         from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
         from tests.support.disposable_lanes import record_safety
@@ -10383,7 +10395,9 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
     def test_alias_insert_during_provider_io_refuses_positive_publication(self) -> None:
         self._fresh_resource_preparation_case("alias")
 
-    def _fresh_resource_preparation_case(self, fault: str) -> None:
+    def _fresh_resource_preparation_case(
+        self, fault: str, *, initial_generation: bool = False
+    ) -> None:
         from tests.test_testing_replacement_resources import TestingReplacementResourceHttpTests
         from control_plane.odoo_testing_resources import OdooTestingResources
 
@@ -10392,6 +10406,33 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             fixture.database_url = url
             fixture.setUp()
             self.addCleanup(fixture.doCleanups)
+            if initial_generation:
+                from control_plane.odoo_testing_usage import OdooTestingUsage
+
+                fixture.operation = fixture.operation.model_copy(
+                    update={
+                        "status": "pass",
+                        "phase": "completed",
+                        "error_code": "",
+                        "error_message": "",
+                        "finished_at": fixture.operation.updated_at,
+                    }
+                )
+                fixture.store.write_odoo_stable_target_replacement_operation_record(
+                    fixture.operation
+                )
+                original_post = fixture.post
+
+                async def initial_post(**changes: object) -> Any:
+                    return await original_post(initial_generation=True, operation_id="", **changes)
+
+                self.enterContext(patch.object(fixture, "post", side_effect=initial_post))
+                self.enterContext(
+                    patch(
+                        "control_plane.testing_initial_generation.read_odoo_testing_usage",
+                        return_value=OdooTestingUsage("unused", False, False, "complete"),
+                    )
+                )
             retained_record = fixture.store.read_dokploy_target_record(
                 context_name=fixture.context, instance_name="testing"
             )
@@ -10621,7 +10662,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                         interrupted = await fixture.post(**body)
                         self.assertEqual(interrupted.status_code, 409, interrupted.text)
                         captured = fixture.store.read_disposable_resource_preparation(
-                            fixture.operation.operation_id
+                            plan.json()["result"]["operation_id"]
                         )
                         assert captured is not None
                         if fault == "lost-adoption":
@@ -10664,7 +10705,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     before_profile,
                 )
                 custody = fixture.store.read_disposable_resource_preparation(
-                    fixture.operation.operation_id
+                    plan.json()["result"]["operation_id"]
                 )
                 assert custody is not None
                 self.assertEqual(custody.retained_target_record, retained_record)
@@ -11036,6 +11077,32 @@ class RealPostgresTestingVerificationHttpTests(
                 policy=policy,
             )
         )
+
+
+class RealPostgresInitialTestingGenerationTests(unittest.TestCase):
+    def scenario(self) -> Any:
+        from tests.test_testing_initial_generation import InitialTestingBootstrapScenarioTests
+        from control_plane.odoo_testing_usage import OdooTestingUsage
+
+        scenario = InitialTestingBootstrapScenarioTests()
+        scenario.seed(self.enterContext(_head_postgres_database()), initial_generation=True)
+        self.addCleanup(scenario.doCleanups)
+        scenario.enterContext(
+            patch(
+                "control_plane.testing_initial_generation.read_odoo_testing_usage",
+                return_value=OdooTestingUsage("unused", False, False, "complete"),
+            )
+        )
+        return scenario
+
+    def test_initial_bootstrap_queues_copy_and_keeps_successful_history(self) -> None:
+        self.scenario().initial_bootstrap()
+
+    def test_initial_preparation_excludes_a_competing_executor(self) -> None:
+        self.scenario().apply_fence_blocks_another_executor_and_preserves_original_key()
+
+    def test_initial_generation_is_not_a_completed_copy(self) -> None:
+        self.scenario().incomplete_generation_cannot_be_claimed_complete_for_walkthrough()
 
 
 class RealPostgresFreshTestingBootstrapTests(FreshTestingBootstrapPrerequisiteScenario):

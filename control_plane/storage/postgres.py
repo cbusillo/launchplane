@@ -9868,6 +9868,7 @@ class PostgresRecordStore(HumanSessionStore):
         context: str,
         instance: str,
         include_synchronous: bool = True,
+        exclude_initial_preparation: str = "",
     ) -> OdooStableLaneOperationOwner | None:
         if include_synchronous and not _try_odoo_synchronous_lane_lock(
             session, product=product, context=context, instance=instance
@@ -9875,6 +9876,31 @@ class PostgresRecordStore(HumanSessionStore):
             return OdooStableLaneOperationOwner(
                 operation_kind="synchronous_release", operation_id=""
             )
+        if instance == "testing":
+            for custody, allocation in session.execute(
+                select(
+                    LaunchplaneDisposableReplacementPreparationRow,
+                    LaunchplaneDisposableTestingResourceAllocationRow,
+                ).join(
+                    LaunchplaneDisposableTestingResourceAllocationRow,
+                    LaunchplaneDisposableReplacementPreparationRow.operation_id
+                    == LaunchplaneDisposableTestingResourceAllocationRow.operation_id,
+                )
+            ):
+                if (custody.payload.get("product"), custody.payload.get("context")) != (
+                    product,
+                    context,
+                ):
+                    continue
+                if (
+                    custody.operation_id != exclude_initial_preparation
+                    and allocation.payload.get("initial_apply_started_at")
+                    and not allocation.payload.get("initial_reconcile_requested_at")
+                ):
+                    return OdooStableLaneOperationOwner(
+                        operation_kind="initial_testing_generation",
+                        operation_id=custody.operation_id,
+                    )
         operation_tables: tuple[tuple[OdooStableLaneOperationKind, Any], ...] = (
             ("stable_bootstrap", LaunchplaneOdooStableBootstrapOperationRow),
             ("target_replacement", LaunchplaneOdooStableTargetReplacementOperationRow),
@@ -12214,11 +12240,27 @@ class PostgresRecordStore(HumanSessionStore):
             current = FreshOdooTestingGeneration.model_validate(row.payload)
             if not generation_snapshot_matches(current, generation):
                 raise ValueError("Fresh testing generation changed before queueing.")
-            operation = session.get(
-                LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id
+            allocation = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                generation.operation_id,
+                with_for_update=True,
             )
-            if operation is None or operation.payload.get("status") != "superseded":
-                raise ValueError("Fresh testing supersession is incomplete.")
+            initial = allocation is not None and bool(
+                allocation.payload.get("initial_request_sha256")
+            )
+            if initial:
+                assert allocation is not None
+                if (
+                    not allocation.payload.get("initial_apply_started_at")
+                    or allocation.payload.get("replacement_target_id") != generation.target_id
+                ):
+                    raise ValueError("Initial testing preparation is incomplete.")
+            else:
+                operation = session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id
+                )
+                if operation is None or operation.payload.get("status") != "superseded":
+                    raise ValueError("Fresh testing supersession is incomplete.")
             if current.reconcile_requested_at:
                 return
             from control_plane.odoo_testing_restore import read_current_testing_generation
@@ -12243,6 +12285,9 @@ class PostgresRecordStore(HumanSessionStore):
             self._fold_product_reconcile_request(
                 session, target=target, requested_at=now, delivery_id=""
             )
+            if initial:
+                assert allocation is not None
+                allocation.payload = {**allocation.payload, "initial_reconcile_requested_at": now}
             row.payload = self._payload_dict(
                 current.model_copy(update={"reconcile_requested_at": now})
             )
@@ -12368,6 +12413,184 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             session.commit()
+
+    def require_initial_testing_lane_available(
+        self,
+        preparation: DisposableTestingResourcePreparation,
+        allow_bootstrap_resume: bool = False,
+        *,
+        shared_session: Any = None,
+    ) -> None:
+        with (
+            nullcontext(shared_session) if shared_session is not None else self._session_factory()
+        ) as session:
+            owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=preparation.product,
+                context=preparation.context,
+                instance="testing",
+                exclude_initial_preparation=preparation.operation_id,
+            )
+            if owner is not None:
+                raise ValueError(
+                    "Another operation owns testing; initial preparation cannot recover it."
+                )
+            if (
+                session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow, preparation.operation_id
+                )
+                is not None
+            ):
+                raise ValueError("An initial intent cannot name historical operation authority.")
+            row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow, (preparation.product, preparation.context)
+            )
+            if row is not None and not (
+                allow_bootstrap_resume
+                and row.payload.get("operation_id") == preparation.operation_id
+            ):
+                raise ValueError("Testing already has a generation.")
+
+    def prepare_initial_testing_generation(
+        self,
+        *,
+        product: str,
+        request: Any,
+        prepared_by: str,
+    ) -> None:
+        from control_plane.testing_replacement_resources import (
+            resource_request_payload,
+            resource_context,
+        )
+        from control_plane.disposable_lanes import (
+            disposable_lane_binding_sha256,
+            disposable_lane_configuration,
+        )
+        from uuid import uuid4
+
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=product, context=request.context, instance="testing"
+            )
+            self._lock_product_authority_bundle_write(session)
+            old = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                existing = self.read_disposable_resource_preparation(request.operation_id)
+                if existing is not None:
+                    if existing.prepared_by != prepared_by:
+                        raise ValueError("Initial preparation belongs to another principal.")
+                    resource_context(self, product=product, request=request)
+                    return
+                profile = self.read_product_profile_record(product)
+                target = self.read_dokploy_target_record(
+                    context_name=request.context, instance_name="testing"
+                )
+                target_id = self.read_dokploy_target_id_record(
+                    context_name=request.context, instance_name="testing"
+                )
+                preparation = DisposableTestingResourcePreparation(
+                    operation_id=request.operation_id,
+                    product=product,
+                    context=request.context,
+                    retained_target_id=target_id.target_id,
+                    prepared_by=prepared_by,
+                    recorded_at=datetime.now(timezone.utc),
+                    resource_namespace=f"lp-testing-{uuid4().hex}",
+                    retained_target_record=target,
+                    initial_request_sha256=canonical_json_sha256(resource_request_payload(request)),
+                    initial_binding_sha256=disposable_lane_binding_sha256(
+                        profile,
+                        target,
+                        target_id,
+                        configuration=disposable_lane_configuration(
+                            self, request.context, "testing"
+                        ),
+                    ),
+                )
+                # The common context enforces product ownership, holds and target aliases.
+                from control_plane.testing_initial_generation import initial_resource_context
+
+                initial_resource_context(self, product, request, preparation, False)
+                if profile.driver_id != "odoo" or not profile.is_active:
+                    raise ValueError("Initial generation requires active Odoo testing.")
+                from control_plane.contracts.product_profile_record import (
+                    is_exclusive_product_context,
+                    product_context_owner_map,
+                )
+
+                if (
+                    not is_exclusive_product_context(
+                        context=request.context,
+                        product=product,
+                        owners=product_context_owner_map(self.list_product_profile_records()),
+                    )
+                    or len(
+                        [
+                            lane
+                            for lane in profile.lanes
+                            if (lane.context, lane.instance) == (request.context, "testing")
+                        ]
+                    )
+                    != 1
+                    or target.policies.staff_testing_hold is not None
+                    or target.pending_public_host_effects
+                ):
+                    raise ValueError("Initial generation requires an exact unheld testing lane.")
+                if (
+                    target.target_type != "compose"
+                    or any(
+                        item.target_id == target_id.target_id
+                        and (item.context, item.instance) != (request.context, "testing")
+                        for item in self.list_dokploy_target_id_records()
+                    )
+                    or any(
+                        item.provider_id == "dokploy"
+                        and item.target_id == target_id.target_id
+                        and (item.context, item.instance) != (request.context, "testing")
+                        for item in self.list_physical_provider_target_records()
+                    )
+                ):
+                    raise ValueError("Original testing target aliases another lane.")
+                base_fields = set(DisposableTestingReplacementPreparation.model_fields)
+                session.add(
+                    LaunchplaneDisposableReplacementPreparationRow(
+                        operation_id=request.operation_id,
+                        payload=preparation.model_dump(mode="json", include=base_fields),
+                    )
+                )
+                session.add(
+                    LaunchplaneDisposableTestingResourceAllocationRow(
+                        operation_id=request.operation_id,
+                        payload=preparation.model_dump(mode="json", exclude=base_fields),
+                    )
+                )
+                session.commit()
+            finally:
+                self._disposable_authority_context.session = old
+
+    def activate_initial_testing_preparation(
+        self, expected: DisposableTestingResourcePreparation
+    ) -> None:
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=expected.product, context=expected.context, instance="testing"
+            )
+            self._lock_product_authority_bundle_write(session)
+            self.require_initial_testing_lane_available(expected, shared_session=session)
+            row = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                expected.operation_id,
+                with_for_update=True,
+            )
+            if row is None or not row.payload.get("initial_request_sha256"):
+                raise ValueError("Initial testing preparation is unavailable.")
+            if not row.payload.get("initial_apply_started_at"):
+                row.payload = {
+                    **row.payload,
+                    "initial_apply_started_at": self._database_mutation_timestamp(session),
+                }
+                session.commit()
 
     def prepare_disposable_testing_replacement(
         self, expected: OdooStableTargetReplacementOperationRecord, prepared_by: str

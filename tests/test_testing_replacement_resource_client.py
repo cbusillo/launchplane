@@ -11,6 +11,7 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.testing_replacement_resources import (
+    resource_wire_payload,
     TestingReplacementResourcesPlan,
     TestingReplacementResourcesRequest,
 )
@@ -94,7 +95,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
                         {
                             "request": {
                                 "product": plan.product,
-                                **draft.model_dump(mode="json"),
+                                **resource_wire_payload(draft),
                                 **({"operation_id": "another-operation"} if wrong_review else {}),
                             },
                             "plan": plan.model_dump(mode="json"),

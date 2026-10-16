@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import (
+    DisposableTestingResourcePreparation,
     DisposableLaneSafety,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
@@ -132,6 +133,8 @@ def _bootstrap_prerequisite(code: BootstrapPrerequisiteCode) -> Iterator[None]:
 
 def bootstrap_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
     payload = request.model_dump(mode="json")
+    if not request.initial_generation:
+        payload.pop("initial_generation")
     if payload.get("source_mode") == "ssh":
         payload.pop("source_mode")
     return payload
@@ -149,6 +152,7 @@ def bootstrap_request_sha256(request: TestingReplacementResourcesRequest) -> str
 
 
 class TestingReplacementBootstrapRequest(TestingReplacementResourcesRequest):
+    operation_id: str = Field(min_length=1)
     domain_host: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
     certificate_type: Literal["none", "letsencrypt"] = "none"
     source_mode: Literal["ssh", "container-export"] = "ssh"
@@ -437,15 +441,20 @@ class TestingReplacementBootstrapAdapter:
             or not self._domains(generation)
         ):
             raise ValueError("The independent testing route or queue is unverified.")
-        operation = self.store.read_odoo_stable_target_replacement_operation_record(
-            generation.operation_id
-        )
-        if (
-            operation.status != "superseded"
-            or operation.disposable_supersession is None
-            or operation.disposable_supersession.replacement_target_id != generation.target_id
-        ):
-            raise ValueError("Testing bootstrap supersession is incomplete.")
+        if self.request.initial_generation:
+            allocation = self.store.read_disposable_resource_preparation(generation.operation_id)
+            if allocation is None or not allocation.initial_reconcile_requested_at:
+                raise ValueError("Initial testing queue receipt is incomplete.")
+        else:
+            operation = self.store.read_odoo_stable_target_replacement_operation_record(
+                generation.operation_id
+            )
+            if (
+                operation.status != "superseded"
+                or operation.disposable_supersession is None
+                or operation.disposable_supersession.replacement_target_id != generation.target_id
+            ):
+                raise ValueError("Testing bootstrap supersession is incomplete.")
         return bootstrap_plan_payload(
             TestingReplacementBootstrapPlan(
                 product=self.product,
@@ -492,6 +501,10 @@ class TestingReplacementBootstrapAdapter:
             def check() -> None:
                 lease.assert_current()
                 old_check()
+                if self.request.initial_generation:
+                    from control_plane.testing_initial_generation import require_initial_usage
+
+                    require_initial_usage(self.root, self.store, self.product, self.request)
                 with self.store.serialize_disposable_testing_resources():
                     if bootstrap_plan(self.store, self.product, self.request) != plan:
                         raise ValueError("Testing bootstrap metadata changed.")
@@ -761,12 +774,20 @@ class TestingReplacementBootstrapAdapter:
             OdooStableTargetReplacementOperationRecord,
         )
 
-        assert isinstance(operation, OdooStableTargetReplacementOperationRecord)
-        if (
+        if isinstance(operation, DisposableTestingResourcePreparation):
+            if not self.request.initial_generation or not operation.initial_request_sha256:
+                raise ValueError("Initial generation preparation is unavailable.")
+        elif not isinstance(operation, OdooStableTargetReplacementOperationRecord):
+            raise ValueError("Testing preparation type is unavailable.")
+        elif (
             operation.status != "superseded"
             and not self.store.supersede_disposable_testing_replacement(operation)
         ):
             raise ValueError("The retained testing fence could not be superseded.")
+        if self.request.initial_generation:
+            from control_plane.testing_initial_generation import require_initial_usage
+
+            require_initial_usage(self.root, self.store, self.product, self.request)
         self.store.request_fresh_testing_reconcile(generation)
         return ProviderMutationOutcome(
             202,

@@ -81,7 +81,8 @@ class TestingReplacementResourcesRequest(BaseModel):
 
     context: str = Field(min_length=1)
     instance: Literal["testing"] = "testing"
-    operation_id: str = Field(min_length=1)
+    operation_id: str = ""
+    initial_generation: bool = False
     mode: Literal["dry-run", "apply", "readback"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
@@ -125,6 +126,20 @@ class TestingReplacementResourcesReadback(BaseModel):
     schedule_id: str = Field(min_length=1)
 
 
+def resource_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
+    payload = request.model_dump(mode="json")
+    if not request.initial_generation:
+        payload.pop("initial_generation")
+    return payload
+
+
+def resource_request_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
+    payload = request.model_dump(exclude={"mode", "reviewed_plan_sha256"})
+    if not request.initial_generation:
+        payload.pop("initial_generation")
+    return payload
+
+
 def resource_context(
     store: PostgresRecordStore,
     *,
@@ -133,7 +148,7 @@ def resource_context(
     allow_bootstrap_resume: bool = False,
 ) -> tuple[
     LaunchplaneProductProfileRecord,
-    OdooStableTargetReplacementOperationRecord,
+    OdooStableTargetReplacementOperationRecord | DisposableTestingResourcePreparation,
     DisposableTestingResourcePreparation,
     DokployTargetRecord,
     DokployTargetIdRecord,
@@ -158,26 +173,41 @@ def resource_context(
         != 1
     ):
         raise ValueError("Replacement resources require an exact active owned Odoo testing lane.")
-    operation = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
-    generation = (
-        store.read_fresh_odoo_testing_generation(product, request.context)
-        if allow_bootstrap_resume
-        else None
-    )
-    resuming = generation is not None and generation.operation_id == operation.operation_id
-    if (
-        not service_testing_operation(operation)
-        or operation.status
-        not in (
-            {"reconciliation_required", "superseded"} if resuming else {"reconciliation_required"}
+    preparation = store.read_disposable_resource_preparation(request.operation_id)
+    if request.initial_generation:
+        from control_plane.testing_initial_generation import initial_resource_context
+
+        if preparation is None:
+            raise ValueError("Initial testing preparation is unavailable.")
+        initial_resource_context(store, product, request, preparation, allow_bootstrap_resume)
+        operation: (
+            OdooStableTargetReplacementOperationRecord | DisposableTestingResourcePreparation
+        ) = preparation
+        generation = store.read_fresh_odoo_testing_generation(product, request.context)
+        resuming = generation is not None and generation.operation_id == request.operation_id
+    else:
+        operation = store.read_odoo_stable_target_replacement_operation_record(request.operation_id)
+        generation = (
+            store.read_fresh_odoo_testing_generation(product, request.context)
+            if allow_bootstrap_resume
+            else None
         )
-        or (operation.product, operation.context, operation.instance)
-        != (product, request.context, "testing")
-    ):
-        raise ValueError("The retained testing operation is unavailable or changed.")
-    preparation = store.read_disposable_resource_preparation(operation.operation_id)
-    if preparation is None or not preparation.resource_namespace:
-        raise ValueError("Capture the retained target before preparing replacement resources.")
+        resuming = generation is not None and generation.operation_id == operation.operation_id
+        if (
+            not service_testing_operation(operation)
+            or operation.status
+            not in (
+                {"reconciliation_required", "superseded"}
+                if resuming
+                else {"reconciliation_required"}
+            )
+            or (operation.product, operation.context, operation.instance)
+            != (product, request.context, "testing")
+        ):
+            raise ValueError("The retained testing operation is unavailable or changed.")
+        preparation = store.read_disposable_resource_preparation(operation.operation_id)
+        if preparation is None or not preparation.resource_namespace:
+            raise ValueError("Capture the retained target before preparing replacement resources.")
     target = store.read_dokploy_target_record(context_name=request.context, instance_name="testing")
     target_id = store.read_dokploy_target_id_record(
         context_name=request.context, instance_name="testing"
@@ -234,7 +264,7 @@ def resource_plan(
     digest = canonical_json_sha256(
         {
             "product": product,
-            "request": request.model_dump(exclude={"mode", "reviewed_plan_sha256"}),
+            "request": resource_request_payload(request),
             "binding": binding,
             "preparation": preparation.model_dump(mode="json"),
             "operation": operation.model_dump(mode="json"),
@@ -424,8 +454,15 @@ class TestingReplacementResourceAdapter:
             compose_id = str(compose["composeId"])
         return str(project["projectId"]), str(environment["environmentId"]), compose_id
 
+    def require_initial_usage(self) -> None:
+        if self.request.initial_generation:
+            from control_plane.testing_initial_generation import require_initial_usage
+
+            require_initial_usage(self.root, self.store, self.product, self.request)
+
     def capture_checkpoint(self, old_check: Callable[[], None]) -> None:
         old_check()
+        self.require_initial_usage()
         with self.store.serialize_disposable_testing_resources():
             resource_context(self.store, product=self.product, request=self.request)
 
@@ -548,6 +585,7 @@ class TestingReplacementResourceAdapter:
 
     def checkpoint(self, expected: str, old_check: Callable[[], None]) -> None:
         old_check()
+        self.require_initial_usage()
         with self.store.serialize_disposable_testing_resources():
             resource_context(self.store, product=self.product, request=self.request)
             if self.configuration_sha256() != expected:
@@ -800,6 +838,15 @@ class TestingReplacementResourceAdapter:
                 expected_retained = self.store.read_dokploy_target_record(
                     context_name=self.request.context, instance_name="testing"
                 )
+
+            if self.request.initial_generation:
+                self.store.activate_initial_testing_preparation(preparation)
+                activated = self.store.read_disposable_resource_preparation(
+                    self.request.operation_id
+                )
+                if activated is None:
+                    raise ValueError("Initial testing preparation disappeared.")
+                preparation = activated
 
             def check() -> None:
                 lease.assert_current()

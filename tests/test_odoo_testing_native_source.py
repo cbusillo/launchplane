@@ -968,7 +968,7 @@ class NativeIdentityCompatibilityTests(unittest.TestCase):
             domain_host="testing.example.invalid",
             reason="fixture",
         )
-        old_wire = request.model_dump(mode="json", exclude={"source_mode"})
+        old_wire = request.model_dump(mode="json", exclude={"source_mode", "initial_generation"})
         self.assertEqual(bootstrap_wire_payload(request), old_wire)
         old_identity = {
             key: value
