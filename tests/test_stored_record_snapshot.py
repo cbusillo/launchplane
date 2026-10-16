@@ -104,7 +104,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         }
         preview = payload["preview"]
         lanes = payload["lanes"]
-        assert isinstance(preview, dict) and isinstance(lanes, list)
+        assert isinstance(preview, dict) and isinstance(lanes, (list, tuple))
         preview["app_name_suffix"] = suffix
         for target in (*lanes, preview):
             target["generic_web_extensions"] = {"schedules": [schedule]}
@@ -135,7 +135,7 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         payload = product_profile_payload()
         preview = payload["preview"]
         lanes = payload["lanes"]
-        assert isinstance(preview, dict) and isinstance(lanes, list)
+        assert isinstance(preview, dict) and isinstance(lanes, (list, tuple))
         preview["app_name_suffix"] = "invalid-suffix"
         lanes[0]["generic_web_extensions"] = {
             "schedules": [{"name": "old", "command": "old", "cron_expression": "invalid"}]
@@ -147,6 +147,17 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         locations = {tuple(item["loc"]) for item in result.exception.errors()}
         self.assertIn(("preview", "app_name_suffix"), locations)
         self.assertIn(("lanes", 0, "generic_web_extensions", "schedules", 0), locations)
+        maximum = schema["$defs"]["ProductPreviewProfile"]["properties"]["app_name_suffix"][
+            "maxLength"
+        ]
+        preview["app_name_suffix"] = "-" + "x" * maximum
+        scrubbed = _Scrubber().scrub(payload, schema, schema)
+        with self.assertRaises(ValidationError) as oversized:
+            LaunchplaneProductProfileRecord.model_validate(scrubbed)
+        self.assertIn(
+            ("preview", "app_name_suffix"),
+            {tuple(item["loc"]) for item in oversized.exception.errors()},
+        )
 
     def test_aggregate_product_scopes_include_history_without_current_profiles(self) -> None:
         from sqlalchemy import insert

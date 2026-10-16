@@ -136,7 +136,9 @@ class _Scrubber:
             self._used_numbers.add(candidate)
         return self._numbers[digest]
 
-    def string(self, value: str, name: str, *, protocol: bool = False) -> str:
+    def string(
+        self, value: str, name: str, *, protocol: bool = False, maximum_length: int | None = None
+    ) -> str:
         if not value or value == "*":
             return value
         # Action names and driver identifiers are code protocol, not identities.
@@ -155,7 +157,12 @@ class _Scrubber:
         if value.isdecimal():
             return str(self.number(value))
         digest = self._digest(value)
-        if protocol and name == "app_name_suffix" and re.fullmatch(r"-[a-z0-9-]+", value):
+        if (
+            protocol
+            and name == "app_name_suffix"
+            and re.fullmatch(r"-[a-z0-9-]+", value)
+            and (maximum_length is None or len(value) <= maximum_length)
+        ):
             return f"-snapshot-{digest[:12]}"
         if protocol and name == "cron_expression":
             try:
@@ -248,7 +255,9 @@ class _Scrubber:
         if isinstance(value, str):
             if value in schema.get("enum", []) or ("const" in schema and value == schema["const"]):
                 return value
-            return self.string(value, name, protocol=declared)
+            return self.string(
+                value, name, protocol=declared, maximum_length=schema.get("maxLength")
+            )
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if (
                 not declared
