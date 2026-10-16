@@ -8080,6 +8080,23 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     preview_slugs=("pr-41", "pr-42"),
                 )
             )
+            # A later background-only scan must not replace explicit lifecycle input.
+            from control_plane.contracts.preview_inventory_scan_record import (
+                PREVIEW_INVENTORY_COLLECTION_SOURCE,
+            )
+
+            store.write_preview_inventory_scan_record(
+                PreviewInventoryScanRecord(
+                    scan_id="later-background-failure",
+                    context="verireel-testing",
+                    product="other-site",
+                    repository="example/other-site",
+                    scanned_at="2026-04-29T19:23:16Z",
+                    source=PREVIEW_INVENTORY_COLLECTION_SOURCE,
+                    status="fail",
+                    preview_count=0,
+                )
+            )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
