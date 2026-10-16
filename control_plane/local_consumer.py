@@ -1,5 +1,6 @@
 """Owner-run local receiver. Real values stay inside this process and private files."""
 
+import asyncio
 import base64
 import fcntl
 import json
@@ -7,6 +8,7 @@ import logging
 import os
 import secrets
 import socket
+import ssl
 import stat
 from contextlib import contextmanager
 from collections.abc import Iterator
@@ -17,7 +19,7 @@ import requests
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from websockets.sync.client import connect
+from websockets.asyncio.client import connect
 
 from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
 from control_plane.local_consumer_contract import (
@@ -210,19 +212,30 @@ def _verify_bridge(request: ConsumerRequest, token: str) -> None:
     assert server.hostname is not None
     transport_logger = logging.Logger("launchplane.local-consumer.transport")
     transport_logger.disabled = True
+    tls = ssl.create_default_context(cafile=os.environ.get("SSL_CERT_FILE"))
+
     # A preconnected socket makes websockets refuse *all* redirects, including
     # same-origin redirects to another lane or an unauthenticated endpoint.
-    with socket.create_connection((server.hostname, server.port or 443), timeout=15) as transport:
-        with connect(
-            request.server_url,
-            sock=transport,
-            additional_headers={"Authorization": f"Bearer {token}"},
-            proxy=None,
-            open_timeout=15,
-            close_timeout=2,
-            logger=transport_logger,
-        ):
-            pass
+    async def authenticate() -> None:
+        # Keep TLS reads and writes on one event loop rather than concurrent
+        # SSL socket threads, which can stall the opening handshake on macOS.
+        with socket.create_connection(
+            (server.hostname, server.port or 443), timeout=15
+        ) as transport:
+            transport.setblocking(False)
+            async with connect(
+                request.server_url,
+                sock=transport,
+                ssl=tls,
+                additional_headers={"Authorization": f"Bearer {token}"},
+                proxy=None,
+                open_timeout=15,
+                close_timeout=2,
+                logger=transport_logger,
+            ):
+                pass
+
+    asyncio.run(authenticate())
 
 
 def receive_consumer(directory: Path, package_file: Path) -> dict[str, str]:
