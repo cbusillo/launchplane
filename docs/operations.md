@@ -4853,10 +4853,17 @@ compares them with the installed runtime settings, then runs the same bounded
 TLS/SHOW GRANTS probe using those applied credentials. The current image needs
 Python, psycopg2, PyMySQL, CA trust and the standard Odoo configuration. Missing
 prerequisites remain unknown; no installation or identity fallback is attempted.
-The purpose-specific diagnostic identity guard still applies before this read.
+The purpose-specific diagnostic identity remains a lane-qualification gate,
+not the identity used by the local database connection: that connection uses
+the runtime's own database credentials with read-only session options.
 
 The host verifies container ID, immutable image, compose service and runtime
-identity before execution, and rejects changed Docker snapshots afterward.
+identity before execution, and rejects changed authority-bearing Docker snapshots afterward (configuration,
+image, mounts, networks and process/start identity, excluding healthcheck logs).
+Short provider IDs are resolved to full Docker IDs before execution. The
+container's observed identity payload is bound through the canonical service
+comparator, which normalizes defaults/aliases and excludes finalized deployment
+timestamps.
 Applied parameters are reread inside the container after source I/O as well as
 through the existing authenticated Odoo read. Source children have ten-second
 deadlines; the container command has a 50-second deadline with forced cleanup,
@@ -4870,7 +4877,9 @@ partial or unrecognized grants remain unknown for either origin.
 Even a read-only runtime observation does not authorize an importer or prove
 that testing holds no production-capable key. Production credential inequality,
 actual identity activation and deployed qualification remain separately owned;
-no production credential is decrypted or tested by this read.
+no production credential is decrypted or tested by this read. The observation
+qualifies the selected web-container origin only; a separate script-runner or
+other execution origin still needs its own qualification before use.
 
 The service rechecks lane authority, binding/version selection, the same
 container and applied parameters after source I/O. Changes discard the evidence.

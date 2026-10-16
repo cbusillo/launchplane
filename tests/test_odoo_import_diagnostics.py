@@ -29,7 +29,7 @@ from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord, ScalarValue
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
-from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.http_routes.odoo_runtime import (
     OdooRuntimeReadDependencies,
@@ -172,7 +172,7 @@ class DiagnosticFixture:
                 identity=self.identity,
                 target_id="fixture-target-id",
                 target_name="fixture-target",
-                container_id="fixture-container",
+                container_id="c" * 64,
                 observed_at=STAMP,
             ),
             host="https://provider.invalid",
@@ -199,7 +199,7 @@ class DiagnosticFixture:
 class DiagnosticTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = DiagnosticFixture()
-        self.environment = {}
+        self.environment = {RUNTIME_IDENTITY_ENV_KEY: self.fixture.identity.model_dump_json()}
         for name, prefix in diagnostic.SOURCE_PREFIXES.items():
             for key in (*diagnostic.FIELDS, "password"):
                 env_key = (
@@ -304,6 +304,7 @@ class DiagnosticTests(unittest.TestCase):
                         diagnostic.import_authority(
                             self.fixture.store, self.fixture.profile.product
                         ).sources,
+                        self.environment,
                     ).values()
                 )
             )

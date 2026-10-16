@@ -1,4 +1,4 @@
-"""Value-free testing import agreement and managed-source grant observations."""
+"""Value-free testing import agreement and source-grant observations."""
 
 import hmac
 import json
@@ -32,7 +32,10 @@ from control_plane.secrets import _decrypt_secret_value
 from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
 from control_plane.runtime_key_safety import ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
-from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
+from control_plane.contracts.runtime_identity import (
+    runtime_identity_from_health_payload,
+    RUNTIME_IDENTITY_ENV_KEY,
+)
 
 SOURCE_PREFIXES = {
     name: next(
@@ -343,7 +346,9 @@ def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsaf
 
 
 def runtime_origin_grants(
-    connection: reads.OdooRuntimeConnection, selected: dict[str, SourceAuthority]
+    connection: reads.OdooRuntimeConnection,
+    selected: dict[str, SourceAuthority],
+    environment: dict[str, str],
 ) -> dict[str, GrantStatus]:
     keys = {
         name: (
@@ -377,6 +382,7 @@ def runtime_origin_grants(
             runtime_grants(
                 connection,
                 tuple(active),
+                observed_identity=environment.get(RUNTIME_IDENTITY_ENV_KEY, ""),
                 prefixes=SOURCE_PREFIXES,
                 fields=FIELDS,
                 environment_keys={
@@ -522,7 +528,7 @@ def diagnose_imports(
                 )
             except Exception:
                 results.append(SourceDiagnostic(source=source_name))
-        runtime_results = runtime_origin_grants(connection, runtime_sources)
+        runtime_results = runtime_origin_grants(connection, runtime_sources, runtime_environment)
         results = [
             result.model_copy(
                 update={"applied_connection_grants": runtime_results.get(result.source, "unknown")}

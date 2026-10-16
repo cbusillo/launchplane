@@ -24,6 +24,7 @@ from tests.test_odoo_import_diagnostics import DiagnosticFixture, PRIVATE
 class RuntimeSourceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = DiagnosticFixture()
+        self.full_container_id = self.fixture.connection.evidence.container_id
         self.values = self.fixture.applied.copy()
         self.env = {
             "PLATFORM_INSTANCE": "testing",
@@ -85,7 +86,7 @@ class RuntimeSourceTests(unittest.TestCase):
         if command[:2] == ["docker", "inspect"]:
             self.inspections += 1
             payload: dict[str, Any] = {
-                "Id": self.fixture.connection.evidence.container_id,
+                "Id": self.full_container_id,
                 "Config": {
                     "Image": self.fixture.identity.image_reference,
                     "Labels": {
@@ -97,6 +98,8 @@ class RuntimeSourceTests(unittest.TestCase):
                 "State": {"Running": True, "StartedAt": "fixture-start"},
                 "NetworkSettings": {"Networks": {"fixture-network": {}}},
             }
+            if self.drift == "health":
+                payload["State"]["Health"] = {"Log": [{"Start": str(self.inspections)}]}
             if self.drift == "image":
                 payload["Config"]["Image"] = "foreign-image"
             if self.inspections > 1 and self.drift == "container":
@@ -113,11 +116,10 @@ class RuntimeSourceTests(unittest.TestCase):
         kwargs["receive"](json.loads(output.removeprefix("FRAME:")))
 
     def run_probe(self) -> dict[str, GrantStatus]:
+        self.postgres = MagicMock(connect=MagicMock(return_value=self.database))
         with (
             patch.dict(os.environ, self.env, clear=True),
-            patch.dict(
-                sys.modules, {"psycopg2": MagicMock(connect=MagicMock(return_value=self.database))}
-            ),
+            patch.dict(sys.modules, {"psycopg2": self.postgres}),
             patch.object(configparser.ConfigParser, "read", return_value=[ODOO_WEB_CONFIG_PATH]),
             patch.object(
                 configparser.ConfigParser, "__getitem__", return_value=self.config["options"]
@@ -132,6 +134,7 @@ class RuntimeSourceTests(unittest.TestCase):
                 prefixes=diagnostic.SOURCE_PREFIXES,
                 fields=diagnostic.FIELDS,
                 environment_keys=self.keys,
+                observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
             )
 
     def test_real_program_chain_uses_runtime_origin_without_exporting_credentials(self) -> None:
@@ -141,12 +144,33 @@ class RuntimeSourceTests(unittest.TestCase):
             self.assertNotIn(PRIVATE, repr(command))
             self.assertGreater(kwargs["timeout"], 0)
         self.assertNotIn(PRIVATE, json.dumps(self.provider_payloads))
-        self.assertTrue(
-            all(call.args[0].startswith("SELECT ") for call in self.cursor.execute.call_args_list)
-        )
+        options = self.postgres.connect.call_args.kwargs["options"]
+        self.assertIn("default_transaction_read_only=on", options)
         self.database.rollback.assert_called()
         self.database.commit.assert_not_called()
         self.mysql.close.assert_called()
+
+    def test_finalized_timestamp_defaults_short_id_and_health_ticks_preserve_origin_proof(
+        self,
+    ) -> None:
+        identity = json.loads(self.env[RUNTIME_IDENTITY_ENV_KEY])
+        identity["deployed_at"] = "2026-10-15T12:01:00Z"
+        identity.pop("schema_version")
+        identity["source_revision"] = identity.pop("source_git_ref")
+        self.env[RUNTIME_IDENTITY_ENV_KEY] = json.dumps(identity)
+        self.fixture.connection = self.fixture.connection.__class__(
+            **{
+                **self.fixture.connection.__dict__,
+                "evidence": self.fixture.connection.evidence.model_copy(
+                    update={"container_id": self.full_container_id[:12]}
+                ),
+            }
+        )
+        self.drift = "health"
+        self.assertTrue(all(value == "read_only" for value in self.run_probe().values()))
+        for command, _ in self.proc_calls:
+            if command[:2] == ["docker", "exec"]:
+                self.assertIn(self.full_container_id, command)
 
     def test_unreachable_source_does_not_hide_other_sources(self) -> None:
         self.drift = "source_failure"
@@ -200,6 +224,7 @@ class RuntimeSourceTests(unittest.TestCase):
                     prefixes=diagnostic.SOURCE_PREFIXES,
                     fields=diagnostic.FIELDS,
                     environment_keys=self.keys,
+                    observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
                 ),
                 {"cm_data": "unknown"},
             )
@@ -214,5 +239,6 @@ class RuntimeSourceTests(unittest.TestCase):
                     prefixes=diagnostic.SOURCE_PREFIXES,
                     fields=diagnostic.FIELDS,
                     environment_keys=self.keys,
+                    observed_identity=self.env[RUNTIME_IDENTITY_ENV_KEY],
                 )
             remote.assert_not_called()

@@ -1,10 +1,14 @@
 """Fixed, value-free source-grant read inside the selected testing web container."""
 
+import json
 from pathlib import Path
 from typing import cast
 
 from control_plane import odoo_runtime_reads as reads
-from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
+from control_plane.contracts.runtime_identity import (
+    RUNTIME_IDENTITY_ENV_KEY,
+    parse_runtime_identity_payload,
+)
 from control_plane.dokploy.compose import ODOO_WEB_CONFIG_PATH
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_source_probe import GrantStatus
@@ -91,7 +95,7 @@ print(json.dumps(result))
 """
 
 HOST_PROGRAM = r"""
-import base64,json,subprocess,sys
+import base64,json,re,subprocess,sys
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 prefix=sys.argv[2]
 result={name:'unknown' for name in spec['sources']}
@@ -105,19 +109,25 @@ def inspect():
     config=value['Config']
     labels=config['Labels']
     env=dict(item.split('=',1) for item in config['Env'] if '=' in item)
-    if (value['Id']!=spec['container'] or value['State'].get('Running') is not True
+    if (not re.fullmatch(r'[0-9a-f]{12,64}',spec['container'])
+        or not re.fullmatch(r'[0-9a-f]{64}',value['Id'])
+        or not value['Id'].startswith(spec['container'])
+        or value['State'].get('Running') is not True
         or config['Image']!=spec['identity']['image_reference']
         or labels.get('com.docker.compose.project')!=spec['project']
         or labels.get('com.docker.compose.service')!='web'
         or env.get('PLATFORM_INSTANCE')!='testing'
         or json.loads(env[__IDENTITY_KEY__])!=spec['identity']):
         raise ValueError()
-    return value
+    # Healthcheck logs change on every tick and carry no runtime authority.
+    return {key:value.get(key) for key in ('Id','Image','Config','HostConfig','Mounts','NetworkSettings','RestartCount')} | {
+        'State':{key:value['State'].get(key) for key in ('Running','StartedAt','Pid')}
+    }
 
 try:
     before=inspect()
     child=subprocess.run(
-        ['docker','exec','-i',spec['container'],'timeout','--kill-after=2s','50s','python3','-I','-c',spec['container_program']],
+        ['docker','exec','-i',before['Id'],'timeout','--kill-after=2s','50s','python3','-I','-c',spec['container_program']],
         input=json.dumps({'identity':spec['identity'],'sources':spec['sources']}),
         text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=55, check=False,
     )
@@ -143,6 +153,7 @@ def runtime_grants(
     prefixes: dict[str, str],
     fields: tuple[str, ...],
     environment_keys: dict[str, dict[str, str]],
+    observed_identity: str,
 ) -> dict[str, GrantStatus]:
     unknown: dict[str, GrantStatus] = {name: "unknown" for name in sources}
     if not sources or connection.selection.identity.instance != "testing":
@@ -161,6 +172,12 @@ def runtime_grants(
         program = program.replace(key, value)
     frames: list[dict[str, object]] = []
     try:
+        # Bind to the actual container payload after the canonical service
+        # comparator has normalized defaults/aliases and excluded deployed_at.
+        # The remote programs can then compare that immutable payload exactly.
+        reads.require_runtime_identity(
+            connection.selection.identity, parse_runtime_identity_payload(observed_identity)
+        )
         _read_remote(
             host=connection.host,
             token=connection.token,
@@ -169,7 +186,7 @@ def runtime_grants(
             payload={
                 "project": connection.app_name,
                 "container": connection.evidence.container_id,
-                "identity": connection.selection.identity.model_dump(mode="json"),
+                "identity": json.loads(observed_identity),
                 "sources": sources,
                 "container_program": program,
             },
