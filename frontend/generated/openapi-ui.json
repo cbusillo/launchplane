@@ -28149,6 +28149,12 @@
             "default": "",
             "title": "Repository",
             "type": "string"
+          },
+          "scan_enabled": {
+            "default": true,
+            "title": "Scan Enabled",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "title": "ProductImageProfile",

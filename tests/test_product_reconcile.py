@@ -502,6 +502,19 @@ class ProductReconcileTestCase(unittest.TestCase):
         self.comments = FakeGitHubComments()
         self.public_origin = "https://launchplane.example.test"
         self.testing_hooks = TestingProviderHooks()
+        from control_plane.artifact_scan import ArtifactScanResult
+
+        scanner_patch = patch(
+            "control_plane.artifact_scan.scan_artifact",
+            side_effect=lambda image: ArtifactScanResult(
+                image_reference=image,
+                status="pass",
+                reason="clean",
+                scanned_at="2026-10-16T12:00:00Z",
+            ),
+        )
+        self.artifact_scanner = scanner_patch.start()
+        self.addCleanup(scanner_patch.stop)
         # The Owner-review status writes with the preview context's credential, not
         # the reconciler's App; tests that need a written status replace this.
         self.owner_review_status: OwnerReviewStatus | None = None
@@ -5351,3 +5364,61 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProductArtifactScanGateTests(ProductReconcileTestCase):
+    def test_unavailable_and_vulnerable_scans_hold_before_testing_or_preview_effects(self) -> None:
+        from control_plane.artifact_scan import ArtifactScanResult
+
+        for target in ("testing", "preview"):
+            for status in ("fail", "unavailable"):
+                with self.subTest(target=target, status=status):
+                    self.artifact_scanner.side_effect = lambda image: ArtifactScanResult(
+                        image_reference=image,
+                        status=cast(Any, status),
+                        reason="fixture",
+                        scanned_at="2026-10-16T12:00:00Z",
+                    )
+                    commit = PR_HEAD if target == "preview" else DEPLOYABLE
+                    self.github.add_run(
+                        20, commit, event="pull_request" if target == "preview" else "push"
+                    )
+                    self.request(target, 5 if target == "preview" else None)
+                    plan = self.reconcile()
+                    self.assertEqual(plan["reason"], "artifact_scan_refused")
+                    self.assertEqual(
+                        self.artifact_scanner.call_args.args,
+                        (f"{IMAGE_REPOSITORY}@{_digest(commit)}",),
+                    )
+                    self.assertFalse(self.provider.applied)
+                    self.assertFalse(
+                        self.store.list_odoo_stable_target_replacement_operation_records()
+                    )
+                    self.assertFalse(self.store.list_artifact_manifests())
+
+    def test_preview_destroy_does_not_require_an_image_scan(self) -> None:
+        self.github.pull_request["state"] = "closed"
+        self.request("preview", 5)
+        self.reconcile()
+        self.artifact_scanner.assert_not_called()
+
+    def test_profile_can_disable_scanning_without_changing_default_serialization(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductImageProfile
+
+        self.assertNotIn(
+            "scan_enabled", ProductImageProfile(repository=IMAGE_REPOSITORY).model_dump()
+        )
+        profile = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "image": profile.image.model_copy(update={"scan_enabled": False}),
+                }
+            )
+        )
+        self.github.add_run(20, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        plan = self.reconcile()
+        self.assertEqual(plan["artifact_scan"], {"status": "disabled"})
+        self.assertTrue(self.provider.applied)
+        self.artifact_scanner.assert_not_called()

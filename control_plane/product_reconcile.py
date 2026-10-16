@@ -479,6 +479,25 @@ def product_repository_identity(
         ) from error
 
 
+def _scan_deploy_artifact(
+    profile: LaunchplaneProductProfileRecord,
+    plan: dict[str, object],
+    verified: VerifiedBuildArtifact | VerifiedGenericWebBuild,
+) -> bool:
+    from control_plane.artifact_scan import scan_artifact
+
+    if not profile.image.scan_enabled:
+        plan["artifact_scan"] = {"status": "disabled"}
+        return True
+    image = f"{verified.manifest.image.repository}@{verified.manifest.image.digest}"
+    result = scan_artifact(image)
+    plan["artifact_scan"] = result.model_dump(mode="json")
+    if result.status == "pass" and result.image_reference == image:
+        return True
+    plan.update(action="wait", held=True, reason="artifact_scan_refused")
+    return False
+
+
 def reconcile_testing_target(
     *,
     record_store: ProductReconcileStore,
@@ -520,6 +539,8 @@ def reconcile_testing_target(
         if qualification != "pass":
             plan.update(action="deploy", reason="testing_qualification_missing")
     if desired is None or plan["action"] != "deploy":
+        return ReconcileOutcome(plan)
+    if not _scan_deploy_artifact(profile, plan, desired):
         return ReconcileOutcome(plan)
     if isinstance(desired, VerifiedGenericWebBuild):
         return _deploy_generic_web_testing(
@@ -1548,6 +1569,9 @@ def reconcile_preview_target(
         if unresolved:
             plan.update(held=True, reason="held_preview_recovery_required")
         return ReconcileOutcome(plan)
+    if plan["action"] == "apply" and decision.verified is not None:
+        if not _scan_deploy_artifact(profile, plan, decision.verified):
+            return ReconcileOutcome(plan)
     odoo = product_profile_uses_odoo_driver(profile)
     if not odoo and not reconciles_as_generic_web(profile):
         plan.update(held=True, reason="no_reconcile_preview_for_driver")

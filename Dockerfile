@@ -41,6 +41,8 @@ RUN github_cli_x_mod_version=v0.41.0 \
     && go version -m /go/bin/gh | grep -F "golang.org/x/text" | grep -F "${GITHUB_CLI_X_TEXT_VERSION}" \
     && go version -m /go/bin/gh | grep -F "golang.org/x/net" | grep -F "${GITHUB_CLI_X_NET_VERSION}"
 
+FROM ghcr.io/aquasecurity/trivy:0.70.0@sha256:be1190afcb28352bfddc4ddeb71470835d16462af68d310f9f4bca710961a41e AS artifact-scanner
+
 FROM mirror.gcr.io/library/python:3.14-slim AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/cbusillo/launchplane"
@@ -73,6 +75,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=github-cli-build /go/bin/gh /usr/local/bin/gh
+COPY --from=artifact-scanner /usr/local/bin/trivy /usr/bin/trivy
 
 RUN pip install --no-cache-dir uv \
     && python -m pip uninstall --yes pip setuptools

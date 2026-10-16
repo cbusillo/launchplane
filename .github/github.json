@@ -65,6 +65,7 @@
     "publicReadiness": "docs/public-readiness.md",
     "roleWords": "docs/role-words.md",
     "artifactProvenance": "docs/artifact-provenance.md",
+    "artifactSecurity": "docs/artifact-security.md",
     "eventDrivenDeploys": "docs/event-driven-deploys.md",
     "releaseReview": "docs/release-review.md",
     "productionBackupProvider": "docs/production-backup-provider.md",
