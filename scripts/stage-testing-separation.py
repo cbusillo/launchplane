@@ -1,4 +1,4 @@
-"""Review testing's staging interlock and stage managed configuration without deploying."""
+"""Review testing holds and staging configuration through the maintained authenticated transport."""
 
 import argparse
 import http.client
@@ -229,6 +229,7 @@ def main() -> int:
                     "mode": args.mode,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
                     "deployment_requested": False,
+                    **({"reconcile_requested": result["reconcile_requested"]} if holding else {}),
                 }
             )
         )

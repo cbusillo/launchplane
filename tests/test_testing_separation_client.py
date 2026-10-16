@@ -264,6 +264,14 @@ class TestingSeparationClientTests(unittest.TestCase):
             write.assert_not_called()
 
     def test_reviewed_staging_lift_sends_its_purpose_without_deployment(self) -> None:
+        self._exercise_lift("isolation_staging")
+
+    def test_reviewed_rehearsal_lift_preserves_provenance_evidence_and_reports_reconcile(
+        self,
+    ) -> None:
+        self._exercise_lift("staff_testing")
+
+    def _exercise_lift(self, purpose: str) -> None:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/stage-testing-separation.py")
         )
@@ -277,12 +285,26 @@ class TestingSeparationClientTests(unittest.TestCase):
                     {
                         "status": "accepted",
                         "trace_id": "fixture-trace",
-                        "result": {"plan_sha256": "a" * 64, "reconcile_requested": False},
+                        "result": {
+                            "plan_sha256": "a" * 64,
+                            "reconcile_requested": False,
+                            "before": {
+                                "reason": "private-fixture",
+                                "rehearsal": {
+                                    "binding_sha256": "b" * 64,
+                                    "target_updated_at": "private-stamp",
+                                    "target_source_label": "private-source",
+                                },
+                            },
+                        },
                     },
                     {
                         "status": "accepted",
                         "trace_id": "fixture-trace",
-                        "result": {"read_back_matches": True, "reconcile_requested": False},
+                        "result": {
+                            "read_back_matches": True,
+                            "reconcile_requested": purpose == "staff_testing",
+                        },
                     },
                 ]
             )
@@ -306,13 +328,22 @@ class TestingSeparationClientTests(unittest.TestCase):
                 "Qualified interlock release.",
                 "--evidence-file",
                 str(evidence),
+                "--hold-purpose",
+                purpose,
             ]
+            output = io.StringIO()
             with (
                 patch("runpy.run_path", return_value=transport),
                 patch("sys.argv", ["client", "lift-dry-run", *common]),
-                redirect_stdout(io.StringIO()),
+                redirect_stdout(output),
             ):
                 self.assertEqual(client["main"](), 0)
+            self.assertNotIn("private-fixture", output.getvalue())
+            self.assertEqual(
+                json.loads(evidence.read_text())["result"]["before"]["rehearsal"]["binding_sha256"],
+                "b" * 64,
+            )
+            output = io.StringIO()
             with (
                 patch("runpy.run_path", return_value=transport),
                 patch(
@@ -326,13 +357,16 @@ class TestingSeparationClientTests(unittest.TestCase):
                         "original-lift",
                     ],
                 ),
-                redirect_stdout(io.StringIO()),
+                redirect_stdout(output),
             ):
                 self.assertEqual(client["main"](), 0)
             sent = call.call_args.kwargs
             self.assertFalse(sent["body"]["hold"])
-            self.assertEqual(sent["body"]["purpose"], "isolation_staging")
+            self.assertEqual(sent["body"]["purpose"], purpose)
             self.assertEqual(sent["idempotency_key"], "original-lift")
+            self.assertEqual(
+                json.loads(output.getvalue())["reconcile_requested"], purpose == "staff_testing"
+            )
 
     def test_server_failure_after_submission_preserves_the_original_key(self) -> None:
         self._exercise_apply("completion_failed", unknown=True, status_code=503)

@@ -72,6 +72,16 @@ class DokployTargetIntegrationAllowance(BaseModel):
         return self
 
 
+class TestingHoldRehearsal(BaseModel):
+    """Service-derived provenance of a hold set on qualified disposable testing."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    binding_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    target_updated_at: str
+    target_source_label: str
+
+
 class DokployTargetStaffTestingHold(BaseModel):
     """A deployment interlock for staff testing or resource-isolation staging."""
 
@@ -85,6 +95,9 @@ class DokployTargetStaffTestingHold(BaseModel):
     )
     recorded_by: str = ""
     recorded_at: str = ""
+    rehearsal: TestingHoldRehearsal | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
 
     @model_validator(mode="after")
     def _validate_hold(self) -> "DokployTargetStaffTestingHold":

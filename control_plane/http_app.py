@@ -95,7 +95,10 @@ from control_plane.dokploy_target_setup_http import (
 )
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_public_hosts
-from control_plane.contracts.dokploy_target_record import DokployTargetRecordChanged
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetRecordChanged,
+    TestingHoldRehearsal,
+)
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane.provider_key_adoption import LaneProviderEnv
 from control_plane import product_health_monitoring as control_plane_product_health_monitoring
@@ -8940,10 +8943,17 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Testing hold request failed validation.",
             ) from error
+        director_staff_hold = (
+            director_agent_identity(identity)
+            and hold_request.purpose == "staff_testing"
+            and not hold_request.activation_plan_sha256
+        )
         _authorize_lane_product_config(
             identity=identity,
             action=(
-                "product_config.apply" if hold_request.mode == "apply" else "product_config.plan"
+                "product_config.apply"
+                if hold_request.mode == "apply" and not director_staff_hold
+                else "product_config.plan"
             ),
             product=hold_request.product,
             context=hold_request.context,
@@ -9004,6 +9014,7 @@ def create_launchplane_fastapi_app(
             and not hold_request.hold
             and (hold_request.mode == "apply" or not director_agent_identity(identity))
             and not activated_interlock
+            and not director_staff_hold
         ):
             # Lifting a hold requests a testing reconcile, which can deploy.
             raise _launchplane_http_error(
@@ -9021,6 +9032,38 @@ def create_launchplane_fastapi_app(
         )
         typed_store = cast(control_plane_testing_lane_hold.TestingHoldStore, record_store)
         actor = launchplane_identity_actor(identity)
+        from control_plane.testing_hold_rehearsal import qualify_testing_hold_rehearsal
+
+        def rehearsal_provenance(*, planning: bool = False) -> TestingHoldRehearsal | None:
+            if not director_staff_hold:
+                return None
+            try:
+                if not isinstance(record_store, PostgresRecordStore):
+                    raise DisposableLaneSafetyUnknown("Testing rehearsal requires service records.")
+                return qualify_testing_hold_rehearsal(record_store, hold_request, actor)
+            except (DisposableLaneSafetyUnknown, FileNotFoundError) as error:
+                # Reads and inert plans remain available for protected/unknown lanes.
+                # Existing explicit authority may still SET a protective ordinary hold.
+                if planning or (
+                    hold_request.hold
+                    and resolved_authz_policy_runtime.allows(
+                        identity=identity,
+                        action="product_config.apply",
+                        product=hold_request.product,
+                        context=hold_request.context,
+                        target=AuthorizationTarget(
+                            scope="instance", instances=(hold_request.instance,)
+                        ),
+                    )
+                ):
+                    return None
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="disposable_lane_safety_unknown",
+                    message="The staff-hold rehearsal is not currently qualified for this caller.",
+                ) from error
+
         records = {
             "product_profile": hold_request.product,
             "context": hold_request.context,
@@ -9030,7 +9073,10 @@ def create_launchplane_fastapi_app(
             await verify_activation_interlock()
             try:
                 plan, _replacement = control_plane_testing_lane_hold.build_testing_hold_plan(
-                    record_store=typed_store, request=hold_request, actor=actor
+                    record_store=typed_store,
+                    request=hold_request,
+                    actor=actor,
+                    rehearsal=rehearsal_provenance(planning=True),
                 )
             except control_plane_testing_lane_hold.TestingHoldRefusal as error:
                 raise _launchplane_http_error(
@@ -9067,10 +9113,15 @@ def create_launchplane_fastapi_app(
         if replay_response is not None:
             return replay_response
         await verify_activation_interlock()
+        rehearsal = rehearsal_provenance()
+        qualified_staff_hold = director_staff_hold and (
+            not hold_request.hold or rehearsal is not None
+        )
         try:
             with (
                 record_store.serialize_disposable_testing_resources()
-                if activated_interlock and isinstance(record_store, PostgresRecordStore)
+                if (activated_interlock or qualified_staff_hold)
+                and isinstance(record_store, PostgresRecordStore)
                 else nullcontext()
             ):
                 if activated_interlock:
@@ -9096,6 +9147,8 @@ def create_launchplane_fastapi_app(
                         hold_request.instance,
                     ),
                     activation_verified=activated_interlock,
+                    rehearsal=rehearsal_provenance() if qualified_staff_hold else None,
+                    require_exact_review=qualified_staff_hold,
                 )
         except ProductProfileConflictError as error:
             raise _launchplane_http_error(

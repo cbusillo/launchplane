@@ -5621,6 +5621,16 @@
             "default": "",
             "title": "Recorded By",
             "type": "string"
+          },
+          "rehearsal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TestingHoldRehearsal"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -47928,6 +47938,32 @@
           }
         },
         "title": "TestingExclusionFacet",
+        "type": "object"
+      },
+      "TestingHoldRehearsal": {
+        "additionalProperties": false,
+        "description": "Service-derived provenance of a hold set on qualified disposable testing.",
+        "properties": {
+          "binding_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Binding Sha256",
+            "type": "string"
+          },
+          "target_source_label": {
+            "title": "Target Source Label",
+            "type": "string"
+          },
+          "target_updated_at": {
+            "title": "Target Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "binding_sha256",
+          "target_updated_at",
+          "target_source_label"
+        ],
+        "title": "TestingHoldRehearsal",
         "type": "object"
       },
       "TestingReplacementBootstrapRequest": {

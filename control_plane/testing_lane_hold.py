@@ -26,6 +26,7 @@ from control_plane.contracts.dokploy_target_record import (
     DokployTargetRecord,
     DokployTargetRecordChanged,
     DokployTargetStaffTestingHold,
+    TestingHoldRehearsal,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -211,6 +212,7 @@ def _desired_hold(
     request: TestingHoldApplyRequest,
     existing: DokployTargetStaffTestingHold | None,
     actor: str,
+    rehearsal: TestingHoldRehearsal | None = None,
 ) -> DokployTargetStaffTestingHold | None:
     if existing is not None and existing.purpose != request.purpose:
         raise TestingHoldRefusal(
@@ -224,6 +226,7 @@ def _desired_hold(
         purpose=request.purpose,
         recorded_by=actor,
         recorded_at=utc_now_timestamp(),
+        rehearsal=rehearsal,
     )
     if (
         existing is not None
@@ -273,6 +276,7 @@ def build_testing_hold_plan(
     record_store: TestingHoldStore,
     request: TestingHoldApplyRequest,
     actor: str,
+    rehearsal: TestingHoldRehearsal | None = None,
 ) -> tuple[TestingHoldPlan, DokployTargetRecord]:
     """Validate the request against the current record and return a digest-bound plan."""
 
@@ -281,7 +285,7 @@ def build_testing_hold_plan(
         record_store=record_store, context=request.context, instance=request.instance
     )
     existing = target.policies.staff_testing_hold
-    desired = _desired_hold(request=request, existing=existing, actor=actor)
+    desired = _desired_hold(request=request, existing=existing, actor=actor, rehearsal=rehearsal)
     action = _action(existing, desired)
     record_sha256_before = target_record_sha256(target)
     plan = TestingHoldPlan(
@@ -302,6 +306,11 @@ def build_testing_hold_plan(
                 "instance": request.instance,
                 "record_sha256_before": record_sha256_before,
                 "desired": _hold_terms(desired),
+                **(
+                    {"rehearsal": desired.rehearsal.model_dump()}
+                    if desired and desired.rehearsal
+                    else {}
+                ),
                 **(
                     {"activation_plan_sha256": request.activation_plan_sha256}
                     if request.activation_plan_sha256
@@ -326,6 +335,8 @@ def apply_testing_hold_plan(
     required_context_owner: tuple[str, str] | None = None,
     required_product_config_target: tuple[str, str, str] | None = None,
     activation_verified: bool = False,
+    rehearsal: TestingHoldRehearsal | None = None,
+    require_exact_review: bool = False,
 ) -> TestingHoldPlan:
     """Re-plan against the current record, require the reviewed digest, write, read back.
 
@@ -334,11 +345,15 @@ def apply_testing_hold_plan(
     """
 
     plan, replacement = build_testing_hold_plan(
-        record_store=record_store, request=request, actor=actor
+        record_store=record_store, request=request, actor=actor, rehearsal=rehearsal
     )
     requested_terms = _hold_terms(replacement.policies.staff_testing_hold)
     applied = False
     if request.reviewed_plan_sha256 != plan.plan_sha256:
+        if require_exact_review:
+            raise TestingHoldStale(
+                "Reviewed testing hold plan no longer matches the lane's record."
+            )
         current = _read_target_record(
             record_store=record_store, context=request.context, instance=request.instance
         )

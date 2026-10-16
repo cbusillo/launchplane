@@ -3271,9 +3271,37 @@ alone is not proof that an existing testing copy has been repaired.
   and `testing-hold-apply` with the saved dry-run evidence, expected digest,
   reviewed acknowledgement and idempotency key. Use the same exact
   `--product`, `--context`, `--instance testing` for review and apply. A lift
-  requests testing reconciliation and can deploy: the Director's agent may
-  plan it, but existing write authority still governs apply (`local_operator`
-  lift applies remain refused). See the hold's
+  requests testing reconciliation and can deploy. The original Director agent
+  may set and lift a rehearsal hold on a currently qualified disposable testing
+  lane without a new grant. For rehearsal holds use the repo's
+  `scripts/stage-testing-separation.py` with `--hold-purpose staff_testing` and
+  `--operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py`.
+  Its `hold-read`, `hold-dry-run`, `hold-apply`, `lift-dry-run` and `lift-apply`
+  modes use that same configured authenticated transport. Planning saves a private
+  `--evidence-file` outside the checkout; apply requires that same file,
+  `--reviewed-dry-run` and a stable `--idempotency-key`. Use separate evidence
+  files/keys for set and lift and keep the same product, context and reason
+  between each plan and its apply. The catalog's hold projection does not yet
+  accept rehearsal provenance (tracked in [codex-skills#1881](https://github.com/cbusillo/codex-skills/issues/1881)).
+  The service marks the hold
+  with `rehearsal` provenance only when setting it on an unused, reproducible,
+  isolated lane with current binding-matched service safety evidence and no
+  active or uncertain execution. An ordinary staff hold, a foreign actor's hold,
+  and an isolation-staging interlock cannot acquire this permission by changing
+  a reason or purpose. Requests cannot supply rehearsal provenance.
+  Lift rechecks those facts under the service authority lock; only the hold's
+  own metadata is removed from the safety comparison. Configuration/resource
+  drift, stale/unknown facts, actual use, only-copy custody, shared resources,
+  and unresolved operations keep the hold. A mismatched reviewed digest refuses
+  even if the requested state already exists; an exact idempotent replay returns
+  its saved response without new effects. A successful normal lift requests
+  testing reconciliation. Existing explicit authority can still set an ordinary
+  protective hold when disposable qualification is unavailable; lifting that
+  hold remains an administrator action. Plans stay read-only for protected lanes
+  and do not manufacture missing safety evidence. The general observation
+  collector does not establish unused/reproducible/isolated facts; use the
+  current executor-produced qualification, or report that prerequisite.
+  See the hold's
   [dispatch limits](event-driven-deploys.md#staff-testing-hold) before isolation
   staging; a hold is not proof of executor/provider quiescence.
   The [generic-web exclusion read and maintained-transport consumer](event-driven-deploys.md#generic-web-testing-exclusion-inspection)
