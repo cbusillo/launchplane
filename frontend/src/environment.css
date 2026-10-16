@@ -184,10 +184,6 @@
   color: var(--unknown);
 }
 
-.environment-operational-status > span {
-  background: currentColor;
-}
-
 .environment-hero-main > p:not(.eyebrow),
 .activity-hero p:not(.eyebrow),
 .config-view-header p:not(.eyebrow),

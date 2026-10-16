@@ -231,6 +231,8 @@ their uncertainty, and only verified inventory uses active or empty wording.
 Product Ops labels combined lane evidence (route records and runtime observations)
 separately from operational health. A product profile's edit date is labelled as
 a profile update, never presented as the age of its lanes' verification.
+A lane's operational tone colors only its headline; an evidence badge's label
+and indicator always take that badge's evidence color.
 Topology evidence badges include route, placement and observation evidence;
 runtime observation timestamps describe their own evidence.
 Combined lane and product evidence expire when their topology expires, even if
