@@ -404,8 +404,8 @@ reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
 
-Relative and absolute filesystem paths in Python strings are not repository
-references. A separate owner/repository reference elsewhere in the same string
+Filesystem paths with `./`, `../`, `/` or `\\` prefixes in Python strings are not
+repository references. A separate owner/repository reference elsewhere in the same string
 is still audited. Historical profile-conversion command constants in
 `control_plane/contracts/*_migration.py` may contain HTTP loopback endpoints:
 they translate in-container behavior into stored declarations. This does not

@@ -525,6 +525,9 @@ only testing and preview declarations; production lanes are preserved. The
 schema migration performs no provider calls. Rollback leaves declarations
 intact because they may have been edited since conversion. Subsequent profile
 edits, including removing commands, are never replaced by legacy defaults.
+A stale v1 or unversioned write carrying the retired extension markers is
+refused: read the current profile and use the existing reviewed generic-web
+transition to preserve or remove its declarations explicitly.
 
 Required Compose environment substitutions such as `${APP_SECRET:?required}`
 are admin-supplied inputs regardless of product. They do not name a Launchplane

@@ -831,6 +831,17 @@ class LaunchplaneProductProfileRecord(BaseModel):
         )
 
     def validate_write_contract(self) -> "LaunchplaneProductProfileRecord":
+        legacy_extensions = self.preview.transport_extension == "verireel-postgres" or any(
+            lane.generic_web_extensions.verification_extension == "verireel-testing"
+            for lane in self.lanes
+        )
+        if legacy_extensions and (
+            self.schema_version < CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION
+            or "schema_version" not in self.model_fields_set
+        ):
+            raise ValueError(
+                "Legacy extension writes require a fresh current-schema profile; read the current profile and use the reviewed generic-web transition to preserve or remove declarations explicitly."
+            )
         self.schema_version = max(self.schema_version, CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION)
         for lane in self.lanes:
             for check in lane.health_monitoring.checks:

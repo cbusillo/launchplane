@@ -11,6 +11,7 @@ import os
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 import re
+import shlex
 import subprocess
 import tomllib
 import tokenize
@@ -3195,20 +3196,7 @@ def _allow_reason(
         and key_text.endswith("COMMAND")
         and isinstance(value, str)
     ):
-        urls = URL_PATTERN.findall(value)
-        try:
-            parsed_urls = [urlparse(url) for url in urls]
-        except ValueError:
-            parsed_urls = []
-        if parsed_urls and all(
-            url.hostname in {"127.0.0.1", "localhost", "::1"}
-            and url.scheme in {"http", "https"}
-            and url.username is None
-            and url.password is None
-            for url in parsed_urls
-        ):
-            # Historical in-container commands translate stored schema behavior;
-            # they select no product host, provider, repository or credentials.
+        if _is_loopback_migration_command(value):
             return ALLOW_REASON_SCHEMA_ONLY
     if normalized.endswith(".py") and (
         key_text.startswith("ALLOW_REASON_")
@@ -3437,6 +3425,43 @@ def _allow_reason(
     if _is_click_option_metadata_key(key):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
     return ""
+
+
+def _is_loopback_migration_command(value: str) -> bool:
+    try:
+        words = shlex.split(value)
+        urls = [word for word in words if word.startswith(("http://", "https://"))]
+        parsed = [urlparse(url) for url in urls]
+    except ValueError:
+        return False
+    if (
+        not words
+        or not parsed
+        or not all(
+            url.hostname in {"127.0.0.1", "localhost", "::1"}
+            and url.username is None
+            and url.password is None
+            for url in parsed
+        )
+    ):
+        return False
+    remainder = URL_PATTERN.sub("", value)
+    if _contains_owner_repo_reference(remainder) or PROVIDER_TARGET_PATTERN.search(remainder):
+        return False
+    # Only the executable, explicit filesystem paths, simple switches and the
+    # loopback URL are schema mechanics. Other arguments require classification.
+    executable = words[0]
+    if not (
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", executable)
+        or executable.startswith(("./", "../", "/"))
+    ):
+        return False
+    return all(
+        word in urls
+        or word.startswith(("./", "../", "/"))
+        or re.fullmatch(r"--?[A-Za-z][A-Za-z0-9_-]*", word)
+        for word in words[1:]
+    )
 
 
 def _is_required_compose_environment_input(*, path: str, key: str, value: object) -> bool:

@@ -1145,7 +1145,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             contracts.mkdir(parents=True)
             (contracts / "sample_migration.py").write_text(
                 'LOCAL_COMMAND = "curl http://127.0.0.1:3000/internal-job"\n'
-                'EXTERNAL_COMMAND = "curl https://application.example.test/internal-job"\n',
+                'EXTERNAL_COMMAND = "curl https://application.example.test/internal-job"\n'
+                'MIXED_REPO_COMMAND = "curl http://127.0.0.1:3000/internal-job --repo example/production"\n'
+                'MIXED_HOST_COMMAND = "curl http://127.0.0.1:3000/internal-job app.example.test"\n'
+                'MIXED_PROVIDER_COMMAND = "curl http://127.0.0.1:3000/internal-job --target dokploy-live"\n',
                 encoding="utf-8",
             )
             (contracts / "sample.py").write_text(
@@ -1165,6 +1168,10 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
                 "allow_reason"
             ]
         )
+        for key in ("MIXED_REPO_COMMAND", "MIXED_HOST_COMMAND", "MIXED_PROVIDER_COMMAND"):
+            self.assertFalse(
+                by_location["control_plane/contracts/sample_migration.py", key]["allow_reason"]
+            )
         self.assertFalse(
             by_location["control_plane/contracts/sample.py", "LOCAL_COMMAND"]["allow_reason"]
         )

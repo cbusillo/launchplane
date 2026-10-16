@@ -60,7 +60,7 @@ class ApplicationLifecycleMigrationTests(unittest.TestCase):
         ).model_dump(mode="json")
         self.assertEqual(migrate_product_application_lifecycle_payload(saved), saved)
 
-    def test_an_explicit_legacy_import_is_saved_as_current_without_restoring_removed_commands(
+    def test_stale_imports_are_refused_and_current_edits_do_not_restore_removed_commands(
         self,
     ) -> None:
         from tempfile import TemporaryDirectory
@@ -70,21 +70,26 @@ class ApplicationLifecycleMigrationTests(unittest.TestCase):
             CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
         )
 
+        for old in (
+            self.payload(),
+            {key: value for key, value in self.payload().items() if key != "schema_version"},
+        ):
+            with self.assertRaises(ValueError):
+                LaunchplaneProductProfileRecord.model_validate(old).validate_write_contract()
         profile = LaunchplaneProductProfileRecord.model_validate(
             migrate_product_application_lifecycle_payload(self.payload())
         )
-        imported = profile.model_copy(
+        current = profile.model_copy(
             update={
-                "schema_version": 1,
                 "preview": profile.preview.model_copy(
                     update={"generic_web_extensions": GenericWebLaneExtensions()}
-                ),
+                )
             }
         ).validate_write_contract()
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
-            store.write_product_profile_record(imported)
-            readback = store.read_product_profile_record(imported.product)
+            store.write_product_profile_record(current)
+            readback = store.read_product_profile_record(current.product)
         self.assertEqual(readback.schema_version, CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION)
         self.assertEqual(readback.preview.generic_web_extensions, GenericWebLaneExtensions())
 
