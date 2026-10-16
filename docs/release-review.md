@@ -155,6 +155,9 @@ approval, a running/stopped release, and missing evidence cannot complete an
 invitation. The existing invitation is marked released without another mention,
 with the saved acceptance linked and the original text and delivery receipts
 retained in a collapsed history section. Historical mentions are neutralized.
+Completed or replaced comments and their preserved receipts are excluded from
+later open request, replacement and reminder scans, including renewed requests bound to
+the same saved decision; a later review gets its own reminder.
 The marked issue closes only when testing matches production and there is no
 other outstanding invitation. Older decided invitations remain history;
 newer requests remain pending until the Client decides. A newer testing

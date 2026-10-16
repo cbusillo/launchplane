@@ -652,7 +652,14 @@ def publish_release_invitation(
             if not isinstance(number, int) or number < 1:
                 raise ValueError("Release invitation issue number is unavailable.")
             comments_path = f"{path}/{number}/comments"
-            comments = _pages(comments_path, token)
+            # Completion preserves original receipts as history, not active requests
+            # or reminders for a later candidate under the same saved decision.
+            comments = [
+                comment
+                for comment in _pages(comments_path, token)
+                if REPLACED_MARKER not in _comment_lines(comment)
+                and not any(line.startswith(COMPLETED_PREFIX) for line in _comment_lines(comment))
+            ]
             request = _open_request(comments, request_marker, last_decision)
             # Engineering-only changes never open a release review on their own;
             # they ride with the next Client-facing release or an urgent opening.

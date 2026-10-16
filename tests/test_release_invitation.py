@@ -9,7 +9,11 @@ from typing import Any, cast
 import unittest
 from unittest.mock import patch
 
-from control_plane.contracts.release_review import ReleaseReviewItem, ReleaseReviewStatus
+from control_plane.contracts.release_review import (
+    ReleaseReviewDecisionRecord,
+    ReleaseReviewItem,
+    ReleaseReviewStatus,
+)
 from control_plane.client_release import ClientReleaseRunView
 from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
@@ -1459,11 +1463,12 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertEqual(self.read_count, 2)
         self.assertEqual(self.posts, [])
 
-    def complete_release(self) -> Any:
+    def complete_release(self, accepted: ReleaseReviewDecisionRecord | None = None) -> Any:
         self.now += timedelta(minutes=1)
-        accepted = decision(self.store, date=self.now.isoformat()).model_copy(
-            update={"release_start": "promote"}
-        )
+        if accepted is None:
+            accepted = decision(self.store, date=self.now.isoformat()).model_copy(
+                update={"release_start": "promote"}
+            )
         self.store.create_release_review_decision_record_if_absent(accepted)
         production = self.store.read_release_tuple_record(
             context_name="example-site", channel_name="prod"
@@ -1617,6 +1622,61 @@ class ReleaseInvitationTests(unittest.TestCase):
         edits = self.edits.copy()
         self.publish()
         self.assertEqual(self.edits, edits)
+
+    def complete_renewed_invitation_with_reminder(self) -> list[dict[str, Any]]:
+        self.publish()
+        self.now += timedelta(minutes=1)
+        accepted = decision(self.store, date=self.now.isoformat()).model_copy(
+            update={"release_start": "promote"}
+        )
+        self.store.create_release_review_decision_record_if_absent(accepted)
+        self.now += timedelta(minutes=1)
+        self.review = self.review.model_copy(update={"checklist_digest": "f" * 64})
+        self.publish()
+        self.now += timedelta(days=3)
+        self.publish()
+        # A later addition replaces the reminder but retains its receipt as history.
+        self.now += timedelta(minutes=1)
+        self.add_client_change(43)
+        self.publish()
+        self.complete_release(accepted)
+        self.publish()
+        self.assertEqual(self.issues[0]["state"], "closed")
+        return [comment.copy() for comment in self.comments]
+
+    def test_completed_renewal_cannot_open_engineering_only_successor_review(self) -> None:
+        history = self.complete_renewed_invitation_with_reminder()
+        posts, edits = self.posts.copy(), self.edits.copy()
+        self.now += timedelta(minutes=1)
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        self.make_engineering_only()
+
+        self.assertFalse(self.publish())
+
+        self.assertEqual(self.comments, history)
+        self.assertEqual(self.posts, posts)
+        self.assertEqual(self.edits, edits)
+        self.assertEqual(self.issues[0]["state"], "closed")
+
+    def test_next_client_review_preserves_completed_renewal_and_gets_its_own_reminder(
+        self,
+    ) -> None:
+        history = self.complete_renewed_invitation_with_reminder()
+        self.now += timedelta(minutes=1)
+        self.change_candidate(artifact_id="new-artifact", source_commit="a" * 40)
+        self.add_client_change(44)
+
+        self.assertTrue(self.publish())
+
+        self.assertEqual(self.comments[: len(history)], history)
+        self.assertEqual(self.issues[0]["state"], "open")
+        count = len(self.comments)
+        self.now += timedelta(days=3)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.comments), count + 1)
+        self.assertEqual(self.comments[: len(history)], history)
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(len(self.comments), count + 1)
 
     def test_previous_rejected_invitation_for_same_version_keeps_its_history(self) -> None:
         self.publish()
