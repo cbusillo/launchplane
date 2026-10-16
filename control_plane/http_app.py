@@ -23854,19 +23854,19 @@ def create_launchplane_fastapi_app(
                 if observation.replaces_operation_id:
                     raise ValueError("This collector does not qualify replacement resources.")
                 observed_at = store.disposable_lane_observation_time()
-                odoo_usage = OdooTestingUsage()
-                if (
-                    profile.driver_id == "odoo"
-                    and observation.instance == "testing"
-                    and target is not None
-                    and target_id is not None
-                    and target.policies.staff_testing_hold is None
-                    and not any(
-                        item.target_id == target_id.target_id
-                        and (item.context, item.instance) != (target.context, target.instance)
-                        for item in store.list_dokploy_target_id_records()
-                    )
+                if profile.driver_id != "odoo" or observation.instance != "testing":
+                    odoo_usage = OdooTestingUsage(reason_code="unsupported_lane")
+                elif target is None or target_id is None:
+                    odoo_usage = OdooTestingUsage(reason_code="target_unavailable")
+                elif target.policies.staff_testing_hold is not None:
+                    odoo_usage = OdooTestingUsage(reason_code="staff_testing_hold")
+                elif any(
+                    item.target_id == target_id.target_id
+                    and (item.context, item.instance) != (target.context, target.instance)
+                    for item in store.list_dokploy_target_id_records()
                 ):
+                    odoo_usage = OdooTestingUsage(reason_code="target_alias")
+                else:
                     try:
                         odoo_usage = await run_in_threadpool(
                             read_odoo_testing_usage,

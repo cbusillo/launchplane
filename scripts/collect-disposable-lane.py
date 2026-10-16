@@ -13,6 +13,7 @@ from control_plane.contracts.disposable_lane import (
     DisposableLaneObservationRequest,
 )
 from control_plane.disposable_lane_collection import disposable_collection_coverage
+from control_plane.odoo_testing_usage import ODOO_USAGE_REASON_CODES
 
 
 def main() -> int:
@@ -85,6 +86,9 @@ def main() -> int:
         if not isinstance(usage, dict):
             raise ValueError("Invalid Odoo usage evidence.")
         usage_facts = {key: usage.get(key) for key in ("recent_signins", "authenticated_sessions")}
+        reason_code = usage.get("reason_code", "diagnostics_unavailable")
+        if not isinstance(reason_code, str) or reason_code not in ODOO_USAGE_REASON_CODES:
+            raise ValueError("Invalid Odoo usage diagnostic.")
         if any(value is not None and type(value) is not bool for value in usage_facts.values()):
             raise ValueError("Invalid Odoo usage evidence.")
         if facts["usage"] == "unused" and any(value is not False for value in usage_facts.values()):
@@ -94,7 +98,7 @@ def main() -> int:
                 {
                     "mode": args.mode,
                     "facts": facts,
-                    "odoo_usage": usage_facts,
+                    "odoo_usage": {**usage_facts, "reason_code": reason_code},
                     "source_coverage": coverage,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
                 }

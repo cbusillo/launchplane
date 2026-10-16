@@ -23,6 +23,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         provider_mutation: bool = False,
         binding_sha256: str = "a" * 64,
         usage: str = "unknown",
+        reason_code: object = None,
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
@@ -40,6 +41,10 @@ class DisposableLaneClientTests(unittest.TestCase):
             "odoo_usage": {"recent_signins": False, "authenticated_sessions": False},
             **facts,
         }
+        if reason_code is not None:
+            odoo_usage = collected_result["odoo_usage"]
+            assert isinstance(odoo_usage, dict)
+            odoo_usage["reason_code"] = reason_code
         collected = {
             "trace_id": "fixture-trace",
             "private_debug": "private-fixture",
@@ -123,3 +128,25 @@ class DisposableLaneClientTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 1)
                 self.assertEqual(json.loads(output)["status"], "unverified")
+
+    def test_client_reports_bounded_reason_and_marks_older_service_diagnostics_unavailable(
+        self,
+    ) -> None:
+        for reason in (None, "serving_process_absent", "session_store_unavailable"):
+            with self.subTest(reason=reason):
+                status, output, _ = self.call_client(reason_code=reason)
+                self.assertEqual(status, 0)
+                self.assertEqual(json.loads(output)["facts"]["usage"], "unknown")
+                self.assertEqual(
+                    json.loads(output)["odoo_usage"]["reason_code"],
+                    reason or "diagnostics_unavailable",
+                )
+        for invalid_reason in (
+            "private-fixture topology",
+            ["private-fixture"],
+            {"private-fixture": True},
+        ):
+            with self.subTest(reason=invalid_reason):
+                status, output, _ = self.call_client(reason_code=invalid_reason)
+                self.assertEqual(status, 1)
+                self.assertNotIn("private-fixture", output)

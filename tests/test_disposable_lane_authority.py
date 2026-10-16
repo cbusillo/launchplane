@@ -264,6 +264,7 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
                     "unknown" if used is None else "in_use" if used else "unused",
                     used,
                     None if used is None else False,
+                    "serving_process_absent" if used is None else "complete",
                 ),
             ) as reader:
                 inspected = await self.observe()
@@ -283,6 +284,10 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((evidence.data, evidence.production_resources), ("unknown", "unknown"))
             self.assertEqual(self.store.read_product_profile_record("example-site"), initial)
             self.assertEqual(response.json()["result"]["odoo_usage"]["recent_signins"], used)
+            self.assertEqual(
+                response.json()["result"]["odoo_usage"]["reason_code"],
+                "serving_process_absent" if used is None else "complete",
+            )
 
     async def test_delayed_unused_collection_cannot_erase_newer_protective_evidence(self) -> None:
         from control_plane.odoo_testing_usage import OdooTestingUsage
