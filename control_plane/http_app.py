@@ -546,6 +546,7 @@ from control_plane.product_promotion_http import (
 from control_plane.http_routes.odoo_import_overrides import (
     register_import_override_reconcile_routes,
 )
+from control_plane.http_routes.odoo_secret_references import register_secret_reference_routes
 from control_plane.http_routes.odoo_runtime import (
     OdooRuntimeReadDependencies,
     register_odoo_runtime_read_routes,
@@ -29738,6 +29739,9 @@ def create_launchplane_fastapi_app(
     )
 
     register_import_override_reconcile_routes(
+        app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
+    )
+    register_secret_reference_routes(
         app, dependencies=read_route_dependencies, mutation_identity=read_browser_mutation_identity
     )
 

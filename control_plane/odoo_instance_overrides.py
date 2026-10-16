@@ -1,5 +1,6 @@
 import base64
 from dataclasses import dataclass
+from typing import cast
 
 import click
 from control_plane._odoo_website_settings_program import WEBSITE_INDEXING_PARAMETER
@@ -236,6 +237,17 @@ def render_post_deploy_payload(
     selected_website_settings: OdooWebsiteSettings | None = None,
 ) -> OdooPostDeployPayload:
     try:
+        if any(item.value.source == "secret_binding" for item in record.config_parameters):
+            from control_plane.odoo_secret_references import (
+                SecretReferenceStore,
+                require_config_parameter_secret_agreement,
+            )
+
+            if record_store is None:
+                raise ValueError("Secret-backed config parameters require lane delivery authority.")
+            require_config_parameter_secret_agreement(
+                record, cast(SecretReferenceStore, record_store)
+            )
         runtime_values = runtime_values_for_override(record, record_store)
     except ValueError as error:
         raise click.ClickException(str(error)) from error

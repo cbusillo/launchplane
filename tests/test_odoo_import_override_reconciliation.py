@@ -20,7 +20,7 @@ from control_plane.contracts.odoo_instance_override_record import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.odoo_import_overrides import plan_import_override_reconciliation
@@ -123,6 +123,29 @@ class ImportOverrideHttpTests(unittest.IsolatedAsyncioTestCase):
         for instance in ("testing", "prod"):
             self.store.write_odoo_instance_override_record(override_record(instance))
             self.store.write_runtime_environment_record(runtime_record(instance))
+        self.store.write_secret_record(
+            SecretRecord(
+                secret_id="cm-password-fixture",
+                scope="context",
+                context="cm",
+                integration="runtime_environment",
+                name="config-password",
+                current_version_id="fixture-version",
+                created_at="2026-10-07T23:00:00Z",
+                updated_at="2026-10-07T23:00:00Z",
+            )
+        )
+        self.store.write_secret_binding(
+            SecretBinding(
+                binding_id="cm-password-fixture",
+                secret_id="cm-password-fixture",
+                integration="runtime_environment",
+                context="cm",
+                binding_key="ODOO_OVERRIDE_SECRET__CONFIG_PARAM__CM_DATA__DB__PASSWORD",
+                created_at="2026-10-07T23:00:00Z",
+                updated_at="2026-10-07T23:00:00Z",
+            )
+        )
         self.app = self.make_app(
             ("product_environment.read", "product_config.plan", "product_config.apply")
         )

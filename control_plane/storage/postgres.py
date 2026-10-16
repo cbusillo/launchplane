@@ -574,6 +574,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import (
     PublicHostAuthorityBusy,
     SecretCopySourceConflictError,
+    SecretDeliveryConflictError,
     SecretRecordConflictError,
     ProductProfileConflictError,
     require_bundle_context_owner,
@@ -6643,6 +6644,18 @@ class PostgresRecordStore(HumanSessionStore):
                     or SecretBinding.model_validate(binding_row.payload) != expected_source.binding
                 ):
                     raise SecretCopySourceConflictError("Secret copy source changed before commit.")
+            for secret_delivery in bundle.secret_delivery_read_sets:
+                if not secret_delivery.matches(
+                    (
+                        SecretRecord.model_validate(row.payload)
+                        for row in session.scalars(select(LaunchplaneSecretRow)).all()
+                    ),
+                    (
+                        SecretBinding.model_validate(row.payload)
+                        for row in session.scalars(select(LaunchplaneSecretBindingRow)).all()
+                    ),
+                ):
+                    raise SecretDeliveryConflictError("Lane secret metadata changed before commit.")
             for expected_secret in bundle.expected_secret_records:
                 current_secret = session.scalar(
                     select(LaunchplaneSecretRow)

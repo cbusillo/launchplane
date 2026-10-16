@@ -99,6 +99,37 @@ class SecretBindingSetExpectation(BaseModel):
     bindings: tuple[SecretBinding, ...]
 
 
+class SecretDeliveryConflictError(ValueError):
+    """The metadata selecting a lane's delivered secrets changed before commit."""
+
+
+class SecretDeliverySetExpectation(BaseModel):
+    """Guard lane selection, including insertions and disabled/absent candidates."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    integration: str
+    context: str
+    instance: str
+    records: tuple[SecretRecord, ...]
+    bindings: tuple[SecretBinding, ...]
+
+    def includes(self, item: SecretRecord | SecretBinding) -> bool:
+        return (
+            item.integration == self.integration
+            and item.context == self.context
+            and item.instance in {"", self.instance}
+        )
+
+    def matches(self, records: Iterable[SecretRecord], bindings: Iterable[SecretBinding]) -> bool:
+        def payloads(items: Iterable[SecretRecord | SecretBinding]) -> list[str]:
+            return sorted(item.model_dump_json() for item in items if self.includes(item))
+
+        return payloads(records) == payloads(self.records) and payloads(bindings) == payloads(
+            self.bindings
+        )
+
+
 class RuntimeEnvironmentWrite(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -205,6 +236,7 @@ class ProductAuthorityBundle(BaseModel):
     secret_audit_events: tuple[SecretAuditEvent, ...] = ()
     secret_copy_sources: tuple[SecretCopySourceExpectation, ...] = ()
     secret_binding_sets: tuple[SecretBindingSetExpectation, ...] = ()
+    secret_delivery_read_sets: tuple[SecretDeliverySetExpectation, ...] = ()
     # Secret ids that must still be absent when the bundle commits: a secret
     # adopted from the provider is only ever created, never rotated.
     absent_secret_ids: tuple[str, ...] = ()
