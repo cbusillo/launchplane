@@ -41,7 +41,7 @@ import {
   type TrustState,
 } from "./ProductOps";
 import { monitoringEvidenceTrust } from "./monitoring-evidence";
-import { environmentOperationalTone, expireEnvironmentEvidence } from "./product-environment-signal";
+import { environmentEvidenceDeadlines, environmentOperationalTone, expireEnvironmentEvidence } from "./product-environment-signal";
 import {
   EnvironmentViewNav,
   ProductWorkspaceNav,
@@ -105,7 +105,8 @@ export function ProductEnvironmentRoute({
   const promotionLoadedKey = useRef("");
   const resourceKey = `${productKey}:${environmentKey}`;
   useEvidenceRefresh(resourceKey, !fixtureMode, detailResource,
-    () => setEvidenceRefreshToken(value => value + 1));
+    () => setEvidenceRefreshToken(value => value + 1),
+    detailResource.data ? environmentEvidenceDeadlines(detailResource.data) : []);
   const needsConfig =
     view === "runtime-settings" ||
     view === "managed-secrets" ||
