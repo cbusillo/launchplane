@@ -36,7 +36,7 @@ _NOTE_LINK = re.compile(
 _RELEASE_PROCESS_INSTRUCTION = re.compile(
     r"(?P<join>,[ \t]*then[ \t]+|(?<=[.!?])[ \t]+(?:then[ \t]+)?"
     r"|^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:then[ \t]+)?)"
-    r"(?P<instruction>(?:accept|approve)\b(?:https?://\S+|[^.!?\n])*[.!?]?)",
+    r"(?P<instruction>(?:accept|approve)\b(?:https?://[^\s]*[^\s.!?)]|[^.!?\n])*[.!?]?)",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -80,6 +80,7 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
                 r"\bLaunchplane\b",
                 r"\b(?:cleanup|memory)\b",
                 r"\b(?:after|once|until|when)\b",
+                r"\b(?:evidence|cleanup)\b.*\b(?:recorded|completed?)\b",
             )
         ):
             return match[0]
@@ -87,7 +88,24 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
         return "." if match["join"].startswith(",") else ""
 
     displayed = _RELEASE_PROCESS_INSTRUCTION.sub(remove_process, notes)
-    displayed = _NOTE_LINK.sub(replace, displayed).strip()
+    displayed = _NOTE_LINK.sub(replace, displayed)
+    if changed:
+        # A batch member whose only instruction was removed still needs notes.
+        lines = displayed.splitlines()
+        members = [
+            (index, int(number[1]))
+            for index, (_line, heading, _fence) in enumerate(_markdown_lines(displayed))
+            if heading is not None
+            and len(heading[1]) >= 3
+            and (number := re.match(r"#([1-9][0-9]*)\b", heading[2]))
+        ]
+        for position in range(len(members) - 1, -1, -1):
+            start, number = members[position]
+            end = members[position + 1][0] if position + 1 < len(members) else len(lines)
+            if not "\n".join(lines[start + 1 : end]).strip():
+                lines.insert(start + 1, missing_owner_test_notes(number))
+        displayed = "\n".join(lines)
+    displayed = displayed.strip()
     return displayed, changed
 
 

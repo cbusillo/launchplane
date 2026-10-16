@@ -141,9 +141,9 @@ test("Preview-era note markers identify each PR only in the engineering view", a
   await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", csrf_token: "fixture", identity: { login: "engineer", github_id: 9002, role: "admin", organizations: [], teams: [] } } }));
   await page.route("**/v1/release-review?*", route => route.fulfill({ json: { ...response, viewer_is_owner: false, can_override: true } }));
   await page.goto("/ui/owner-review?product=example-site");
-  const marker = page.getByText(/PR #42: test notes adjusted/, { exact: false });
+  const marker = page.getByTestId("release-notes-adjustment-42");
   await expect(marker).toBeVisible();
-  await expect(page.getByText(/PR #45: test notes adjusted/, { exact: false })).toHaveCount(0);
+  await expect(page.getByTestId("release-notes-adjustment-45")).toHaveCount(0);
   await page.screenshot({ path: testInfo.outputPath("preview-era-admin.png"), fullPage: true });
   await page.unroute("**/v1/release-review?*");
   await page.route("**/v1/release-review?*", route => route.fulfill({ json: response }));

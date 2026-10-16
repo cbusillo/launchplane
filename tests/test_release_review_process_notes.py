@@ -2,7 +2,12 @@
 
 import unittest
 
-from control_plane.release_review_github import read_release_changes, release_test_notes
+from control_plane.release_review_github import (
+    read_release_changes,
+    release_test_notes,
+    missing_owner_test_notes,
+    pull_requests_missing_owner_test_notes,
+)
 from tests.test_release_review import BASE, HEAD, github_read
 
 
@@ -27,6 +32,7 @@ class ReleaseProcessNotesTests(unittest.TestCase):
             "Check the page. Record what you find in the Launchplane release review.",
             "Nothing for the Client to test: Internal cleanup and memory evidence only.",
             "Check the available memory in Launchplane's service diagnostics.",
+            "Approve the release in Launchplane after checking that the memory panel shows data.",
         ):
             with self.subTest(notes=notes):
                 self.assertEqual(release_test_notes(notes), (notes, False))
@@ -59,12 +65,10 @@ class ReleaseProcessNotesTests(unittest.TestCase):
         self.assertEqual(displayed, "")
 
     def test_unpunctuated_process_line_preserves_following_checks_and_batch_blockers(self) -> None:
-        from control_plane.release_review_github import pull_requests_missing_owner_test_notes
-
         notes = (
             "Check the contact form.\n"
             "Then accept the release through Launchplane after cleanup evidence is recorded\n\n"
-            "### #124 Another change\n\n#124 has no Client test notes.\n"
+            "### #124 Another change\n\n" + missing_owner_test_notes(124) + "\n"
             "Check the checkout total matches the cart."
         )
         displayed, changed = release_test_notes(notes)
@@ -81,3 +85,23 @@ class ReleaseProcessNotesTests(unittest.TestCase):
                     "https://control.example.invalid/evidence."
                 )
                 self.assertEqual(release_test_notes(notes), ("", True))
+
+    def test_url_ends_the_instruction_before_a_following_testing_sentence(self) -> None:
+        notes = (
+            "Check the page, then accept the release in Launchplane after cleanup is recorded "
+            "at https://control.example.invalid/evidence. Check the footer."
+        )
+        displayed, changed = release_test_notes(notes)
+        self.assertTrue(changed)
+        self.assertIn("Check the page", displayed)
+        self.assertIn("Check the footer.", displayed)
+
+    def test_batch_member_with_only_process_notes_retains_the_missing_notes_gate(self) -> None:
+        notes = (
+            "### #123 First change\n\nAccept the release in Launchplane after cleanup is recorded.\n\n"
+            "### #124 Second change\n\nCheck the checkout total."
+        )
+        displayed, changed = release_test_notes(notes)
+        self.assertTrue(changed)
+        self.assertEqual(pull_requests_missing_owner_test_notes(displayed), (123,))
+        self.assertIn("Check the checkout total.", displayed)

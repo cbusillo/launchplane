@@ -104,14 +104,14 @@ function ReleaseItems({ items, viewerIsOwner, emptyMessage = "No merged pull req
             a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noreferrer">{children}</a> : <>{children}</>,
             img: ({ alt }) => <>{alt}</>,
           }}>{item.owner_test_notes.trim() || "Test notes are missing for this change."}</Markdown></div>
-            {!viewerIsOwner && item.preview_era_notes ? <span>PR #{item.pull_request_number}: test notes adjusted for the testing site.</span> : null}
+            {!viewerIsOwner && item.preview_era_notes ? <span data-testid={`release-notes-adjustment-${item.pull_request_number}`}>PR #{item.pull_request_number}: test notes adjusted for the testing site.</span> : null}
             {item.already_reviewed ? <span>{`${viewerIsOwner ? "You" : "The Client"} accepted this change in its preview. Check it again as part of this release.`}</span> : null}
         </li>)}</ol> : <p>{items.length ? "No changes from this repository need you to test them." : emptyMessage}</p>}
         {grouped.nothingToTest.length ? <details className="release-review-untested">
           <summary>{grouped.nothingToTest.length === 1 ? "1 change needs nothing from you" : `${grouped.nothingToTest.length} changes need nothing from you`}</summary>
           <ul>{grouped.nothingToTest.map(item => <li key={item.url}>
             {changeTitle(item)}
-            {!viewerIsOwner && item.preview_era_notes ? <span>PR #{item.pull_request_number}: test notes adjusted for the testing site.</span> : null}
+            {!viewerIsOwner && item.preview_era_notes ? <span data-testid={`release-notes-adjustment-${item.pull_request_number}`}>PR #{item.pull_request_number}: test notes adjusted for the testing site.</span> : null}
             {untestedReason(item.owner_test_notes) ? <span>{untestedReason(item.owner_test_notes)}</span> : null}
           </li>)}</ul>
         </details> : null}
