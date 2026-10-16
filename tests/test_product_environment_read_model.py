@@ -41,7 +41,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressIncidentReminderStateRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import (
-    PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
+    health_monitor_freshness_seconds,
     build_public_ingress_incident_event_id,
     build_public_ingress_material_fingerprint,
     public_ingress_material_fingerprint_sha256,
@@ -1637,7 +1637,8 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         stale = observation.model_copy(
             update={
                 "observed_at": (
-                    checked - timedelta(seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1)
+                    checked
+                    - timedelta(seconds=health_monitor_freshness_seconds(observation.instance) + 1)
                 ).isoformat()
             }
         )

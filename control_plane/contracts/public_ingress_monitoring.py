@@ -142,6 +142,12 @@ def health_monitor_interval_seconds(instance: str) -> int:
     )
 
 
+def health_monitor_freshness_seconds(instance: str) -> int:
+    """Cover one cadence plus a bounded half-cadence scheduling/publication budget."""
+    interval = health_monitor_interval_seconds(instance)
+    return interval + (interval + 1) // 2
+
+
 def monitored_check_identity(check_name: str) -> tuple[PublicIngressCheckKind, str] | None:
     if not check_name.startswith(MONITOR_CADENCE_CHECK_PREFIX):
         return None
