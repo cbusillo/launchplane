@@ -33,6 +33,7 @@ class SlotStartupTests(unittest.TestCase):
         self.current: dict[tuple[str, str], str] = {}
         self.effects: list[str] = []
         self.fail_recreate = ""
+        self.fail_readback = ""
         self.wrong_image = self.bad_config = self.lost_env = False
         targets = []
         payload = {
@@ -63,7 +64,8 @@ class SlotStartupTests(unittest.TestCase):
                 name = project + "-" + service
                 self.current[project, service] = name
                 self.configs[project]["services"][service] = {
-                    "env_file": [{"path": str(self.files[project])}]
+                    "image": slot.image,
+                    "env_file": [{"path": str(self.files[project])}],
                 }
                 self.containers[name] = {
                     "State": {"Running": False, "Restarting": False},
@@ -127,8 +129,6 @@ class SlotStartupTests(unittest.TestCase):
                 return json.dumps(self.configs[project])
             if "up" in argv:
                 self.effects.append("recreate:" + project)
-                if project == self.fail_recreate:
-                    raise TimeoutError("recreation reply lost")
                 for writer in self.plan.writers:
                     key = project, writer.writer_id
                     old = self.current[key]
@@ -143,12 +143,16 @@ class SlotStartupTests(unittest.TestCase):
                         container["Config"]["Image"] = "wrong-image"
                     self.containers[name] = container
                     self.current[key] = name
+                if project == self.fail_recreate:
+                    raise TimeoutError("recreation reply lost after replacing containers")
                 # This adapter's supported operation must keep dependencies and
                 # all consumers stopped. A restart cannot refresh creation env.
                 self.assertIn("--no-start", argv)
                 self.assertIn("--no-deps", argv)
                 return ""
             if "ps" in argv:
+                if project == self.fail_readback:
+                    raise TimeoutError("inventory readback reply lost")
                 return self.current[project, argv[-1]]
         raise AssertionError("unexpected startup command")
 
@@ -216,6 +220,41 @@ class SlotStartupTests(unittest.TestCase):
             self.startup(self.plan, self.plan.new, self.plan.website_settings)
         self.assertNotEqual(self.writers.targets, original)
         self.assertTrue(all(not item["State"]["Running"] for item in self.containers.values()))
+        self.assertTrue(all(item.container in self.containers for item in self.writers.targets))
+        self.fail_recreate = ""
+        assert self.plan.rollback_website_settings is not None
+        self.startup(self.plan, self.plan.old, self.plan.rollback_website_settings)
+
+    def test_changed_compose_image_and_later_env_override_refuse_before_any_write(self) -> None:
+        assert self.plan.website_settings is not None
+        definition = next(iter(self.configs[self.plan.old.compose_id]["services"].values()))
+        for image in ("other@sha256:" + "a" * 64, "${ODOO_IMAGE}"):
+            definition["image"] = image
+            with (
+                self.subTest(image=image),
+                self.assertRaisesRegex(ValueError, "Compose writer image"),
+            ):
+                self.startup(self.plan, self.plan.new, self.plan.website_settings)
+            self.assertFalse(self.effects)
+        definition["image"] = self.plan.old.image
+        definition["env_file"].append({"path": "/another.env"})
+        with self.assertRaisesRegex(ValueError, "without an override"):
+            self.startup.preflight(self.plan)
+        self.assertFalse(self.effects)
+
+    def test_lost_rollback_recreation_and_readback_recover_without_deleted_ids(self) -> None:
+        assert self.plan.website_settings is not None
+        assert self.plan.rollback_website_settings is not None
+        self.startup(self.plan, self.plan.new, self.plan.website_settings)
+        self.fail_recreate = self.plan.old.compose_id
+        self.fail_readback = self.plan.old.compose_id
+        with self.assertRaises(TimeoutError):
+            self.startup(self.plan, self.plan.old, self.plan.rollback_website_settings)
+        # The next read recovers via the previously observed Compose authority,
+        # before inspecting IDs removed by the uncertain recreation.
+        self.fail_recreate = self.fail_readback = ""
+        self.startup(self.plan, self.plan.old, self.plan.rollback_website_settings)
+        self.assertTrue(all(item.container in self.containers for item in self.writers.targets))
 
     def test_provider_readback_disagreement_stops_before_file_or_container_changes(self) -> None:
         assert self.plan.website_settings is not None

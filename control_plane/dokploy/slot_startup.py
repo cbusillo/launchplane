@@ -126,10 +126,30 @@ class DokploySlotStartup:
         self, *, host: str, token: str, writers: ContainerSlotWriters, execute: ContainerCommand
     ):
         self.host, self.token, self.writers, self.execute = host, token, writers, execute
+        self._pending_projects: dict[str, _Project] = {}
+
+    def _refresh_project(self, project: _Project) -> None:
+        # A lost up/ps reply is uncertainty, not evidence that the old IDs still
+        # exist. Keep the observed Compose coordinates until readback succeeds.
+        for writer, service in project.services:
+            containers = self.execute(
+                project.argv + ("ps", "--all", "--quiet", service), None
+            ).split()
+            if len(containers) != 1:
+                raise ValueError("recreated writer inventory is not unique")
+            self.writers.targets = tuple(
+                replace(target, container=containers[0])
+                if (target.slot_id, target.writer) == (writer.slot_id, writer.writer)
+                else target
+                for target in self.writers.targets
+            )
+        self._pending_projects.pop(project.slot.slot_id, None)
 
     def _projects(self, plan: OdooCutoverPlan, *, fenced: bool) -> tuple[_Project, ...]:
         if self.writers.plan != plan:
             raise ValueError("startup writer inventory belongs to another release")
+        for project in tuple(self._pending_projects.values()):
+            self._refresh_project(project)
         projects = []
         for slot in (plan.old, plan.new):
             target = api.fetch_dokploy_target_payload(
@@ -196,14 +216,17 @@ class DokploySlotStartup:
             )
             for _, service in services:
                 definition = raw["services"][service]
+                # The containers we are about to replace are no proof of what
+                # Compose would create today. Refuse mutable/interpolated images
+                # and later env files before touching either retained slot.
+                if definition.get("image") != slot.image:
+                    raise ValueError("Compose writer image differs from the immutable release")
                 paths = definition.get("env_file", [])
                 if (
                     not isinstance(paths, list)
-                    or not any(
-                        str(item.get("path", "") if isinstance(item, dict) else item)
-                        in {".env", env_file}
-                        for item in paths
-                    )
+                    or not paths
+                    or str(paths[-1].get("path", "") if isinstance(paths[-1], dict) else paths[-1])
+                    not in {".env", env_file}
                     or ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY in definition.get("environment", {})
                 ):
                     raise ValueError(
@@ -260,7 +283,6 @@ class DokploySlotStartup:
         projects = self._projects(plan, fenced=True)
         # Read/validate both paths before the first write, including rollback.
         self.preflight(plan)
-        targets: list[SlotWriterContainer] = []
         for project in projects:
             current = api.fetch_dokploy_target_payload(
                 host=self.host,
@@ -292,38 +314,25 @@ class DokploySlotStartup:
                 raise ValueError("provider startup payload readback differs")
             self._file(project, intent, apply=True)
             services = tuple(service for _, service in project.services)
-            self.execute(
-                project.argv
-                + (
-                    "up",
-                    "--no-start",
-                    "--no-deps",
-                    "--force-recreate",
-                    "--no-build",
-                    "--pull",
-                    "never",
-                    *services,
-                ),
-                None,
-            )
-            for writer, service in project.services:
-                containers = self.execute(
-                    project.argv + ("ps", "--all", "--quiet", service), None
-                ).split()
-                if len(containers) != 1:
-                    raise ValueError("recreated writer inventory is not unique")
-                targets.append(replace(writer, container=containers[0]))
-            observed = {(target.slot_id, target.writer.writer_id): target for target in targets}
-            self.writers.targets = tuple(
-                observed.get((target.slot_id, target.writer.writer_id), target)
-                for target in self.writers.targets
-            )
-        # Preserve canonical writer order for native verification/handoff.
-        by_writer = {(target.slot_id, target.writer.writer_id): target for target in targets}
-        refreshed = tuple(
-            by_writer[(target.slot_id, target.writer.writer_id)] for target in self.writers.targets
-        )
-        self.writers.targets = refreshed
+            self._pending_projects[project.slot.slot_id] = project
+            try:
+                self.execute(
+                    project.argv
+                    + (
+                        "up",
+                        "--no-start",
+                        "--no-deps",
+                        "--force-recreate",
+                        "--no-build",
+                        "--pull",
+                        "never",
+                        *services,
+                    ),
+                    None,
+                )
+            finally:
+                self._refresh_project(project)
+        refreshed = self.writers.targets
         result = StartupSettingsReadback(intent.settings.digest, intent.settings.digest, refreshed)
         from control_plane.dokploy.slot_website_settings import _verify_startup_containers
 
