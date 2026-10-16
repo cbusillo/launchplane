@@ -210,6 +210,7 @@ class LaneUsageTests(unittest.TestCase):
         self.assertTrue(self.decision().protected)
 
     def test_unavailable_monitor_evidence_refuses_without_raising(self) -> None:
+        self.health()
         for failure in (
             KeyError("private-detail"),
             OSError("private-detail"),
@@ -222,7 +223,9 @@ class LaneUsageTests(unittest.TestCase):
                     self.store, "list_public_ingress_observation_records", side_effect=failure
                 ),
             ):
-                self.assertTrue(self.decision().protected)
+                decision = self.decision()
+                self.assertTrue(decision.protected)
+                self.assertEqual(decision.reason, "monitor_evidence_unavailable")
 
     def test_serving_unknown_and_production_remain_protected(self) -> None:
         self.health(status=200)

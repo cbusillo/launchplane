@@ -176,6 +176,7 @@ def require_drill_use_unprotected(
     *,
     now: float | None = None,
     accepted_usage_revision: str = "",
+    allow_down_repair: bool = True,
 ) -> None:
     try:
         # Missing tracked authority is an unreadable hold check, never no hold.
@@ -193,6 +194,7 @@ def require_drill_use_unprotected(
                 context=context,
                 instance="testing",
                 usage=recorded.usage,
+                require_unused=allow_down_repair,
                 now=datetime.fromtimestamp(now, timezone.utc) if now is not None else None,
             )
         )

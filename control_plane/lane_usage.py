@@ -204,7 +204,11 @@ def evaluate_lane_usage(
                 store, profile, target, target_id, now or datetime.now(timezone.utc)
             )
         except Exception:
-            records = ()
+            logging.getLogger(__name__).warning(
+                "Non-production repair monitor evidence unavailable",
+                extra={"product": profile.product, "context": target.context, "instance": instance},
+            )
+            return LaneUsageDecision(True, "monitor_evidence_unavailable")
         if records:
             ordered = sorted(records, key=lambda record: _timestamp(record.observed_at))
             decision = LaneUsageDecision(

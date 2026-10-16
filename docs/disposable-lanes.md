@@ -59,6 +59,8 @@ unverified and retain their existing admission paths.
 Existing preview refresh, never-live retirement and non-destructive isolation
 paths continue to protect known use without demanding a universal negative
 occupancy observation. This change adds no UNKNOWN restriction to those paths.
+Walkthrough account and browser operations also retain known-use protection;
+they do not use the downtime repair exception.
 
 Downtime does not qualify needed-copy custody, physical isolation, secret
 separation, backup, authorization, deployment fences or unknown provider

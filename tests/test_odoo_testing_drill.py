@@ -319,6 +319,41 @@ class TestingDrillTests(TestingDrillScenario):
         self.now += DRILL_INTERVAL_SECONDS
         self.assert_down_lane_drill_admitted("in_use")
 
+    def test_walkthrough_keeps_known_use_protected_on_a_down_lane(self) -> None:
+        from types import SimpleNamespace
+        from control_plane.odoo_walkthrough import plan_walkthrough
+        from control_plane.contracts.odoo_walkthrough import OdooWalkthroughRequest
+        from tests.support.down_lanes import record_lane_health
+
+        record_lane_health(
+            self.store,
+            self.profile.product,
+            self.context,
+            datetime.fromtimestamp(self.now, timezone.utc),
+        )
+        record_safety(self.store, self.profile.product, self.context, "testing", usage="in_use")
+        selection = SimpleNamespace(
+            identity=SimpleNamespace(context=self.context), base_url="https://testing.example.com"
+        )
+        with (
+            patch("control_plane.odoo_walkthrough.select_stable_runtime", return_value=selection),
+            patch("control_plane.odoo_walkthrough.read_drill_recent_signins", return_value=False),
+            patch("control_plane.odoo_walkthrough.connect_runtime") as connection,
+        ):
+            with self.assertRaises(DrillSkipped):
+                plan_walkthrough(
+                    self.store,
+                    Path("."),
+                    OdooWalkthroughRequest(
+                        product=self.profile.product,
+                        context=self.context,
+                        task_id="1" * 32,
+                        operation="provision",
+                    ),
+                    "fixture-agent",
+                )
+            connection.assert_not_called()
+
     def assert_down_lane_drill_admitted(self, usage: str) -> None:
         from tests.support.down_lanes import record_lane_health
         from control_plane.lane_usage import VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX
