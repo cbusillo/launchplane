@@ -77,7 +77,7 @@ class DiagnosticIdentityTests(unittest.TestCase):
             scope="context_instance",
             integration=diagnostic.DIAGNOSTIC_SECRET_INTEGRATION,
             binding_key=diagnostic.DIAGNOSTIC_IDENTITY_KEY,
-            name="service-reader",
+            name=diagnostic.diagnostic_lane_secret_name(self.runtime.instance),
             context_name=self.runtime.context,
             instance_name=self.runtime.instance,
             plaintext_value=json.dumps(payload),
@@ -146,6 +146,21 @@ class DiagnosticIdentityTests(unittest.TestCase):
         ):
             with self.assertRaises(ValueError):
                 self.read()
+
+    def test_fixed_lane_name_keeps_rotation_recoverable_after_a_stray_record(self) -> None:
+        write_secret_value(
+            record_store=cast(SecretWriteStore, self.store),
+            scope="context_instance",
+            integration=diagnostic.DIAGNOSTIC_SECRET_INTEGRATION,
+            binding_key=diagnostic.DIAGNOSTIC_IDENTITY_KEY,
+            name="mistyped-reader-name",
+            context_name=self.runtime.context,
+            instance_name=self.runtime.instance,
+            plaintext_value=json.dumps(self.payload),
+        )
+        rotated = {**self.payload, "password": "synthetic-rotated-password"}
+        self.write_identity(rotated)
+        self.assertEqual(self.read().password.get_secret_value(), rotated["password"])
 
     def test_payload_must_match_lane_database_and_service_account(self) -> None:
         for change in (
@@ -376,7 +391,7 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                             "subjects": ["fixture-admin"],
                             "token_labels": ["fixture-label"],
                             "products": [profile.product],
-                            "contexts": [profile.preview.context],
+                            "contexts": [profile.preview.context, "stable-context"],
                             "actions": ["product_config.plan", "product_config.apply"],
                         }
                     ],
@@ -502,6 +517,37 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                     identity["database"],
                 )
 
+            stable_payload = deepcopy(payload)
+            stable_payload.update(context="stable-context", instance="testing")
+            stable_identity = {**identity, "context": "stable-context", "instance": "testing"}
+            stable_payload["secrets"][0].update(
+                scope="context_instance",
+                name=diagnostic.diagnostic_lane_secret_name("testing"),
+                value=json.dumps(stable_identity),
+            )
+            stable_plan = await send(stable_payload, "stable-plan")
+            self.assertEqual(stable_plan.status_code, 202, stable_plan.text)
+            stable_apply = await send({**stable_payload, "mode": "apply"}, "stable-apply")
+            self.assertEqual(stable_apply.status_code, 202, stable_apply.text)
+            stable_runtime = runtime.model_copy(
+                update={
+                    "context": "stable-context",
+                    "instance": "testing",
+                    "environment_kind": "stable",
+                }
+            )
+            self.assertEqual(
+                diagnostic.read_diagnostic_identity(
+                    store, stable_runtime, identity["database"]
+                ).user_id,
+                identity["user_id"],
+            )
+            wrong_name = deepcopy(stable_payload)
+            wrong_name["secrets"][0]["name"] = "a-second-record"
+            for mode in ("dry-run", "apply"):
+                wrong = await send({**wrong_name, "mode": mode}, "wrong-stable-name-" + mode)
+                self.assertEqual(wrong.status_code, 400, wrong.text)
+
             for role in ("admin", "read_only"):
                 session = sessions.issue(_github_human_identity(role=role))
 
@@ -547,6 +593,7 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                     unsafe["product"] = "foreign-product"
                 response = await send(unsafe, "preview-refuse-" + kind)
                 self.assertGreaterEqual(response.status_code, 400, response.text)
+                self.assertLess(response.status_code, 500, response.text)
                 self.assertEqual(store.list_runtime_environment_records(), ())
 
             original = store.write_product_authority_bundle
@@ -555,9 +602,11 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                 store.write_product_profile_record(
                     profile.model_copy(
                         update={
-                            "preview": profile.preview.model_copy(
-                                update={"context": "moved-context"}
-                            )
+                            "product": "concurrent-product",
+                            "preview": profile.preview.model_copy(update={"enabled": False}),
+                            "lanes": (
+                                profile.lanes[0].model_copy(update={"context": runtime.context}),
+                            ),
                         }
                     )
                 )
@@ -574,3 +623,4 @@ class PreviewDiagnosticConfigTests(unittest.IsolatedAsyncioTestCase):
                 refused = await send(changed, "preview-race")
             self.assertEqual(refused.status_code, 409, refused.text)
             self.assertEqual(tuple(store.list_secret_records()), before)
+            self.assertEqual(store.read_product_profile_record(profile.product), profile)

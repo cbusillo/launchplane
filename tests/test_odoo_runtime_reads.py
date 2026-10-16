@@ -31,6 +31,7 @@ from control_plane.odoo_diagnostic_identity import (
     DIAGNOSTIC_IDENTITY_KEY,
     DIAGNOSTIC_IDENTITY_UNAVAILABLE,
     diagnostic_preview_secret_name,
+    diagnostic_lane_secret_name,
 )
 from control_plane.secrets import SecretWriteStore, write_secret_value
 from control_plane.service_auth import LaunchplaneAuthzPolicy
@@ -116,7 +117,7 @@ class OdooRuntimeReadTests(unittest.IsolatedAsyncioTestCase):
                 integration=DIAGNOSTIC_SECRET_INTEGRATION,
                 name=diagnostic_preview_secret_name(identity.instance)
                 if identity.environment_kind == "preview"
-                else "diagnostic-reader",
+                else diagnostic_lane_secret_name(identity.instance),
                 binding_key=DIAGNOSTIC_IDENTITY_KEY,
                 context_name=identity.context,
                 instance_name="" if identity.environment_kind == "preview" else identity.instance,

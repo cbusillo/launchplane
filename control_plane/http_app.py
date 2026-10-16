@@ -16890,6 +16890,7 @@ def create_launchplane_fastapi_app(
         )
         from control_plane.odoo_diagnostic_identity import (
             DIAGNOSTIC_SECRET_INTEGRATION,
+            diagnostic_lane_secret_name,
             is_diagnostic_preview_config,
         )
 
@@ -16909,6 +16910,19 @@ def create_launchplane_fastapi_app(
                 trace_id=trace_id,
                 code="authorization_denied",
                 message="Odoo diagnostic identities must be recorded by an authorized admin.",
+            )
+
+        if any(
+            secret.get("integration") == DIAGNOSTIC_SECRET_INTEGRATION
+            and secret.get("scope") == "context_instance"
+            and secret.get("name") != diagnostic_lane_secret_name(str(secret.get("instance", "")))
+            for secret in cast(list[dict[str, object]], request_payload["secrets"])
+        ):
+            raise _launchplane_http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="Stable Odoo diagnostic identities must reuse the lane's fixed secret name.",
             )
 
         try:

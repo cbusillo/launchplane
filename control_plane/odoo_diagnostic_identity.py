@@ -20,6 +20,10 @@ def diagnostic_preview_secret_name(instance: str) -> str:
     return "preview-" + instance
 
 
+def diagnostic_lane_secret_name(instance: str) -> str:
+    return "lane-" + instance
+
+
 def diagnostic_preview_context_owned(
     profiles: Iterable[LaunchplaneProductProfileRecord], product: str, context: str
 ) -> bool:
@@ -110,7 +114,12 @@ def read_diagnostic_identity(
             and record.scope == ("context" if preview else "context_instance")
             and record.context == runtime.context
             and record.instance == ("" if preview else runtime.instance)
-            and (not preview or record.name == diagnostic_preview_secret_name(runtime.instance))
+            and record.name
+            == (
+                diagnostic_preview_secret_name(runtime.instance)
+                if preview
+                else diagnostic_lane_secret_name(runtime.instance)
+            )
             and record.status == "configured"
         }
         pairs = [

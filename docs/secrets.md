@@ -71,7 +71,8 @@ secret record scoped to the exact `context_instance`. For a preview, use its
 product's configured preview context, scope `context`, empty stored instance,
 and the fixed secret name `preview-` followed by the exact runtime instance.
 Each preview has its own encrypted record: this is an exact named lookup,
-never context-secret inheritance. Its encrypted value is a JSON object with `product`,
+never context-secret inheritance. Stable records use the fixed name `lane-`
+followed by their exact instance. Its encrypted value is a JSON object with `product`,
 `context`, `instance`, `database`, `login`, `password`, and numeric `user_id`.
 The first four fields must match the selected runtime and its actual running
 database. `login` must name the separate service account; `admin`, the built-in
@@ -82,13 +83,18 @@ No account or password is created, reset or copied by a diagnostic read.
 This reuses existing encrypted secret records and the supported product-config
 dry-run/apply API (`POST /v1/product-config/apply`). An activation session supplies
 the exact owned product/context/instance, a reason, and a secret entry with
-`scope="context_instance"`, `integration="odoo_diagnostics"`, an admin-chosen
-`name`, `binding_key="ODOO_DIAGNOSTIC_IDENTITY"`, and the JSON string as `value`.
+`scope="context_instance"`, `integration="odoo_diagnostics"`, the fixed
+`name="lane-<instance>"`, `binding_key="ODOO_DIAGNOSTIC_IDENTITY"`, and the JSON string as `value`.
 Recording these service credentials requires existing authorized admin authority
 (a signed-in GitHub admin or `local_admin` identity). A workflow or
 `local_operator` cannot write this integration, including through a mixed bundle
 or a stable lane. Existing plan authority still covers inert dry runs; no grant
 is added. Admin writes require a reason, idempotency and the matching dry-run.
+Each preview must have independently provisioned credentials: never reuse a
+stable lane or another preview password, even when a restored database already
+contains that account. The preview runs PR code and receives this credential
+during authentication. Provisioning and that separation are checked by the
+existing operational activation session.
 For previews, omit the top-level instance, use scope `context` and the fixed
 preview secret name above. The existing signed-in admin path supports this
 service-only write even when the preview context has no stable profile lane.
@@ -114,7 +120,8 @@ none selects an admin fallback. Mail and import APIs return HTTP 503 with
 or Odoo authentication fails or returns another UID. A failed login establishes
 no session to destroy; logout is attempted for a positive but unexpected UID.
 Logout transport failure does not replace that identity refusal. Authentication
-transport/protocol errors retain their own codes rather than implying bad credentials.
+transport errors retain their own codes. Odoo RPC/server or malformed-envelope
+refusals remain unavailable; that result alone does not prove bad credentials.
 Calendar reads refuse and the release-window reader
 continues to hold a release when its calendar is unavailable. Responses and
 exceptions contain no secret payload, and mail text redacts both diagnostic and
@@ -122,13 +129,18 @@ legacy bootstrap passwords. Existing HTTPS/domain, container image and runtime
 identity checks remain required before authentication, with session destruction
 after model reads or an unexpected authenticated UID.
 
-Rotate through the same governed secret path, reusing the original secret name
-and binding key. A new name creates a second record rather than rotating the
-old one; ambiguous identities are unavailable. Existing disabled records are
-also unavailable. After a testing restore,
+Rotate through the same governed secret path, reusing the fixed lane or preview
+name and binding key. Stable API writes reject a different name; stray records
+under other names are ignored, so the fixed-name write remains the recovery path.
+Duplicate bindings of the selected record are unavailable. Existing disabled
+records are also unavailable. After a testing restore,
 the operational session must verify or reactivate its separate service account
 and exact database binding. Preserve restored people's passwords. For rollback,
-retain the encrypted record until its operational session no longer needs it;
+retain the encrypted record until its operational session no longer needs it.
+Destroying a preview does not delete its managed-secret history. Reusing the
+same preview instance/database reuses that lane binding; verify or rotate it
+before diagnostics as part of activation. Automatic credential retirement is
+not performed by these readers. For a source rollback,
 older reader code uses the bootstrap binding and may be unable to authenticate
 against a preserved restored login. Do not solve that by changing the login.
 
