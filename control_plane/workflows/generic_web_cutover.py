@@ -12,6 +12,7 @@ from control_plane.contracts.generic_web_cutover import (
     WebSlotReadiness,
     WebRouteObservation,
     WebCutoverStep,
+    require_candidate_deploy_reference,
 )
 from control_plane.traffic_switch import (
     require_serving_route,
@@ -89,6 +90,11 @@ def execute_web_cutover(
     checkpoint: Callable[[str], None] = lambda _step: None,
 ) -> GenericWebCutoverRecord:
     plan = GenericWebCutoverPlan.model_validate(plan.model_dump())
+    require_candidate_deploy_reference(
+        target_type=plan.new.target_type,
+        image=plan.new.image,
+        deploy_reference=plan.new.deploy_reference,
+    )
     with provider.exclusive(plan):
         try:
             record = store.load(record_id)
@@ -195,7 +201,11 @@ def rollback_web_cutover(
             raise ValueError("public runtime differs from the admitted rollback authority")
         if record.step != "rolling_back":
             record = record.model_copy(
-                update={"step": "rolling_back", "rollback_started_at": clock()}
+                update={
+                    "step": "rolling_back",
+                    "rollback_started_at": clock(),
+                    "records_committed": False,
+                }
             )
             store.save(record)
         try:

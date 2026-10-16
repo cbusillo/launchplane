@@ -683,6 +683,7 @@ class GenericWebDeployProviderMutationAdapter:
             )
             if (
                 cutover.step == "complete"
+                and cutover.records_committed
                 and record.deploy.status == "pass"
                 and inventory.deployment_record_id == record.record_id
             ):

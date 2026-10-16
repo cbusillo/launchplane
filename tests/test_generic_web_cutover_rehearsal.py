@@ -146,7 +146,9 @@ class WebCutoverRehearsalTests(unittest.TestCase):
                             update={
                                 "private_url": f"http://{engine}:{18080 + index}",
                                 "image": image,
-                                "deploy_reference": "",
+                                "deploy_reference": repository + ":sha-" + manifest.source_commit
+                                if slot.target_type == "application"
+                                else "",
                                 "runtime_identity": identity,
                             }
                         )

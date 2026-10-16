@@ -965,3 +965,138 @@ class WebCutoverRefusalObservationTests(unittest.TestCase):
             )
             self.assertEqual(contradictory.observation.outcome, "unknown")
             self.assertFalse(contradictory.retry_safe)
+
+
+class WebCutoverRecordsCommitTests(unittest.TestCase):
+    def test_terminal_traffic_checkpoint_holds_lane_until_outer_commit_and_resumes(self) -> None:
+        from control_plane.generic_web_cutover import execute_web_cutover_deployment
+
+        for operation in ("forward", "abort", "switch-back"):
+            for boundary in ("before_commit", "inventory", "acknowledge"):
+                with (
+                    self.subTest(operation=operation, boundary=boundary),
+                    TemporaryDirectory() as folder,
+                ):
+                    store, intent, provider = WebCutoverDeploymentTests().seed(
+                        Path(folder), "compose"
+                    )
+                    lane = store.read_product_profile_record("fixture").lanes[0]
+
+                    def run(*, reverse: bool = False, record_id: str = "release", **kw: Any) -> Any:
+                        return execute_web_cutover_deployment(
+                            store,
+                            product="fixture",
+                            lane=lane,
+                            artifact_id=(
+                                intent.production if reverse else intent.candidate
+                            ).artifact_id,
+                            source_git_ref=(
+                                intent.production if reverse else intent.candidate
+                            ).source_commit,
+                            deploy_reference="" if reverse else intent.new.deploy_reference,
+                            record_id=record_id,
+                            factory=lambda _p: provider,
+                            rollback=reverse,
+                            **kw,
+                        )
+
+                    if operation == "abort":
+                        provider.fail_ready = True
+                        with self.assertRaises(ValueError):
+                            run()
+                        provider.fail_ready = False
+                    elif operation == "switch-back":
+                        run()
+                    reverse = operation != "forward"
+                    result_id = "reverse" if reverse else "release"
+                    original_save = WebDeploymentCutoverStore.save
+
+                    def interrupted_ack(holder: Any, record: Any) -> None:
+                        if record.records_committed:
+                            raise TimeoutError("injected records acknowledgement loss")
+                        original_save(holder, record)
+
+                    if boundary == "before_commit":
+
+                        def before_commit() -> None:
+                            raise TimeoutError("injected lease loss")
+
+                        with self.assertRaises(TimeoutError):
+                            run(
+                                reverse=reverse,
+                                record_id=result_id,
+                                before_records_commit=before_commit,
+                            )
+                    elif boundary == "inventory":
+                        with patch.object(
+                            store, "write_environment_inventory", side_effect=TimeoutError
+                        ):
+                            with self.assertRaises(TimeoutError):
+                                run(reverse=reverse, record_id=result_id)
+                    else:
+                        with patch.object(WebDeploymentCutoverStore, "save", interrupted_ack):
+                            with self.assertRaises(TimeoutError):
+                                run(reverse=reverse, record_id=result_id)
+                    held = store.read_deployment_record("release").generic_web_cutover
+                    self.assertEqual(held.step, "rolled_back" if reverse else "complete")
+                    self.assertFalse(held.records_committed)
+                    actions = tuple(provider.actions)
+                    with self.assertRaises(ValueError):
+                        run(record_id="unrelated")
+                    self.assertEqual(tuple(provider.actions), actions)
+                    # Reopen storage and recover through the public bridge, not
+                    # the inner state machine. Both stale/correct inventory work.
+                    store = FilesystemRecordStore(Path(folder))
+                    result = run(reverse=reverse, record_id=result_id)
+                    self.assertEqual(result.deploy.status, "pass")
+                    self.assertTrue(
+                        store.read_deployment_record(
+                            "release"
+                        ).generic_web_cutover.records_committed
+                    )
+                    self.assertEqual(
+                        store.read_environment_inventory(
+                            context_name=lane.context, instance_name=lane.instance
+                        ).deployment_record_id,
+                        result.record_id,
+                    )
+                    if reverse:
+                        self.assertNotEqual(
+                            store.read_deployment_record("release").deploy.status, "pending"
+                        )
+                        # A lost outer response after all records committed is
+                        # also retryable with the same rollback result id.
+                        self.assertEqual(run(reverse=True, record_id=result_id), result)
+
+    def test_application_without_provider_reference_rejects_before_intent_or_reservation(
+        self,
+    ) -> None:
+        from control_plane.generic_web_cutover import (
+            execute_web_cutover_deployment,
+            resolve_web_cutover_target,
+        )
+
+        with TemporaryDirectory() as folder:
+            store, intent, provider = WebCutoverDeploymentTests().seed(Path(folder), "application")
+            profile = store.read_product_profile_record("fixture")
+            args = dict(
+                lane=profile.lanes[0],
+                artifact_id=intent.candidate.artifact_id,
+                source_git_ref=intent.candidate.source_commit,
+                deploy_reference="",
+            )
+            with self.assertRaises(ValueError):
+                resolve_web_cutover_target(
+                    store, profile=profile, provider_id="dokploy", timeout_seconds=10, **args
+                )
+            with self.assertRaises(ValueError):
+                execute_web_cutover_deployment(
+                    store,
+                    product=profile.product,
+                    record_id="release",
+                    factory=lambda _p: provider,
+                    **args,
+                )
+            with self.assertRaises(FileNotFoundError):
+                store.read_deployment_record("release")
+            self.assertEqual(provider.actions, [])

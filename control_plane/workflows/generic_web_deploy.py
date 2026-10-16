@@ -503,7 +503,11 @@ def execute_generic_web_deploy(
             and callable(list_records)
             and any(
                 item.generic_web_cutover is not None
-                and item.generic_web_cutover.step not in {"rolled_back", "blocked"}
+                and item.generic_web_cutover.step != "blocked"
+                and (
+                    item.generic_web_cutover.step != "rolled_back"
+                    or not item.generic_web_cutover.records_committed
+                )
                 for item in list_records(
                     context_name=current_lane.context, instance_name=current_lane.instance
                 )

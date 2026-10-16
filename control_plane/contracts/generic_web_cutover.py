@@ -72,6 +72,16 @@ class WebSlot(WebSlotCoordinates):
         return self
 
 
+def require_candidate_deploy_reference(
+    *, target_type: str, image: str, deploy_reference: str
+) -> None:
+    reference = validate_provider_deploy_reference(
+        artifact_id=image, deploy_reference=deploy_reference, label="two-slot candidate"
+    )
+    if target_type == "application" and not reference:
+        raise ValueError("application candidate requires an immutable provider deploy reference")
+
+
 class GenericWebCutoverPlan(FrozenRecord):
     release_id: str = Field(min_length=1)
     lane: GenericWebCutoverLane
@@ -173,3 +183,6 @@ class GenericWebCutoverRecord(FrozenRecord):
     old_connections_drained: bool = False
     previous_slot_retained: Literal[True] = True
     error: str = ""
+    # Traffic completion precedes outer deployment/inventory persistence. Keep
+    # the lane held until those records are committed, including after rollback.
+    records_committed: bool = False

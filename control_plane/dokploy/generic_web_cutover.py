@@ -9,6 +9,7 @@ from control_plane.contracts.generic_web_cutover import (
     WebSlot,
     WebSlotReadiness,
     WebRouteObservation,
+    require_candidate_deploy_reference,
 )
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import HealthcheckEvidence
@@ -92,6 +93,11 @@ class DokployWebCutoverProvider:
         )
 
     def prepare_candidate(self, plan: GenericWebCutoverPlan) -> None:
+        require_candidate_deploy_reference(
+            target_type=plan.new.target_type,
+            image=plan.new.image,
+            deploy_reference=plan.new.deploy_reference,
+        )
         require_route(self.current_route(plan), plan, plan.old)
         self.preflight(plan)
         if self.driver.stage_runtime(plan) != plan.lane.runtime_settings_sha256:

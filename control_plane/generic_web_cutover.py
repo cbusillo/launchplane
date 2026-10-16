@@ -13,6 +13,7 @@ from control_plane.contracts.generic_web_cutover import (
     GenericWebCutoverPlan,
     GenericWebCutoverRecord,
     WebSlot,
+    require_candidate_deploy_reference,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -103,6 +104,11 @@ def compile_web_cutover(
             or plan.new.deploy_reference != deploy_reference
         ):
             raise ValueError("retry differs from its persisted lane/artifact authority")
+        require_candidate_deploy_reference(
+            target_type=plan.new.target_type,
+            image=plan.new.image,
+            deploy_reference=deploy_reference,
+        )
         return plan
     inventory = store.read_environment_inventory(
         context_name=lane.context, instance_name=lane.instance
@@ -119,6 +125,11 @@ def compile_web_cutover(
     if old_coordinate is None:
         raise ValueError("serving inventory does not match the admitted slots")
     new_coordinate = next(slot for slot in config.slots if slot != old_coordinate)
+    require_candidate_deploy_reference(
+        target_type=new_coordinate.target_type,
+        image=f"{candidate.image.repository}@{candidate.image.digest}",
+        deploy_reference=deploy_reference,
+    )
     return GenericWebCutoverPlan(
         release_id=record_id,
         lane=config,
@@ -174,7 +185,11 @@ def execute_web_cutover_deployment(
         r
         for r in records
         if r.generic_web_cutover is not None
-        and r.generic_web_cutover.step not in {"complete", "rolled_back", "blocked"}
+        and r.generic_web_cutover.step != "blocked"
+        and (
+            not r.generic_web_cutover.records_committed
+            or r.generic_web_cutover.step not in {"complete", "rolled_back"}
+        )
     ]
     if len(unfinished) > 1:
         raise ValueError("multiple unfinished cutovers require reconciliation")
@@ -182,11 +197,24 @@ def execute_web_cutover_deployment(
         context_name=lane.context, instance_name=lane.instance
     )
     if rollback:
+        try:
+            replay = store.read_deployment_record(record_id)
+        except FileNotFoundError:
+            replay = None
+        source_id = (
+            replay.post_deploy_update.evidence.get("cutover_record_id", "")
+            if replay is not None and replay.deploy.deploy_mode == "atomic-switch-back"
+            else ""
+        )
         source = (
-            unfinished[0]
-            if len(unfinished) == 1
+            store.read_deployment_record(str(source_id))
+            if source_id
+            else unfinished[0]
+            if unfinished
             else store.read_deployment_record(current.deployment_record_id)
         )
+        if any(r.record_id != source.record_id for r in unfinished):
+            raise ValueError("another unfinished cutover holds this lane; recover it first")
         cutover = source.generic_web_cutover
         if (
             cutover is None
@@ -261,12 +289,13 @@ def execute_web_cutover_deployment(
             plan, persistence, provider, record_id=source.record_id, checkpoint=checkpoint
         )
     )
+    failed_source = None
     if rollback and source.deploy.status == "pending":
         source = store.read_deployment_record(source.record_id)
         source.deploy.status = "fail"
         source.deploy.started_at = cutover.began_at.isoformat()
         source.deploy.finished_at = cutover.updated_at.isoformat()
-        store.write_deployment_record(source)
+        failed_source = source
     slot = plan.old if rollback else plan.new
     if cutover.route is None:
         raise ValueError("cutover lacks applied/public runtime evidence")
@@ -309,11 +338,14 @@ def execute_web_cutover_deployment(
         }
     )
     before_records_commit()
+    if failed_source is not None:
+        store.write_deployment_record(failed_source)
     store.write_deployment_record(result)
     store.write_environment_inventory(
         build_environment_inventory(deployment_record=result, updated_at=finished)
     )
-    return result
+    persistence.save(cutover.model_copy(update={"records_committed": True}))
+    return store.read_deployment_record(result.record_id)
 
 
 def resolve_web_cutover_target(
@@ -352,6 +384,11 @@ def resolve_web_cutover_target(
     if manifest.source_commit != source_git_ref:
         raise ValueError("candidate source differs from its verified artifact")
     target_type = config.slots[0].target_type
+    require_candidate_deploy_reference(
+        target_type=target_type,
+        image=f"{manifest.image.repository}@{manifest.image.digest}",
+        deploy_reference=deploy_reference,
+    )
     target = ResolvedTargetEvidence(
         target_type=target_type, target_id="route:" + config.route_id, target_name=config.route_id
     )

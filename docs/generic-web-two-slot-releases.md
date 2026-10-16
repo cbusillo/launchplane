@@ -126,3 +126,11 @@ rollback/finalization path. A rollback's newer checkpoint cannot be overwritten
 by the promotion's earlier deployment snapshot. New candidates must belong to
 the product's configured image and source repository. These checks grant no
 access and leave installed-provider/actual release qualification on #3268.
+
+Traffic completion is distinct from committing deployment and serving inventory.
+The source cutover holds the lane through both operations using
+`records_committed`; a crash in between resumes the same release or switch-back
+before a new release can use inventory. Application candidates require a valid
+immutable provider reference before reservation, persisted intent or settings
+staging. Retained old slots need no deployment tag because switch-back does not
+redeploy them.

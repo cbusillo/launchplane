@@ -12,6 +12,21 @@ from tests.test_generic_web_cutover import plan, Provider
 
 
 class WebCutoverProviderTests(unittest.TestCase):
+    def test_application_missing_reference_cannot_stage_settings(self) -> None:
+        with TemporaryDirectory() as folder:
+            provider, _, route = self.provider(Path(folder), "application")
+            invalid = provider.plan.model_copy(
+                update={"new": provider.plan.new.model_copy(update={"deploy_reference": ""})}
+            )
+            with patch(
+                "control_plane.dokploy.generic_web_cutover.execute_dokploy_artifact_deploy"
+            ) as deploy:
+                with self.assertRaises(ValueError):
+                    provider.prepare_candidate(invalid)
+                provider.driver.stage_runtime.assert_not_called()
+                deploy.assert_not_called()
+                route.publish.assert_not_called()
+
     def provider(self, root: Path, target: str) -> tuple[Any, Any, Any]:
         intent = plan(target)
         fixture = Provider(intent)
