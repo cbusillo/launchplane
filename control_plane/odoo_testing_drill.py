@@ -371,6 +371,7 @@ def prepare_drill(
             "reconcile_requested_at": prepared_at or timestamp(now),
             "request_sha256": canonical_json_sha256([key, database]),
             "source_binding_sha256": source_binding,
+            "drill_storage_budget": lane.odoo_testing_drill_storage,
         }
     )
     runtime = runtime.model_copy(
@@ -642,9 +643,39 @@ class OdooTestingDrillScheduler:
                         delivered_destinations=[],
                         next_alert_at=0,
                     )
+            if operation.result is not None:
+                evidence = operation.result.post_deploy_override_evidence
+                if (
+                    evidence.get("post_deploy_readback_testing_drill_disposal_deferred") == "true"
+                    and "disposal_status" not in payload
+                ):
+                    payload.update(disposal_status="deferred", disposal_pending=1)
+                    if (
+                        payload["status"] != "fail"
+                        and payload.get("failure_step") != "testing_disposal_deferred"
+                    ):
+                        payload.update(
+                            failure_step="testing_disposal_deferred",
+                            failure_trace=payload["trace"],
+                            alert_delivered=False,
+                            delivered_destinations=[],
+                            next_alert_at=0,
+                        )
+                elif (
+                    evidence.get("post_deploy_readback_testing_drill_disposal_completed") == "true"
+                ):
+                    payload["disposal_status"] = "disposed"
             if payload != receipt.response_payload:
                 payload["observed_at"] = timestamp(now)
-                self.store.update_odoo_testing_drill_receipt(receipt.idempotency_key, now, payload)
+                self.store.update_odoo_testing_drill_receipt(
+                    receipt.idempotency_key,
+                    now,
+                    {
+                        key: value
+                        for key, value in payload.items()
+                        if receipt.response_payload.get(key) != value
+                    },
+                )
         # Never replace an unfinished or held generation with a new snapshot/key.
         if payload.get("operation_id") and payload["status"] == "fail":
             operation = self.store.read_odoo_stable_target_replacement_operation_record(
@@ -669,7 +700,23 @@ class OdooTestingDrillScheduler:
                 continue
             payload["alert_delivered"] = self.notify(product, context, payload)
             payload["next_alert_at"] = now + DRILL_ALERT_RETRY_SECONDS
-            self.store.update_odoo_testing_drill_receipt(receipt.idempotency_key, now, payload)
+            self.store.update_odoo_testing_drill_receipt(
+                receipt.idempotency_key,
+                now,
+                {
+                    key: payload[key]
+                    for key in ("alert_delivered", "next_alert_at", "delivered_destinations")
+                    if key in payload
+                },
+                expected_failure=(
+                    receipt.response_payload.get(
+                        "failure_step", receipt.response_payload.get("step")
+                    ),
+                    receipt.response_payload.get(
+                        "failure_trace", receipt.response_payload.get("trace")
+                    ),
+                ),
+            )
 
     def _notify(self, product: str, context: str, payload: dict[str, JsonValue]) -> bool:
         from control_plane.notifications import post_discord_webhook
@@ -709,7 +756,7 @@ class OdooTestingDrillScheduler:
                     sender,
                     {
                         "allowed_mentions": {"parse": []},
-                        "content": f"Odoo testing rebuild failed: {safe(product)} / testing. Step: {safe(payload.get('failure_step', payload.get('step')))}. Trace: {safe(payload.get('failure_trace', payload.get('trace')))}. Inspect the retained drill operation; no automatic recapture.",
+                        "content": f"Odoo testing {'storage cleanup needs attention' if payload.get('failure_step') in {'testing_disposal_deferred', 'testing_disposal_retained'} else 'rebuild failed'}: {safe(product)} / testing. Step: {safe(payload.get('failure_step', payload.get('step')))}. Trace: {safe(payload.get('failure_trace', payload.get('trace')))}. Inspect the retained drill operation; no automatic recapture.",
                     },
                 )
                 delivered_destinations.append(destination_key)
@@ -736,12 +783,26 @@ def testing_drill_evidence(
     )
     if receipt is None:
         return None
+    payload = dict(receipt.response_payload)
+    from control_plane._odoo_testing_storage_program import MAX_DISPOSALS_PER_PASS
+
+    pending = store.list_odoo_testing_disposal_receipts(product, context)
+    payload["disposal_pending"] = len(pending)
+    payload["disposal_pending_bindings"] = [
+        cast(dict[str, JsonValue], item.response_payload["planned_generation"])[
+            "discard_copy_binding"
+        ]
+        for item in pending[:MAX_DISPOSALS_PER_PASS]
+    ]
+    payload["disposal_attention"] = len(
+        store.list_odoo_testing_disposal_receipts(product, context, include_retained=True)
+    ) - cast(int, payload["disposal_pending"])
     return OdooTestingDrillEvidence.model_validate(
         {
             "observed_at": receipt.response_payload.get("observed_at", receipt.recorded_at),
             **{
                 key: value
-                for key, value in receipt.response_payload.items()
+                for key, value in payload.items()
                 if key in OdooTestingDrillEvidence.model_fields and key != "observed_at"
             },
         }

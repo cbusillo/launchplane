@@ -51,6 +51,10 @@ unchanged historical observation if monitoring expires or recovers during the
 attempt; a newer use observation is evaluated again, and holds, needed-copy and
 resource protections are always rechecked. Admission uses the scheduler's clock.
 Reclaim needs new admission and a new captured usage revision.
+Storage maintenance uses the same usage rule before dispatch and at readback:
+deleting retained copies still requires the full fresh custody/isolation guard,
+while capacity-only inspection keeps its independent receiver and copy-witness
+checks without requiring a negative usage read.
 Connection-isolation and environment-staging guards also use the shared usage
 decision. Acknowledged activation/interlock lifting keeps its original explicit
 hold and known-use checks; it has no UNKNOWN usage requirement. Preview operations
@@ -1176,28 +1180,92 @@ A drill can stop the testing web service, replace its disposable contents, load
 the production source with the existing bounded read-only export, and consume
 testing storage. It never changes production data, ports, storage, routes,
 credentials or permissions. Its copy has live keys and outbound connections
-removed before the first registry process. After the new copy passes sanitization,
-module and integration readback, the restore guard may dispose of the older
-service-created drill database and its filestore. The immediate completed
-predecessor is retained through final web/health checks, including when those
-checks fail. Only the copy two generations behind can be disposed of, and it must carry
-its exact committed copy witness; DROP uses no FORCE, so an unexpected connection
-refuses disposal. The new copy is distinct and the initial bootstrap database
-is retained. Successful cleanup bounds steady-state drill storage to the initial copy, current
-copy, immediate predecessor and in-progress copy. Cleanup runs after the sanitized
-new web process starts; a cleanup refusal preserves that working copy, emits
-`testing_drill_disposal_deferred=true` in the operation logs, and retains the old
-copy under the slot receipt's custody. Deferred cleanup and failed partial
-captures/copies require explicit disposition and can accumulate; admission does
-not establish available filesystem capacity. Durable deferred-disposal telemetry,
-capacity admission and bounded cleanup reconciliation are tracked in
-[#3729](https://github.com/cbusillo/launchplane/issues/3729).
+removed before the first registry process. The immediate completed predecessor,
+initial bootstrap database and current selection are retained. Disposal runs
+before a later drill selects its new database, independently of that new copy's
+health. Up to four outstanding slot receipts are reconciled per worker pass,
+oldest first, against fresh authoritative unused/reproducible/isolated facts,
+no hold, unchanged resource allocation and actual container/backing-consumer
+inspection. The same host lock excludes restore and cleanup processes. A copy
+must have its exact committed database witness; DROP uses neither FORCE nor
+connection termination. A connected database or failed filestore removal stays
+deferred. No receipt or failed raw-copy evidence is erased.
+Copies from different resource generations, protected current/predecessor copies,
+and legacy absent databases with a remaining filestore but no host write-ahead
+receipt become retained attention. They are never deleted, remain queryable and
+alert through the existing policy, but do not permanently block the new lane.
+An outstanding retriable disposal prevents the next capture from starting;
+the last healthy copy keeps serving. Later scheduled attempts reconcile the
+same original identities instead of adding another copy to a growing backlog.
+Successful bounded batches with more work requeue the same slot for another worker
+pass before capture, without a cleanup-failure alert or waiting for tomorrow.
+Completed batch snapshots remain immutable when the latest intent is reused.
+
+Before DROP, the host fsyncs a write-ahead receipt in its account's private
+`~/.local/state/launchplane-testing-disposal/<namespace>/` directory, outside
+PGDATA and container mounts, binding the original database and witness. If DROP succeeds but filestore
+removal or transport fails, the original-key retry reacquires the host lock and
+uses that receipt. An absent database with a remaining filestore and no receipt
+is retained without deleting files; absence of both needs no deletion. Foreign witnesses, symlinks and
+current/immediate-predecessor identities are refused. Directory-relative,
+no-follow opens protect receipt creation/readback, and actual mount inspection
+refuses any writable container access to the host state directory. Historical slot receipts
+remain queryable after cleanup. Legacy `testing_drill_disposal_deferred` log
+markers are consumed into service evidence, but new copies no longer perform
+inline best-effort deletion after web startup. Activated failed/cancelled slots
+stay in the ledger too; success is not the source of disposal custody.
+
+Each testing lane's `odoo_testing_drill_storage` record supplies positive integer
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`.
+`staging_bytes` covers the complete working staging peak: SSH host staging must
+include both dump and rsynced filestore; the runner copy holds the dump. Native
+staging must include chunks and assembled artifacts. Already verified staged
+native bytes are deducted at the later host check, while space for the immutable
+capture's assembly remains required. Set these
+working-headroom requirements through the existing authenticated product-profile
+write path, preserving the rest of the current profile. There are no invented
+real sizes, default budgets, new grants or assumed observation lifetimes.
+Unconfigured requirements refuse a drill before database selection. Choose the
+requirements from qualified source size and restore/staging overhead; they are
+an explicit capacity requirement, **not a quota or a claim about future source
+growth**. A budget is not established by a healthy deployment or yesterday's
+free-space observation.
+
+A capacity-only pass sends no deletion candidates and requires no general
+positive custody observation. Recorded holds, use, only-copy or shared-resource
+protection still wins, including expired protection. Receiver inspection proves
+actual resource isolation and the committed current-copy witness. This read
+does not authorize disposal: any old-copy deletion still requires fresh general
+custody facts for its original receipt; drill-scoped successful-login evidence
+is not silently generalized to other copies.
+
+On every new worker attempt, the shared resource guard reads current filesystem
+capacity, using non-root available bytes and the actual backing device. Demands
+for DB, filestore and capture staging on the same filesystem are summed before
+adding its reserve. SSH capture accounts for both host staging and the runner's
+simultaneous dump copy. Native staging requires a known runner writable-layer
+backing; unsupported storage layouts stay unverified. Cleanup can reclaim old
+copies even when that pass then refuses capacity. Capacity evidence is bound to
+the exact generation, authority and worker attempt before activation, and the
+host repeats the free-space check before touching the web gate or capturing.
+A witnessed existing-copy resume does not demand another complete copy or staging
+allocation. Holds and the existing destructive authorization checkpoint are
+rechecked under the lane/authority locks immediately before sending the remote
+program. Locks are released for the remote wait, then results are recorded under
+locks; changed authority preserves completed cleanup evidence while refusing
+activation from that capacity snapshot.
+Insufficient or unavailable capacity alerts through the existing Discord policy
+and preserves the selected generation and its usable predecessor. This is a
+current admission check, not a filesystem reservation: unrelated writers or a
+source larger than the recorded working requirements can still consume space.
 A failed copy never deletes its predecessor. Final web and health verification
 still gates a passing operation and generation completion.
 
 `GET /v1/products/{product}/environments/testing` includes value-free
 `testing_rebuild_drill` evidence: queued/pass/fail/skipped, observation time,
-operation/deployment IDs, failing step, trace and alert delivery status. A pass
+operation/deployment IDs, failing step, trace, alert delivery status, pending
+disposal count, up to four original pending discard-copy bindings,
+retained-attention count and capacity status. A pass
 requires the worker's health result and this exact generation's committed copy
 completion. It does not replace monitor freshness or prove platform updates.
 Failures use the lane's existing enabled Discord notification destinations and
@@ -1243,3 +1311,28 @@ is not authorized. Private slot receipts retain prior generation identities;
 they are provenance, not a promise that a successfully superseded drill database
 still exists after bounded disposal. Remove failed raw-copy evidence only under
 the existing custody procedure above. No production rollback is part of this drill.
+
+Once a profile or generation contains a drill storage budget, use this image or a
+compatible successor for recovery. Older images cannot interpret those fields;
+forward-fix rather than removing custody evidence to roll back. Disabling the
+existing drill flag prevents new scheduled captures and changes no retained copy.
+
+For a deliberately retained copy, the existing authenticated profile path accepts
+`odoo_testing_drill_storage.retained_copy_bindings`, a list of exact original
+committed discard-copy bindings exposed as `disposal_pending_bindings` in that
+existing environment evidence. The bounded service
+pass records these as retained attention without deleting data, erasing receipts,
+changing identity or granting access. This is the supported continuation for a
+copy that must stay connected or cannot be removed: it prevents an indefinite
+retriable-cleanup block while preserving its storage/custody. Capacity and fresh
+lane safety still gate each new capture. It is not a recurring manual usage
+approval or permission to delete a retained copy. Budget or retention edits made
+before activation are accepted only after fresh capacity qualification and only
+while every other source/copy identity remains unchanged. Once selected, recovery
+keeps the original generation and its budget.
+
+The guarded terminal program send has its own bounded deadline; expiry shuts
+down that connection and retains original-key uncertainty. Alert delivery writes
+only delivery fields for its original failure, and cannot overwrite worker
+storage/disposal evidence. A hold or positive use report arriving while a completed
+cleanup result is in flight preserves that result but skips the new activation.
