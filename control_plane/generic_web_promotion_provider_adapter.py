@@ -115,7 +115,9 @@ class GenericWebProdPromotionProviderMutationAdapter:
         self._lane = lane
         self._trace_id = trace_id
         self._validate_before_effect = validate_before_effect
-        self._deploy_provider = deploy_provider or default_generic_web_deploy_provider()
+        self._deploy_provider = deploy_provider or default_generic_web_deploy_provider(
+            record_store=record_store, control_plane_root=control_plane_root
+        )
         self._validate_before_checkpoint = validate_before_checkpoint
         self._settle_pre_effect_failure = settle_pre_effect_failure
         self._resolved_deploy_target: GenericWebResolvedDeployTarget | None = None

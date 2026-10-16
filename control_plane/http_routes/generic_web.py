@@ -1514,7 +1514,9 @@ def build_generic_web_write_route_handlers(
                 lane=lane,
                 trace_id=trace_id,
                 validate_before_effect=validate_live_promotion,
-                deploy_provider=default_generic_web_deploy_provider(),
+                deploy_provider=default_generic_web_deploy_provider(
+                    record_store=record_store, control_plane_root=dependencies.control_plane_root
+                ),
             )
             try:
                 durable_response = await dependencies.run_provider_mutation(
