@@ -254,6 +254,9 @@ def save_outcome(destination,attempt,receipt):
         json.dump(receipt,output)
         output.flush()
         os.fsync(output.fileno())
+    write_outcome_pointer(destination,receipt)
+
+def write_outcome_pointer(destination,receipt):
     temporary=destination/('outcome-'+uuid.uuid4().hex+'.tmp')
     with temporary.open('x') as output:
         json.dump(receipt,output)
@@ -285,6 +288,9 @@ def recover(paths,spec,*,base=None):
             # No inference from age or absence after a possibly interrupted writer.
             raise ValueError('unwitnessed recovery attempt')
         attempt=Path(tempfile.mkdtemp(prefix='attempt-',dir=destination))
+        # Invalidate an earlier failed-safe witness before this attempt can have
+        # effects. A crash must never expose a previous attempt's retry permission.
+        write_outcome_pointer(destination,{'state':'running','binding':spec['recovery_binding']})
         scratch=None
         container='lp-recovery-'+uuid.uuid4().hex
         cleanup_verified=True

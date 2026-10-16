@@ -365,3 +365,25 @@ class RecoveryProgramTests(unittest.TestCase):
             self.namespace["inspect_recovery"](self.spec, base=self.root / "captures")
         self.assertIn("recipient_recovery_retry_safe=true", output.getvalue())
         self.assertIn("recipient_recovery_ok=true", self.recover())
+
+    def test_active_or_interrupted_attempt_never_inherits_an_old_retry_witness(self) -> None:
+        with self.namespace["recovery_directory"](self.spec, base=self.root / "captures"):
+            with self.assertRaises(BlockingIOError):
+                self.namespace["inspect_recovery"](self.spec, base=self.root / "captures")
+        self.fail_check = True
+        with self.assertRaises(ValueError):
+            self.recover()
+        original = self.docker
+
+        def unknown_create(*args: str) -> str:
+            if args[0] == "create":
+                raise TimeoutError("unknown create effect")
+            return original(*args)
+
+        self.namespace["docker"] = unknown_create
+        with self.assertRaises(TimeoutError):
+            self.recover()
+        destination = self.root / "captures" / self.spec["recovery_binding"]
+        self.assertEqual(json.loads((destination / "outcome.json").read_text())["state"], "running")
+        with self.assertRaises(ValueError):
+            self.namespace["inspect_recovery"](self.spec, base=self.root / "captures")
