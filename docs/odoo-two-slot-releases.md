@@ -105,6 +105,14 @@ data or overwriting later business writes.
 
 ## Records, retries and activation
 
+Product re-onboarding preserves the exact matching lane's `odoo_cutover` record.
+Stable target replacement reports `two_slot_cutover_required` for a configured
+two-slot lane or a recorded serving slot, including when configuration has been
+removed. It cannot recreate that lane's serving project. Use the accepted
+two-slot release path; repairing missing lane authority requires restoring its
+record before another release. Apply rechecks current lane authority after
+planning and before any provider effect.
+
 Stable logs and outgoing-email diagnostics select the slot in current serving
 inventory from the lane's recorded Compose coordinates. They inspect that
 slot's container/image/runtime identity and reject missing slot authority or an
