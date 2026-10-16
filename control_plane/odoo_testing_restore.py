@@ -839,8 +839,6 @@ def restore_main():
             print(prefix+json.dumps({'type':'complete','cleanup_qualified':True}),flush=True)
             return
         if spec.get('usage_only'):
-            if present != '1':
-                raise RuntimeError('Testing login history is unavailable')
             if spec.get('usage_reclaim'):
                 new_database=spec['usage_new_database']
                 if not re.fullmatch(r'lp_drill_[a-f0-9]{32}',new_database):
@@ -863,6 +861,11 @@ def restore_main():
                 if serving:
                     print(prefix+json.dumps({'type':'complete','new_copy_serving':True}),flush=True)
                     return
+            if spec.get('usage_required') is False:
+                print(prefix+json.dumps({'type':'complete','resources_qualified':True}),flush=True)
+                return
+            if present != '1':
+                raise RuntimeError('Testing login history is unavailable')
             # Odoo records successful logins in res_users_log.create_date with
             # create_uid naming the account. Read all accounts without logging
             # identities or creating an Odoo session (which would add a login).

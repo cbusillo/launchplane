@@ -10806,6 +10806,57 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
 
+    def test_down_lane_usage_and_locked_successor_on_postgres(self) -> None:
+        from tests.test_down_lane_collection import DownLaneCollectionTests
+        from tests.test_lane_usage import LaneUsageTests
+        from tests.test_odoo_testing_drill import TestingDrillTests
+
+        for scenario in (
+            "test_locked_successor_adapter_consumes_the_service_downtime_rule",
+            "test_current_staff_hold_always_blocks_down_lane",
+            "test_private_serving_or_unresolved_endpoint_protects_a_publicly_down_lane",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                fixture = LaneUsageTests(scenario)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, scenario)()
+                finally:
+                    fixture.doCleanups()
+        with _head_postgres_database() as url:
+            drill = TestingDrillTests(
+                "test_down_lane_queues_without_login_history_and_keeps_resource_qualification"
+            )
+            try:
+                drill.seed(
+                    make_url(url)
+                    .update_query_dict({"options": "-c statement_timeout=1000"})
+                    .render_as_string(hide_password=False)
+                )
+                database_errors: list[str] = []
+                event.listen(
+                    drill.store._engine,
+                    "handle_error",
+                    lambda error: database_errors.append(type(error.original_exception).__name__),
+                )
+                drill.test_down_lane_queues_without_login_history_and_keeps_resource_qualification()
+                self.assertFalse(database_errors, database_errors)
+            finally:
+                drill.doCleanups()
+        for scenario in (
+            "test_collect_produces_real_resource_facts_then_admits_down_runtime_repair",
+            "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",
+            "test_needed_copy_and_failed_physical_inspection_still_refuse",
+            "test_resource_denial_and_binding_drift_do_not_publish",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                collected = DownLaneCollectionTests(scenario)
+                collected.database_url = url
+                result = unittest.TestResult()
+                collected.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 

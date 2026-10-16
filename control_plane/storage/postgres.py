@@ -10513,7 +10513,13 @@ class PostgresRecordStore(HumanSessionStore):
             )
         )
 
-    def publish_collected_disposable_lane_safety(self, record: DisposableLaneSafety) -> bool:
+    def publish_collected_disposable_lane_safety(
+        self,
+        record: DisposableLaneSafety,
+        *,
+        collect_facts: bool = False,
+        replace_resource_facts: bool = False,
+    ) -> bool:
         """A delayed collector cannot erase a newer protective observation."""
         with self._session_factory() as session:
             self._begin_serialized_write(session)
@@ -10553,8 +10559,26 @@ class PostgresRecordStore(HumanSessionStore):
             )
             if row is not None:
                 previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
-                if previous.usage == "in_use" and record.usage == "unknown":
+                if not collect_facts and (
+                    (previous.usage == "in_use" and record.usage == "unknown")
+                    or (previous.data == "only_copy" and record.data != "only_copy")
+                    or (
+                        previous.production_resources == "shared"
+                        and record.production_resources == "unknown"
+                    )
+                ):
                     return False
+                if collect_facts:
+                    from control_plane.disposable_lane_collection import merge_collected_safety
+
+                    was_unknown = record.usage == "unknown"
+                    record = merge_collected_safety(
+                        previous, record, replace_resource_facts=replace_resource_facts
+                    )
+                    if was_unknown and record.usage == "in_use":
+                        self._invalidate_testing_non_use_in_session(
+                            session, product=record.product, context=record.context
+                        )
                 if previous.observed_at > record.observed_at or (
                     previous.observed_at == record.observed_at
                     and previous.usage == "in_use"
@@ -11277,7 +11301,12 @@ class PostgresRecordStore(HumanSessionStore):
                     (product, context, "testing"),
                     with_for_update=True,
                 )
-                require_drill_use_unprotected(self, product, context)
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
+                try:
+                    require_drill_use_unprotected(self, product, context)
+                finally:
+                    self._disposable_authority_context.session = outer
                 if revision != observed_revision:
                     raise DrillSkipped("drill_admission_snapshot_changed")
                 if collection_error is not None:
@@ -11437,7 +11466,12 @@ class PostgresRecordStore(HumanSessionStore):
                 session, product=operation.product, context=operation.context, instance="testing"
             )
             self._lock_product_authority_bundle_write(session)
-            require_drill_use_unprotected(self, operation.product, operation.context)
+            outer = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                require_drill_use_unprotected(self, operation.product, operation.context)
+            finally:
+                self._disposable_authority_context.session = outer
             if (
                 drill_admission_revision(self, operation.product, operation.context)
                 != observed_revision
@@ -11513,7 +11547,12 @@ class PostgresRecordStore(HumanSessionStore):
                     self._sync_idempotency_row(receipt_row, receipt)
                     session.commit()
                 else:
-                    require_drill_checkpoint(self, operation)
+                    outer = getattr(self._disposable_authority_context, "session", None)
+                    self._disposable_authority_context.session = session
+                    try:
+                        require_drill_checkpoint(self, operation)
+                    finally:
+                        self._disposable_authority_context.session = outer
                 return
             if current.model_dump(mode="json") != receipt.response_payload["previous_generation"]:
                 raise DrillPrerequisite("drill_generation_changed")
@@ -12016,10 +12055,19 @@ class PostgresRecordStore(HumanSessionStore):
                         else None
                     ),
                 )
+                outer = getattr(self._disposable_authority_context, "session", None)
+                self._disposable_authority_context.session = session
                 try:
-                    replacement = disposable_testing_supersession(current, bindings)
+                    # Configuration stays on the locked adapter. Downtime reads
+                    # use the service monitor store, which the adapter does not
+                    # expose; no provider read or usage assertion is substituted.
+                    replacement = disposable_testing_supersession(
+                        current, bindings, usage_store=self
+                    )
                 except (DisposableLaneSafetyUnknown, ValueError, FileNotFoundError):
                     return False
+                finally:
+                    self._disposable_authority_context.session = outer
                 check_lock()
                 self._sync_odoo_stable_target_replacement_operation_row(row, replacement)
                 session.commit()

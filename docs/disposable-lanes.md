@@ -8,6 +8,72 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Repair usage rule
+
+`control_plane/lane_usage.py` owns the usage decision for disposable repair.
+A current staff-testing hold always protects the lane. Without a hold,
+automated UNKNOWN or positive usage (including recent login/session reports) cannot block repair of a
+verified-down non-production lane. The usage observation stays UNKNOWN; this
+is repair eligibility, not an assertion that nobody ever used the copy.
+Serving or unverified lanes retain their existing usage protections.
+Production admission and release gates are unchanged.
+
+Verified down means every effective application HTTP check has failed in each
+of the same two consecutive monitor scheduler slots inside the preceding two
+cadences, with each latest result less than one cadence old. The scheduler's
+existing slot rule owns this timing; variation in the run's offset inside its
+slot does not disqualify a continuously failing lane.
+All observations must follow the current profile, tracked target and target-ID
+updates and match the monitor's current URLs and expected runtime identity.
+Every probed URL must fail: network/DNS/TLS failure or server error qualifies;
+successful HTTP responses, access refusals, identity mismatch, missing checks,
+skipped checks, unresolved endpoints, future timestamps and stale observations
+do not. Public and declared private checks both count. Provider-only or
+unmonitored states remain unverified. No probe or live action is initiated by
+this decision. The guard logs the durable monitor record IDs and interval;
+the drill also preserves those references in its private admission receipt.
+
+These observations describe Launchplane's monitor vantage. A network, DNS or
+TLS fault in that vantage can look like a lane outage even if a person can reach
+it elsewhere. A staff-testing hold remains authoritative regardless of monitor
+results. Network-only qualification is the explicit policy choice recorded on
+the owning issue before this rule is used on a live lane.
+
+The common disposable guard covers runtime repair/deploy, preview operations,
+replacement target setup, held-operation supersession and rehearsal admission.
+The Odoo daily drill uses the same usage decision before queueing and worker
+activation. Its down-lane read still runs the original container, storage,
+network, credential and copy-witness inspections, including protection of an
+already-opened replacement copy; it skips login-history collection.
+UNKNOWN is preserved in that scoped receipt, which remains usable only by
+the same continuously leased attempt. Reclaim needs new admission.
+Connection-isolation and environment-staging guards also use the shared usage
+decision. Acknowledged activation/interlock lifting keeps its original explicit
+hold and known-use checks; it has no UNKNOWN usage requirement. Preview operations
+use the common guard, but previews without stable-lane monitor authority remain
+unverified and retain their existing admission paths.
+Existing preview refresh, never-live retirement and non-destructive isolation
+paths continue to protect known use without demanding a universal negative
+occupancy observation. This change adds no UNKNOWN restriction to those paths.
+
+Downtime does not qualify needed-copy custody, physical isolation, secret
+separation, backup, authorization, deployment fences or unknown provider
+effects. Their existing checks still run. In particular, no missing usage
+record becomes a reproducible-data or production-isolation fact. Preserve old
+operations, keys and retained resources when replacing a stranded generation.
+
+For an update, deploy the compatible API and Odoo worker together through the
+normal service path; no migration, grant, new runtime flag or per-product rule
+is required. Use the bounded collection client from that compatible source
+revision; older coverage/enum validation refuses the newly qualified resource
+facts. Use the existing monitor history and collect immediately before
+apply; a hold or changed recipient still refuses. Source tests do not qualify
+a real lane. Before a queued drill uses a downtime receipt, retain this image
+or a compatible successor and forward-fix: older workers require a negative
+usage result and cannot continue the new UNKNOWN admission. Do not rewrite
+receipts or clear fences to roll back. No live lane action is part of source
+delivery.
+
 The source accepts exact-scope `disposable_lane_safety` observations on the
 dedicated DB-backed lane record (and a separate collection for filesystem
 rehearsals). Each observation binds the profile and current
@@ -17,7 +83,8 @@ usage (`unused`/`in_use`/`unknown`), data custody
 (`isolated`/`shared`/`separation_ready`/`unknown`), with each known fact's source
 reference and a timezone-aware observation/expiry window of at most fifteen
 minutes. A changed binding, expired observation, positive
-staff-testing hold or any required unknown fact refuses the new permission.
+staff-testing hold or any required unknown custody/isolation fact refuses the new
+permission. UNKNOWN usage alone has the verified-down repair exception above.
 A target ID also bound to another lane refuses it independently of the observation.
 The existing Odoo preview-refresh exception below uses direct resource inspection
 and protected-use reports instead of positive occupancy/custody observations.
@@ -79,9 +146,10 @@ For a stranded runtime, deliver the diagnostics image through the normal service
 deploy and collect again through the same client, without starting, restarting or
 repairing that lane to obtain evidence. Record its code and service trace. If it
 cannot read the original served configuration/database/session store, that exact
-prerequisite remains unsupported: a stopped process, missing database or absent
-staff hold is not a substitute. Preserve the original lane and custody and leave
-its rebuild blocked. No alternative credential, direct database qualification or
+prerequisite remains unsupported for a negative usage assertion: a stopped process,
+missing database or absent staff hold is not a substitute. The verified-down
+repair rule can independently qualify usage eligibility while preserving the
+original lane's custody and every other rebuild gate. No alternative credential, direct database qualification or
 new grant is needed for diagnosis. The service read is the proof of the concrete
 failed checkpoint; a fixture qualification or an old generic UNKNOWN is not.
 
@@ -465,7 +533,23 @@ its supplied facts and references cannot affect the result. The existing stored
 actor kind and observation schema remain compatible with the previous image.
 
 For Odoo testing, the read-only login/session probe described above can also
-publish `unused`. Custody and physical isolation remain unknown. Missing holds,
+publish `unused`. On a verified-down lane with a resettable data policy and a
+current completed service-created testing generation, collection can independently
+reinspect its original physical containers, storage, networks and copy binding
+through the fixed receiver, without requiring login history. Only a passing
+inspection supplies reproducible-data and isolated-resource facts. Unsupported
+or failed inspection leaves those facts unknown; it never substitutes downtime
+for a resource proof. A provider refusal returns authorization_denied with its
+trace, without another identity or transport.
+
+Collection retains known use and only-copy protection. It also retains independent
+fresh custody/isolation facts on the same binding, capped at their original expiry;
+collection cannot renew an old proof. A new physical inspection can publish a fresh
+proof; a failed attempted inspection replaces those independent facts with UNKNOWN
+instead of reusing the previous proof. The response reports the stored facts, including retained historical use,
+while the login/session diagnostic remains UNKNOWN. An unheld down lane can use
+that historical positive usage for repair eligibility without erasing it.
+Missing holds,
 distinct target IDs and old preview-generation
 states do not establish occupancy, custody, physical isolation or executor
 exclusion. The response and bounded client name these coverage limits. Collection
@@ -1012,7 +1096,8 @@ hold. Every account counts, including staff, Client, portal and administrator
 accounts; no maintained account list or current-use registry is required. The
 read excludes logins older than copy preparation, uses a read-only SQL transaction,
 creates no Odoo login, and returns only a
-boolean. Recent sign-ins, a hold or an unreadable check skip the daily slot with
+boolean. A hold skips the daily slot. On a serving or unverified lane, recent
+sign-ins or an unreadable check also skip the slot with
 a value-free reason on the lane's drill evidence. Missing tables/databases,
 runtime mismatch, provider refusal, incomplete reads and unavailable credentials
 cannot mean idle. This is the agreed recent-use check, not proof that an old
@@ -1057,7 +1142,13 @@ does not expire in the middle of that continuously leased restore. A reclaimed
 attempt requires fresh admission. It reads login history from the original served database and its committed
 copy witness, including when web is stopped or the new copy is incomplete;
 copied production login rows in the new database cannot stand in for testing use.
-An unavailable original database still skips rather than assuming non-use.
+An unavailable original login database normally skips rather than assuming
+non-use. The verified-down repair rule above can instead qualify usage while
+preserving UNKNOWN; the independent resource/copy inspection must still pass.
+This also applies when Launchplane's own stop or stalled operation caused the
+downtime: excluding that cause would recreate a repair deadlock. The original
+database is retained and the already-opened new-copy gate below still protects
+testers; an explicit staff-testing hold always refuses the operation.
 If the selected new copy already has its web-start gate, reclaim
 skips and preserves it: people may have used it before final completion was
 recorded. A stopped web process alone does not erase that gate's protection.
