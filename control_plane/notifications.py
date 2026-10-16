@@ -23,6 +23,14 @@ def public_discord_url_error(url: str) -> str:
     return ""
 
 
+class DiscordNotificationError(RuntimeError):
+    """A provider response, distinguishable from a lost HTTP response."""
+
+    def __init__(self, status_code: int) -> None:
+        self.status_code = status_code
+        super().__init__(f"Discord webhook returned HTTP {status_code}")
+
+
 def post_discord_webhook(webhook_url: str, payload: dict[str, object]) -> None:
     url_error = public_discord_url_error(webhook_url)
     if url_error:
@@ -35,4 +43,4 @@ def post_discord_webhook(webhook_url: str, payload: dict[str, object]) -> None:
         timeout_seconds=15,
     )
     if not 200 <= response.status_code < 300:
-        raise RuntimeError(f"Discord webhook returned HTTP {response.status_code}")
+        raise DiscordNotificationError(response.status_code)
