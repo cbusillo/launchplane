@@ -246,6 +246,19 @@ def _testing_attempt_step(plan: dict[str, object] | None | Unread) -> PathCheckS
             "The completed reconcile records matching current and desired testing build provenance.",
             record_ids=(_testing_artifact_id(plan["current_artifact_id"]),),
         )
+    if (
+        plan.get("reconcile_state") == "done"
+        and plan.get("action") == "none"
+        and plan.get("reason") == "already_deployed"
+        and plan.get("held") is False
+    ):
+        return _step(
+            step_id,
+            "unknown",
+            "testing_provenance_incomplete",
+            "The no-deploy plan lacks matching artifact, source commit or image provenance.",
+            "wait",
+        )
     return _step(
         step_id,
         "unknown",

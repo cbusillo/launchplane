@@ -4301,7 +4301,8 @@ reconcile attempt, naming the `deploy_blocked.*` or other code that stopped it.
 A completed `already_deployed` no-op is clear when the recorded current and
 desired artifact ids, commit SHAs and immutable image digests all match and the
 plan is not held. It cites the artifact id without inventing a deploy operation.
-Missing or inconsistent provenance, or a request that is not done, stays unknown.
+Missing or inconsistent provenance on a completed, unheld no-op stays unknown
+with `testing_provenance_incomplete`; a request that is not done stays unknown.
 This cites saved reconciliation evidence, not a fresh provider observation;
 a later manual deployment requires reconciliation before this evidence is current.
 `promote` checks the caller's own promotion grant, Client acceptance, the prod
