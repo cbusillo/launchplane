@@ -13,6 +13,9 @@ title: Testing Style
 - Do not assert workflow, action, config, or docs text. Run the embedded script
   with inputs and check what it does, or enforce a rule that holds for every
   workflow (fork isolation, pinned actions, permissions).
+- CI's `repository_pins` job runs the shared
+  [change-detector scanner](https://github.com/cbusillo/codex-skills/blob/main/skills/references/test-quality.md)
+  as warnings only. Triage its annotations on tests you add or change.
 - Verification code must not depend on working-tree state; read live state
   only on the path that acts on it.
 - Prefer deterministic file-system tests using `TemporaryDirectory`.
