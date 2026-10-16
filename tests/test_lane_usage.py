@@ -196,7 +196,7 @@ class LaneUsageTests(unittest.TestCase):
                         lane.model_copy(
                             update={
                                 "health_monitoring": lane.health_monitoring.model_copy(
-                                    update={"checks": (provider,)}
+                                    update={"checks": (provider,), "monitoring_intent": "prelaunch"}
                                 )
                             }
                         )
