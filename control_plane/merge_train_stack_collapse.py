@@ -23,7 +23,9 @@ from control_plane.merge_train_batch_candidate import (
     MergeTrainStackCollapsePlanRecordStore as MergeTrainStackCollapsePlanRecordStore,
     require_merge_train_stack_collapse_plan_record_store as _require_stack_collapse_store,
 )
+from control_plane.merge_train_branch_refresh import require_merge_train_client_review_read_store
 from control_plane.merge_train_github import (
+    MergeTrainBranchRefreshReadStore,
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
     MergeTrainGitHubTransport,
@@ -100,8 +102,41 @@ def execute_merge_train_stack_collapse_run_once(
         token=token,
         api_base_url=request.github_api_base_url,
     )
+    review_store = require_merge_train_client_review_read_store(
+        stack_collapse_store, route="Stack-collapse run-once"
+    )
     if request.mode == "execute":
-        github_client = GitHubMergeTrainClient(transport=transport)
+        github_client = GitHubMergeTrainClient(
+            transport=transport, branch_refresh_store=review_store
+        )
+        github_client.begin_snapshot_pass(
+            policy=policy.find_repository_policy(
+                repository=request.repository, base_branch=request.base_branch
+            ),
+            read_only=False,
+        )
+
+        def checkpoint_progress(progress_plan: MergeTrainStackCollapsePlan) -> None:
+            if mutation_checkpoint is not None:
+                mutation_checkpoint(
+                    "merge_stack_branches",
+                    next(
+                        (
+                            mutation.child_pull_request_number
+                            for mutation in progress_plan.mutations
+                            if mutation.status != "mutated"
+                        ),
+                        None,
+                    ),
+                )
+            stack_collapse_store.write_merge_train_stack_collapse_plan_record(
+                build_merge_train_stack_collapse_plan_record(
+                    plan=progress_plan,
+                    source=f"service:stack-collapse-progress:{trace_id}",
+                    updated_at=progress_plan.updated_at,
+                )
+            )
+
         executed_plan = execute_merge_train_stack_collapse_plan(
             plan=existing_record.plan,
             branch_client=github_client,
@@ -112,24 +147,16 @@ def execute_merge_train_stack_collapse_run_once(
                     repository=request.repository, base_branch=request.base_branch
                 ),
             ),
-            updated_at=recorded_at,
-            checkpoint=(
-                lambda progress_plan: (
-                    mutation_checkpoint(
-                        "merge_stack_branches",
-                        next(
-                            (
-                                mutation.child_pull_request_number
-                                for mutation in progress_plan.mutations
-                                if mutation.status != "mutated"
-                            ),
-                            None,
-                        ),
-                    )
-                    if mutation_checkpoint is not None
-                    else None
-                )
+            recovered_child_readiness_reasons=merge_train_stack_child_readiness_check(
+                reader=github_client,
+                repository=request.repository,
+                repository_policy=policy.find_repository_policy(
+                    repository=request.repository, base_branch=request.base_branch
+                ),
+                recovered_merge=True,
             ),
+            updated_at=recorded_at,
+            checkpoint=checkpoint_progress,
         )
         collapse_record = build_merge_train_stack_collapse_plan_record(
             plan=executed_plan,
@@ -151,6 +178,7 @@ def execute_merge_train_stack_collapse_run_once(
         trace_id=trace_id,
         recorded_at=recorded_at,
         existing_plan=existing_record.plan,
+        review_store=review_store,
         transport=transport,
         batch_candidate_store=batch_candidate_store,
     )
@@ -189,6 +217,7 @@ def _execute_admit_mode(
     trace_id: str,
     recorded_at: str,
     existing_plan: MergeTrainStackCollapsePlan,
+    review_store: MergeTrainBranchRefreshReadStore,
     transport: MergeTrainGitHubTransport,
     batch_candidate_store: MergeTrainBatchCandidateRecordStore | None,
 ) -> MergeTrainStackCollapseRunOnceResult:
@@ -207,7 +236,13 @@ def _execute_admit_mode(
         current_sha256=policy_sha256,
     ):
         raise ValueError("merge train stack collapse policy digest no longer matches")
-    snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+    snapshot = GitHubMergeTrainSnapshotReader(
+        transport=transport,
+        branch_refresh_store=review_store,
+        repository_policy=policy.find_repository_policy(
+            repository=request.repository, base_branch=request.base_branch
+        ),
+    ).read_merge_train_snapshot(
         repository=request.repository,
         base_branch=request.base_branch,
     )

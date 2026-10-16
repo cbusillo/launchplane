@@ -26,6 +26,7 @@ from control_plane.odoo_testing_restore import (
     FRESH_TESTING_RESTORE_HOST_PROGRAM,
     FRESH_TESTING_STALE_LOCK_PROGRAM,
     TESTING_COPY_COMPLETION_PARAMETER,
+    TESTING_COPY_VERIFICATION_FRAME,
     TestingCredentialsOverlap,
     TestingCredentialVersionsMissing,
     FreshOdooTestingGeneration,
@@ -414,6 +415,101 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             )
         )
 
+    def test_public_verification_requires_live_copy_digest_identity_and_open_gate_without_writes(
+        self,
+    ) -> None:
+        import sqlite3
+
+        # Obtain the persisted gate using the real producer, with provider IO
+        # faked by this scenario. The fixture follows its binding format.
+        payload = "fixture-payload"
+        self.gate_payload = payload
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        self.calls.clear()
+        (self.root / (self.gen.namespace + "-copy.lock")).unlink()
+        self.spec.update(
+            inspection_only=True,
+            verification_only=True,
+            runtime_identity={"deployment_record_id": "installed"},
+        )
+        gate = self.root / "verified-gate"
+        self.spec["web_gate_path"] = str(gate)
+        gate.write_text(self.gate_hash)
+        # Temporary lock-file loss must not require another restore.
+        self.existing_database = True
+        for container in self.containers.values():
+            container["State"] = {"Status": "running"}
+            container["Image"] = "fixture-image"
+            container["Config"]["Env"].extend(
+                [
+                    "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+                    + json.dumps(self.spec["runtime_identity"]),
+                    "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64=" + payload,
+                ]
+            )
+        original = self.command
+        witness = generation_binding(self.gen)
+        actual_image = self.spec["image_reference"]
+        sql = sqlite3.connect(":memory:")
+        self.addCleanup(sql.close)
+        sql.execute("CREATE TABLE ir_config_parameter (key TEXT PRIMARY KEY, value TEXT)")
+
+        def read(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            data = kwargs.get("input") or b""
+            if command[:3] == ["docker", "image", "inspect"]:
+                self.calls.append(command)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps([{"RepoDigests": [actual_image]}]).encode(),
+                    stderr=b"",
+                )
+            if data and command[-1] == self.database and '-d "$1"' in " ".join(command):
+                self.calls.append(command)
+                sql.execute(
+                    "INSERT OR REPLACE INTO ir_config_parameter VALUES (?, ?)",
+                    (TESTING_COPY_COMPLETION_PARAMETER, witness),
+                )
+                observed = sql.execute(data.decode()).fetchone()
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=str(observed[0]).encode() if observed else b"", stderr=b""
+                )
+            if command[-2:] == [self.database, str(gate)]:
+                self.calls.append(command)
+                with (
+                    patch.dict(os.environ, {"ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": payload}),
+                    patch.object(sys, "argv", ["gate", self.database, str(gate)]),
+                ):
+                    exec(command[command.index("-c") + 1], {})
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+            return original(command, **kwargs)
+
+        with patch.object(self, "command", side_effect=read):
+            status, output = self.run_program()
+            self.assertEqual(status, 0, output)
+            frames = [
+                json.loads(line.removeprefix("fixture:"))
+                for line in output.splitlines()
+                if line.startswith("fixture:")
+            ]
+            self.assertEqual(frames, [TESTING_COPY_VERIFICATION_FRAME])
+            for fault in ("witness", "image", "gate"):
+                with self.subTest(fault=fault):
+                    witness = "wrong" if fault == "witness" else generation_binding(self.gen)
+                    actual_image = "wrong" if fault == "image" else self.spec["image_reference"]
+                    gate.write_text("wrong" if fault == "gate" else self.gate_hash)
+                    status, _ = self.run_program()
+                    self.assertNotEqual(status, 0)
+        self.assertFalse(
+            any(
+                call[0] in {"ssh", "rsync"}
+                or call[:2] in (["docker", "stop"], ["docker", "start"], ["docker", "cp"])
+                or "rm" in call
+                for call in self.calls
+            )
+        )
+
     def test_drill_usage_reads_successful_logins_without_starting_or_restoring(self) -> None:
         from datetime import datetime, timezone
 
@@ -466,6 +562,25 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             usage_since=datetime.now(timezone.utc).isoformat(),
         )
         status, output = self.run_program()
+        self.assertNotEqual(status, 0)
+
+    def test_down_lane_resource_qualification_does_not_need_login_database(self) -> None:
+        from control_plane.odoo_testing_drill_usage import parse_drill_usage_result
+
+        self.spec.update(inspection_only=True, usage_only=True, usage_required=False)
+        status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertIsNone(parse_drill_usage_result(frames, usage_required=False))
+        self.assertFalse(
+            any(call[:2] in (["docker", "stop"], ["docker", "start"]) for call in self.calls)
+        )
+        self.containers["web"]["HostConfig"]["PortBindings"] = {"8069/tcp": [{}]}
+        status, _ = self.run_program()
         self.assertNotEqual(status, 0)
 
     def test_task_cleanup_qualifies_physical_copy_without_reading_login_history(self) -> None:

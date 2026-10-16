@@ -102,10 +102,13 @@ keeps its existing digest algorithm; scoped execution bindings are separate.
 
 Controller snapshots retain the base-rooted open-PR graph, but read details,
 checks, label actors, conversations and CODEOWNERS routing only for potential
-queue members. The active policy's enqueue label and label-free dependency-update
-identities decide that enrichment; policies without a required label still read
-every non-draft PR. Unqueued and draft entries carry unknown readiness and cannot
-justify a landing. A newly applied label is observed on the next list read.
+queue members. The active policy's enqueue label, trusted current-head ready
+handoffs, and label-free dependency-update identities decide that enrichment;
+policies without a required label still read every non-draft PR. Unlabelled
+ordinary PRs first get a bounded discussion read, then details and checks only
+when their latest trusted handoff names the listed head. Draft entries carry
+unknown readiness and cannot justify a landing. A new handoff or label is
+observed on the next snapshot sweep.
 
 Authenticated REST GETs retain response bodies and ETags in a bounded process-local
 cache separated by credential and API origin. Native controller token resolution
@@ -139,7 +142,10 @@ and the same authenticated provider transport. Compare response-header quota-use
 counters as well as per-pass attempts/304s; other users of a shared installation
 can increase its counter during the measurement. The HTTP fixture in
 `tests/test_merge_train_read_cost.py` exercises the controller with fifteen unqueued
-PRs. An isolated read proof does not establish a whole night's installation-wide
+PRs. A cold pass now includes discussion evidence for each unlabelled PR, plus
+commit classification for dependency updates; its cost scales with that evidence.
+Immediately repeated unchanged passes revalidate those bodies without charging
+primary quota. An isolated read proof does not establish a whole night's installation-wide
 budget; correlate deployed pass tallies with hourly counter peaks after landing.
 
 ## Preparing An Ordinary-Agent Target
@@ -332,7 +338,9 @@ Each repository policy contains:
 
 - `repository`: GitHub `owner/name` repository.
 - `base_branch`: Branch the train protects and merges into.
-- `enqueue_label`: Label required before a pull request can enter the train.
+- `enqueue_label`: Explicit enqueue signal, checked against the actor who applied
+  it. Trusted current-head ready handoffs and qualified dependency updates also
+  admit without this label.
 - `blocked_label`: Label Launchplane applies when a queued pull request blocks.
 - `stack_child_disposition_label`: Label Launchplane applies to child PRs after
   a same-repository stack has landed through its root PR. When empty or omitted,
@@ -381,8 +389,9 @@ Each repository policy contains:
   schedule reads it from the deployed Launchplane API until that schedule is
   removed); checked-in workflows and GitHub variables are not target authority.
 
-The default enqueue policy is intentionally narrow: the enqueue label must be
-present and the PR author must be a repo owner or repo admin. A repository may
+The default enqueue policy is intentionally narrow: an authorized label or
+current-head ready handoff must be present and the PR author must be a repo
+owner or repo admin. A repository may
 explicitly opt a known automation account in by storing its immutable GitHub
 numeric user id in `trusted_automation_github_user_ids`. Matching identities are
 reported as `trusted_automation` in controller dry-run output. The default list
@@ -428,8 +437,111 @@ before either the trusted-automation or allowed-role check. An App's own
 installation token acts as its bot account and needs a trusted automation id. A
 label applied by anyone else, or whose labeler cannot be read, is ignored for
 admission. The dry run reports the specific refusal reason and identifies the
-labeler when available. Removing the label, by anyone, still takes the pull
-request out of the queue.
+labeler when available. Removing the label removes that admission signal;
+an independently valid ready handoff or dependency-update signal can still admit
+the PR. Use the configured block label for a manual hold.
+
+### Ready Handoffs
+
+The train accepts the checked engineering handoff format without an enqueue
+label:
+
+```text
+Ready for the merge train
+
+Head: <full 40-character source head SHA>
+```
+
+Use `gh-pr.py ready` to produce this handoff after current-head CI and review
+dispositions are complete. The GitHub adapter reads the complete discussion,
+bounded to 100 pages of 100 comments. The latest trusted ready or
+`Engineering ready; waiting for ...` comment wins by update time and comment id;
+an edited handoff has unproven editor authority and requires a new checked
+`gh-pr.py ready` comment. A waiting handoff cancels readiness. A push
+requires a fresh handoff naming exactly the current head. Missing, duplicate,
+quoted, fenced, stale or unreadable head evidence cannot admit a PR. The adapter
+reports unavailable or incomplete discussion evidence as unreadable rather than
+guessing a previous handoff is still current.
+
+Edited comments from trusted authors remain unproven even when the handoff
+text has been erased. Unrelated managed-comment updates are ignored only when
+the provider's [comment editor](https://docs.github.com/en/graphql/reference/issues#issuecomment)
+is a configured trusted installation bot and the body, node and edit timestamp
+match the discussion read. The comments API cannot observe deleted handoffs;
+these signals describe the latest visible trusted intent, like the existing
+label controls, rather than an immutable approval journal.
+
+The train's own recorded branch refresh is the exception to requiring a new
+handoff after a push. It carries the source handoff only through a complete
+chain of its persisted refresh records, rechecking exact merge parents, base
+ancestry and unchanged source patches using the same proof as dependency
+refreshes. Unrecorded pushes or a changed source patch need a fresh handoff.
+Checks on the refreshed current head must still pass before admission.
+
+The same carry applies to active stack collapses, including intermediate parents:
+the current policy binding, latest persisted progress and exact merge parents
+must prove each edge back to the handed-off head. Before a feature-branch merge,
+the executor constructs the merge from its immutable parent and child SHAs using
+the existing candidate-construction effects, then saves its expected tree in the
+`planned` mutation of the collapse progress record. Construction refs are removed
+after construction; a restart before the plan write can reconstruct them. A hard
+crash followed by retirement with different inputs can leave its construction ref
+behind; that ref supplies no readiness or recovery authority. A failed
+plan write prevents the feature-branch merge. Progress selection preserves a
+saved tree plan ahead of an otherwise equal unprepared checkpoint.
+
+If GitHub succeeds before the `mutated` checkpoint is saved, recovery accepts only
+the current branch tip with the saved tree, exact ordered parents and collapse
+message, and an unchanged child head. It checks current child readiness before
+checkpointing that recovered edge, without repeating the feature-branch merge or
+reconstructing the expected tree. A missing plan, different tree, changed head or
+hold refuses recovery. Unproven merge construction or provider effects return a controlled blocked result
+and retire the plan while retaining its history. Fresh current-policy discovery
+then needs current source authority: a retired plan cannot carry its old handoff.
+Review the current heads and post fresh checked handoffs to continue through the
+existing path, instead of repeating controller errors. The original trusted handoff can follow a matching saved
+tree plan through the admission reader's read-only proof; the executor still owns
+the mutated checkpoint. Legacy progress without a saved tree cannot recover an
+uncheckpointed changed branch tip and needs a fresh checked `gh-pr.py ready`
+handoff and current-policy discovery. Messages and parents alone never renew
+readiness.
+
+Standalone execution saves each progress checkpoint. Blocked, retired or
+policy-stale plans cannot carry readiness. Retired ordinary-agent job records are
+excluded. Current source checks and Client gates still apply. Edited-comment
+diagnostics name the fresh checked handoff needed to resume.
+
+The handoff author must satisfy the existing enqueue policy: an allowed
+`repo_owner` or `repo_admin` role, or a numeric trusted-automation id. An App using a person's token
+does not inherit that person's authority. The PR author's existing eligibility
+is checked independently. No access, merge identity or policy enrollment changes.
+Handoff admission requires passing source-head checks, known conflict-free
+mergeability, valid Client test notes where required, and the existing Client
+review and conversation gates. Unknown, pending, conflicting and failed heads
+remain outside the next candidate, with `ineligible_reasons` on their queue
+entries, and are reconsidered on each fresh read without a label change.
+
+Admission selects new members only between candidates. Eligible PRs beyond the
+cap, a known changed-file area group or a CODEOWNERS individual-landing boundary
+retain eligibility and report `deferred_reasons`. Grouping uses contiguous
+oldest-first entries sharing top-level changed-file areas; root files share one
+area, and missing area evidence makes no grouping claim. Queues containing
+Client-reviewed features preserve their existing feature grouping. New handoff heads reuse
+the CODEOWNERS file read and head confirmation to obtain those areas. Existing
+candidate membership and ordering are rechecked alone, without new grouping.
+
+Under Q312, engineering PRs in Client repositories can land while a release
+invitation awaits a decision; merges update testing. An accepted release in
+progress still holds its source repositories through the existing release-run
+state, and Client-visible changes keep their review gates. No invitation-window
+hold or local pause file is added.
+
+After this source lands and deploys, the Supervisor can retire the interim
+codex-skills#1623 watcher using its existing lifecycle procedure. Until then it
+remains the supported label bridge. Operational batch-size changes use the
+existing reviewed-baseline operational policy route above; this source change
+does not change live policy. Recovery is an ordinary source revert through the
+train; explicit-label admission remains supported for the prior service.
 
 `dependency_update_github_user_ids` names dependency-update bots, for example
 Dependabot. Each id must also be in `trusted_automation_github_user_ids`. A pull
@@ -826,8 +938,9 @@ or an allowed dependency update, from an allowed author). A child that is not
 ready refuses the whole collapse; the controller reports `stack_unsupported` with a `blocking_reason`
 naming each child and reason. Execution reads each child again from GitHub
 just before merging it, so a child held while a recorded plan runs is not
-merged; a child GitHub already shows as merged by this collapse is recovered,
-not re-read. Launchplane records a stack collapse plan
+merged. Recovery first proves the saved tree and exact parents, then re-reads
+the child for current holds, head, source checks and intent. A child closed by
+that proved merge may recover without satisfying open-PR mergeability. Launchplane records a stack collapse plan
 before mutating branches so the root PR, child order, expected SHAs, mutation
 sequence, policy digest, and idempotency evidence remain auditable. Ambiguous,
 forked, cyclic, or unsupported branch-protection cases must fail closed with

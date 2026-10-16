@@ -231,8 +231,12 @@ their uncertainty, and only verified inventory uses active or empty wording.
 Product Ops labels combined lane evidence (route records and runtime observations)
 separately from operational health. A product profile's edit date is labelled as
 a profile update, never presented as the age of its lanes' verification.
+A lane's operational tone colors only its headline; an evidence badge's label
+and indicator always take that badge's evidence color.
 Topology evidence badges include route, placement and observation evidence;
 runtime observation timestamps describe their own evidence.
+Shared evidence badges wrap their full state label within the available width,
+including each lane's column in the narrow product directory.
 Combined lane and product evidence expire when their topology expires, even if
 the health observation has a later deadline. Operational health continues to
 evaluate effective checks, runtime identity and incidents separately.
@@ -842,7 +846,14 @@ See [Sidebar lane status](#sidebar-lane-status) for the sidebar's operational
 signals and its distinct treatment of stale inventory and evidence.
 
 Open product inventories, workspaces, activity, and environment evidence views refresh
-their read resources once a minute after a completed read. Hidden tabs pause
+their read resources at the next evidence deadline or one minute after a
+completed read, whichever comes first. This includes the production monitor's
+short remaining window when a page opens between observations; the browser
+does not wait another full cadence while current service evidence advances.
+If that read still returns the same expired proof, it retries every five
+seconds for at most one minute to observe the monitor's completed probes.
+The old proof stays stale in the meantime. Already expired deadlines do not
+start new retry windows, and a failed read returns to normal polling. Hidden tabs pause
 automatic reads and catch up on focus or visibility return when due. Pending
 reads do not overlap; access-denied and missing resources require a manual retry.
 Evidence still expires at its recorded deadline while a read is delayed or

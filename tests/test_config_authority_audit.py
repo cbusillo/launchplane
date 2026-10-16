@@ -9,6 +9,11 @@ from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
+from control_plane.config_authority_audit import (
+    ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT,
+    ALLOW_REASON_SCHEMA_ONLY,
+)
 from control_plane.config_authority_audit import build_config_authority_audit
 from control_plane.config_authority_audit import evaluate_config_authority_gate
 from control_plane.config_authority_audit import render_config_authority_markdown
@@ -1129,6 +1134,65 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(len(script_findings), 1)
         self.assertEqual(script_findings[0]["key"], "repository")
         self.assertEqual(script_findings[0]["classification"], "needs_classification")
+
+    def test_profile_migration_loopback_commands_do_not_allow_external_runtime_defaults(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            contracts = root / "control_plane" / "contracts"
+            contracts.mkdir(parents=True)
+            (contracts / "sample_migration.py").write_text(
+                'LOCAL_COMMAND = "curl http://127.0.0.1:3000/internal-job"\n'
+                'EXTERNAL_COMMAND = "curl https://application.example.test/internal-job"\n'
+                'MIXED_REPO_COMMAND = "curl http://127.0.0.1:3000/internal-job --repo example/production"\n'
+                'MIXED_HOST_COMMAND = "curl http://127.0.0.1:3000/internal-job app.example.test"\n'
+                'MIXED_PROVIDER_COMMAND = "curl http://127.0.0.1:3000/internal-job --target dokploy-live"\n',
+                encoding="utf-8",
+            )
+            (contracts / "sample.py").write_text(
+                'LOCAL_COMMAND = "curl http://127.0.0.1:3000/internal-job"\n', encoding="utf-8"
+            )
+            _commit_all(root)
+            findings = _findings(build_config_authority_audit(control_plane_root=root))
+        by_location = {(finding["path"], finding["key"]): finding for finding in findings}
+        self.assertEqual(
+            by_location["control_plane/contracts/sample_migration.py", "LOCAL_COMMAND"][
+                "allow_reason"
+            ],
+            ALLOW_REASON_SCHEMA_ONLY,
+        )
+        self.assertFalse(
+            by_location["control_plane/contracts/sample_migration.py", "EXTERNAL_COMMAND"][
+                "allow_reason"
+            ]
+        )
+        for key in ("MIXED_REPO_COMMAND", "MIXED_HOST_COMMAND", "MIXED_PROVIDER_COMMAND"):
+            self.assertFalse(
+                by_location["control_plane/contracts/sample_migration.py", key]["allow_reason"]
+            )
+        self.assertFalse(
+            by_location["control_plane/contracts/sample.py", "LOCAL_COMMAND"]["allow_reason"]
+        )
+
+    def test_python_command_paths_are_not_repository_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / "lifecycle.py").write_text(
+                'COMMANDS = [{"command": "./node_modules/.bin/prisma migrate deploy"}]\n'
+                'REPOSITORY = "example/production"\n'
+                'MIXED_COMMAND = "./node_modules/.bin/prisma --repo example/production"\n',
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            findings = _findings(build_config_authority_audit(control_plane_root=root))
+        keys = {finding["key"] for finding in findings}
+        self.assertNotIn("COMMANDS", keys)
+        self.assertNotIn("COMMANDS[0].command", keys)
+        self.assertIn("REPOSITORY", keys)
+        self.assertIn("MIXED_COMMAND", keys)
 
     def test_hashes_are_stable_for_same_inputs_and_findings(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3863,54 +3927,45 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         )
         self.assertEqual(product_repo_gate["status"], "pass")
 
-    def test_product_repo_gate_allows_verireel_dokploy_managed_secret_bindings(
-        self,
-    ) -> None:
+    def test_product_repo_gate_allows_required_compose_inputs_without_product_names(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             _init_repo(root)
-            compose = root / "compose.dokploy.yaml"
-            compose.write_text(
-                "services:\n"
-                "  app:\n"
-                "    environment:\n"
-                "      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:?required}\n"
-                "      VERIREEL_CRON_SECRET: ${VERIREEL_CRON_SECRET:?required}\n"
-                "      VERIREEL_INDEXNOW_KEY: ${VERIREEL_INDEXNOW_KEY:?required}\n"
-                "      VERIREEL_INDEXNOW_SUBMIT_SECRET: ${VERIREEL_INDEXNOW_SUBMIT_SECRET:?required}\n"
-                "      VERIREEL_SECRETS_MASTER_KEY: ${VERIREEL_SECRETS_MASTER_KEY:?required}\n"
-                "      VERIREEL_SMOKE_MAINTENANCE_SECRET: ${VERIREEL_SMOKE_MAINTENANCE_SECRET:?required}\n"
-                "      UNCLASSIFIED_API_SECRET: ${UNCLASSIFIED_API_SECRET:?required}\n",
+            (root / "compose.dokploy.yaml").write_text(
+                "services:\n  app:\n    environment:\n"
+                "      CUSTOMER_AUTH_SECRET: ${CUSTOMER_AUTH_SECRET:?required}\n"
+                "      OTHER_SECRET: hardcoded-value\n",
                 encoding="utf-8",
             )
             _commit_all(root)
-
             payload = build_config_authority_audit(control_plane_root=root)
-            product_repo_gate = evaluate_config_authority_gate(payload, profile="product-repo")
+        findings = {finding["key"]: finding for finding in _findings(payload)}
+        self.assertEqual(
+            findings["CUSTOMER_AUTH_SECRET"]["allow_reason"],
+            ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT,
+        )
+        self.assertFalse(findings["OTHER_SECRET"]["allow_reason"])
 
-        findings_by_key = {finding["key"]: finding for finding in _findings(payload)}
-        for key in (
-            "BETTER_AUTH_SECRET",
-            "VERIREEL_CRON_SECRET",
-            "VERIREEL_INDEXNOW_KEY",
-            "VERIREEL_INDEXNOW_SUBMIT_SECRET",
-            "VERIREEL_SECRETS_MASTER_KEY",
-            "VERIREEL_SMOKE_MAINTENANCE_SECRET",
-        ):
+    def test_required_compose_placeholders_cannot_classify_platform_credentials_as_app_inputs(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / "compose.dokploy.yaml").write_text(
+                "services:\n  app:\n    environment:\n"
+                + "".join(
+                    f"      {key}: ${{{key}:?required}}\n"
+                    for key in sorted(PLATFORM_CREDENTIAL_KEYS)
+                ),
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            findings = _findings(build_config_authority_audit(control_plane_root=root))
+        by_key = {finding["key"]: finding for finding in findings}
+        for key in PLATFORM_CREDENTIAL_KEYS:
             with self.subTest(key=key):
-                self.assertEqual(
-                    findings_by_key[key]["allow_reason"],
-                    "operator_supplied_runtime_input",
-                )
-        self.assertEqual(
-            findings_by_key["UNCLASSIFIED_API_SECRET"]["classification"],
-            "needs_classification",
-        )
-        self.assertEqual(product_repo_gate["status"], "fail")
-        self.assertEqual(
-            cast("list[dict[str, object]]", product_repo_gate["rejected_findings"])[0]["key"],
-            "UNCLASSIFIED_API_SECRET",
-        )
+                self.assertFalse(by_key[key]["allow_reason"])
 
     def test_product_repo_gate_rejects_managed_secret_binding_fixtures(self) -> None:
         with TemporaryDirectory() as temp_dir:

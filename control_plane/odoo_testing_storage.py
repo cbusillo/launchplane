@@ -16,6 +16,7 @@ from control_plane.odoo_testing_drill import (
     DrillPrerequisite,
     DrillSkipped,
     drill_receipt,
+    require_drill_use_unprotected,
 )
 from control_plane.odoo_testing_restore import (
     FRESH_TESTING_RESTORE_HOST_PROGRAM,
@@ -232,9 +233,7 @@ def prepare_drill_storage(
             operation, binding, payload, perform, clock=clock, checkpoint=checkpoint
         )
     except DisposableLaneSafetyUnknown as error:
-        safety = store.read_disposable_lane_safety(operation.product, operation.context, "testing")
-        if safety is not None and (safety.usage == "in_use" or safety.data == "only_copy"):
-            raise DrillSkipped("lane_use_or_only_copy_protected") from error
+        require_drill_use_unprotected(store, operation.product, operation.context, now=clock())
         raise DrillPrerequisite("usage_custody_or_isolation_unverified") from error
     if result.get("skip_code"):
         raise DrillSkipped(str(result["skip_code"]))

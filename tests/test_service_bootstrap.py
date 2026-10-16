@@ -63,6 +63,9 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
         sweep_patch = patch.object(service_bootstrap, "PreviewLifecycleScheduler")
         self.preview_lifecycle_scheduler = sweep_patch.start().return_value
         self.addCleanup(sweep_patch.stop)
+        digest_patch = patch.object(service_bootstrap, "ReleaseDigestScheduler")
+        self.release_digest_scheduler = digest_patch.start().return_value
+        self.addCleanup(digest_patch.stop)
 
     def test_service_serve_runs_fastapi_app(self) -> None:
         fastapi_response: Any | None = None
@@ -250,6 +253,8 @@ class LaunchplaneServiceBootstrapTests(unittest.TestCase):
             run_uvicorn.assert_called_once()
             self.scheduler.start.assert_called()
             self.scheduler.stop.assert_called()
+            self.release_digest_scheduler.start.assert_called()
+            self.release_digest_scheduler.stop.assert_called()
             self.preview_lifecycle_scheduler.start.assert_called()
             self.preview_lifecycle_scheduler.stop.assert_called()
 

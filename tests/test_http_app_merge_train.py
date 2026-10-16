@@ -1477,6 +1477,10 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
                     request_payload,
                     idempotency_key="merge-train-stack-collapse-execute",
                 )
+                records_after_execution = store.list_merge_train_stack_collapse_plan_records(
+                    repository=str(request_payload["repository"]),
+                    base_branch=str(request_payload["base_branch"]),
+                )
                 replay_response = await _post_merge_train_stack_collapse_run_once(
                     app,
                     request_payload,
@@ -1489,7 +1493,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
         self.assertEqual(first_response.status_code, 202)
         self.assertEqual(replay_response.status_code, 202)
         self.assertTrue(replay_response.json()["replayed"])
-        self.assertEqual(len(stack_records), 2)
+        self.assertEqual(stack_records, records_after_execution)
 
     async def test_rejects_missing_stack_collapse_storage(self) -> None:
         with (
@@ -1538,6 +1542,7 @@ class FastApiMergeTrainStackCollapseRunOnceTests(unittest.IsolatedAsyncioTestCas
                 branch_client=_FakeMergeTrainGitHubClient(transport=object()),
                 child_readiness_reasons=lambda _pull_request_number: (),
                 updated_at="2026-05-13T21:02:00Z",
+                checkpoint=lambda progress: None,
             )
             executed_plan_record = build_merge_train_stack_collapse_plan_record(
                 plan=executed_record,

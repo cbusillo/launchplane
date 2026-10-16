@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
     validate_product_profile_history_transition,
 )
 from control_plane.workflows.generic_web_deploy import product_profile_uses_generic_web_base
@@ -33,6 +34,7 @@ class GenericWebPreviewDeclaration(BaseModel):
     transport_extension: Literal["", "verireel-postgres"] = ""
     transport_database_prefix: str = ""
     app_name_suffix: str = ""
+    generic_web_extensions: GenericWebLaneExtensions | None = None
 
 
 class ProductGenericWebTransitionRequest(BaseModel):
@@ -105,12 +107,20 @@ def build_generic_web_transition_plan(
         )
     preview = profile.preview
     if request.preview is not None:
-        preview = preview.model_copy(update=request.preview.model_dump(exclude_unset=True))
+        updates = request.preview.model_dump(exclude_unset=True, exclude={"generic_web_extensions"})
+        if request.preview.generic_web_extensions is not None:
+            updates["generic_web_extensions"] = request.preview.generic_web_extensions
+        preview = preview.model_copy(update=updates)
     if preview.data_transport_mode == "driver" and not preview.transport_extension:
         raise ValueError("Driver preview transport requires an explicit shared-web extension.")
     replacement = LaunchplaneProductProfileRecord.model_validate(
         profile.model_copy(
-            update={"driver_id": "generic-web", "lanes": lanes, "preview": preview}
+            update={
+                "schema_version": CURRENT_PRODUCT_PROFILE_SCHEMA_VERSION,
+                "driver_id": "generic-web",
+                "lanes": lanes,
+                "preview": preview,
+            }
         ).model_dump(mode="json")
     ).validate_write_contract()
     validate_product_profile_history_transition(

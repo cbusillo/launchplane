@@ -3208,6 +3208,10 @@ def _reflow_stale_candidate_record(
         ),
         batch_landing=candidate_record.ordinary_job_binding is None,
         existing_candidate_size=len(candidate_record.candidate.entries),
+        planned_handoff_heads=frozenset(
+            (entry.pull_request_number, entry.head_sha)
+            for entry in candidate_record.candidate.entries
+        ),
     )
     candidate_matches_queue = _merge_train_candidate_matches_dry_run_queue(
         candidate=candidate_record.candidate,
@@ -4131,6 +4135,20 @@ def _advance_planned_stack_collapse_record(
             lease=lease,
         )
 
+    def unproven_stack_merge(message: str) -> dict[str, object]:
+        return {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "blocked",
+            "controller_action": "stack_unsupported",
+            "blocking_reason": {
+                "code": "merge_train_stack_merge_unproven",
+                "message": message
+                + " Review the current heads and post fresh checked handoffs before replanning.",
+            },
+            "merge_train_stack_collapse_plan_record_id": planned_collapse_record.record_id,
+        }
+
     # Obsolete execution steps aside while its complete history stays available.
     if planned_collapse_record.plan.policy_key != repository_policy.policy_key or (
         not merge_train_policy_bindings_match(
@@ -4185,12 +4203,15 @@ def _advance_planned_stack_collapse_record(
                 child_head_sha=current_head_shas[root_mutation.child_pull_request_number],
                 expected_parent_head_sha=expected_root_sha,
                 parent_head_ref=root_mutation.parent_head_ref,
+                expected_merge_tree_sha=root_mutation.expected_merge_tree_sha,
                 collapse_id=planned_collapse_record.plan.collapse_id,
                 child_pull_request_number=root_mutation.child_pull_request_number,
                 parent_pull_request_number=root_mutation.parent_pull_request_number,
             )
-        except MergeTrainGitHubStaleHeadError:
+        except MergeTrainGitHubStaleHeadError as error:
             retire("root_moved")
+            if root_mutation.expected_merge_tree_sha:
+                return unproven_stack_merge(str(error))
             return None
         if observed_root_sha != root_pull_request.head_sha:
             # A ref probe and PR snapshot can disagree while GitHub converges.
@@ -4296,10 +4317,19 @@ def _advance_planned_stack_collapse_record(
                     repository=planned_collapse_record.plan.repository,
                     repository_policy=repository_policy,
                 ),
+                recovered_child_readiness_reasons=merge_train_stack_child_readiness_check(
+                    reader=github_client,
+                    repository=planned_collapse_record.plan.repository,
+                    repository_policy=repository_policy,
+                    recovered_merge=True,
+                ),
                 effect_executor=github_client.semantic_effect_executor,
                 updated_at=recorded_at,
                 checkpoint=checkpoint_collapse_progress,
             )
+        except MergeTrainGitHubStaleHeadError as error:
+            retire("unproven_stack_recovery")
+            return unproven_stack_merge(str(error))
         except MergeTrainStackChildNotReadyError as error:
             return {
                 "repository": request.repository,

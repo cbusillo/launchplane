@@ -9,6 +9,12 @@ from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 from httpx2 import ASGITransport, AsyncClient, Response
 
+# Bounds a lifespan that never finishes starting or stopping. It is not a
+# latency requirement: production uvicorn waits for startup without a deadline,
+# and startup here takes milliseconds. The library's 5-second default failed
+# tests when a loaded host stalled the process (launchplane#2432).
+LIFESPAN_HANG_DEADLINE_SECONDS = 60.0
+
 
 @asynccontextmanager
 async def lifespan_client(
@@ -17,7 +23,11 @@ async def lifespan_client(
     raise_server_exceptions: bool = True,
     base_url: str = "https://testserver",
 ) -> AsyncIterator[AsyncClient]:
-    async with LifespanManager(app) as manager:
+    async with LifespanManager(
+        app,
+        startup_timeout=LIFESPAN_HANG_DEADLINE_SECONDS,
+        shutdown_timeout=LIFESPAN_HANG_DEADLINE_SECONDS,
+    ) as manager:
         transport = ASGITransport(
             app=manager.app,
             raise_app_exceptions=raise_server_exceptions,

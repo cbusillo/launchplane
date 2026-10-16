@@ -66,6 +66,10 @@ updates:
       semver-major-days: 30
     labels:
       - dependencies
+    ignore:
+      # macOS persistent-profile shutdown regression; qualification: #3830.
+      - dependency-name: "@playwright/test"
+        versions: ["1.64.x"]
     groups:
       routine-version-updates:
         patterns:

@@ -9,11 +9,14 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 import re
+import shlex
 import subprocess
 import tomllib
 import tokenize
 from typing import Protocol, cast
+from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 
 
 MAX_SCANNED_FILE_BYTES = 1_000_000
@@ -28,17 +31,6 @@ ALLOW_REASON_THIN_CONNECTOR_INPUT = "thin_connector_input"
 ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT = "operator_supplied_runtime_input"
 ALLOW_REASON_PRODUCT_OWNED_ADDON = "product_owned_addon"
 ALLOW_REASON_REPO_METADATA_ERGONOMICS = "repo_metadata_ergonomics"
-
-VERIREEL_DOKPLOY_MANAGED_SECRET_BINDINGS = frozenset(
-    (
-        "BETTER_AUTH_SECRET",
-        "VERIREEL_CRON_SECRET",
-        "VERIREEL_INDEXNOW_KEY",
-        "VERIREEL_INDEXNOW_SUBMIT_SECRET",
-        "VERIREEL_SECRETS_MASTER_KEY",
-        "VERIREEL_SMOKE_MAINTENANCE_SECRET",
-    )
-)
 
 SCAN_MODES = ("full-audit", "changed-files-gate")
 OUTPUT_FORMATS = ("json", "markdown")
@@ -3038,7 +3030,8 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
         return True
     repository_reference = (
         _contains_owner_repo_reference(value_text)
-        if normalized == "package.json" and key.startswith("scripts.")
+        if normalized.endswith(".py")
+        or (normalized == "package.json" and key.startswith("scripts."))
         else OWNER_REPO_PATTERN.search(value_text) is not None
     )
     return bool(
@@ -3197,6 +3190,14 @@ def _allow_reason(
         and re.fullmatch(r"py3(?:[3-9]|1[0-5])", value)
     ):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
+    if (
+        normalized.startswith("control_plane/contracts/")
+        and normalized.endswith("_migration.py")
+        and key_text.endswith("COMMAND")
+        and isinstance(value, str)
+    ):
+        if _is_loopback_migration_command(value):
+            return ALLOW_REASON_SCHEMA_ONLY
     if normalized.endswith(".py") and (
         key_text.startswith("ALLOW_REASON_")
         or key_text.startswith("PRODUCT_DRIVER_REUSABLE_")
@@ -3204,6 +3205,8 @@ def _allow_reason(
         or "PATH_GLOBS" in key_text
     ):
         return ALLOW_REASON_SCHEMA_ONLY
+    if normalized == "compose.dokploy.yaml" and key_text in PLATFORM_CREDENTIAL_KEYS:
+        return ""
     if key_text in BOOTSTRAP_ENV_KEYS:
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
     if normalized.startswith(".github/workflows/") and _is_launchplane_public_url_reference(
@@ -3381,7 +3384,7 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
-    if _is_verireel_dokploy_managed_secret_binding(
+    if _is_required_compose_environment_input(
         path=normalized,
         key=key,
         value=value,
@@ -3424,11 +3427,48 @@ def _allow_reason(
     return ""
 
 
-def _is_verireel_dokploy_managed_secret_binding(*, path: str, key: str, value: object) -> bool:
+def _is_loopback_migration_command(value: str) -> bool:
+    try:
+        words = shlex.split(value)
+        urls = [word for word in words if word.startswith(("http://", "https://"))]
+        parsed = [urlparse(url) for url in urls]
+    except ValueError:
+        return False
+    if (
+        not words
+        or not parsed
+        or not all(
+            url.hostname in {"127.0.0.1", "localhost", "::1"}
+            and url.username is None
+            and url.password is None
+            for url in parsed
+        )
+    ):
+        return False
+    remainder = URL_PATTERN.sub("", value)
+    if _contains_owner_repo_reference(remainder) or PROVIDER_TARGET_PATTERN.search(remainder):
+        return False
+    # Only the executable, explicit filesystem paths, simple switches and the
+    # loopback URL are schema mechanics. Other arguments require classification.
+    executable = words[0]
+    if not (
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", executable)
+        or executable.startswith(("./", "../", "/"))
+    ):
+        return False
+    return all(
+        word in urls
+        or word.startswith(("./", "../", "/"))
+        or re.fullmatch(r"--?[A-Za-z][A-Za-z0-9_-]*", word)
+        for word in words[1:]
+    )
+
+
+def _is_required_compose_environment_input(*, path: str, key: str, value: object) -> bool:
     if path != "compose.dokploy.yaml":
         return False
     key_text = key.strip().upper()
-    if key_text not in VERIREEL_DOKPLOY_MANAGED_SECRET_BINDINGS:
+    if key_text in PLATFORM_CREDENTIAL_KEYS or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key_text):
         return False
     return _string_value(value).strip() == f"${{{key_text}:?required}}"
 
@@ -4170,9 +4210,6 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
         "launchplane.context.enabled",
         "launchplane.operator.enabled",
         "launchplane.operator.requiresPrivateConfig",
-        "launchplane.mergeTrain.enabled",
-        "launchplane.mergeTrain.controller",
-        "launchplane.mergeTrain.githubActionsRunner.mutateDefault",
     }:
         return isinstance(value, bool)
     if not isinstance(value, str):
@@ -4188,51 +4225,7 @@ def _is_launchplane_metadata_routing(key: str, value: object) -> bool:
         return value.removeprefix("skills/") == catalog_paths[key]
     if key in {"launchplane.service.contextUrlEnv", "launchplane.service.operatorUrlEnv"}:
         return re.fullmatch(r"[A-Z][A-Z0-9_]*", value) is not None
-    if key == "launchplane.mergeTrain.githubActionsRunner.repo":
-        return re.fullmatch(r"[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+", value) is not None and value.split(
-            "/", 1
-        )[1] not in {".", ".."}
-    if key == "launchplane.mergeTrain.githubActionsRunner.workflow":
-        return re.fullmatch(r"[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml", value) is not None
-    if key in {
-        "launchplane.mergeTrain.baseBranch",
-        "launchplane.mergeTrain.githubActionsRunner.ref",
-    }:
-        return (
-            re.fullmatch(r"[^\x00-\x20\x7f~^:?*\[\\]+", value) is not None
-            and ".." not in value
-            and "//" not in value
-            and "@{" not in value
-            and value != "@"
-            and not value.startswith("/")
-            and not value.endswith(("/", "."))
-            and all(
-                not part.startswith(".") and not part.endswith(".lock") for part in value.split("/")
-            )
-        )
-    if key == "launchplane.mergeTrain.readyLabel":
-        return (
-            bool(value.strip())
-            and not re.search(r"[\x00-\x1f\x7f]", value)
-            and not value.startswith(("/", "~", "\\"))
-            and "://" not in value
-            and "//" not in value
-            and not re.search(r":\d+(?:[/?#]|$)", value)
-            and not re.match(r"[A-Za-z]:[\\/]", value)
-            and not re.match(r"(?:[A-Za-z0-9-]+\.)+[A-Za-z0-9-]+(?:/|:|$)", value)
-            and not PROVIDER_TARGET_PATTERN.search(value)
-            and all(part not in {".", ".."} for part in value.split("/"))
-            and not re.search(r"/[^/]+\.(?:json|env|toml|ya?ml|pem|key)$", value, re.I)
-        )
-    if key == "launchplane.mergeTrain.githubActionsRunner.runnerMode":
-        return value == "controller"
-    evidence_fields = {
-        "runnerWorkflow": "workflow_run.head_sha",
-        "candidate": "result.candidate.candidate_sha",
-        "landing": "result.landing_plan.entries[].merge_commit_sha",
-    }
-    prefix = "launchplane.mergeTrain.githubActionsRunner.revisionEvidenceFields."
-    return key.startswith(prefix) and value == evidence_fields.get(key.removeprefix(prefix))
+    return False
 
 
 def _is_repo_metadata_ergonomics_key(key: str) -> bool:

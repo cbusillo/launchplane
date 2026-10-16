@@ -12,6 +12,7 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane import runtime_platform_credentials
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.disposable_lanes import (
     DisposableLaneStore,
     DisposableLaneSafetyUnknown,
@@ -136,7 +137,7 @@ _RETIREMENT_PROTECTED_KEYS = frozenset(
     {
         "PLATFORM_CONTEXT",
         "PLATFORM_INSTANCE",
-        "DOCKER_IMAGE_REFERENCE",
+        *COMPOSE_IMAGE_REFERENCE_ENV_KEYS,
         "LAUNCHPLANE_RUNTIME_IDENTITY_JSON",
         "LAUNCHPLANE_DEPLOYMENT_RECORD_ID",
         "LAUNCHPLANE_ARTIFACT_ID",

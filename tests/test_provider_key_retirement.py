@@ -12,6 +12,7 @@ from control_plane.cli import main
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_identity import COMPOSE_IMAGE_REFERENCE_ENV_KEYS
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.live_target_runtime import (
     LiveTargetRuntimeError,
@@ -199,6 +200,17 @@ class ProviderKeyRetirementApiTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(driver_key.status_code, 400, driver_key.text)
         self.assertEqual(driver_key.json()["error"]["code"], "runtime_retirement_conflict")
+
+    async def test_compose_driver_image_inputs_cannot_be_retired(self) -> None:
+        for key in COMPOSE_IMAGE_REFERENCE_ENV_KEYS:
+            with self.subTest(key=key):
+                response = await _post_product_config_apply(
+                    self.app,
+                    self._payload(key=key),
+                    authorization="Bearer local-operator-token",
+                )
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(response.json()["error"]["code"], "runtime_retirement_conflict")
 
     async def test_concurrent_retirement_edit_is_not_lost(self) -> None:
         review = await _post_product_config_apply(

@@ -18,6 +18,7 @@ from control_plane.contracts.dokploy_target_record import (
 )
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
+    OdooInstanceOverrideRecord,
     OdooOverrideValue,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -30,6 +31,7 @@ from control_plane.product_secret_copy import (
     resolve_copy_source,
 )
 from control_plane.odoo_instance_overrides import config_parameter_secret_env_key
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.runtime_key_safety import runtime_key_safety_environment_class
 
 
@@ -80,10 +82,29 @@ class PreviewImportSourceStore(ProductSecretCopyStore, Protocol):
 
 @dataclass(frozen=True)
 class FishbowlPreviewSource:
+    context: str
+    instance: str
+    binding: SecretBinding
     parameters: tuple[OdooConfigParameterOverride, ...]
     environment: dict[str, str]
     allowance: DokployTargetIntegrationAllowance
     authority_sha256: str
+
+    def require_override_agreement(self, record: OdooInstanceOverrideRecord) -> None:
+        """This transient payload uses the qualified copy source, not preview inheritance."""
+        if (
+            (record.context, record.instance) != (self.context, self.instance)
+            or runtime_key_safety_environment_class(record.instance) != "preview"
+            or record.config_parameters != self.parameters
+            or self.binding.binding_key not in self.environment
+            or any(
+                item.value.secret_binding_id != self.binding.binding_id
+                or config_parameter_secret_env_key(item.key) != self.binding.binding_key
+                for item in record.config_parameters
+                if item.value.source == "secret_binding"
+            )
+        ):
+            raise ValueError("Preview override must match its qualified import source delivery.")
 
 
 def resolve_fishbowl_preview_source(
@@ -213,6 +234,9 @@ def resolve_fishbowl_preview_source(
         json.dumps(authority, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return FishbowlPreviewSource(
+        context=profile.preview.context,
+        instance=preview_slug,
+        binding=binding,
         parameters=tuple(parameters),
         environment={key: copy_source_value(version)} if include_secret_value else {},
         allowance=allowances[0],
