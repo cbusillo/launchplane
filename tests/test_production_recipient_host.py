@@ -155,7 +155,18 @@ class HostTransportTests(unittest.TestCase):
             self.assertNotIn(base64.b64encode(json.dumps(spec).encode()).decode(), completed.stdout)
             return {"recipient_upstreams_ok": "true"}
 
+        from control_plane.production_recipient_fence import fenced_program
+
         with (
+            patch(
+                "control_plane.production_recipient_host.fenced_program",
+                side_effect=lambda program, namespace, binding: fenced_program(
+                    program, namespace, binding
+                ).replace(
+                    "/var/lib/launchplane/recipient-execution",
+                    str(self.root.resolve() / "execution"),
+                ),
+            ),
             patch(
                 "control_plane.production_recipient_host.api.fetch_dokploy_target_payload",
                 return_value={"serverId": self.record.request.destination_server_id},

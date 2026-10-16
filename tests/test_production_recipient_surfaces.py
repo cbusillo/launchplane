@@ -222,6 +222,64 @@ class HttpBoundaryTests(unittest.TestCase):
         self.mutate.assert_not_awaited()
         self.assertEqual(self.fixture.effects, [])
 
+    def test_terminal_identity_cannot_arm_continue_or_recover_a_production_release(self) -> None:
+        from control_plane.production_recipient_cutover import CUTOVER_ROUTE
+        from control_plane.production_recipient_continuation import CONTINUATION_ROUTE
+        from control_plane.production_recipient_release_recovery import RELEASE_RECOVERY_ROUTE
+
+        self.identity = TerminalAgentIdentity("agent", "fixture", director_agent=True)
+        requests = (
+            (
+                CUTOVER_ROUTE,
+                {
+                    "context": self.fixture.context,
+                    "preparation_plan_sha256": "a" * 64,
+                    "health_urls": {},
+                    "backup_sources": {},
+                    "writer_binding_id": "existing",
+                    "destination_backup_operation_id": "capture",
+                    "readiness_url": "http://192.168.1.2/ready",
+                    "reason": "review",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": "b" * 64,
+                },
+            ),
+            (
+                CONTINUATION_ROUTE,
+                {
+                    "context": self.fixture.context,
+                    "original_key": "original",
+                    "expected_custody_sha256": "a" * 64,
+                    "replacement": self.fixture.body.model_copy(
+                        update={"mode": "dry-run", "reviewed_plan_sha256": ""}
+                    ).model_dump(mode="json"),
+                    "reason": "review",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": "b" * 64,
+                },
+            ),
+            (
+                RELEASE_RECOVERY_ROUTE,
+                {
+                    "context": self.fixture.context,
+                    "preparation_plan_sha256": "a" * 64,
+                    "decision_record_id": "accepted",
+                    "kind": "promote",
+                    "reason": "review",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": "b" * 64,
+                },
+            ),
+        )
+        for route, body in requests:
+            with self.subTest(route=route):
+                response = self.post(body, route)
+                self.assertEqual(response.status_code, 403, response.text)
+        self.mutate.assert_not_awaited()
+        self.assertEqual(self.post(self.fixture.body.model_dump(mode="json")).status_code, 403)
+        self.mutate.assert_not_awaited()
+        self.assertEqual(self.fixture.effects, [])
+
     def test_sqlite_apply_and_nonproduction_payload_refuse(self) -> None:
         self.assertEqual(self.post(self.fixture.body.model_dump(mode="json")).status_code, 503)
         self.assertEqual(

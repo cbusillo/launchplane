@@ -332,6 +332,8 @@ def build_recipient(
     actor: str,
     scope: str,
     original_key: str = "",
+    *,
+    retained_supersession: bool = False,
 ) -> ProductionRecipientRecord:
     existing = custody(store, product, request.context)
     intent = request.model_copy(update={"mode": "dry-run", "reviewed_plan_sha256": ""})
@@ -350,7 +352,7 @@ def build_recipient(
     )
     if old.get("composeId") != target_id.target_id:
         raise ValueError("The provider returned a different production recipient.")
-    if existing:
+    if existing and not retained_supersession:
         if (
             existing.request == intent
             and existing.authority_snapshot == snapshot
@@ -385,6 +387,7 @@ def build_recipient(
             "request": intent.model_dump(mode="json"),
             "authority": snapshot,
             "provider_sha256": provider_binding_digest(old),
+            **({"predecessor": existing.plan_sha256} if retained_supersession and existing else {}),
         }
     )
     record = ProductionRecipientRecord(
@@ -393,6 +396,7 @@ def build_recipient(
         actor=actor,
         scope=scope,
         original_key=original_key,
+        execution_fence_version=1,
         request=intent,
         plan_sha256="",
         namespace="lp-prod-recipient-" + plan_digest[:32],
@@ -442,6 +446,8 @@ def plan(record: ProductionRecipientRecord) -> dict[str, Any]:
         qualified_at=record.qualified_at,
         upstream_qualified=bool(record.upstream_proof),
         recovery_qualified=bool(record.recovery_proof),
+        custody_sha256=canonical_sha256(record.model_dump(mode="json")),
+        phase=record.phase,
     ).model_dump(mode="json")
 
 
@@ -461,6 +467,14 @@ class ProductionRecipientAdapter:
 
     def reconciliation_key(self) -> str:
         return self.request.reviewed_plan_sha256
+
+    def execution_key(self) -> str:
+        record = custody(self.store, self.product, self.request.context)
+        if record and record.continuation:
+            if self.original_key != record.original_key:
+                raise ValueError("Retain the original preparation key.")
+            return self.original_key + ":continuation:" + record.plan_sha256
+        return self.original_key
 
     def current(self) -> ProductionRecipientRecord:
         return build_recipient(
@@ -527,7 +541,23 @@ class ProductionRecipientAdapter:
         if json.loads(str(payload.get("composeFile") or "null")) != expected:
             raise ValueError("The provider source differs from the reviewed immutable source.")
         values = runtime_values(self.store, self.root, record)
-        if api.parse_dokploy_env_text(str(payload.get("env") or "")) != values:
+        allowed_environments = [values]
+        if record.execution.get("runtime_identity"):
+            from control_plane.contracts.runtime_identity import (
+                RuntimeIdentity,
+                runtime_identity_env,
+            )
+
+            deployed_values = {
+                **values,
+                **runtime_identity_env(
+                    RuntimeIdentity.model_validate(record.execution["runtime_identity"])
+                ),
+            }
+            allowed_environments = (
+                [values] if not record.execution.get("trigger_requested_at") else []
+            ) + [deployed_values]
+        if api.parse_dokploy_env_text(str(payload.get("env") or "")) not in allowed_environments:
             raise ValueError("The provider environment differs from managed production inputs.")
         actual = yaml.safe_load(
             compose.fetch_dokploy_converted_compose_file(
@@ -729,7 +759,7 @@ class ProductionRecipientAdapter:
             reservation = self.store.read_idempotency_record(
                 scope=self.scope,
                 route_path=ROUTE.format(product=self.product),
-                idempotency_key=self.original_key,
+                idempotency_key=self.execution_key(),
             )
             started = bool(
                 reservation is None

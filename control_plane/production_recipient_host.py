@@ -1,6 +1,7 @@
 """Fixed destination programs; no product command, credential export or guest restore."""
 
 import base64
+import hashlib
 import inspect
 import json
 from collections.abc import Callable
@@ -11,6 +12,7 @@ from control_plane import odoo_source_probe
 from control_plane.contracts.production_recipient import ProductionRecipientRecord
 from control_plane.dokploy import api, post_deploy, source
 from control_plane.production_recipient_resources import RESOURCE_LIBRARY
+from control_plane.production_recipient_fence import fenced_program
 
 
 class RecipientProbeCleanupError(RuntimeError):
@@ -25,7 +27,16 @@ def run_recipient_program(
     checkpoint: Callable[[str], None],
     *,
     scrub_guard: Callable[[], None] | None = None,
+    retire_execution: bool = False,
 ) -> dict[str, str]:
+    if retire_execution:
+        from control_plane.production_recipient_fence import RETIRE_EXECUTION_PROGRAM
+
+        if program != RETIRE_EXECUTION_PROGRAM or spec != {
+            "namespace": record.namespace,
+            "binding": record.plan_sha256,
+        }:
+            raise ValueError("Only the fixed namespace retirement fence can bypass execution.")
     host, token = source.read_dokploy_config(control_plane_root=root)
     payload = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=record.target_id
@@ -47,7 +58,19 @@ def run_recipient_program(
         if spec.get("inspect")
         else "Launchplane isolated recipient qualification"
     )
-    schedule_app_name = record.namespace + ("-check" if spec.get("inspect") else "-qual")
+    schedule_app_name = (
+        "lp-recipient-job-"
+        + hashlib.sha256(
+            json.dumps(
+                [
+                    record.namespace,
+                    record.target_id,
+                    "inspect" if spec.get("inspect") else "apply",
+                    "retire" if retire_execution else "qualify",
+                ]
+            ).encode()
+        ).hexdigest()[:32]
+    )
     schedule_payload: api.JsonObject = {
         "name": schedule_name,
         "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
@@ -58,7 +81,11 @@ def run_recipient_program(
         "script": "#!/usr/bin/env bash\nset -euo pipefail\npython3 - <<'LP_QUALIFY'\nimport sys\nsys.argv=['recipient',"
         + repr(encoded)
         + "]\n"
-        + program
+        + (
+            program
+            if retire_execution
+            else fenced_program(program, record.namespace, record.plan_sha256)
+        )
         + "\nLP_QUALIFY\n",
         "serverId": server,
         "userId": lookup if kind == "dokploy-server" else None,

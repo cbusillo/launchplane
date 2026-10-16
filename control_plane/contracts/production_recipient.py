@@ -62,7 +62,7 @@ class ProductionRecipientRequest(BaseModel):
     database_service: str = Field(min_length=1)
     service_limits: dict[str, RecipientServiceLimits]
     upstreams: tuple[RecipientUpstream, ...] = ()
-    mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
+    mode: Literal["dry-run", "apply", "readback", "receipt", "custody"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
@@ -124,6 +124,12 @@ class ProductionRecipientRecord(BaseModel):
     prior_attempts: list[dict[str, Any]] = Field(default_factory=list)
     upstream_proof: dict[str, Any] = Field(default_factory=dict)
     recovery_proof: dict[str, Any] = Field(default_factory=dict)
+    publication: dict[str, Any] = Field(default_factory=dict)
+    continuation: dict[str, Any] = Field(default_factory=dict)
+    activation: dict[str, Any] = Field(default_factory=dict)
+    execution: dict[str, Any] = Field(default_factory=dict)
+    writer_custody: list[dict[str, Any]] = Field(default_factory=list)
+    execution_fence_version: int = 0
 
     @property
     def volumes(self) -> dict[str, str]:
@@ -149,6 +155,8 @@ class ProductionRecipientPlan(BaseModel):
     qualified_at: str = ""
     upstream_qualified: bool = False
     recovery_qualified: bool = False
+    custody_sha256: str = ""
+    phase: str = "prepared"
 
 
 class RecipientRecoveryRequest(BaseModel):
