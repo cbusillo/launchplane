@@ -126,10 +126,15 @@ def service_web_cutover_factory(
         identity = plan.new.runtime_identity
         profile = records.read_product_profile_record(identity.product)
         lane = next(
-            lane
-            for lane in profile.lanes
-            if (lane.context, lane.instance) == (identity.context, identity.instance)
+            (
+                lane
+                for lane in profile.lanes
+                if (lane.context, lane.instance) == (identity.context, identity.instance)
+            ),
+            None,
         )
+        if lane is None:
+            raise ValueError("cutover differs from current persisted lane/artifact authority")
         expected = compile_web_cutover(
             records,
             product=profile.product,

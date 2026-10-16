@@ -186,6 +186,19 @@ class ServiceCutoverBindingTests(unittest.TestCase):
             service_odoo_cutover_factory(store, Path(fixture.temporary.name))(fixture.plan)
         host.assert_not_called()
 
+        # A second profile read can lose the lane after the plan's admission.
+        store.read_product_profile_record.return_value.lanes = ()
+        with (
+            patch(
+                "control_plane.dokploy.cutover_factory.resolve_profile_cutover_plan",
+                return_value=fixture.plan,
+            ),
+            patch("control_plane.dokploy.service_cutover.installed_cutover_host") as load,
+            self.assertRaisesRegex(ValueError, "persisted lane/artifact authority"),
+        ):
+            service_odoo_cutover_factory(store, Path(fixture.temporary.name))(fixture.plan)
+        load.assert_not_called()
+
     def test_default_web_factory_uses_fresh_records_and_refuses_stale_plan_before_host(
         self,
     ) -> None:
@@ -239,4 +252,11 @@ class ServiceCutoverBindingTests(unittest.TestCase):
                     self.assertRaises(ValueError),
                 ):
                     service_web_cutover_factory(store, root)(admitted)
+                load.assert_not_called()
+                store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
+                with (
+                    patch("control_plane.dokploy.service_cutover.installed_cutover_host") as load,
+                    self.assertRaisesRegex(ValueError, "persisted lane/artifact authority"),
+                ):
+                    factory(admitted)
                 load.assert_not_called()
