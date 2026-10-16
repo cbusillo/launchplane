@@ -14195,6 +14195,18 @@
             "title": "Status",
             "type": "string"
           },
+          "testing_authority_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Authority Sha256",
+            "type": "string"
+          },
+          "testing_generation_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Testing Generation Sha256",
+            "type": "string"
+          },
           "tls_owner": {
             "default": "unknown",
             "enum": [

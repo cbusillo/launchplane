@@ -26132,8 +26132,23 @@ class PostgresRecordStore(HumanSessionStore):
         """CAS every reviewed source with the testing-only edge authority publication."""
         from control_plane.odoo_testing_restore import generation_binding
 
-        if replacement.instance != "testing" or audit.requested_domains != tuple(
-            domain.domain_name for domain in replacement.domains
+        if (
+            replacement.instance != "testing"
+            or replacement.product != audit.product
+            or replacement.context != audit.context
+            or replacement.source.source_kind != "service"
+            or replacement.ingress.provider != audit.provider
+            or replacement.ingress.endpoint_key != audit.edge_endpoint_key
+            or replacement.ingress.endpoint_key
+            != EdgeEndpointRecord.model_validate(expected["endpoint"]).endpoint_key
+            or replacement.ingress.provider_evidence.get("audit_record") != audit.record_id
+            or replacement.tls.owner != audit.tls_owner
+            or replacement.tls.provider_evidence.get("provider_certificate_ref")
+            != audit.provider_certificate_ref
+            or audit.status != "applied"
+            or audit.testing_generation_sha256 != expected["generation"]
+            or not audit.testing_authority_sha256
+            or audit.requested_domains != tuple(d.domain_name for d in replacement.domains)
         ):
             raise ValueError("Testing edge publication cannot change another lane.")
         with self._session_factory() as session:

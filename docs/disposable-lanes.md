@@ -685,6 +685,10 @@ targets, storage, passwords, restored database and capture records.
 
 Recovery is forward-only under the original edge key: a lost create response
 can adopt only the exact provider route carrying the reviewed plan's marker.
+Its pending audit binds the generation, route authority and exact provider
+payload, so certificate renewal with the same ID and unrelated metadata refresh
+do not strand adoption. Meaningful authority or payload drift still refuses;
+publication revalidates current records and uses a fresh compare-and-write.
 An absent or foreign route after a dispatched create stays unknown and is
 never created again. `readback` checks actual route, certificate and binding;
 a terminal apply replay is historical evidence, not a fresh health check.

@@ -12,6 +12,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import TESTING_PUBLIC_INGRESS_ROUTE
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.contracts.ingress_route_audit_record import (
     IngressRouteAuditOperation,
     IngressRouteAuditRecord,
@@ -30,6 +33,8 @@ from control_plane.provider_operations import (
 from control_plane.route_binding_reconcile import (
     RouteBindingReconcileRequest,
     build_route_binding_candidate,
+    provider_target_projection,
+    route_binding_authority_projection,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
@@ -67,7 +72,7 @@ def _covers(pattern: str, hostname: str) -> bool:
     )
 
 
-def _host_payload(host: NpmplusProxyHost) -> dict[str, object]:
+def _host_payload(host: NpmplusProxyHostPayload) -> dict[str, object]:
     return host.model_dump(mode="json", exclude={"id", "meta"})
 
 
@@ -180,7 +185,28 @@ class TestingPublicIngressAdapter:
         )
         return material, bundle
 
-    def _plan(self) -> tuple[dict[str, object], NpmplusProxyHostPayload, ProductAuthorityBundle]:
+    def _custody_binding(self, material: dict[str, object]) -> str:
+        """Keep route/generation identity stable across harmless source metadata refreshes."""
+        return canonical_json_sha256(
+            {
+                "generation": material["generation"],
+                "binding": route_binding_authority_projection(
+                    EnvironmentRouteBindingRecord.model_validate(material["binding"])
+                ),
+                "provider": provider_target_projection(
+                    ProviderTargetRecord.model_validate(material["provider"])
+                ),
+                "endpoint": EdgeEndpointRecord.model_validate(material["endpoint"]).model_dump(
+                    mode="json", exclude={"updated_at"}
+                ),
+                "server_id": material["server_id"],
+                "desired": material["desired"],
+            }
+        )
+
+    def _plan(
+        self, custody: IngressRouteAuditRecord | None = None
+    ) -> tuple[dict[str, object], NpmplusProxyHostPayload, ProductAuthorityBundle]:
         material, bundle = self._authority()
         generation = self.store.read_fresh_odoo_testing_generation(
             self.product, self.request.context
@@ -229,7 +255,23 @@ class TestingPublicIngressAdapter:
             desired=desired.model_dump(mode="json"),
         )
         plan_sha = canonical_json_sha256(material)
-        desired.meta[_MARKER] = plan_sha
+        if custody is not None and (
+            custody.record_id != "testing-public-ingress-" + self.request.reviewed_plan_sha256
+            or custody.product != self.product
+            or custody.context != self.request.context
+            or custody.mode != "apply"
+            or custody.status not in {"pending", "applied"}
+            or custody.requested_domains != desired.domain_names
+            or custody.edge_endpoint_key != endpoint.endpoint_key
+            or custody.testing_generation_sha256 != generation_binding(generation)
+            or custody.testing_authority_sha256 != self._custody_binding(material)
+            or custody.provider_route_sha256 != canonical_json_sha256(_host_payload(desired))
+        ):
+            raise ValueError("The pending edge operation no longer owns this route.")
+        desired.meta[_MARKER] = self.request.reviewed_plan_sha256 if custody else plan_sha
+        self._candidate(
+            self._audit(None, "preflight", desired=desired).model_copy(update={"status": "applied"})
+        )
         for h in hosts:
             for name in h.domain_names:
                 # Nginx wildcard server names cover subtrees, unlike certificate SANs.
@@ -239,10 +281,18 @@ class TestingPublicIngressAdapter:
                 if name.startswith("~") or matches:
                     if (
                         _host_payload(h) != desired.model_dump(mode="json", exclude={"meta"})
-                        or h.meta.get(_MARKER) != plan_sha
+                        or h.meta.get(_MARKER) != desired.meta[_MARKER]
                     ):
                         raise ValueError("The testing hostname already has foreign edge authority.")
-        return {"plan_sha256": plan_sha, "material": material}, desired, bundle
+        return (
+            {
+                "plan_sha256": plan_sha,
+                "material": material,
+                "custody_sha256": self._custody_binding(material),
+            },
+            desired,
+            bundle,
+        )
 
     def plan(self) -> dict[str, object]:
         snapshot, _, _ = self._plan()
@@ -261,7 +311,14 @@ class TestingPublicIngressAdapter:
             "public_health_verified": False,
         }
 
-    def _audit(self, host: NpmplusProxyHost | None, provider_key: str) -> IngressRouteAuditRecord:
+    def _audit(
+        self,
+        host: NpmplusProxyHost | None,
+        provider_key: str,
+        *,
+        desired: NpmplusProxyHostPayload | None = None,
+        custody_sha256: str = "",
+    ) -> IngressRouteAuditRecord:
         generation = self.store.read_fresh_odoo_testing_generation(
             self.product, self.request.context
         )
@@ -269,6 +326,8 @@ class TestingPublicIngressAdapter:
         binding = self.store.read_route_binding_record(
             product=self.product, context_name=self.request.context, instance_name="testing"
         )
+        payload = host or desired
+        assert payload is not None
         return IngressRouteAuditRecord(
             record_id="testing-public-ingress-" + self.request.reviewed_plan_sha256,
             product=self.product,
@@ -278,9 +337,11 @@ class TestingPublicIngressAdapter:
             status="applied" if host else "pending",
             requested_domains=(generation.domain_host,),
             edge_endpoint_key=binding.ingress.endpoint_key,
-            tls_owner="provider" if host else "unknown",
-            provider_certificate_ref=str(host.certificate_id) if host else "",
-            provider_route_sha256=canonical_json_sha256(_host_payload(host)) if host else "",
+            tls_owner="provider",
+            provider_certificate_ref=str(payload.certificate_id),
+            provider_route_sha256=canonical_json_sha256(_host_payload(payload)),
+            testing_generation_sha256=generation_binding(generation),
+            testing_authority_sha256=custody_sha256,
             provider_host_id=host.id if host else None,
             operations=(
                 IngressRouteAuditOperation(
@@ -296,23 +357,32 @@ class TestingPublicIngressAdapter:
             recorded_at=utc_now_timestamp(),
         )
 
-    def _publish(
-        self, host: NpmplusProxyHost, provider_key: str, expected: dict[str, object]
-    ) -> None:
-        audit = self._audit(host, provider_key)
-        self.store.write_ingress_route_audit_record(audit)
+    def _candidate(self, audit: IngressRouteAuditRecord) -> EnvironmentRouteBindingRecord:
         candidate = build_route_binding_candidate(
             record_store=self.store,
+            audit_record=audit,
             request=RouteBindingReconcileRequest(
                 product=self.product,
                 context=self.request.context,
                 instance="testing",
                 source_label="testing-public-ingress:" + self.request.reviewed_plan_sha256,
-                evaluated_at=audit.recorded_at,
+                evaluated_at=utc_now_timestamp(),
             ),
         ).record
         if candidate is None:
             raise ValueError("The new edge route has no complete source authority.")
+        return candidate
+
+    def _publish(
+        self,
+        host: NpmplusProxyHost,
+        provider_key: str,
+        expected: dict[str, object],
+        custody_sha256: str,
+    ) -> None:
+        audit = self._audit(host, provider_key, custody_sha256=custody_sha256)
+        self.store.write_ingress_route_audit_record(audit)
+        candidate = self._candidate(audit)
         self.store.publish_testing_public_ingress_binding(
             expected=expected,
             replacement=candidate,
@@ -336,8 +406,6 @@ class TestingPublicIngressAdapter:
             or matches[0].meta.get(_MARKER) != self.request.reviewed_plan_sha256
             or not matches[0].enabled
             or not matches[0].ssl_forced
-            or binding.source.source_label
-            != "testing-public-ingress:" + self.request.reviewed_plan_sha256
             or tuple(d.domain_name for d in binding.domains) != (generation.domain_host,)
         ):
             raise ValueError("The testing edge route and binding are not verified.")
@@ -356,8 +424,13 @@ class TestingPublicIngressAdapter:
             or audit.edge_endpoint_key != endpoint.endpoint_key
             or audit.provider_certificate_ref != str(current.certificate_id)
             or audit.provider_route_sha256 != canonical_json_sha256(_host_payload(current))
+            or audit.testing_generation_sha256 != generation_binding(generation)
         ):
             raise ValueError("The provider route differs from its original publication receipt.")
+        if binding.model_dump(exclude={"source", "updated_at"}) != self._candidate(
+            audit
+        ).model_dump(exclude={"source", "updated_at"}):
+            raise ValueError("The testing binding differs from its published route authority.")
         if (current.forward_host, current.forward_port, current.forward_scheme) != (
             endpoint.upstream_host,
             endpoint.upstream_port,
@@ -372,8 +445,15 @@ class TestingPublicIngressAdapter:
         return self._result(self.request.reviewed_plan_sha256, applied=True)
 
     def _run(self, provider_key: str, checkpoint: Callable[[], None], *, create: bool) -> None:
-        snapshot, desired, bundle = self._plan()
-        if snapshot["plan_sha256"] != self.request.reviewed_plan_sha256:
+        custody = None
+        if not create:
+            custody = self.store.read_ingress_route_audit_record(
+                "testing-public-ingress-" + self.request.reviewed_plan_sha256
+            )
+            if custody.idempotency_key != provider_key:
+                raise ValueError("The edge receipt belongs to another provider operation.")
+        snapshot, desired, bundle = self._plan(custody)
+        if create and snapshot["plan_sha256"] != self.request.reviewed_plan_sha256:
             raise ValueError("The reviewed testing edge plan changed.")
         target = bundle.dokploy_targets[0]
         target_id = self.store.read_dokploy_target_id_record(
@@ -385,10 +465,17 @@ class TestingPublicIngressAdapter:
         expected = self._authority()[0]
         result_host: list[NpmplusProxyHost] = []
         if create:
-            self.store.write_ingress_route_audit_record(self._audit(None, provider_key))
+            self.store.write_ingress_route_audit_record(
+                self._audit(
+                    None,
+                    provider_key,
+                    desired=desired,
+                    custody_sha256=str(snapshot["custody_sha256"]),
+                )
+            )
 
         def effect(_receipt: Callable[[str, str, int], None]) -> None:
-            fresh, _, _ = self._plan()
+            fresh, _, _ = self._plan(custody)
             if fresh != snapshot:
                 raise ValueError("Testing edge authority changed before the effect.")
             matches = [
@@ -418,7 +505,7 @@ class TestingPublicIngressAdapter:
             apply_provider=effect,
         )
         checkpoint()
-        self._publish(result_host[0], provider_key, expected)
+        self._publish(result_host[0], provider_key, expected, str(snapshot["custody_sha256"]))
 
     def apply(
         self, provider_operation_key: str, lease: ProviderOperationLease

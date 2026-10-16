@@ -223,8 +223,8 @@ def plan_route_binding_reconcile(
             current_record=current_record,
             record=record,
         )
-    if _route_binding_authority_projection(current_record) != (
-        _route_binding_authority_projection(record)
+    if route_binding_authority_projection(current_record) != (
+        route_binding_authority_projection(record)
     ):
         return _conflict_plan(
             code="route_binding_authority_conflict",
@@ -265,6 +265,7 @@ def build_route_binding_candidate(
     request: RouteBindingReconcileRequest,
     current_record: EnvironmentRouteBindingRecord | None = None,
     current_record_sha256: str = "",
+    audit_record: IngressRouteAuditRecord | None = None,
 ) -> RouteBindingReconcilePlan:
     """Build desired authority from stored sources; this grants no replacement permission."""
     findings: list[RouteBindingReconcileFinding] = []
@@ -287,7 +288,7 @@ def build_route_binding_candidate(
         target_record=dokploy_target,
         target_id_record=dokploy_target_id,
     )
-    if _provider_target_projection(provider_target) != _provider_target_projection(
+    if provider_target_projection(provider_target) != provider_target_projection(
         expected_provider_target
     ):
         return _blocked_plan(
@@ -325,12 +326,21 @@ def build_route_binding_candidate(
             current_record_sha256=current_record_sha256,
         )
 
-    audit_record = _resolve_ingress_audit(
-        record_store=record_store,
-        request=request,
-        domains=domains,
-        findings=findings,
-    )
+    if audit_record is None:
+        audit_record = _resolve_ingress_audit(
+            record_store=record_store,
+            request=request,
+            domains=domains,
+            findings=findings,
+        )
+    elif (
+        audit_record.product != request.product
+        or audit_record.context != request.context
+        or audit_record.requested_domains != domains
+        or audit_record.mode != "apply"
+        or audit_record.status not in {"applied", "unchanged"}
+    ):
+        raise ValueError("The explicit ingress audit does not describe this route.")
     if audit_record is None:
         return _blocked_plan(
             findings=findings,
@@ -708,7 +718,7 @@ def _resolve_ingress_audit(
     return max(latest_records, key=lambda record: record.record_id)
 
 
-def _provider_target_projection(record: ProviderTargetRecord) -> tuple[object, ...]:
+def provider_target_projection(record: ProviderTargetRecord) -> tuple[object, ...]:
     # Identity only: a lane setting written to the Dokploy target record (a testing
     # hold, an integration allowance) moves its updated_at without changing the target.
     return (
@@ -723,7 +733,7 @@ def _provider_target_projection(record: ProviderTargetRecord) -> tuple[object, .
     )
 
 
-def _route_binding_authority_projection(
+def route_binding_authority_projection(
     record: EnvironmentRouteBindingRecord,
 ) -> tuple[object, ...]:
     return (

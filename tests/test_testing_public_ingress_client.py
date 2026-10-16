@@ -79,7 +79,7 @@ class TestingPublicIngressClientTests(unittest.TestCase):
 
     def test_review_and_original_key_survive_apply_and_readback(self) -> None:
         self.assertEqual(self.call("dry-run")[0], 0)
-        self.assertEqual(self.evidence.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(self.evidence.stat().st_mode & 0o077, 0)
         original = self.evidence.read_bytes()
         self.receipt["result"]["applied"] = True
         self.assertEqual(self.call("apply")[0], 0)

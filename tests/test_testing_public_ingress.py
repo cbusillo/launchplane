@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 import unittest
 
 from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.route_binding_record import EnvironmentRouteBindingRecord
 from control_plane.npmplus import NpmplusCertificate
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration, generation_binding
@@ -227,6 +228,170 @@ class TestingPublicIngressScenario(FreshTestingBootstrapScenario):
 
 
 class TestingPublicIngressTests(TestingPublicIngressScenario):
+    def test_pending_recovery_refuses_changed_binding_authority(self) -> None:
+        self.review_edge()
+        create = self.client.create_proxy_host
+
+        def lost(payload: Any) -> Any:
+            create(payload)
+            raise OSError("fixture lost response")
+
+        with patch.object(self.client, "create_proxy_host", side_effect=lost):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.publish()
+        changed = self.old_binding.model_copy(
+            update={
+                "provider_target": self.old_binding.provider_target.model_copy(
+                    update={"target_name": "new-authority"}
+                )
+            }
+        )
+        self.store.write_route_binding_record(changed)
+        self.assertEqual(
+            self.edge()
+            .observe("fixture-provider-key", "create_testing_public_route", "fixture")
+            .outcome,
+            "unknown",
+        )
+        self.assertEqual(self.client.calls.count("create"), 1)
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=self.profile.product,
+                context_name=self.fixture.context,
+                instance_name="testing",
+            ),
+            changed,
+        )
+
+    def test_recovery_tolerates_metadata_refresh_but_keeps_original_route_custody(self) -> None:
+        self.review_edge()
+        create = self.client.create_proxy_host
+
+        def lost(payload: Any) -> Any:
+            create(payload)
+            raise OSError("fixture lost response")
+
+        with patch.object(self.client, "create_proxy_host", side_effect=lost):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.publish()
+        profile = self.store.read_product_profile_record(self.profile.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"display_name": "Renamed"})
+        )
+        self.client.certificate = self.client.certificate.model_copy(
+            update={"expires_on": (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()}
+        )
+        self.client.proxy_hosts[0].meta["nginx_online"] = True
+        self.store.write_route_binding_record(
+            self.old_binding.model_copy(
+                update={
+                    "source": self.old_binding.source.model_copy(
+                        update={"source_label": "refreshed"}
+                    )
+                }
+            )
+        )
+        self.assertEqual(
+            self.edge()
+            .observe("fixture-provider-key", "create_testing_public_route", "fixture")
+            .outcome,
+            "present",
+        )
+        self.assertEqual(self.client.calls.count("create"), 1)
+        binding = self.store.read_route_binding_record(
+            product=self.profile.product, context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_route_binding_record(
+            binding.model_copy(
+                update={
+                    "source": binding.source.model_copy(update={"source_label": "ordinary-refresh"})
+                }
+            )
+        )
+        self.assertTrue(self.edge().readback()["applied"])
+
+    def test_held_or_reassigned_generation_refuses_before_provider_effect(self) -> None:
+        self.review_edge()
+        target = self.store.read_dokploy_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "policies": target.policies.model_copy(
+                        update={
+                            "staff_testing_hold": DokployTargetStaffTestingHold(
+                                reason="staff session",
+                                recorded_by="fixture",
+                                recorded_at=self.profile.updated_at,
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        protected = self.store.read_fresh_odoo_testing_generation(
+            self.profile.product, self.fixture.context
+        )
+        with self.assertRaises(ProviderMutationRejectedError):
+            self.publish()
+        self.assertEqual(
+            self.store.read_fresh_odoo_testing_generation(
+                self.profile.product, self.fixture.context
+            ),
+            protected,
+        )
+        self.store.write_dokploy_target_record(target)
+        target_id = self.store.read_dokploy_target_id_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            target_id.model_copy(update={"target_id": "foreign-target"})
+        )
+        with self.assertRaises(ProviderMutationRejectedError):
+            self.publish()
+        self.assertNotIn("create", self.client.calls)
+
+    def test_inconsistent_provider_projection_refuses_during_planning(self) -> None:
+        provider = self.store.read_provider_target_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_provider_target_record(
+            provider.model_copy(update={"display_name": "foreign-target"})
+        )
+        with self.assertRaises(ValueError):
+            self.edge().plan()
+        self.assertNotIn("create", self.client.calls)
+
+    def test_binding_cas_rejects_candidate_from_another_audit(self) -> None:
+        self.review_edge()
+        original = self.store.publish_testing_public_ingress_binding
+
+        def corrupt(**kwargs: Any) -> Any:
+            candidate = kwargs["replacement"]
+            kwargs["replacement"] = candidate.model_copy(
+                update={
+                    "ingress": candidate.ingress.model_copy(
+                        update={"provider_evidence": {"audit_record": "foreign-audit"}}
+                    )
+                }
+            )
+            return original(**kwargs)
+
+        with patch.object(
+            self.store, "publish_testing_public_ingress_binding", side_effect=corrupt
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.publish()
+        self.assertEqual(
+            self.store.read_route_binding_record(
+                product=self.profile.product,
+                context_name=self.fixture.context,
+                instance_name="testing",
+            ),
+            self.old_binding,
+        )
+
     def test_original_key_recovers_unknown_create_and_replays_once(self) -> None:
         if self.store.database_dialect_name != "postgresql":
             self.skipTest("Durable heartbeat fencing requires the explicit PostgreSQL fixture.")
@@ -255,6 +420,10 @@ class TestingPublicIngressTests(TestingPublicIngressScenario):
         with patch.object(self.client, "create_proxy_host", side_effect=lost):
             first = run()
         self.assertEqual(first.status, "reconcile_required")
+        self.client.certificate = self.client.certificate.model_copy(
+            update={"expires_on": (datetime.now(timezone.utc) + timedelta(days=90)).isoformat()}
+        )
+        self.client.proxy_hosts[0].meta["nginx_online"] = True
         self.assertEqual(run().status, "adopted")
         self.assertEqual(run().status, "replayed")
         self.assertEqual(self.client.calls.count("create"), 1)
