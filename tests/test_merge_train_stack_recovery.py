@@ -3,6 +3,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable
 import unittest
+from unittest.mock import patch
 from urllib.parse import unquote
 
 from control_plane.contracts.merge_train_stack_collapse import (
@@ -11,7 +12,10 @@ from control_plane.contracts.merge_train_stack_collapse import (
     build_merge_train_stack_collapse_plan_record,
     execute_merge_train_stack_collapse_plan,
 )
-from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train import (
+    build_merge_train_dry_run_result,
+    merge_train_stack_child_readiness_check,
+)
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
@@ -19,6 +23,12 @@ from control_plane.merge_train_github import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from tests.test_merge_train_handoff import _comment, _snapshot, _stack_fixture
+from tests.test_merge_train_github import (
+    _github_pull_request,
+    _combined_status,
+    _check_run,
+    _conversation_rule,
+)
 
 
 class _Provider:
@@ -38,6 +48,10 @@ class _Provider:
         }
         self.feature_effects: list[str] = []
         self.constructions: list[str] = []
+        self.closed: set[int] = set()
+        self.held: set[int] = set()
+        self.entries = {entry.pull_request_number: entry for entry in plan.entries}
+        self.repository = plan.repository
         self.handoffs = {entry.pull_request_number: entry.head_sha for entry in plan.entries}
 
     def contains(self, head: str, child: str) -> bool:
@@ -61,7 +75,29 @@ class _Provider:
             ]
         if method == "GET" and "/pulls/" in path:
             number = int(path.rsplit("/", 1)[1])
-            return {"head": {"sha": self.heads[self.refs[number]]}}
+            entry = self.entries[number]
+            pull = _github_pull_request(
+                number,
+                head_sha=self.heads[entry.head_ref],
+                repository=self.repository,
+                author_association="OWNER",
+            )
+            pull.update(
+                state="closed" if number in self.closed else "open",
+                merged=number in self.closed,
+                mergeable=None if number in self.closed else True,
+                labels=[{"name": "merge-blocked"}] if number in self.held else [],
+                body="## Client test notes\nNothing for the Client to test: internal recovery.",
+            )
+            pull["head"]["ref"] = entry.head_ref
+            pull["base"]["ref"] = entry.base_ref
+            return pull
+        if method == "GET" and "/status?" in path:
+            return _combined_status()
+        if method == "GET" and "/check-runs" in path:
+            return {"check_runs": [_check_run("completed", "success")]}
+        if method == "GET" and path.endswith("/protection"):
+            return _conversation_rule()
         if method == "GET" and "/git/commits/" in path:
             return self.commits[path.rsplit("/", 1)[1]]
         if method == "GET" and "/commits/" in path:
@@ -96,18 +132,21 @@ class _Provider:
         raise AssertionError(f"Unexpected provider request: {method} {path}")
 
 
-class StackRecoveryTests(unittest.TestCase):
+class StackRecoveryTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.reset_case()
 
     def reset_case(self) -> None:
         self.policy, self.plan, self.members = _stack_fixture()
         self.provider = _Provider(self.plan)
-        self.client = GitHubMergeTrainClient(transport=self.provider)
         self.directory = TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.store = FilesystemRecordStore(Path(self.directory.name))
         self.store.write_merge_train_policy_record(self.policy)
+        self.client = GitHubMergeTrainClient(
+            transport=self.provider, branch_refresh_store=self.store
+        )
+        self.client.begin_snapshot_pass(policy=self.policy.policy.policies[0], read_only=False)
         self.saved = self.plan
 
     def checkpoint(self, progress: MergeTrainStackCollapsePlan) -> None:
@@ -189,6 +228,128 @@ class StackRecoveryTests(unittest.TestCase):
         self.assertEqual(self.provider.constructions, constructions)
         self.assertEqual(self.handoff(), "ready")
 
+    def test_recovered_closed_child_uses_real_readiness_and_still_honors_holds(self) -> None:
+        self.crash_after_merge()
+        self.provider.closed.add(2)
+        normal = merge_train_stack_child_readiness_check(
+            reader=self.client,
+            repository=self.plan.repository,
+            repository_policy=self.policy.policy.policies[0],
+        )
+        recovered = merge_train_stack_child_readiness_check(
+            reader=self.client,
+            repository=self.plan.repository,
+            repository_policy=self.policy.policy.policies[0],
+            recovered_merge=True,
+        )
+        self.assertTrue(normal(2))
+        self.provider.held.add(2)
+        with self.assertRaises(MergeTrainStackChildNotReadyError):
+            execute_merge_train_stack_collapse_plan(
+                plan=self.saved,
+                branch_client=self.client,
+                child_readiness_reasons=normal,
+                recovered_child_readiness_reasons=recovered,
+                updated_at=self.plan.updated_at,
+                checkpoint=self.checkpoint,
+            )
+        self.assertEqual(self.saved.mutations[0].status, "planned")
+        self.provider.held.clear()
+        effects = list(self.provider.feature_effects)
+        result = execute_merge_train_stack_collapse_plan(
+            plan=self.saved,
+            branch_client=self.client,
+            child_readiness_reasons=normal,
+            recovered_child_readiness_reasons=recovered,
+            updated_at=self.plan.updated_at,
+            checkpoint=self.checkpoint,
+        )
+        self.assertEqual(result.status, "waiting_for_root_checks")
+        self.assertEqual(self.provider.feature_effects, effects)
+
+    async def test_changed_child_returns_controlled_block_on_repeated_controller_passes(
+        self,
+    ) -> None:
+        from control_plane.http_app import create_launchplane_fastapi_app
+        from tests.http_app_test_support import _post_merge_train_controller_run_once
+        from tests.support.auth import _StubVerifier
+        from tests.support.merge_train import (
+            _merge_train_service_identity,
+            _merge_train_service_policy,
+        )
+
+        def before_effect(progress: MergeTrainStackCollapsePlan) -> None:
+            self.checkpoint(progress)
+            if progress.mutations[0].expected_merge_tree_sha:
+                raise RuntimeError("crash before effect")
+
+        with self.assertRaisesRegex(RuntimeError, "crash before effect"):
+            self.execute(before_effect)
+        self.provider.heads[self.members[1].head_ref] = "new-child"
+        self.provider.handoffs[2] = "b" * 40
+        # The label or a new trusted handoff can admit a changed child; the saved plan still cannot.
+        provider, store, members = self.provider, self.store, self.members
+
+        class Client(GitHubMergeTrainClient):
+            def __init__(self, **kwargs: Any) -> None:
+                super().__init__(transport=provider, branch_refresh_store=store)
+
+            def read_merge_train_snapshot(self, **kwargs: Any) -> Any:
+                return _snapshot(
+                    *(
+                        member.model_copy(
+                            update={
+                                "head_sha": provider.heads[member.head_ref],
+                                "ready_handoff": member.ready_handoff.model_copy(
+                                    update={
+                                        "head_sha": provider.heads[member.head_ref],
+                                    }
+                                )
+                                if member.ready_handoff
+                                else None,
+                            }
+                        )
+                        for member in members
+                    )
+                )
+
+            def read_pull_request_snapshot(
+                self, *, repository: str, pull_request_number: int
+            ) -> Any:
+                return self.read_merge_train_snapshot().pull_requests[pull_request_number - 1]
+
+        app = create_launchplane_fastapi_app(
+            verifier=_StubVerifier(_merge_train_service_identity()),
+            authz_policy=_merge_train_service_policy(),
+            record_store_factory=lambda: store,
+        )
+        with (
+            patch(
+                "control_plane.http_app.resolve_merge_train_github_token", return_value="fixture"
+            ),
+            patch(
+                "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                Client,
+            ),
+        ):
+            for _ in range(2):
+                response = await _post_merge_train_controller_run_once(
+                    app,
+                    {
+                        "repository": self.plan.repository,
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                result = response.json()["result"]
+                self.assertEqual(result["controller_action"], "stack_unsupported")
+                self.assertEqual(
+                    result["blocking_reason"]["code"], "merge_train_stack_recovery_unproven"
+                )
+        self.assertFalse(provider.feature_effects)
+        self.assertFalse(store.list_merge_train_batch_candidate_records())
+
     def test_saved_tree_plan_outranks_later_unprepared_checkpoint(self) -> None:
         from control_plane.workflows.merge_train_controller import (
             latest_merge_train_stack_collapse_progress_record,
@@ -255,7 +416,10 @@ class StackRecoveryTests(unittest.TestCase):
                 self.crash_after_merge()
                 commit = self.provider.commits[self.provider.heads[self.plan.root_head_ref]]
                 if change == "tree":
-                    commit["tree"] = {"sha": "forged-tree"}
+                    forged_sha = sha256(b"forged-tree").hexdigest()[:40]
+                    commit = {**commit, "sha": forged_sha, "tree": {"sha": "forged-tree"}}
+                    self.provider.commits[forged_sha] = commit
+                    self.provider.heads[self.plan.root_head_ref] = forged_sha
                 elif change == "child":
                     self.provider.heads[self.members[1].head_ref] = "changed-child"
                 elif change == "parents":

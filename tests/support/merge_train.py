@@ -65,6 +65,10 @@ class _LandingPlanRecordUpdater(Protocol):
     ) -> None: ...
 
 
+def planned_stack_merge_tree(parent_sha: str, child_sha: str) -> str:
+    return f"tree:{parent_sha}:{child_sha}"
+
+
 class _FakeMergeTrainGitHubClient:
     land_batch_candidate_calls = 0
     cleanup_batch_candidate_ref_calls = 0
@@ -281,7 +285,9 @@ class _FakeMergeTrainGitHubClient:
         return f"branch-head:{branch_ref}"
 
     def plan_stack_child_merge_tree(self, **kwargs: object) -> str:
-        return f"tree:{kwargs['expected_parent_head_sha']}:{kwargs['child_head_sha']}"
+        return planned_stack_merge_tree(
+            str(kwargs["expected_parent_head_sha"]), str(kwargs["child_head_sha"])
+        )
 
     def find_stack_child_merge_commit(
         self,

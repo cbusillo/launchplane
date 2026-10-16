@@ -56,7 +56,10 @@ from tests.test_merge_train_github import (
     _github_pull_request,
 )
 from tests.test_merge_train_dependency_refresh import _change
-from tests.support.merge_train import _FakeExpandedMergeTrainSnapshotReader
+from tests.support.merge_train import (
+    _FakeExpandedMergeTrainSnapshotReader,
+    planned_stack_merge_tree,
+)
 from tests.test_merge_train_dependency_requalification import (
     _controller,
     _DependencyState,
@@ -637,7 +640,11 @@ class GitHubHandoffTests(unittest.TestCase):
                     responses += (
                         {
                             "sha": current,
-                            "tree": {"sha": f"tree:{member.head_sha}:{members[2].head_sha}"},
+                            "tree": {
+                                "sha": planned_stack_merge_tree(
+                                    member.head_sha, members[2].head_sha
+                                )
+                            },
                             "parents": [{"sha": member.head_sha}, {"sha": members[2].head_sha}],
                         },
                     )
@@ -770,7 +777,7 @@ class GitHubHandoffTests(unittest.TestCase):
                         responses += (
                             {
                                 "sha": current,
-                                "tree": {"sha": f"tree:{edges[current][0]}:{edges[current][1]}"},
+                                "tree": {"sha": planned_stack_merge_tree(*edges[current])},
                                 "parents": [{"sha": value} for value in edges[current]],
                             },
                         )

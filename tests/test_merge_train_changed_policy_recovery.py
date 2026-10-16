@@ -26,6 +26,7 @@ from tests.merge_train_policy_fixtures import build_test_merge_train_policy_reco
 from tests.support.auth import _StubVerifier
 from tests.support.merge_train import (
     _FakeMergeTrainGitHubClient,
+    planned_stack_merge_tree,
     _FakeStackedMergeTrainSnapshotReader,
     _merge_train_service_identity,
     _merge_train_service_policy,
@@ -87,7 +88,7 @@ class _StackTransport:
             head = f"branch-merge-{len(self.merge_requests)}"
             self.parents[head] = (parent, child_head)
             self.messages[head] = message
-            self.trees[head] = f"tree:{parent}:{child_head}"
+            self.trees[head] = planned_stack_merge_tree(parent, child_head)
             self.heads[ref] = head
             return {"sha": head}
         raise AssertionError(f"unexpected provider request: {method} {path}")

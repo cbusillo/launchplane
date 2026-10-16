@@ -4135,6 +4135,20 @@ def _advance_planned_stack_collapse_record(
             lease=lease,
         )
 
+    def unproven_recovery(message: str) -> dict[str, object]:
+        return {
+            "repository": request.repository,
+            "base_branch": request.base_branch,
+            "mode": "blocked",
+            "controller_action": "stack_unsupported",
+            "blocking_reason": {
+                "code": "merge_train_stack_recovery_unproven",
+                "message": message
+                + " Review the current heads and post fresh checked handoffs before replanning.",
+            },
+            "merge_train_stack_collapse_plan_record_id": planned_collapse_record.record_id,
+        }
+
     # Obsolete execution steps aside while its complete history stays available.
     if planned_collapse_record.plan.policy_key != repository_policy.policy_key or (
         not merge_train_policy_bindings_match(
@@ -4194,7 +4208,9 @@ def _advance_planned_stack_collapse_record(
                 child_pull_request_number=root_mutation.child_pull_request_number,
                 parent_pull_request_number=root_mutation.parent_pull_request_number,
             )
-        except MergeTrainGitHubStaleHeadError:
+        except MergeTrainGitHubStaleHeadError as error:
+            if root_mutation.expected_merge_tree_sha:
+                return unproven_recovery(str(error))
             retire("root_moved")
             return None
         if observed_root_sha != root_pull_request.head_sha:
@@ -4301,10 +4317,18 @@ def _advance_planned_stack_collapse_record(
                     repository=planned_collapse_record.plan.repository,
                     repository_policy=repository_policy,
                 ),
+                recovered_child_readiness_reasons=merge_train_stack_child_readiness_check(
+                    reader=github_client,
+                    repository=planned_collapse_record.plan.repository,
+                    repository_policy=repository_policy,
+                    recovered_merge=True,
+                ),
                 effect_executor=github_client.semantic_effect_executor,
                 updated_at=recorded_at,
                 checkpoint=checkpoint_collapse_progress,
             )
+        except MergeTrainGitHubStaleHeadError as error:
+            return unproven_recovery(str(error))
         except MergeTrainStackChildNotReadyError as error:
             return {
                 "repository": request.repository,

@@ -284,6 +284,7 @@ def execute_merge_train_stack_collapse_plan(
     branch_client: MergeTrainStackCollapseBranchClient,
     child_readiness_reasons: Callable[[int], tuple[str, ...]],
     effect_executor: MergeTrainSemanticEffectExecutor | None = None,
+    recovered_child_readiness_reasons: Callable[[int], tuple[str, ...]] | None = None,
     updated_at: str,
     checkpoint: Callable[[MergeTrainStackCollapsePlan], None],
 ) -> MergeTrainStackCollapsePlan:
@@ -314,10 +315,6 @@ def execute_merge_train_stack_collapse_plan(
             checkpoint(in_progress_plan)
         if mutation.parent_head_ref == plan.base_branch:
             raise ValueError("stack collapse cannot mutate the protected base branch")
-        # A hold applies equally to a new effect and a recovered effect.
-        not_ready_reasons = child_readiness_reasons(mutation.child_pull_request_number)
-        if not_ready_reasons:
-            raise MergeTrainStackChildNotReadyError(not_ready_reasons)
         if mutation.expected_merge_tree_sha and (
             mutation.child_head_sha != child_head_sha
             or mutation.expected_parent_head_sha != expected_parent_head_sha
@@ -333,6 +330,13 @@ def execute_merge_train_stack_collapse_plan(
             child_pull_request_number=mutation.child_pull_request_number,
             parent_pull_request_number=mutation.parent_pull_request_number,
         )
+        # Only a proved effect can use readiness for a child GitHub has closed.
+        readiness_check = child_readiness_reasons
+        if merge_commit_sha and recovered_child_readiness_reasons is not None:
+            readiness_check = recovered_child_readiness_reasons
+        not_ready_reasons = readiness_check(mutation.child_pull_request_number)
+        if not_ready_reasons:
+            raise MergeTrainStackChildNotReadyError(not_ready_reasons)
         if not merge_commit_sha:
             if not mutation.expected_merge_tree_sha:
                 expected_tree = branch_client.plan_stack_child_merge_tree(
@@ -363,10 +367,10 @@ def execute_merge_train_stack_collapse_plan(
                         updated_at=updated_at,
                     )
                 )
-            # Construction and storage can take time; recheck before the branch effect.
-            not_ready_reasons = child_readiness_reasons(mutation.child_pull_request_number)
-            if not_ready_reasons:
-                raise MergeTrainStackChildNotReadyError(not_ready_reasons)
+                # Construction and storage can take time; recheck before the branch effect.
+                not_ready_reasons = child_readiness_reasons(mutation.child_pull_request_number)
+                if not_ready_reasons:
+                    raise MergeTrainStackChildNotReadyError(not_ready_reasons)
             if effect_executor is None:
                 merge_commit_sha = branch_client.merge_stack_child_into_parent(
                     repository=plan.repository,

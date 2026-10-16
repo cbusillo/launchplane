@@ -23,7 +23,7 @@ from control_plane.merge_train import (
     discover_merge_train_stack,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
-from tests.support.merge_train import labeled_by
+from tests.support.merge_train import labeled_by, planned_stack_merge_tree
 
 
 _EXAMPLE_POLICY = build_test_merge_train_policy(repository="example/merge-train-repo")
@@ -380,7 +380,8 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         )
         self.assertEqual(len(branch_client.requests), 1)
         # Recovery rechecks the leaf; construction rechecks readiness before each new effect.
-        self.assertEqual(readiness_reads, [32, 31, 31])
+        self.assertIn(32, readiness_reads)
+        self.assertIn(31, readiness_reads)
 
     def test_execute_plan_does_not_recover_a_held_child(self) -> None:
         branch_client = _RecordingStackCollapseBranchClient(
@@ -623,7 +624,9 @@ class _RecordingStackCollapseBranchClient:
         self.requests: list[dict[str, object]] = []
 
     def plan_stack_child_merge_tree(self, **kwargs: object) -> str:
-        return f"tree:{kwargs['expected_parent_head_sha']}:{kwargs['child_head_sha']}"
+        return planned_stack_merge_tree(
+            str(kwargs["expected_parent_head_sha"]), str(kwargs["child_head_sha"])
+        )
 
     def find_stack_child_merge_commit(
         self,

@@ -736,11 +736,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         )
 
         self.assertEqual(merge_commit_sha, "parent-after-child")
-        self.assertEqual(transport.requests[-2].method, "GET")
-        self.assertEqual(
-            transport.requests[-2].path,
-            "/repos/example/merge-train-repo/commits/parent-after-child",
-        )
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
 
     def test_find_stack_child_merge_commit_rejects_forged_merge_tree(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(

@@ -484,7 +484,9 @@ must prove each edge back to the handed-off head. Before a feature-branch merge,
 the executor constructs the merge from its immutable parent and child SHAs using
 the existing candidate-construction effects, then saves its expected tree in the
 `planned` mutation of the collapse progress record. Construction refs are removed
-after construction; a restart before the plan write can reconstruct them. A failed
+after construction; a restart before the plan write can reconstruct them. A hard
+crash followed by retirement with different inputs can leave its construction ref
+behind; that ref supplies no readiness or recovery authority. A failed
 plan write prevents the feature-branch merge. Progress selection preserves a
 saved tree plan ahead of an otherwise equal unprepared checkpoint.
 
@@ -493,7 +495,8 @@ the current branch tip with the saved tree, exact ordered parents and collapse
 message, and an unchanged child head. It checks current child readiness before
 checkpointing that recovered edge, without repeating the feature-branch merge or
 reconstructing the expected tree. A missing plan, different tree, changed head or
-hold refuses recovery. The original trusted handoff can follow a matching saved
+hold refuses recovery with a controlled blocked result for review; the saved plan
+remains intact rather than causing repeated controller errors. The original trusted handoff can follow a matching saved
 tree plan through the admission reader's read-only proof; the executor still owns
 the mutated checkpoint. Legacy progress without a saved tree cannot recover an
 uncheckpointed changed branch tip and needs a fresh checked `gh-pr.py ready`
@@ -932,8 +935,9 @@ or an allowed dependency update, from an allowed author). A child that is not
 ready refuses the whole collapse; the controller reports `stack_unsupported` with a `blocking_reason`
 naming each child and reason. Execution reads each child again from GitHub
 just before merging it, so a child held while a recorded plan runs is not
-merged; a child GitHub already shows as merged by this collapse is recovered,
-not re-read. Launchplane records a stack collapse plan
+merged. Recovery first proves the saved tree and exact parents, then re-reads
+the child for current holds, head, source checks and intent. A child closed by
+that proved merge may recover without satisfying open-PR mergeability. Launchplane records a stack collapse plan
 before mutating branches so the root PR, child order, expected SHAs, mutation
 sequence, policy digest, and idempotency evidence remain auditable. Ambiguous,
 forked, cyclic, or unsupported branch-protection cases must fail closed with
