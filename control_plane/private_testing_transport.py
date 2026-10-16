@@ -21,12 +21,11 @@ ROUTE = "/v1/products/{product}/private-testing-transport/plan"
 PRODUCT_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
 
 
-class PrivateTestingTransportRequest(BaseModel):
+class PrivateTestingTransportIntent(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     context: str = Field(min_length=1)
     instance: Literal["testing"] = "testing"
-    mode: Literal["dry-run", "readback"] = "dry-run"
     endpoint_key: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
     private_ip: IPv4Address
     listener_port: int = Field(ge=1024, le=65535)
@@ -37,7 +36,6 @@ class PrivateTestingTransportRequest(BaseModel):
     monitor_ca_bundle_path: str
     receiver_ca_bundle_path: str
     trust_review: str = Field(min_length=1, max_length=1000)
-    expected_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
     @field_validator("private_ip")
     @classmethod
@@ -61,6 +59,11 @@ class PrivateTestingTransportRequest(BaseModel):
 
 class PrivateTestingTransportRefused(ValueError):
     """Evidence is incomplete or differs from the reviewed preparation."""
+
+
+class PrivateTestingTransportRequest(PrivateTestingTransportIntent):
+    mode: Literal["dry-run", "readback"] = "dry-run"
+    expected_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
 
 def nginx_configuration(
@@ -108,7 +111,7 @@ def _object(value: object) -> dict[str, object]:
 
 
 def transport_overlay(
-    request: PrivateTestingTransportRequest, *, namespace: str, runtime_port: int
+    request: PrivateTestingTransportIntent, *, namespace: str, runtime_port: int
 ) -> dict[str, object]:
     return {
         "services": {

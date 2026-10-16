@@ -46,6 +46,40 @@
     },
     "operations": [
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "activate_private_testing_transport_source",
+        "path": "/v1/products/{product}/private-testing-transport/activation",
+        "purpose": "Install or remove exact reviewed private testing Compose source using immutable product provenance and original-operation recovery; deployment and live TLS proof remain separate.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "expected_plan_sha256",
+          "host_review",
+          "custody_review",
+          "trust_review"
+        ],
+        "schema_fingerprint_sha256": "47f44b2de14827c949b24278aab35d5a8e521d46e0527d256d71d19c735727eb",
+        "supported_surfaces": [
+          "service_api",
+          "local_cli"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_browser_mutation_identity"
@@ -714,8 +748,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "346e77d53e5527c2d5862722ec212fd788056739"
+    "source_commit_sha": "1e7d1431b7961f6374c561d084d481f5b54831ec"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "1213eb1cbf82249a4ff8a71474b2bcbf46eb7df35421317a58eff76f3711c7b2"
+  "semantic_digest_sha256": "bf28a24f6047e44f887c70b0c355b794a17bb46e5010f51a641e8a8e0f67c9ca"
 }

@@ -1,6 +1,10 @@
 import hashlib
 import json
+import re
 from typing import Literal
+from urllib.parse import urlsplit
+
+from cryptography import x509
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -22,6 +26,7 @@ class PrivateHealthEndpointRecord(BaseModel):
     status: PrivateHealthEndpointStatus = "active"
     source_label: str = ""
     updated_at: str
+    tls_ca_pem: str = Field(default="", max_length=65536, exclude_if=lambda value: not value)
 
     @field_validator(
         "endpoint_key",
@@ -53,6 +58,23 @@ class PrivateHealthEndpointRecord(BaseModel):
             raise ValueError("private health endpoint url must be a valid HTTP URL")
         if not public_error:
             raise ValueError("private health endpoint url must not be public")
+        if self.tls_ca_pem:
+            if self.instance != "testing" or urlsplit(self.url).scheme != "https":
+                raise ValueError("Scoped private CA trust is supported only on testing HTTPS.")
+            blocks = re.findall(
+                r"-----BEGIN CERTIFICATE-----\s+[A-Za-z0-9+/=\s]+?-----END CERTIFICATE-----",
+                self.tls_ca_pem,
+            )
+            if not blocks or "".join(self.tls_ca_pem.split()) != "".join("".join(blocks).split()):
+                raise ValueError("Scoped trust accepts public certificates only.")
+            try:
+                for certificate in x509.load_pem_x509_certificates(self.tls_ca_pem.encode("ascii")):
+                    if not certificate.extensions.get_extension_for_class(
+                        x509.BasicConstraints
+                    ).value.ca:
+                        raise ValueError("Scoped trust requires CA certificates.")
+            except x509.ExtensionNotFound as error:
+                raise ValueError("Scoped trust requires CA certificates.") from error
         return self
 
 
