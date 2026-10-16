@@ -751,6 +751,15 @@ class TestingDrillTests(TestingDrillScenario):
         )
 
     def test_late_success_refreshes_lane_evidence_and_keeps_deadline_alert(self) -> None:
+        self._assert_late_success(cross_daily_boundary=False)
+
+    def test_late_success_keeps_deadline_alert_when_next_daily_drill_is_queued(self) -> None:
+        self._assert_late_success(cross_daily_boundary=True)
+
+    def _assert_late_success(self, *, cross_daily_boundary: bool) -> None:
+        offset = int(lane_key(self.profile.product, self.context)[:8], 16) % DRILL_INTERVAL_SECONDS
+        next_slot = self.now - (self.now - offset) % DRILL_INTERVAL_SECONDS + DRILL_INTERVAL_SECONDS
+        self.now = next_slot + (DRILL_INTERVAL_SECONDS - 1 if cross_daily_boundary else 0)
         self.scheduler.run_once()
         self.activate()
         self.now += DRILL_TIMEOUT_SECONDS + 1
@@ -783,8 +792,20 @@ class TestingDrillTests(TestingDrillScenario):
             )
         )
         self.scheduler.run_once()
-        self.assertEqual(self.evidence().status, "pass")
-        self.assertTrue(self.evidence().alert_delivered)
+        receipt = self.store.read_idempotency_record(
+            scope=DRILL_SCOPE, route_path=DRILL_ROUTE, idempotency_key=operation.idempotency_key
+        )
+        assert receipt is not None
+        self.assertEqual(receipt.response_payload["status"], "pass")
+        self.assertEqual(receipt.response_payload["step"], "late_completion")
+        self.assertEqual(receipt.response_payload["failure_step"], DRILL_DEADLINE_STEP)
+        self.assertTrue(receipt.response_payload["alert_delivered"])
+        if cross_daily_boundary:
+            self.assertEqual(self.evidence().status, "queued")
+            self.assertNotEqual(self.evidence().operation_id, operation.operation_id)
+        else:
+            self.assertEqual(self.evidence().status, "pass")
+            self.assertEqual(self.evidence().operation_id, operation.operation_id)
 
     def test_partial_discord_delivery_does_not_resend_successful_destination(self) -> None:
         destinations = tuple(
