@@ -83,7 +83,11 @@ def _down_observations(
     if len(lanes) != 1 or target.instance == "prod":
         return ()
     lane = lanes[0]
-    checks = [check for check in lane.health_monitoring.checks if check.enabled]
+    checks = [
+        check
+        for check in lane.health_monitoring.checks
+        if check.enabled and check.kind in {"public_http", "private_http"}
+    ]
     if not checks:
         return ()
     interval = timedelta(seconds=health_monitor_interval_seconds(lane.instance))
@@ -99,10 +103,7 @@ def _down_observations(
         )
         if monitor is None:
             continue
-        if (
-            monitor.check_kind not in {"public_http", "private_http"}
-            or monitor.resolution_failure_code
-        ):
+        if monitor.resolution_failure_code:
             return ()
         records = reader(
             product=profile.product,
@@ -194,6 +195,10 @@ def evaluate_lane_usage(
         return LaneUsageDecision(True, "staff_testing_hold")
     if usage == "unused":
         return LaneUsageDecision(False, "unused")
+    if not require_unused:
+        # Retirement and non-destructive isolation keep their original known-use
+        # protection. Downtime qualifies repair, not those separate operations.
+        return LaneUsageDecision(usage == "in_use", "usage_protected")
     if instance != "prod" and target is not None and target_id is not None:
         try:
             records = _down_observations(

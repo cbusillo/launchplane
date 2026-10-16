@@ -119,6 +119,96 @@ class LaneUsageTests(unittest.TestCase):
         )
         self.assertTrue(self.decision().protected)
 
+    def test_down_lane_keeps_known_use_protected_for_retirement_and_isolation(self) -> None:
+        from control_plane.connection_isolation_qualification import (
+            require_connection_isolation_lane,
+        )
+
+        profile = self.store.read_product_profile_record(self.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(update={"production_use": "prelaunch"})
+        )
+        self.health()
+        record_safety(self.store, self.product, self.context, "testing", usage="unknown")
+        self.assertTrue(
+            require_disposable_lane(
+                self.store,
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                retirement=True,
+                now=self.now,
+            )
+        )
+        self.assertTrue(
+            require_connection_isolation_lane(
+                self.store, product=self.product, context=self.context, instance="testing"
+            )
+        )
+        record_safety(self.store, self.product, self.context, "testing", usage="in_use")
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store,
+                product=self.product,
+                context=self.context,
+                instance="testing",
+                retirement=True,
+                now=self.now,
+            )
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_connection_isolation_lane(
+                self.store, product=self.product, context=self.context, instance="testing"
+            )
+
+    def test_provider_check_does_not_disqualify_failed_application_http_checks(self) -> None:
+        self.health()
+        profile = self.store.read_product_profile_record(self.product)
+        provider = ProductLaneHealthCheck(
+            name="provider-target",
+            kind="provider",
+            provider="dokploy",
+            provider_check="target-health",
+        )
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(
+                            update={
+                                "health_monitoring": lane.health_monitoring.model_copy(
+                                    update={"checks": (*lane.health_monitoring.checks, provider)}
+                                )
+                            }
+                        )
+                        if lane.instance == "testing"
+                        else lane
+                        for lane in profile.lanes
+                    )
+                }
+            )
+        )
+        self.assertFalse(self.decision().protected)
+        profile = self.store.read_product_profile_record(self.product)
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "lanes": tuple(
+                        lane.model_copy(
+                            update={
+                                "health_monitoring": lane.health_monitoring.model_copy(
+                                    update={"checks": (provider,)}
+                                )
+                            }
+                        )
+                        if lane.instance == "testing"
+                        else lane
+                        for lane in profile.lanes
+                    )
+                }
+            )
+        )
+        self.assertTrue(self.decision().protected)
+
     def test_unavailable_monitor_evidence_refuses_without_raising(self) -> None:
         for failure in (
             KeyError("private-detail"),
