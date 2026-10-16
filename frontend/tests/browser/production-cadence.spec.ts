@@ -81,29 +81,29 @@ for (const view of ["index", "workspace", "environment"] as const) {
     });
     await page.route(`${detailUrl}/public-ingress/incidents`, route => route.fulfill({ json: { status: "ok", incident_list: fixture.incidents } }));
     await page.goto(`/ui/products${view === "index" ? "" : `/${fixture.product.product}${view === "environment" ? "/environments/prod" : ""}`}`);
-    const signal = view === "index" ? page.locator('.directory-lane[data-lane="prod"]')
-      : page.locator(view === "workspace" ? ".signal-tile" : ".condition-tile").filter({ hasText: view === "workspace" ? /^Production/i : /^Runtime identity/i });
+    const main = page.getByRole("main");
+    const findSignal = (root: typeof main) => view === "index" ? root.locator('.directory-lane[data-lane="prod"]')
+      : root.locator(view === "workspace" ? ".signal-tile" : ".condition-tile").filter({ hasText: view === "workspace" ? /^Production/i : /^Runtime identity/i });
+    const signal = findSignal(main);
     const attribute = view === "index" ? "data-operational" : "data-tone";
     const healthy = view === "environment" ? "pass" : "verified";
     await expect(signal).toHaveAttribute(attribute, healthy);
     await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
-    const advance = async (milliseconds: number) => {
+    const advance = async (milliseconds: number, tone: string) => {
       const previousName = lastName;
       browserTime += milliseconds;
       await page.clock.runFor(milliseconds);
-      // Retained data stays rendered while loading. Its replacement proves
-      // React consumed the response without a second host-side polling loop.
-      await expect(page.getByText(previousName, { exact: true })).toHaveCount(0);
-      await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
+      // Check response replacement and its freshness in one browser assertion.
+      // Retained loading data cannot match because it still has the old name.
+      const nextSurface = main.filter({ hasNot: page.getByText(previousName, { exact: true }) });
+      await expect(findSignal(nextSurface)).toHaveAttribute(attribute, tone);
     };
     for (let minute = 0; minute < 31; minute++) {
       // Observe each boundary before publication, then its recovery. A single
       // minute-sized clock jump would answer the pending read too late and
       // hide the publication race for the rest of this long-lived page.
-      await advance(origin + (minute + 1) * cadence + 1 - browserTime);
-      await expect(signal).toHaveAttribute(attribute, "warning");
-      await advance(publicationDelay + DEADLINE_RETRY_INTERVAL_MS);
-      await expect(signal).toHaveAttribute(attribute, healthy);
+      await advance(origin + (minute + 1) * cadence + 1 - browserTime, "warning");
+      await advance(publicationDelay + DEADLINE_RETRY_INTERVAL_MS, healthy);
     }
     await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-${view}-${testInfo.project.name}.png`, fullPage: true });
     // Successful GETs must not renew stopped monitor evidence.
