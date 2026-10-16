@@ -106,22 +106,25 @@ def main() -> int:
             for value in usage_facts.values()
         ):
             raise ValueError("Unused requires complete Odoo usage evidence.")
+        qualification = result.get(
+            "never_served_qualification", "never_served_diagnostics_unavailable"
+        )
+        if qualification not in {
+            "never_served",
+            "never_served_records_incomplete",
+            "never_served_protection_seen",
+            "never_served_not_attempted",
+        }:
+            qualification = "never_served_diagnostics_unavailable"
+        if (reason_code == "never_served") != (qualification == "never_served"):
+            raise ValueError("Never-served qualification and usage disagree.")
         print(
             json.dumps(
                 {
                     "mode": args.mode,
                     "facts": facts,
                     "odoo_usage": {**usage_facts, "reason_code": reason_code},
-                    "never_served_qualification": (
-                        result.get("never_served_qualification")
-                        if result.get("never_served_qualification")
-                        in {
-                            "never_served",
-                            "never_served_records_incomplete",
-                            "never_served_protection_seen",
-                        }
-                        else "never_served_records_incomplete"
-                    ),
+                    "never_served_qualification": qualification,
                     "source_coverage": coverage,
                     "trace_id": transport["public_trace_id"](response["trace_id"]),
                 }

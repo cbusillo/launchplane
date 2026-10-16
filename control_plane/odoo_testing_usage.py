@@ -55,6 +55,10 @@ ODOO_USAGE_REASON_CODES = ODOO_USAGE_PROBE_REASON_CODES | frozenset(
         "never_served",
         "never_served_records_incomplete",
         "never_served_protection_seen",
+        "never_served_not_attempted",
+        "never_served_diagnostics_unavailable",
+        "provider_history_unavailable",
+        "serving_history_present",
         "provider_config_unavailable",
         "provider_target_changed",
         "provider_target_unavailable",
@@ -74,6 +78,7 @@ class OdooTestingUsage:
     reason_code: str = "not_collected"
 
     proof_sha256: str = ""
+    never_served_candidate: bool = False
 
     def payload(self) -> dict[str, object]:
         return {
@@ -171,6 +176,13 @@ def probe():
     if os.environ.get('PLATFORM_INSTANCE')!='testing':
         raise UsageUnavailable('unsupported_lane')
     database=os.environ['ODOO_DB_NAME']
+    checkpoint='process_inventory_unavailable'
+    processes=[[a for a in p.read_bytes().split(b'\0') if a]
+               for p in Path('/proc').glob('[0-9]*/cmdline')]
+    odoo_processes=[p for p in processes if any(
+        arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'} for arg in p[:2])]
+    if not odoo_processes:
+        raise UsageUnavailable('serving_process_absent')
     checkpoint='web_configuration_unavailable'
     config=configparser.ConfigParser(interpolation=None)
     if config.read(CONFIG_PATH)!=[CONFIG_PATH]:
@@ -186,13 +198,6 @@ def probe():
         raise UsageUnavailable('session_location_unavailable')
     # The supported startup hands this configuration to Odoo. A waiting gate,
     # custom command or another config cannot qualify this read.
-    checkpoint='process_inventory_unavailable'
-    processes=[[a for a in p.read_bytes().split(b'\0') if a]
-               for p in Path('/proc').glob('[0-9]*/cmdline')]
-    odoo_processes=[p for p in processes if any(
-        arg.rsplit(b'/',1)[-1] in {b'odoo',b'odoo-bin'} for arg in p[:2])]
-    if not odoo_processes:
-        raise UsageUnavailable('serving_process_absent')
     if not all(serving_configured(p,options,database) for p in odoo_processes):
         raise UsageUnavailable('serving_configuration_mismatch')
     session_use=read_sessions(data_dir/'sessions',database)
@@ -366,6 +371,17 @@ def read_odoo_testing_usage(
                 and isinstance(reason, str)
                 and reason in ODOO_USAGE_PROBE_REASON_CODES
             ):
+                if reason == "serving_process_absent":
+                    checkpoint = "provider_history_unavailable"
+                    if api.list_deployments_for_target(
+                        host=host,
+                        token=token,
+                        target_type="compose",
+                        target_id=target_id.target_id,
+                        require_complete=True,
+                    ):
+                        return OdooTestingUsage(reason_code="serving_history_present")
+                    return OdooTestingUsage(reason_code=reason, never_served_candidate=True)
                 return OdooTestingUsage(reason_code=reason)
         if (
             len(frames) != 1

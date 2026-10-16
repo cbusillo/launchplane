@@ -10528,6 +10528,8 @@ class PostgresRecordStore(HumanSessionStore):
                     or qualified.usage != "unused"
                     or record.usage_evidence != NON_USE_EVIDENCE_PREFIX + qualified.proof_sha256
                 ):
+                    if record.usage == "in_use":
+                        session.commit()
                     return False
             row = session.get(
                 LaunchplaneDisposableLaneSafetyRow,
@@ -10543,6 +10545,8 @@ class PostgresRecordStore(HumanSessionStore):
                     and previous.usage == "in_use"
                     and record.usage != "in_use"
                 ):
+                    if record.usage == "in_use":
+                        session.commit()
                     return False
             session.merge(
                 LaunchplaneDisposableLaneSafetyRow(
@@ -11481,6 +11485,16 @@ class PostgresRecordStore(HumanSessionStore):
                     raise ValueError("Only the atomic testing queue can record its receipt.")
             elif record.reconcile_requested_at or record.completed_at:
                 raise ValueError("A fresh generation cannot begin with completion receipts.")
+            if row is None and record.non_use_tracking_started_at:
+                target = session.get(LaunchplaneDokployTargetRow, (record.context, "testing"))
+                if (
+                    target is None
+                    or DokployTargetRecord.model_validate(
+                        target.payload
+                    ).policies.staff_testing_hold
+                    is not None
+                ):
+                    record = record.model_copy(update={"non_use_invalidated": True})
             session.merge(
                 LaunchplaneFreshOdooTestingGenerationRow(
                     product=record.product,

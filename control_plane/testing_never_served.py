@@ -78,7 +78,6 @@ def qualify_never_served(records: NeverServedRecords) -> OdooTestingUsage:
             if datetime.fromisoformat(started.replace("Z", "+00:00")) >= prepared:
                 return unknown
         kinds: set[str] = set()
-        check_ids: list[str] = []
         for check in records.checks:
             at = datetime.fromisoformat(check.observed_at.replace("Z", "+00:00"))
             if at < prepared:
@@ -92,13 +91,15 @@ def qualify_never_served(records: NeverServedRecords) -> OdooTestingUsage:
             if check.check_kind not in {"public_http", "private_http"}:
                 continue
             if urlsplit(check.base_url).hostname != gen.domain_host:
+                # A failed pre-route check says nothing about this generation.
+                if check.status == "fail" and all(t.status == "fail" for t in check.targets):
+                    continue
                 return unknown
             # A mixed result can contain a successful public/private target even
             # when the aggregate check failed. It also defeats lifetime non-use.
             if check.status != "fail" or any(t.status == "pass" for t in check.targets):
                 return unknown
             kinds.add(check.check_kind)
-            check_ids.append(check.record_id)
         if kinds != {"public_http", "private_http"}:
             return unknown
     except (ValueError, TypeError):
@@ -107,9 +108,7 @@ def qualify_never_served(records: NeverServedRecords) -> OdooTestingUsage:
         usage="unused",
         reason_code="never_served",
         # These remain null: no session/login read is claimed by this proof.
-        proof_sha256=canonical_json_sha256(
-            {"generation": generation_binding(gen), "checks": sorted(check_ids)}
-        ),
+        proof_sha256=canonical_json_sha256({"generation": generation_binding(gen)}),
     )
 
 

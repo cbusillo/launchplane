@@ -23938,14 +23938,15 @@ def create_launchplane_fastapi_app(
                         ),
                     ):
                         raise ValueError("The lane changed during usage collection; collect again.")
-                never_served = OdooTestingUsage(reason_code="never_served_records_incomplete")
+                never_served = OdooTestingUsage(reason_code="never_served_not_attempted")
                 if (
                     profile.driver_id == "odoo"
                     and observation.instance == "testing"
                     and target is not None
                     and target_id is not None
                     and odoo_usage.usage == "unknown"
-                    and odoo_usage.reason_code not in {"staff_testing_hold", "target_alias"}
+                    and odoo_usage.reason_code == "serving_process_absent"
+                    and odoo_usage.never_served_candidate
                 ):
                     never_served = read_never_served_testing_usage(
                         store,

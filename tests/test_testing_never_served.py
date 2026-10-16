@@ -205,6 +205,78 @@ class NeverServedTestingTests(unittest.TestCase):
     def test_set_then_lifted_hold_revokes_compare_target_writes(self) -> None:
         self.hold_cycle("compare")
 
+    def test_hold_already_set_at_creation_cannot_be_forgotten_after_lifting(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneFreshOdooTestingGenerationRow
+
+        # Model the bootstrap's first write after a hold raced its earlier check.
+        with self.store._session_factory() as session:
+            row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow, (self.product, self.context)
+            )
+            assert row is not None
+            session.delete(row)
+            session.commit()
+        original = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            original.model_copy(
+                update={
+                    "policies": original.policies.model_copy(
+                        update={
+                            "staff_testing_hold": DokployTargetStaffTestingHold(
+                                reason="hold at creation"
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        self.store.write_fresh_odoo_testing_generation(self.gen)
+        self.store.write_dokploy_target_record(original)
+        self.assertEqual(self.read().usage, "unknown")
+
+    def test_delayed_positive_use_revokes_a_newer_negative_even_when_rejected(self) -> None:
+        proof = self.read()
+        record_safety(
+            self.store,
+            self.product,
+            self.context,
+            "testing",
+            usage_evidence="service:later-runtime-negative",
+            observed_at=self.at + timedelta(seconds=10),
+        )
+        negative = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        assert negative is not None
+        positive = negative.model_copy(
+            update={
+                "usage": "in_use",
+                "usage_evidence": "service:positive-use",
+                "observed_at": self.at,
+            }
+        )
+        self.assertFalse(self.store.publish_collected_disposable_lane_safety(positive))
+        self.assertEqual(self.read().usage, "unknown")
+        self.assertFalse(
+            self.store.publish_collected_disposable_lane_safety(
+                negative.model_copy(
+                    update={"usage_evidence": NON_USE_EVIDENCE_PREFIX + proof.proof_sha256}
+                )
+            )
+        )
+
+    def test_additional_failed_checks_do_not_change_proof_but_a_pass_revokes_it(self) -> None:
+        proof = self.read()
+        old = self.check("public_http").model_copy(
+            update={"record_id": "old-host-failure", "base_url": "https://old.example.invalid"}
+        )
+        self.store.write_public_ingress_observation_record(old)
+        new = self.check("public_http").model_copy(update={"record_id": "new-failure"})
+        self.store.write_public_ingress_observation_record(new)
+        self.assertEqual(self.read(), proof)
+        self.store.write_public_ingress_observation_record(self.check("private_http", passed=True))
+        self.assertEqual(self.read().usage, "unknown")
+
     def test_known_use_cannot_be_replaced_with_never_served_proof(self) -> None:
         record_safety(self.store, self.product, self.context, "testing", usage="in_use")
         self.assertEqual(self.read().usage, "unknown")
@@ -222,7 +294,9 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
         body = {"product": fixture.product, "context": fixture.context, "instance": "testing"}
         with patch(
             "control_plane.http_app.read_odoo_testing_usage",
-            return_value=OdooTestingUsage(reason_code="web_configuration_unavailable"),
+            return_value=OdooTestingUsage(
+                reason_code="serving_process_absent", never_served_candidate=True
+            ),
         ):
             for revoked in (False, True):
                 if revoked:
@@ -255,3 +329,54 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIsNone(result["odoo_usage"]["recent_signins"])
                 self.assertIsNone(result["odoo_usage"]["authenticated_sessions"])
                 self.assertIs(result["provider_mutation"], False)
+
+    async def test_running_or_unverified_runtime_cannot_be_overridden_by_durable_records(
+        self,
+    ) -> None:
+        from unittest.mock import patch
+        from tests.support.http import request
+
+        fixture = NeverServedTestingTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.assertEqual(fixture.read().usage, "unused")
+        body = {"product": fixture.product, "context": fixture.context, "instance": "testing"}
+        for reason in (
+            "web_configuration_unavailable",
+            "session_file_unreadable",
+            "login_history_unavailable",
+            "runtime_changed",
+            "serving_history_present",
+            "serving_process_absent",
+        ):
+            with (
+                self.subTest(reason=reason),
+                patch(
+                    "control_plane.http_app.read_odoo_testing_usage",
+                    return_value=OdooTestingUsage(reason_code=reason),
+                ),
+            ):
+                inspected = await request(
+                    fixture.fixture.fixture.app,
+                    "POST",
+                    "/v1/disposable-lanes/observations",
+                    headers={"Authorization": "Bearer local-operator-token"},
+                    payload=body,
+                )
+                response = await request(
+                    fixture.fixture.fixture.app,
+                    "POST",
+                    "/v1/disposable-lanes/observations",
+                    headers={"Authorization": "Bearer local-operator-token"},
+                    payload={
+                        **body,
+                        "mode": "collect",
+                        "expected_binding_sha256": inspected.json()["result"]["binding_sha256"],
+                    },
+                )
+                self.assertEqual(response.status_code, 202, response.text)
+                self.assertEqual(response.json()["result"]["usage"], "unknown")
+                self.assertEqual(
+                    response.json()["result"]["never_served_qualification"],
+                    "never_served_not_attempted",
+                )

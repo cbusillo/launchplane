@@ -916,6 +916,14 @@ in custody until separately authorized disposition.
 
 ## Never-served testing generations
 
+Before consulting records, the service must observe no serving Odoo process and
+read a complete empty provider deployment history for that exact target. Process
+inventory is read before the serving configuration, so a closed startup gate can
+be inspected without creating a configuration. A running process with an unreadable
+configuration/session/login store, an incomplete history, or any provider deployment
+cannot be overridden by this rule. These are collection-time checks, not a reservation
+against an operator starting a lane afterward; collect immediately before apply.
+
 The service collector can qualify non-use without reading a serving configuration
 only for a generation with a complete lifetime witness, created by the supported
 fresh-resource bootstrap. It requires all of the following:
@@ -926,29 +934,36 @@ fresh-resource bootstrap. It requires all of the following:
   not completed, no drill database was selected, and the witness has never been
   revoked. Legacy records have no witness and stay UNKNOWN; there is no backfill.
 - Complete public and private HTTP histories since preparation both contain
-  failed checks bound to that generation's hostname, with no successful or skipped check and no successful target
-  inside a failed aggregate check. Missing either history stays UNKNOWN.
+  failed checks bound to that generation's hostname, with no successful or skipped
+  check and no successful target inside a failed aggregate check. Missing either
+  history stays UNKNOWN.
 - No deployment record since preparation exists, even a failed deployment, and
   no current inventory publication since preparation exists. This includes
   uncertain serving attempts, not just successful final health checks.
 - No current hold or recorded use exists. Setting a hold permanently revokes
   the generation's witness, even if the hold is later lifted. Known use also
-  revokes it. Retired custody is immutable and supplies no current-generation
-  proof. The replacement worker revokes it **before every provider dispatch**,
+  revokes it even when a delayed positive-use observation is rejected by ordering.
+  A hold already present at generation creation also revokes it. Retired custody
+  is immutable and supplies no current-generation proof. The replacement worker revokes it **before every provider dispatch**,
   including a dispatch that times out. This deliberately excludes more states
   than only an acknowledged web start; an incomplete restore is not assumed safe.
 
 Only their conjunction produces `usage=unused`, reason `never_served`. Session
 and login booleans remain null: this is a separate proof, not an empty-session
 claim. Source reads are complete DB queries, without a history limit. The proof
-is rechecked under the shared authority lock before publication and again when
+binds to the generation rather than a growing list of failed checks. Failed checks
+against an earlier route do not count toward coverage. The predicate is rechecked
+under the shared authority lock before publication and again when
 consumed. Dispatch/hold revocation removes an already-published never-served
 observation; a delayed collector cannot republish it. Data custody, physical
 isolation, backup gates and retained-operation fences remain independent.
 
 Use the existing evidence-only `scripts/collect-disposable-lane.py collect`
 procedure. When runtime occupancy is unavailable, the service tries this rule
-and returns a bounded `never_served_qualification` result. A missing source,
+and returns a bounded `never_served_qualification` result. Skipped qualification
+is `never_served_not_attempted`; an older response without the field is
+`never_served_diagnostics_unavailable` in the client. The client cross-checks a
+positive qualification against the matching usage reason. A missing source,
 legacy witness, uncertain dispatch, served-once record or incomplete history
 stays UNKNOWN. Never start or repair a lane to manufacture negative evidence.
 A newer client rejects an older service's different coverage; deliver compatible

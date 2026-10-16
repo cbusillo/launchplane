@@ -223,6 +223,20 @@ class SessionInventoryTests(unittest.TestCase):
         assert isinstance(value, dict)
         return value
 
+    def test_absent_process_is_readable_before_a_missing_serving_configuration(self) -> None:
+        self.driver.connect = Mock()  # type: ignore[attr-defined]
+        config = MagicMock()
+        config.read.return_value = []
+        with (
+            patch.dict("os.environ", {"PLATFORM_INSTANCE": "testing", "ODOO_DB_NAME": "fixture"}),
+            patch("configparser.ConfigParser", return_value=config),
+            patch.object(Path, "glob", return_value=[]),
+            self.assertRaisesRegex(ValueError, "serving_process_absent"),
+        ):
+            self.namespace["probe"]()
+        config.read.assert_not_called()
+        self.driver.connect.assert_not_called()
+
     def test_failed_container_checkpoint_is_bounded_and_never_negative_evidence(self) -> None:
         failures = {
             "config": "web_configuration_unavailable",
@@ -306,6 +320,9 @@ class UsageReaderTests(unittest.TestCase):
             "appName": "fixture-project",
             "serverId": "remote",
         }
+        self.history = self.enterContext(
+            patch(module + "api.list_deployments_for_target", return_value=[])
+        )
         self.remote = self.enterContext(patch(module + "_read_remote"))
 
     def read(self) -> Any:
@@ -365,6 +382,25 @@ class UsageReaderTests(unittest.TestCase):
                 self.assertIsNone(result.recent_signins)
                 self.assertIsNone(result.authenticated_sessions)
                 self.assertNotIn("private-fixture", json.dumps(result.payload()))
+
+    def test_never_served_candidate_requires_absent_process_and_complete_empty_provider_history(
+        self,
+    ) -> None:
+        self.remote.side_effect = lambda **kw: kw["receive"](
+            {"type": "complete", "unavailable": True, "reason_code": "serving_process_absent"}
+        )
+        result = self.read()
+        self.assertTrue(result.never_served_candidate)
+        self.assertEqual(result.usage, "unknown")
+        self.assertIs(self.history.call_args.kwargs["require_complete"], True)
+        self.history.return_value = [{"deploymentId": "earlier-serve"}]
+        result = self.read()
+        self.assertFalse(result.never_served_candidate)
+        self.assertEqual(result.reason_code, "serving_history_present")
+        self.history.side_effect = ValueError("incomplete fixture history")
+        result = self.read()
+        self.assertFalse(result.never_served_candidate)
+        self.assertEqual(result.reason_code, "provider_history_unavailable")
 
     def test_configuration_provider_and_transport_failures_report_the_failed_checkpoint(
         self,
