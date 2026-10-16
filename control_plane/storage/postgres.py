@@ -13000,10 +13000,16 @@ class PostgresRecordStore(HumanSessionStore):
                 record = self._read_payload(model_type=model_type, payload=row.payload)
                 if cutover_reconciliation:
                     from control_plane.odoo_cutover_plan import cutover_identity
+                    from control_plane.contracts.odoo_prod_promotion_operation import (
+                        ODOO_CUTOVER_RECONCILIATION_DELAY,
+                    )
 
                     if (
                         model_type is not OdooProdPromotionOperationRecord
                         or record.attempt >= max_attempts
+                        or datetime.fromisoformat(claimed_at.replace("Z", "+00:00"))
+                        < datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                        + ODOO_CUTOVER_RECONCILIATION_DELAY
                     ):
                         continue
                     cutover_id = cutover_identity(

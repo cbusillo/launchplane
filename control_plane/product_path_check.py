@@ -44,6 +44,7 @@ from control_plane.contracts.generic_web_rollback import (
 from control_plane.contracts.odoo_prod_rollback_operation import OdooProdRollbackRequest
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackTargetMissingError,
+    OdooCutoverCoherentRestoreRequiredError,
     resolve_odoo_prod_rollback_target,
 )
 from control_plane.contracts.odoo_prod_promotion_operation import ODOO_PROD_PROMOTION_RUN_ACTION
@@ -781,6 +782,16 @@ def _rollback_target_steps(
             target = resolve_odoo_prod_rollback_target(
                 record_store=record_store,
                 request=OdooProdRollbackRequest(context=prod_lane.context),
+            )
+        except OdooCutoverCoherentRestoreRequiredError as error:
+            return (
+                _step(
+                    "rollback_target",
+                    "blocked",
+                    error.code,
+                    "This database-changing release requires the authorized coherent image, database and filestore restore path.",
+                    "by_hand",
+                ),
             )
         except OdooProdRollbackTargetMissingError:
             return (
