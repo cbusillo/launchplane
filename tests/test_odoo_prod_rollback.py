@@ -184,6 +184,48 @@ def _replacement_result(
 
 
 class OdooProdRollbackWorkflowTests(unittest.TestCase):
+    def test_cutover_factory_refusal_records_failed_rollback_without_effects(self) -> None:
+        from tempfile import TemporaryDirectory
+        from tests.test_odoo_cutover import IsolatedCutoverProvider, cutover_store
+        from control_plane.workflows.odoo_cutover import execute_odoo_cutover
+
+        with TemporaryDirectory() as directory:
+            provider = IsolatedCutoverProvider(Path(directory))
+            self.addCleanup(provider.engine.dispose)
+            cutover = execute_odoo_cutover(
+                provider.cutover, cutover_store(Path(directory)), provider, record_id="c" * 32
+            )
+            records = self._record_store()
+            records.read_deployment_record.return_value = _deployment_record().model_copy(
+                update={"odoo_cutover": cutover}
+            )
+            factory = Mock(side_effect=ValueError("fixture host unavailable"))
+            checkpoint = Mock()
+            with (
+                patch(
+                    "control_plane.workflows.odoo_prod_rollback.execute_odoo_stable_target_replacement_apply"
+                ) as legacy,
+                patch(
+                    "control_plane.workflows.odoo_prod_rollback.execute_odoo_cutover_rollback_deployment"
+                ) as rollback,
+            ):
+                result = execute_odoo_prod_rollback(
+                    control_plane_root=Path(directory),
+                    record_store=records,
+                    product="fixture",
+                    request=OdooProdRollbackRequest(context="opw"),
+                    cutover_provider_factory=factory,
+                    provider_effect_checkpoint=checkpoint,
+                )
+            factory.assert_called_once_with(cutover.plan)
+            self.assertEqual(result.rollback_status, "fail")
+            final_promotion = records.write_promotion_record.call_args.args[0]
+            self.assertEqual(final_promotion.rollback.status, "fail")
+            self.assertTrue(final_promotion.rollback.finished_at)
+            checkpoint.assert_not_called()
+            legacy.assert_not_called()
+            rollback.assert_not_called()
+
     def test_configured_slot_lane_after_switch_back_never_uses_in_place_rollback(self) -> None:
         from tempfile import TemporaryDirectory
         from tests.test_odoo_cutover import IsolatedCutoverProvider

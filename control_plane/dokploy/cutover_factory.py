@@ -49,13 +49,18 @@ class DokployOdooCutoverProviderFactory:
         if expected != plan:
             raise ValueError("cutover differs from current persisted lane/artifact authority")
         profile = self.store.read_product_profile_record(plan.new.binding.product_id)
-        lane = next(
-            lane
-            for lane in profile.lanes
-            if lane.context == plan.new.runtime_identity.context
-            and lane.instance == plan.new.binding.environment_id
-        ).odoo_cutover
-        assert lane is not None
+        current_lane = next(
+            (
+                lane
+                for lane in profile.lanes
+                if lane.context == plan.new.runtime_identity.context
+                and lane.instance == plan.new.binding.environment_id
+            ),
+            None,
+        )
+        lane = current_lane.odoo_cutover if current_lane is not None else None
+        if lane is None:
+            raise ValueError("cutover differs from current persisted lane/artifact authority")
         driver = self.driver(plan, lane)
         if driver.lane != lane:
             raise ValueError("host capability differs from its admitted lane")
