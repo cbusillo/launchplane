@@ -43,14 +43,16 @@ uv run --extra dev python -m unittest tests.test_module_name.TestCaseName.test_b
 
 The Supervisor owns the measured comparison and brings the keep-or-revert
 decision to the Director on the linked trial issue. The rule becomes permanent
-only if the numbers support it.
+only if the numbers support it. Q375 explicitly supersedes the older full-local
+safety exception for Launchplane during this trial, including older catalog or
+global test guidance. Matching catalog guidance updates are tracked on the
+[trial issue](https://github.com/cbusillo/codex-skills/issues/1884#issuecomment-6215760222).
 
 Use `.github/github.json` for the lint and type-check commands and inspection
 configuration. `qualityGate.test.local` is the focused command template;
 `qualityGate.test.localSafety` takes whole safety module names, and
 `qualityGate.test.ci` names the complete suite for CI only. For a documentation
-or metadata change with no affected code,
-record why behavior tests or IDE inspection do not apply; do not add tests that
+or metadata change with no affected code, record why behavior tests or IDE inspection do not apply; do not add tests that
 assert instruction wording or config text.
 
 For frontend changes, use `qualityGate.build.frontend` for frontend unit, type,
@@ -65,7 +67,8 @@ Safety, authorization, approval-rule, destructive-helper, and shared-infrastruct
 changes keep their safety classification. Credential handling falls under safety
 and authorization; shared test helpers, shard tooling, and CI runner selection
 are shared infrastructure. For these changes, run focused behavior tests plus
-the **whole test modules** covering each safety area touched: authorization,
+the **whole test modules** covering the touched behavior within each safety
+area: authorization,
 secrets, recovery, and credentials. Select modules by the changed behavior and
 its callers, including relevant tests in broadly named modules; a filename
 keyword search alone is not a complete selection. Pass module names, not
@@ -80,16 +83,27 @@ Record the classification, touched areas, selected modules and results in the
 PR. When no executable safety area is touched (for example, this test guidance
 itself), record that reason and obtain the required model review. Do not run
 unrelated safety modules just because the repository is a control plane.
+Shared-infrastructure changes touching none of those safety areas run their
+focused tests locally and record why no additional safety modules apply.
 Broaden local coverage within the affected areas for shared contracts, storage,
 generated surfaces or observed failures; the complete 12-shard suite runs only
 in CI, including for safety-classified changes.
 
-The CI suite uses the command named by `qualityGate.test.ci`; its historical
-`unittest-shard local` subcommand name describes the all-shard runner, not a
-requirement to run it on the developer host. CI plans once and runs the complete
-inventory across 12 shards, with the coverage aggregate required by `ci-gate`.
-The all-shard CLI remains implemented for compatibility; it is not a local
-review, ready or closeout gate under this trial.
+`qualityGate.test.ci` names the all-shard equivalent of CI's plan/run/aggregate
+sequence; CI does not invoke that exact command. Same-repository CI plans once
+and runs the complete inventory across 12 shards, with the coverage aggregate
+required by `ci-gate`; fork PRs run the complete inventory through unsharded
+unittest discovery. Both require green CI before `ready` and merge. Reproduce
+an individual shard using the frozen plan and the diagnostic commands below,
+rather than substituting a new host-local plan.
+
+The historical `unittest-shard local` CLI remains implemented for compatibility;
+it is not a developer-host review, ready or closeout gate under this trial.
+It computes one deterministic plan, runs shards in isolated Python subprocesses,
+and reports failing shard indexes. Its `--jobs` option controls concurrency;
+timing history under ignored `.ci-cache/` is a balancing hint and updates only
+when all shards pass. This describes existing mechanics, not a local full-suite
+requirement or an exception to Q375.
 
 Storage tests that instantiate `PostgresRecordStore` with `sqlite+pysqlite://`
 are portability and local rehearsal tests. They prove ORM mapping, payload round
