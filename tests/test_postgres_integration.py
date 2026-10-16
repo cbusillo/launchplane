@@ -959,6 +959,154 @@ def _owner_acceptance_system_event(
     )
 
 
+class RealPostgresWalkthroughRecoveryTests(unittest.TestCase):
+    def test_native_probe_requires_quiescence_and_reads_actual_staff_activity(self) -> None:
+        from contextlib import redirect_stdout
+        import io
+        import sys
+        from types import SimpleNamespace
+
+        import psycopg
+
+        from control_plane.contracts.odoo_walkthrough import (
+            WALKTHROUGH_ACTIVE_STATE,
+            WALKTHROUGH_CLOSED_STATE,
+            WALKTHROUGH_LOCK_PREFIX,
+            WALKTHROUGH_LOGIN_PREFIX,
+            WALKTHROUGH_MARKER_PREFIX,
+        )
+        from control_plane.dokploy.odoo_walkthrough import ACCOUNT_DATABASE_PROBE
+        from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
+
+        with _isolated_postgres_database() as database_url:
+            url = database_url.replace("postgresql+psycopg://", "postgresql://")
+            spec = {
+                "mode": "quiescence",
+                "binding": "fixture-binding",
+                "copy_binding": "fixture-copy",
+                "task_id": "1" * 32,
+                "usage_since": datetime.now(timezone.utc).isoformat(),
+            }
+            with psycopg.connect(url) as owner:
+                owner.execute("CREATE TABLE ir_config_parameter (key text, value text)")
+                owner.execute("CREATE TABLE res_users (id int, login text, active bool)")
+                owner.execute("CREATE TABLE res_users_log (create_uid int, create_date timestamp)")
+                owner.execute(
+                    "INSERT INTO ir_config_parameter VALUES (%s,%s)",
+                    ("web.base.url", "https://fixture.invalid"),
+                )
+                owner.execute(
+                    "INSERT INTO ir_config_parameter VALUES (%s,%s),(%s,%s)",
+                    (
+                        TESTING_COPY_COMPLETION_PARAMETER,
+                        spec["copy_binding"],
+                        WALKTHROUGH_MARKER_PREFIX + spec["task_id"],
+                        json.dumps(
+                            {
+                                "binding": spec["binding"],
+                                "copy_binding": spec["copy_binding"],
+                                "account_id": 17,
+                                "state": WALKTHROUGH_ACTIVE_STATE,
+                            }
+                        ),
+                    ),
+                )
+                owner.execute(
+                    "INSERT INTO res_users VALUES (%s,%s,%s)",
+                    (17, WALKTHROUGH_LOGIN_PREFIX + spec["task_id"], True),
+                )
+                owner.commit()
+
+                def connect(**kwargs: object) -> SimpleNamespace:
+                    connection = psycopg.connect(url)
+
+                    def set_session(*, readonly: bool, autocommit: bool) -> None:
+                        connection.read_only = readonly
+                        connection.autocommit = autocommit
+
+                    return SimpleNamespace(
+                        set_session=set_session,
+                        cursor=connection.cursor,
+                        rollback=connection.rollback,
+                        close=connection.close,
+                    )
+
+                def probe() -> bool:
+                    output = io.StringIO()
+                    with (
+                        patch.dict(sys.modules, {"psycopg2": SimpleNamespace(connect=connect)}),
+                        patch.dict(
+                            os.environ,
+                            {
+                                "ODOO_DB_HOST": "unused-fixture",
+                                "ODOO_DB_NAME": "unused-fixture",
+                                "ODOO_DB_USER": "unused-fixture",
+                                "ODOO_DB_PASSWORD": "unused-fixture",
+                            },
+                        ),
+                        patch.object(sys, "stdin", io.StringIO(json.dumps(spec))),
+                        redirect_stdout(output),
+                    ):
+                        exec(compile(ACCOUNT_DATABASE_PROBE, "native-database-probe", "exec"), {})
+                    return json.loads(output.getvalue())["clear"] is True
+
+                owner.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(%s,0))",
+                    (WALKTHROUGH_LOCK_PREFIX + spec["binding"],),
+                )
+                self.assertFalse(probe())
+                owner.commit()
+                self.assertTrue(probe())
+                spec["mode"] = "usage"
+                self.assertTrue(probe())
+                owner.execute(
+                    "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (17,)
+                )
+                owner.commit()
+                self.assertTrue(probe())
+                # A completed task's history does not masquerade as staff use
+                # when a new task is admitted on this same isolated copy.
+                owner.execute("UPDATE res_users SET active=false WHERE id=17")
+                owner.execute(
+                    "UPDATE ir_config_parameter SET value=%s WHERE key=%s",
+                    (
+                        json.dumps(
+                            {
+                                "binding": spec["binding"],
+                                "copy_binding": spec["copy_binding"],
+                                "account_id": 17,
+                                "state": WALKTHROUGH_CLOSED_STATE,
+                            }
+                        ),
+                        WALKTHROUGH_MARKER_PREFIX + spec["task_id"],
+                    ),
+                )
+                owner.commit()
+                spec.update(mode="lane_usage", task_id="2" * 32)
+                self.assertTrue(probe())
+                owner.execute(
+                    "UPDATE ir_config_parameter SET value=%s WHERE key=%s",
+                    (
+                        json.dumps(
+                            {
+                                "copy_binding": "a-different-copy",
+                                "account_id": 17,
+                                "state": WALKTHROUGH_CLOSED_STATE,
+                            }
+                        ),
+                        WALKTHROUGH_MARKER_PREFIX + "1" * 32,
+                    ),
+                )
+                owner.commit()
+                self.assertFalse(probe())
+                owner.execute("DELETE FROM res_users_log")
+                owner.execute(
+                    "INSERT INTO res_users_log VALUES (%s,now() AT TIME ZONE 'UTC')", (23,)
+                )
+                owner.commit()
+                self.assertFalse(probe())
+
+
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_POSTGRES_URL"), "PostgreSQL integration URL required"
 )

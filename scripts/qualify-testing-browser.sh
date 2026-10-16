@@ -90,6 +90,7 @@ run_interruptible docker run --rm --cidfile "$fixture_dir/probe.cid" --network "
     --entrypoint /app/.venv/bin/python "$image" -c '
 from playwright.sync_api import sync_playwright
 from control_plane.workflows.verireel_testing_post_deploy import launch_testing_browser
+from control_plane.odoo_walkthrough_browser import require_safe_browser_control
 with sync_playwright() as playwright:
     browser = launch_testing_browser(playwright.chromium)
     try:
@@ -97,7 +98,26 @@ with sync_playwright() as playwright:
         heading = "Isolated testing browser"
         page.set_content(f"<h1>{heading}</h1>")
         assert page.locator("h1").inner_text() == heading
+        page.set_content("""<input id="business" name="name">
+            <input id="private-password" type="password">
+            <input id="private-hidden" type="hidden">
+            <input id="private-file" type="file">
+            <input id="private-key" name="api_key">
+            <input id="private-token" name="access_token">
+            <iframe srcdoc="&lt;input id=business&gt;"></iframe>""")
+        require_safe_browser_control(page.locator("#business"))
+        page.locator("#business").fill("TEST browser qualification")
+        assert page.locator("#business").input_value() == "TEST browser qualification"
+        refused = [page.locator(f"#{name}") for name in (
+            "private-password", "private-hidden", "private-file", "private-key", "private-token")]
+        refused.append(page.frame_locator("iframe").locator("#business"))
+        for locator in refused:
+            try:
+                require_safe_browser_control(locator)
+            except ValueError:
+                continue
+            raise AssertionError("Sensitive or iframe control was accepted")
     finally:
         browser.close()
 '
-printf '%s\n' 'Isolated browser rendered a page without control-plane credentials, runtime mounts or published ports.'
+printf '%s\n' 'Isolated browser rendered a page and refused sensitive/iframe controls without control-plane credentials, runtime mounts or published ports.'
