@@ -23568,6 +23568,184 @@
         "title": "OdooTestingRouteBindingRefreshEnvelope",
         "type": "object"
       },
+      "OdooWalkthroughRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "groups": {
+            "default": [
+              "base.group_user"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Groups",
+            "type": "array"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "provision",
+              "run",
+              "cleanup"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "product": {
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(|[a-f0-9]{64})$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "steps": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/WalkthroughStep"
+            },
+            "maxItems": 50,
+            "title": "Steps",
+            "type": "array"
+          },
+          "task_id": {
+            "pattern": "^[a-f0-9]{32}$",
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "task_id",
+          "operation"
+        ],
+        "title": "OdooWalkthroughRequest",
+        "type": "object"
+      },
+      "OdooWalkthroughResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "$ref": "#/components/schemas/OdooWalkthroughResult"
+          },
+          "status": {
+            "const": "accepted",
+            "default": "accepted",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "result"
+        ],
+        "title": "OdooWalkthroughResponse",
+        "type": "object"
+      },
+      "OdooWalkthroughResult": {
+        "additionalProperties": false,
+        "properties": {
+          "account_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Account Id"
+          },
+          "code": {
+            "default": "",
+            "title": "Code",
+            "type": "string"
+          },
+          "operation": {
+            "enum": [
+              "provision",
+              "run",
+              "cleanup"
+            ],
+            "title": "Operation",
+            "type": "string"
+          },
+          "plan_sha256": {
+            "title": "Plan Sha256",
+            "type": "string"
+          },
+          "screenshots": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Screenshots",
+            "type": "array"
+          },
+          "signed_in": {
+            "default": false,
+            "title": "Signed In",
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              "ready",
+              "pass",
+              "fail",
+              "unknown"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "steps_passed": {
+            "default": 0,
+            "title": "Steps Passed",
+            "type": "integer"
+          },
+          "task_id": {
+            "title": "Task Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "plan_sha256",
+          "task_id",
+          "operation"
+        ],
+        "title": "OdooWalkthroughResult",
+        "type": "object"
+      },
       "OdooWebsiteBootstrapPayload": {
         "additionalProperties": false,
         "properties": {
@@ -49303,6 +49481,39 @@
         "title": "VeriReelProdBackupGateOperationWorkerStatusResponseModel",
         "type": "object"
       },
+      "WalkthroughStep": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "enum": [
+              "open",
+              "click",
+              "fill",
+              "visible",
+              "screenshot"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "selector": {
+            "default": "",
+            "maxLength": 500,
+            "title": "Selector",
+            "type": "string"
+          },
+          "value": {
+            "default": "",
+            "maxLength": 2000,
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action"
+        ],
+        "title": "WalkthroughStep",
+        "type": "object"
+      },
       "WorkGraphIssueInboxReconcileResponse": {
         "additionalProperties": false,
         "properties": {
@@ -65493,6 +65704,116 @@
           }
         },
         "summary": "Cancel pending Odoo target replacement operation"
+      }
+    },
+    "/v1/drivers/odoo/testing-walkthrough": {
+      "post": {
+        "operationId": "odoo_testing_walkthrough",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OdooWalkthroughRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooWalkthroughResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Provision, run or clean up an opaque Odoo testing task"
       }
     },
     "/v1/drivers/odoo/website-bootstrap-override": {

@@ -559,6 +559,17 @@ ODOO_DRIVER = DriverDescriptor(
             writes_records=("odoo_instance_override",),
         ),
         _action(
+            "testing_walkthrough",
+            "Run a testing walkthrough",
+            "Create a task account, keep its password inside Launchplane, run a browser or revoke the account.",
+            safety="mutation",
+            scope="instance",
+            route_path="/v1/drivers/odoo/testing-walkthrough",
+            authz_action="odoo_testing_walkthrough.execute",
+            alternate_authz_actions=("odoo_testing_walkthrough.plan",),
+            writes_records=("secret", "odoo_testing_task"),
+        ),
+        _action(
             "service_restart",
             "Restart a service (same version)",
             "Inspect and restart one container on its recorded current artifact, excluding release runs.",

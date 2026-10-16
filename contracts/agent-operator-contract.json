@@ -48,6 +48,35 @@
       {
         "idempotency": "apply",
         "identity_dependencies": [
+          "read_operator_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply"
+        ],
+        "operation_id": "odoo_testing_walkthrough",
+        "path": "/v1/drivers/odoo/testing-walkthrough",
+        "purpose": "Provision or revoke a testing-only Odoo task account, or run its browser inside Launchplane; return only redacted receipts and masked screenshots.",
+        "response_statuses": [
+          "200",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "96d0316c1bf6963acb003859670ba87339c7d613e9b135da1198b49e8e065c51",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
           "read_browser_mutation_identity"
         ],
         "method": "POST",
@@ -626,8 +655,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "220fadc40d80b7eb4dbfe2229a2506c9d731409a"
+    "source_commit_sha": "56bf50c242adff3697f618fdd1bb902f0679e7eb"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "47d51593c1aa8850a76acc2960805fb1a9bf596913fc246380619165d53bcec8"
+  "semantic_digest_sha256": "30cc5ad4a4519a2a2f63c794b99c36900b36e02a76546795ee581c0a9c02cf2a"
 }

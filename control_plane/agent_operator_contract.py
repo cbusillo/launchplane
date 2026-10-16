@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
 from control_plane.contracts.disposable_lane import (
     DISPOSABLE_LANE_OBSERVATION_ROUTE,
     TESTING_REPLACEMENT_RESOURCES_ROUTE,
@@ -90,6 +91,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        WALKTHROUGH_ROUTE,
+        "Provision or revoke a testing-only Odoo task account, or run its browser inside Launchplane; return only redacted receipts and masked screenshots.",
+        ("service_api",),
+        ("dry-run", "apply"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
     OperationSpec(
         "POST",
         TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,

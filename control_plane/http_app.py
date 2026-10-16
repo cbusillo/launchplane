@@ -144,6 +144,10 @@ from control_plane.http_routes.lane_service_restart import (
     ServiceRestartDependencies,
     register_service_restart_route,
 )
+from control_plane.http_routes.odoo_walkthrough import (
+    WalkthroughDependencies,
+    register_walkthrough_route,
+)
 from control_plane.repository_evidence import (
     GitHubRepositoryEvidenceProvider,
 )
@@ -29331,6 +29335,18 @@ def create_launchplane_fastapi_app(
     register_service_restart_route(
         app,
         dependencies=ServiceRestartDependencies(
+            read_identity=read_operator_mutation_identity,
+            get_record_store=get_record_store,
+            next_trace_id=next_trace_id,
+            authorization_allows=resolved_authz_policy_runtime.allows,
+            http_error=_launchplane_http_error,
+            control_plane_root=resolved_control_plane_root,
+            error_response_model=LaunchplaneErrorResponse,
+        ),
+    )
+    register_walkthrough_route(
+        app,
+        dependencies=WalkthroughDependencies(
             read_identity=read_operator_mutation_identity,
             get_record_store=get_record_store,
             next_trace_id=next_trace_id,

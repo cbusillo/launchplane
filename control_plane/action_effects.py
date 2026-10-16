@@ -131,6 +131,8 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "merge_train_policy_operation.read": ActionDeclaration("read"),
         "merge_train_policy_operation.revoke": ActionDeclaration("write"),
         "odoo_app_maintenance.execute": ActionDeclaration("write"),
+        "odoo_testing_walkthrough.execute": ActionDeclaration("write"),
+        "odoo_testing_walkthrough.plan": ActionDeclaration("plan"),
         "odoo_config_parameter_override.write": ActionDeclaration("write"),
         "odoo_post_deploy.execute": ActionDeclaration("write"),
         ODOO_CONNECTION_ISOLATION_ACTIONS["dry-run"]: ActionDeclaration("plan"),

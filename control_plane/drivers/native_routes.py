@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ROUTE
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
@@ -63,6 +64,7 @@ from control_plane.service_auth import AuthorizationTarget, LaunchplaneIdentity
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
     {
         SERVICE_RESTART_ROUTE,
+        WALKTHROUGH_ROUTE,
         _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path,
         _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path,
@@ -99,7 +101,7 @@ _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS = frozenset(
 )
 
 _NATIVE_FASTAPI_DRIVER_ROUTE_PATHS_WITH_ALTERNATE_AUTHZ = frozenset(
-    {INGRESS_ROUTE_APPLY_ROUTE, SERVICE_RESTART_ROUTE}
+    {INGRESS_ROUTE_APPLY_ROUTE, SERVICE_RESTART_ROUTE, WALKTHROUGH_ROUTE}
 )
 _NATIVE_DRIVER_ROUTE_METADATA_ATTRIBUTE = "__launchplane_native_driver_route_metadata__"
 
