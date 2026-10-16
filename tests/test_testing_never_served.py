@@ -17,6 +17,12 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
 )
 from control_plane.odoo_testing_usage import OdooTestingUsage
+from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    build_authz_policy_record_id,
+    authz_policy_sha256,
+)
 from control_plane.odoo_testing_restore import generation_binding
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.testing_never_served import (
@@ -333,6 +339,29 @@ class NeverServedTestingTests(unittest.TestCase):
         self.store.write_fresh_odoo_testing_generation(self.gen)
         self.assertEqual(self.read().usage, "unknown")
 
+    def test_revocation_changes_only_usage_on_an_independently_protected_row(self) -> None:
+        proof = self.read()
+        for protection in NeverServedHttpTests.revocation_protections:
+            with self.subTest(protection=protection):
+                record_safety(
+                    self.store,
+                    self.product,
+                    self.context,
+                    "testing",
+                    usage_evidence=NON_USE_EVIDENCE_PREFIX + proof.proof_sha256,
+                )
+                previous = self.store.read_disposable_lane_safety(
+                    self.product, self.context, "testing"
+                )
+                assert previous is not None
+                previous = previous.model_copy(update=protection)
+                self.store.write_disposable_lane_safety(previous)
+                self.store.invalidate_testing_non_use(self.product, self.context)
+                self.assertEqual(
+                    self.store.read_disposable_lane_safety(self.product, self.context, "testing"),
+                    previous.model_copy(update={"usage": "unknown", "usage_evidence": ""}),
+                )
+
     def hold_cycle(self, writer: str) -> None:
         original = self.store.read_dokploy_target_record(
             context_name=self.context, instance_name="testing"
@@ -469,6 +498,19 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
                 fixture.database_url = self.database_url
                 fixture.setUp()
                 self.addCleanup(fixture.doCleanups)
+                policy = LaunchplaneAuthzPolicy()
+                fixture.store.seed_authz_policy_if_absent(
+                    LaunchplaneAuthzPolicyRecord(
+                        record_id=build_authz_policy_record_id(
+                            revision=1, policy_sha256=authz_policy_sha256(policy)
+                        ),
+                        revision=1,
+                        status="active",
+                        source="test:never-served-http",
+                        updated_at=fixture.profile.updated_at,
+                        policy=policy,
+                    )
+                )
                 app = fixture.fixture.fixture.app
                 previous = fixture.store.read_disposable_lane_safety(
                     fixture.product, fixture.context, "testing"
@@ -489,6 +531,7 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
                         headers={"Authorization": "Bearer local-operator-token"},
                         payload=body,
                     )
+                    self.assertEqual(inspected.status_code, 202, inspected.text)
                     response = await request(
                         app,
                         "POST",
