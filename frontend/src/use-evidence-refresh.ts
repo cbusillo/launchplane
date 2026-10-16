@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import type { ResourceState } from "./resource";
 
 export const READ_REFRESH_INTERVAL_MS = 60_000;
+export const DEADLINE_RETRY_INTERVAL_MS = 5_000;
 
 // Refresh reads independently of the shell's manual refresh, which also resets
 // action resources. The existing loaders own cancellation and retained data.
@@ -11,9 +12,14 @@ export function useEvidenceRefresh<T>(
   enabled: boolean,
   resource: ResourceState<T>,
   refresh: () => void,
+  evidenceDeadlines: readonly string[] = [],
 ) {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
+  const deadlineReads = useRef<{ key: string; pending: Map<number, number> }>({ key, pending: new Map() });
+  // Keep the dependency stable across expiry-only renders. Already expired
+  // evidence cannot schedule a read loop; normal polling still retries it.
+  const deadlineKey = evidenceDeadlines.join(",");
 
   useEffect(() => {
     if (!enabled || !["ready", "error"].includes(resource.status) ||
@@ -21,8 +27,31 @@ export function useEvidenceRefresh<T>(
 
     let timer: number;
     let requested = false;
-    const dueAt = performance.now() + READ_REFRESH_INTERVAL_MS;
-    const wallDueAt = Date.now() + READ_REFRESH_INTERVAL_MS;
+    const now = Date.now();
+    const deadlines = deadlineKey.split(",").map(value => Date.parse(value)).filter(Number.isFinite);
+    if (deadlineReads.current.key !== key || resource.status !== "ready") {
+      deadlineReads.current = { key, pending: new Map() };
+    }
+    const pending = deadlineReads.current.pending;
+    for (const [deadline, retryUntil] of pending) {
+      if (!deadlines.includes(deadline) ||
+          now >= deadline + READ_REFRESH_INTERVAL_MS || performance.now() >= retryUntil) {
+        pending.delete(deadline);
+      }
+    }
+    // Watch every future deadline before a pending read or hidden tab can
+    // cross it. Expired proof first encountered in a response gets no window.
+    for (const deadline of deadlines) {
+      if (deadline > now && !pending.has(deadline)) {
+        pending.set(deadline, performance.now() + deadline - now + READ_REFRESH_INTERVAL_MS);
+      }
+    }
+    const retryDue = [...pending.keys()].some(deadline => deadline <= now);
+    const nextExpiry = Math.min(...deadlines.filter(value => value > now));
+    const interval = Math.min(READ_REFRESH_INTERVAL_MS, nextExpiry - now,
+      retryDue ? DEADLINE_RETRY_INTERVAL_MS : Infinity);
+    const dueAt = performance.now() + interval;
+    const wallDueAt = now + interval;
     const update = () => {
       if (requested || document.visibilityState !== "visible") return;
       // Some browsers pause their monotonic clock during system sleep. A
@@ -38,7 +67,7 @@ export function useEvidenceRefresh<T>(
       window.clearTimeout(timer);
       refreshRef.current();
     };
-    timer = window.setTimeout(update, READ_REFRESH_INTERVAL_MS);
+    timer = window.setTimeout(update, interval);
     window.addEventListener("focus", update);
     document.addEventListener("visibilitychange", update);
     return () => {
@@ -46,5 +75,5 @@ export function useEvidenceRefresh<T>(
       window.removeEventListener("focus", update);
       document.removeEventListener("visibilitychange", update);
     };
-  }, [enabled, key, resource]);
+  }, [enabled, key, resource, deadlineKey]);
 }

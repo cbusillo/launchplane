@@ -11,6 +11,7 @@ OutboxDeliveryKind = Literal[
     "github_workflow_dispatch",
     "operator_authorization_recovery_alert",
     "public_ingress_notification",
+    "release_digest",
 ]
 OutboxDeliveryState = Literal[
     "pending",
