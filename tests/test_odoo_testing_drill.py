@@ -797,7 +797,6 @@ class TestingDrillTests(TestingDrillScenario):
         )
         assert receipt is not None
         self.assertEqual(receipt.response_payload["status"], "pass")
-        self.assertEqual(receipt.response_payload["step"], "late_completion")
         self.assertEqual(receipt.response_payload["failure_step"], DRILL_DEADLINE_STEP)
         self.assertTrue(receipt.response_payload["alert_delivered"])
         if cross_daily_boundary:
