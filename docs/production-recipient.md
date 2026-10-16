@@ -58,10 +58,22 @@ The private network has exact project/custody labels and IPv6 disabled; neither
 an arbitrary existing network nor a caller's connection assertion is adopted.
 No application starts. Managed values remain inside the service/provider path;
 terminal receipts contain neither endpoint values, credentials nor grant text.
-Private probe inputs travel in the script's stdin, never process arguments.
+Private probe inputs reach Python through stdin, avoiding Python's process
+arguments. This is still a private service/provider credential delivery path:
+Dokploy stores the script in its schedule record and materializes it on the
+destination host. Its shell transport can carry the encoded script in process
+arguments, and its script file permissions depend on the host's umask. The
+provider and destination host administrators are within that custody boundary;
+this mechanism does not promise secrecy from other host users during delivery.
 The manual-only script is scrubbed after success or failure under its execution
 lease, even if authority changes during the probe. Unverified cleanup is reported
-as `recipient_probe_cleanup_unverified` and never qualifies preparation.
+as `recipient_probe_cleanup_unverified` and never qualifies preparation. Scrub
+requires provider readback of the inert script and disabled schedule. Dokploy's
+[schedule update implementation](https://github.com/Dokploy/dokploy/blob/53464e9096a0976e8e4a8f3a1908bc1054e45a37/packages/server/src/services/schedule.ts#L170)
+awaits rewriting the destination script as well as updating its record. This is
+source contract evidence, not verification of an installed provider version.
+On unverified cleanup, preserve the original operation and private provider
+evidence for the reviewed continuation; do not repeat the probe blindly.
 The source observation is bound to the preparation, destination and managed
 versions. Readback retains its original observation time and does not renew it.
 Later bootstrap must requalify the actual connections; a historical proof cannot
@@ -129,7 +141,12 @@ The receipt and terminal plan distinguish an empty captured database from an
 initialized one through `captured_database_empty`; initializing an empty restored
 copy is never presented as recovery of populated business data. Integrity success
 requires both a successful checker exit and no `--silent` diagnostics, because
-MariaDB can report corrupt tables while exiting zero. File and archive hashes
+MariaDB can report corrupt tables while exiting zero. Unsupported storage-engine
+checks also refuse: startup alone cannot qualify data whose integrity the
+verifier cannot check. The verifier
+also requires a populated, readable privilege catalog, so an interrupted partial
+initialization is not mistaken for recovered data. The verifier ignores image
+option files and supplies its own data directory. File and archive hashes
 are streamed. Capture requires space for archive and restored trees, their
 metadata, and 2 GiB of database/verifier overhead before writing either copy.
 
@@ -162,7 +179,8 @@ uv run --extra dev python -m unittest tests.test_production_recipient_mariadb
 ```
 
 This gate proves empty restoration, populated restoration with a recovered-row
-query, and rejection of a real corrupt Aria table. It needs a local Docker engine
+query, rejection of a real corrupt Aria table, and partial-initialization refusal.
+It needs a local Docker engine
 and no live product data or credential. Record the exact image and result on the
 PR. Ordinary unittest/CI runs explicitly skip it without that fixture input;
 their success alone is not the real MariaDB proof.

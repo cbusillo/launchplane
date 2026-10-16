@@ -138,3 +138,14 @@ class RealMariaDBRecoveryTests(unittest.TestCase):
             (self.root / "captures" / self.spec["recovery_binding"] / "outcome.json").read_text()
         )
         self.assertEqual(outcome["state"], "failed_safe")
+
+    def test_partial_mysql_initialization_cannot_qualify_as_populated_recovery(self) -> None:
+        (self.paths[0] / "mysql").mkdir()
+        before = [self.namespace["manifest"](path) for path in self.paths]
+        with self.assertRaises((ValueError, RuntimeError)):
+            self.run_capture()
+        self.assertEqual(before, [self.namespace["manifest"](path) for path in self.paths])
+        outcome = json.loads(
+            (self.root / "captures" / self.spec["recovery_binding"] / "outcome.json").read_text()
+        )
+        self.assertEqual(outcome["state"], "failed_safe")

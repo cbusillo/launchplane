@@ -4,6 +4,7 @@ import base64
 from contextlib import redirect_stdout
 import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -143,6 +144,12 @@ class HostTransportTests(unittest.TestCase):
                 text=True,
                 capture_output=True,
                 check=True,
+                env={
+                    **os.environ,
+                    "PATH": str(Path(sys.executable).parent)
+                    + os.pathsep
+                    + os.environ.get("PATH", ""),
+                },
             )
             self.assertNotIn(password, completed.stdout)
             self.assertNotIn(base64.b64encode(json.dumps(spec).encode()).decode(), completed.stdout)
@@ -161,7 +168,10 @@ class HostTransportTests(unittest.TestCase):
                 "control_plane.production_recipient_host.post_deploy.run_manual_data_schedule",
                 side_effect=run,
             ),
-            patch("control_plane.production_recipient_host.api.upsert_dokploy_schedule") as scrub,
+            patch(
+                "control_plane.production_recipient_host.api.upsert_dokploy_schedule",
+                side_effect=lambda **kwargs: kwargs["schedule_payload"],
+            ) as scrub,
         ):
             result = run_recipient_program(
                 self.root,
@@ -192,18 +202,50 @@ class HostTransportTests(unittest.TestCase):
                 "control_plane.production_recipient_host.post_deploy.run_manual_data_schedule",
                 side_effect=TimeoutError("unknown probe"),
             ),
-            patch("control_plane.production_recipient_host.api.upsert_dokploy_schedule") as scrub,
+            patch(
+                "control_plane.production_recipient_host.api.upsert_dokploy_schedule",
+                side_effect=lambda **kwargs: kwargs["schedule_payload"],
+            ) as scrub,
         ):
             with self.assertRaises(TimeoutError):
                 run_recipient_program(
                     self.root, self.record, spec, "", lambda phase: None, scrub_guard=guard
                 )
             scrub.assert_called_once()
+            scrub.side_effect = lambda **kwargs: {
+                "script": "stale private script",
+                "enabled": False,
+            }
+            with self.assertRaises(RecipientProbeCleanupError):
+                run_recipient_program(
+                    self.root, self.record, spec, "", lambda phase: None, scrub_guard=guard
+                )
             scrub.side_effect = OSError("provider unavailable")
             with self.assertRaises(RecipientProbeCleanupError):
                 run_recipient_program(
                     self.root, self.record, spec, "", lambda phase: None, scrub_guard=guard
                 )
+
+    def test_readback_and_apply_cannot_replace_each_others_provider_script(self) -> None:
+        with (
+            patch(
+                "control_plane.production_recipient_host.api.fetch_dokploy_target_payload",
+                return_value={"serverId": self.record.request.destination_server_id},
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy._resolve_dokploy_schedule_runtime",
+                return_value=("server", "destination", "project", "destination"),
+            ),
+            patch(
+                "control_plane.production_recipient_host.post_deploy.run_manual_data_schedule",
+                return_value={},
+            ) as dispatch,
+        ):
+            run_recipient_program(self.root, self.record, {}, "", lambda phase: None)
+            run_recipient_program(self.root, self.record, {"inspect": True}, "", lambda phase: None)
+        apply, readback = [call.kwargs for call in dispatch.call_args_list]
+        self.assertNotEqual(apply["schedule_name"], readback["schedule_name"])
+        self.assertNotEqual(apply["schedule_app_name"], readback["schedule_app_name"])
 
     def test_foreign_destination_refuses_before_host_dispatch(self) -> None:
         with (
@@ -260,6 +302,8 @@ class RecoveryProgramTests(unittest.TestCase):
         if args[0] == "start":
             return ""
         if args[0] == "exec":
+            if args[2] == "mariadb":
+                return "1"
             if self.fail_check:
                 raise ValueError("corrupt recovery")
             return self.check_output

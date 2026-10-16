@@ -40,10 +40,18 @@ def run_recipient_program(
         target_payload=payload,
     )
     encoded = base64.b64encode(json.dumps(spec).encode()).decode()
+    # Readback dispatches before mutation admission. It must never replace the
+    # script that a concurrently leased apply is about to trigger.
+    schedule_name = (
+        "Launchplane isolated recipient readback"
+        if spec.get("inspect")
+        else "Launchplane isolated recipient qualification"
+    )
+    schedule_app_name = record.namespace + ("-check" if spec.get("inspect") else "-qual")
     schedule_payload: api.JsonObject = {
-        "name": "Launchplane isolated recipient qualification",
+        "name": schedule_name,
         "cronExpression": post_deploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
-        "appName": record.namespace + "-qualification",
+        "appName": schedule_app_name,
         "shellType": "bash",
         "scheduleType": kind,
         "command": "control-plane recipient qualification",
@@ -66,8 +74,8 @@ def run_recipient_program(
             ),
             schedule_lookup_id=lookup,
             schedule_type=kind,
-            schedule_name="Launchplane isolated recipient qualification",
-            schedule_app_name=record.namespace + "-qualification",
+            schedule_name=schedule_name,
+            schedule_app_name=schedule_app_name,
             schedule_payload=schedule_payload,
             resolved_schedule_execution_timeout_seconds=300,
             before_provider_mutation=checkpoint,
@@ -80,15 +88,18 @@ def run_recipient_program(
                 if scrub_guard is None:
                     raise ValueError("Private probe cleanup requires its execution lease.")
                 scrub_guard()
-                api.upsert_dokploy_schedule(
+                scrub_script = "#!/bin/sh\nexit 1\n"
+                scrubbed = api.upsert_dokploy_schedule(
                     host=host,
                     token=token,
                     target_id=lookup,
                     schedule_type=kind,
-                    schedule_name="Launchplane isolated recipient qualification",
-                    app_name=record.namespace + "-qualification",
-                    schedule_payload={**schedule_payload, "script": "#!/bin/sh\nexit 1\n"},
+                    schedule_name=schedule_name,
+                    app_name=schedule_app_name,
+                    schedule_payload={**schedule_payload, "script": scrub_script},
                 )
+                if scrubbed.get("script") != scrub_script or scrubbed.get("enabled") is not False:
+                    raise ValueError("Private probe scrub readback did not match.")
             except Exception as error:
                 raise RecipientProbeCleanupError(
                     "recipient_probe_cleanup_unverified: retain the original operation and private provider evidence."
@@ -321,20 +332,24 @@ def recover(paths,spec,*,base=None):
                 '--memory','2g','--cpus','1','--security-opt','no-new-privileges',
                 '--mount','type=bind,src='+str(scratch/'database')+',dst=/var/lib/mysql',
                 '--entrypoint','sh',spec['database_image'],'-ec',
-                'if [ ! -d /var/lib/mysql/mysql ]; then mariadb-install-db --user=mysql --datadir=/var/lib/mysql --skip-test-db >/dev/null 2>&1; fi; '
-                'exec mariadbd --user=mysql --skip-networking --skip-grant-tables --skip-slave-start --event-scheduler=OFF --skip-log-bin').strip()
+                'if [ ! -d /var/lib/mysql/mysql ]; then mariadb-install-db --no-defaults --user=mysql --datadir=/var/lib/mysql --skip-test-db >/dev/null 2>&1; fi; '
+                'exec mariadbd --no-defaults --datadir=/var/lib/mysql --user=mysql --skip-networking --skip-grant-tables --skip-slave-start --event-scheduler=OFF --skip-log-bin').strip()
             try:
                 docker('start',identifier)
                 deadline=time.monotonic()+90
                 while True:
-                    status=subprocess.run(['docker','exec',identifier,'mariadb','--protocol=socket','--user=root','--execute=SELECT 1'],capture_output=True,timeout=5)
+                    status=subprocess.run(['docker','exec',identifier,'mariadb','--no-defaults','--protocol=socket','--user=root','--execute=SELECT 1'],capture_output=True,timeout=5)
                     if status.returncode==0:
                         break
                     if time.monotonic()>=deadline:
                         raise ValueError('database recovery uncertain')
                     time.sleep(.25)
                 # CHECK TABLE can report corruption while mariadb-check exits zero.
-                if docker('exec',identifier,'mariadb-check','--protocol=socket','--user=root','--all-databases','--check','--silent').strip():
+                catalog=docker('exec',identifier,'mariadb','--no-defaults','--protocol=socket','--user=root',
+                    '--batch','--skip-column-names','--execute=SELECT COUNT(*) FROM mysql.global_priv').strip()
+                if not catalog.isdecimal() or int(catalog)<=0:
+                    raise ValueError('database initialization is incomplete')
+                if docker('exec',identifier,'mariadb-check','--no-defaults','--protocol=socket','--user=root','--all-databases','--check','--silent').strip():
                     raise ValueError('database integrity unverified')
                 observed=json.loads(docker('inspect',identifier))[0]
                 if observed['HostConfig']['NetworkMode']!='none' or observed['Config'].get('Env')!=json.loads(docker('image','inspect',spec['database_image']))[0]['Config'].get('Env'):
