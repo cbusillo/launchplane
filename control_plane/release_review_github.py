@@ -85,9 +85,22 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
         ):
             return match[0]
         changed = True
-        return "." if match["join"].startswith(",") else ""
+        following_check = re.search(
+            r"\s+(?:then|and)(?:\s+then)?\s+"
+            r"(?P<check>(?:check|confirm|verify|open|try|repeat|inspect|look|test)\b.*)",
+            instruction,
+            re.IGNORECASE,
+        )
+        retained = "." if match["join"].startswith(",") else ""
+        if following_check:
+            check = following_check["check"]
+            retained += (" " if retained else "") + check[0].upper() + check[1:]
+        return retained
 
-    displayed = _RELEASE_PROCESS_INSTRUCTION.sub(remove_process, notes)
+    displayed = "\n".join(
+        line if fence else _RELEASE_PROCESS_INSTRUCTION.sub(remove_process, line)
+        for line, _heading, fence in _markdown_lines(notes)
+    )
     displayed = _NOTE_LINK.sub(replace, displayed)
     if changed:
         # A batch member whose only instruction was removed still needs notes.
@@ -96,17 +109,29 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
             (index, int(number[1]))
             for index, (_line, heading, _fence) in enumerate(_markdown_lines(displayed))
             if heading is not None
-            and len(heading[1]) >= 3
+            and len(heading[1]) == 3
             and (number := re.match(r"#([1-9][0-9]*)\b", heading[2]))
         ]
         for position in range(len(members) - 1, -1, -1):
             start, number = members[position]
             end = members[position + 1][0] if position + 1 < len(members) else len(lines)
-            if not "\n".join(lines[start + 1 : end]).strip():
+            if not _note_content("\n".join(lines[start + 1 : end])):
                 lines.insert(start + 1, missing_owner_test_notes(number))
+        if not _note_content("\n".join(lines)):
+            lines = []
         displayed = "\n".join(lines)
     displayed = displayed.strip()
     return displayed, changed
+
+
+def _note_content(notes: str) -> bool:
+    return any(
+        line.strip()
+        and heading is None
+        and not line.strip().endswith(":")
+        and not re.fullmatch(r"[ \t]*(?:[-*+]|[0-9]+[.)]|`{3,}|~{3,})[ \t]*", line)
+        for line, heading, _fence in _markdown_lines(notes)
+    )
 
 
 # Batch PRs written before the role words changed say "Owner"; both are read.

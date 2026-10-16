@@ -105,3 +105,26 @@ class ReleaseProcessNotesTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertEqual(pull_requests_missing_owner_test_notes(displayed), (123,))
         self.assertIn("Check the checkout total.", displayed)
+
+    def test_following_check_survives_a_conjunction_in_the_same_sentence(self) -> None:
+        for tail in (", then check the footer.", " and confirm the banner is gone."):
+            with self.subTest(tail=tail):
+                notes = (
+                    "Accept the release in Launchplane after cleanup evidence is recorded" + tail
+                )
+                displayed, changed = release_test_notes(notes)
+                self.assertTrue(changed)
+                self.assertIn(tail.split()[-1], displayed)
+                self.assertNotIn("cleanup", displayed)
+
+    def test_headings_and_labels_do_not_stand_in_for_removed_instructions(self) -> None:
+        for heading in ("Test steps:", "#### Steps"):
+            with self.subTest(heading=heading):
+                notes = heading + "\nAccept the release in Launchplane after cleanup is recorded."
+                self.assertEqual(release_test_notes(notes), ("", True))
+                displayed, _ = release_test_notes("### #123 Change\n" + notes)
+                self.assertEqual(pull_requests_missing_owner_test_notes(displayed), (123,))
+
+    def test_process_examples_in_fences_are_data(self) -> None:
+        notes = "```text\nAccept the release in Launchplane after cleanup is recorded.\n```"
+        self.assertEqual(release_test_notes(notes), (notes, False))
