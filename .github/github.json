@@ -61,6 +61,7 @@
     "odooTestingWalkthrough": "docs/odoo-testing-walkthrough.md",
     "githubActionsSecurity": "docs/github-actions-security.md",
     "dependencyHealthContract": "docs/dependency-health-contract.md",
+    "runtimeDependencyHealth": "docs/runtime-dependency-health.md",
     "advisoryGovernanceChecks": "docs/advisory-governance-checks.md",
     "publicReadiness": "docs/public-readiness.md",
     "roleWords": "docs/role-words.md",

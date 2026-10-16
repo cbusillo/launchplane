@@ -25,6 +25,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
   const [intent, setIntent] = useState<MonitoringRequest["monitoring_intent"]>("prelaunch");
   const [enabled, setEnabled] = useState(false);
   const [identityRequired, setIdentityRequired] = useState(false);
+  const [dependenciesRequired, setDependenciesRequired] = useState(false);
   const [reason, setReason] = useState("");
   const [review, setReview] = useState<ProductHealthMonitoringPlan | null>(null);
   const [confirmed, setConfirmed] = useState(false);
@@ -74,6 +75,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
         setIntent(current.health_monitoring?.monitoring_intent ?? "prelaunch");
         setEnabled(selected?.enabled ?? false);
         setIdentityRequired(selected?.require_runtime_identity ?? false);
+        setDependenciesRequired(current.health_monitoring?.dependency_health?.mode === "required");
       }).catch(error => {
         if (!controller.signal.aborted) setProfileError(error instanceof Error ? error.message : "Monitoring profile unavailable.");
       }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
@@ -92,6 +94,10 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
       check_name: check.name, check_kind: check.kind as "public_http" | "private_http",
       monitoring_intent: intent, enabled, require_runtime_identity: identityRequired,
       private_endpoint_key: check.private_endpoint_key, reason: reason.trim(), mode: "dry-run",
+      dependency_health: {
+        mode: dependenciesRequired ? "required" : "informational",
+        override: lane?.health_monitoring?.dependency_health?.override ?? null,
+      },
     });
     if (response?.result) {
       if (reviewedProfileRevision !== profileRevisionRef.current) return;
@@ -115,6 +121,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
       monitoring_intent: review!.requested_monitoring_intent, enabled: review!.requested_enabled,
       require_runtime_identity: review!.requested_require_runtime_identity,
       private_endpoint_key: review!.private_endpoint_key, reason: review!.reason,
+      dependency_health: review!.requested_dependency_health,
       mode: "apply", reviewed_plan_sha256: review!.plan_sha256,
     } satisfies MonitoringRequest;
     try {
@@ -137,11 +144,13 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
       if (!saved || !savedCheck || saved.health_monitoring?.monitoring_intent !== request.monitoring_intent
         || savedCheck.enabled !== request.enabled || savedCheck.require_runtime_identity !== request.require_runtime_identity
         || savedCheck.kind !== request.check_kind || savedCheck.private_endpoint_key !== request.private_endpoint_key
+        || request.dependency_health && JSON.stringify(saved.health_monitoring?.dependency_health ?? { mode: "informational", override: null }) !== JSON.stringify(request.dependency_health)
         || savedCheck.kind === "public_http" && (savedCheck.url || saved.health_url || saved.base_url) !== response.result.resolved_url) {
         throw new Error("Stored monitoring differs from this request. Refresh and inspect the current profile.");
       }
       setLane(saved); setIntent(request.monitoring_intent); setEnabled(request.enabled ?? true);
       setIdentityRequired(request.require_runtime_identity ?? false);
+      setDependenciesRequired(request.dependency_health?.mode === "required");
       setMessage("Monitoring policy saved and read back. Health and runtime identity remain unverified until the monitor records fresh evidence.");
     } catch (error) {
       setMessage(`Monitoring policy saved; readback not confirmed. ${error instanceof Error ? error.message : "Refresh to inspect the recorded policy."}`);
@@ -182,6 +191,10 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
     </select></label>
     <label className="monitoring-checkbox"><input type="checkbox" disabled={locked || !supported} checked={enabled} onChange={event => { setEnabled(event.target.checked); if (!event.target.checked) setIdentityRequired(false); edited(); }} />Check enabled</label>
     <label className="monitoring-checkbox"><input type="checkbox" disabled={locked || !supported || !enabled} checked={identityRequired} onChange={event => { setIdentityRequired(event.target.checked); edited(); }} />Require runtime identity</label>
+    <p>Dependencies: {detail.health_monitoring.dependency_expectations?.source === "unavailable" ? "Not available" : detail.health_monitoring.dependency_expectations?.dependencies.join(", ") || "None derived"}.
+      {lane?.health_monitoring?.dependency_health?.override ? ` Override: ${lane.health_monitoring.dependency_health.override.reason}` : " Derived from this lane’s deployment settings."}</p>
+    <label className="monitoring-checkbox"><input type="checkbox" disabled={locked || !supported} checked={dependenciesRequired} onChange={event => { setDependenciesRequired(event.target.checked); edited(); }} />Require dependency coverage</label>
+    <p>Enable after this product reports its dependencies. Missing coverage then fails the check; until adoption it stays informational.</p>
     <label className="promotion-field"><span>Reason</span><input disabled={locked} value={reason} onChange={event => { setReason(event.target.value); edited(); }} /></label>
     <button className="secondary-button" disabled={locked || !supported || !reason.trim()} onClick={() => void inspect()}>Review monitoring change</button>
     {review ? <div className="monitoring-review">
@@ -191,6 +204,7 @@ export function HealthMonitoringPanel({ detail, fixtureMode, onRefresh, refreshT
         <div><dt>Monitoring intent</dt><dd>{review.current_monitoring_intent} → {review.requested_monitoring_intent}</dd></div>
         <div><dt>Check enabled</dt><dd>{String(review.current_enabled)} → {String(review.requested_enabled)}</dd></div>
         <div><dt>Require runtime identity</dt><dd>{String(review.current_require_runtime_identity)} → {String(review.requested_require_runtime_identity)}</dd></div>
+        <div><dt>Dependency coverage</dt><dd>{review.current_dependency_health?.mode ?? "informational"} → {review.requested_dependency_health?.mode ?? "informational"}</dd></div>
         <div><dt>Endpoint preserved</dt><dd>{review.requested_check_kind === "private_http" ? `Registered private endpoint: ${review.private_endpoint_key}` : review.resolved_url || "No public endpoint recorded"}</dd></div>
       </dl>
       <label className="monitoring-checkbox"><input type="checkbox" disabled={locked} checked={confirmed} onChange={event => setConfirmed(event.target.checked)} />I confirm this monitoring change on {detail.environment}.</label>

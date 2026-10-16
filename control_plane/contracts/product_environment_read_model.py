@@ -30,6 +30,13 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
+from control_plane.contracts.runtime_dependency_health import (
+    RuntimeDependencyExpectations,
+    RuntimeDependencyHealthEvidence,
+    RuntimeDependencyHealthPolicy,
+    runtime_dependency_coverage_current,
+)
+from control_plane.runtime_dependency_health import derive_runtime_dependencies
 from control_plane.contracts.product_incident_read_model import (
     ProductIncidentEnvironmentScope,
     ProductIncidentSummary,
@@ -381,6 +388,11 @@ class ProductHealthMonitoringCheckSummary(BaseModel):
     observed_at: str = ""
     record_id: str = ""
     summary: str = ""
+    dependency_health: RuntimeDependencyHealthEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     incident_status: str = ""
     incident_id: str = ""
     incident_severity: PublicIngressIncidentSeverity | Literal[""] = ""
@@ -406,6 +418,16 @@ class ProductHealthMonitoringSummary(BaseModel):
     checks: tuple[ProductHealthMonitoringCheckSummary, ...] = ()
     open_incidents: tuple[ProductIncidentSummary, ...] = ()
     provenance: DataProvenance
+    dependency_expectations: RuntimeDependencyExpectations | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    dependency_policy: RuntimeDependencyHealthPolicy | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
 
 class ProductOdooEnvironmentExtension(BaseModel):
@@ -2392,6 +2414,14 @@ def _health_monitoring_summary(
     )
     summaries_by_id = {summary.incident_id: summary for summary in open_incident_summaries}
     check_summaries: list[ProductHealthMonitoringCheckSummary] = []
+    dependency_expectations = (
+        derive_runtime_dependencies(profile=profile, lane=lane, record_store=record_store)
+        if any(
+            check.enabled and check.kind in {"public_http", "private_http"}
+            for check in lane.health_monitoring.checks
+        )
+        else RuntimeDependencyExpectations(source="unavailable")
+    )
     for check in lane.health_monitoring.checks:
         probe_effective = check.enabled and product_lane_monitoring_probe_effective(
             monitoring_intent=lane.health_monitoring.monitoring_intent,
@@ -2463,6 +2493,29 @@ def _health_monitoring_summary(
             )
             status = "missing"
             summary = "Launchplane has not recorded a probe observation for this health check."
+        dependency_health = (
+            next(
+                (target.dependency_health for target in latest.targets if target.dependency_health),
+                None,
+            )
+            if latest is not None
+            else None
+        )
+        if (
+            probe_effective
+            and check.kind in {"public_http", "private_http"}
+            and lane.health_monitoring.dependency_health.mode == "required"
+            and status == "pass"
+            and not runtime_dependency_coverage_current(
+                evidence=dependency_health, expectations=dependency_expectations
+            )
+        ):
+            status = "missing"
+            trust_state = "missing"
+            summary = "Dependency health: not covered; awaiting a current conforming probe."
+            provenance = provenance.model_copy(
+                update={"freshness_status": "missing", "detail": summary}
+            )
         check_summaries.append(
             ProductHealthMonitoringCheckSummary(
                 name=check.name,
@@ -2476,6 +2529,7 @@ def _health_monitoring_summary(
                 observed_at=latest.observed_at if latest is not None else "",
                 record_id=latest.record_id if latest is not None else "",
                 summary=summary,
+                dependency_health=dependency_health,
                 incident_status=open_incident.status if open_incident is not None else "",
                 incident_id=open_incident.incident_id if open_incident is not None else "",
                 incident_severity=open_incident.severity if open_incident is not None else "",
@@ -2501,6 +2555,8 @@ def _health_monitoring_summary(
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         public_incident_eligible=lane.health_monitoring.monitoring_intent == "public",
         checks=tuple(check_summaries),
+        dependency_expectations=dependency_expectations,
+        dependency_policy=lane.health_monitoring.dependency_health,
         open_incidents=open_incident_summaries,
         provenance=_monitoring_intent_provenance(profile=profile, lane=lane),
     )
@@ -2574,14 +2630,31 @@ def _public_ingress_summary(
         incident_id=open_incident.incident_id if open_incident is not None else "",
     )
     provenance = monitor_observation_provenance(latest)
+    dependency_gap = (
+        latest.status == "pass"
+        and lane.health_monitoring.dependency_health.mode == "required"
+        and not runtime_dependency_coverage_current(
+            evidence=next(
+                (target.dependency_health for target in latest.targets if target.dependency_health),
+                None,
+            ),
+            expectations=derive_runtime_dependencies(
+                profile=profile, lane=lane, record_store=record_store
+            ),
+        )
+    )
+    if dependency_gap:
+        provenance = provenance.model_copy(update={"freshness_status": "missing"})
     return ProductPublicIngressSummary(
         monitoring_intent=monitoring_intent,
         incident_eligible=incident_eligible,
-        status=latest.status,
+        status="missing" if dependency_gap else latest.status,
         failure_code=latest.failure_code or "",
         observed_at=latest.observed_at,
         record_id=latest.record_id,
-        summary=latest.summary,
+        summary="Dependency health: not covered; awaiting a current conforming probe."
+        if dependency_gap
+        else latest.summary,
         notification_sent=latest.notification_sent,
         incident_status=open_incident.status if open_incident is not None else "",
         incident_id=open_incident.incident_id if open_incident is not None else "",
