@@ -13,6 +13,8 @@ import logging
 import re
 import shlex
 import time
+import socket
+from threading import Event, Timer
 from typing import Protocol
 from urllib.parse import urlencode, urlsplit, urlunsplit
 import uuid
@@ -55,6 +57,9 @@ class ReadConnection(Protocol):
     def send(self, message: str) -> None: ...
 
     def recv(self, timeout: float | None = None) -> str | bytes: ...
+
+
+GUARDED_SEND_TIMEOUT_SECONDS = 5.0
 
 
 def require_registered_remote_server(server_id: object) -> str:
@@ -123,6 +128,8 @@ def _read_program(
     payload: dict[str, object],
     timeout_seconds: float,
     receive: Callable[[dict[str, object]], None],
+    dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
+    abort_send: Callable[[], None] | None = None,
 ) -> None:
     deadline = time.monotonic() + timeout_seconds
     nonce = uuid.uuid4().hex
@@ -171,7 +178,36 @@ def _read_program(
     encoded_program = base64.b64encode(program.encode()).decode()
     if len(encoded) > 120 * 1024 or len(encoded_program) > 120 * 1024:
         raise NativeSourceUnavailable("The fixed remote read exceeds the transport argument bound.")
-    connection.send(json.dumps({"program": encoded_program, "payload": encoded}) + "\n")
+
+    def dispatch() -> None:
+        message = json.dumps({"program": encoded_program, "payload": encoded}) + "\n"
+        if abort_send is None:
+            connection.send(message)
+            return
+        expired = Event()
+
+        def abort() -> None:
+            expired.set()
+            try:
+                abort_send()
+            except OSError:
+                pass
+
+        timer = Timer(min(GUARDED_SEND_TIMEOUT_SECONDS, _remaining(deadline)), abort)
+        timer.daemon = True
+        timer.start()
+        try:
+            connection.send(message)
+            if expired.is_set():
+                raise NativeSourceUnavailable("The guarded program send exceeded its deadline.")
+        finally:
+            timer.cancel()
+            timer.join()
+
+    if dispatch_guard is None:
+        dispatch()
+    else:
+        dispatch_guard(dispatch)
     complete = False
     for line in lines:
         if not line.startswith(prefix):
@@ -331,6 +367,7 @@ def _read_remote(
     payload: dict[str, object],
     receive: Callable[[dict[str, object]], None],
     timeout_seconds: float,
+    dispatch_guard: Callable[[Callable[[], None]], None] | None = None,
 ) -> None:
     logger = logging.Logger("launchplane-private-source", level=logging.CRITICAL + 1)
     logger.disabled = True
@@ -355,6 +392,10 @@ def _read_remote(
                 payload=payload,
                 timeout_seconds=timeout_seconds,
                 receive=receive,
+                dispatch_guard=dispatch_guard,
+                abort_send=(lambda: connection.socket.shutdown(socket.SHUT_RDWR))
+                if dispatch_guard is not None
+                else None,
             )
     except InvalidStatus as error:
         if error.response.status_code in {401, 403}:
