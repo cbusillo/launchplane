@@ -394,9 +394,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             )
 
         self.assertFalse(branch_client.requests)
-        self.assertTrue(
-            all(mutation.status == "planned" for mutation in checkpoints[-1].mutations)
-        )
+        self.assertTrue(all(mutation.status == "planned" for mutation in checkpoints[-1].mutations))
 
     def test_execute_plan_stops_before_merging_a_child_held_mid_collapse(self) -> None:
         plan = _collapse_plan()
