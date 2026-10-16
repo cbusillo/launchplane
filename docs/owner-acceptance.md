@@ -56,6 +56,11 @@ recording a Client decision or sending a review invitation. A later review label
 missing notes, or real test notes restores the corresponding review gate on the
 same head when the check refreshes. Until then, an engineering-only check cannot
 satisfy required Client acceptance. An existing Client rejection stays visible.
+The train independently reads saved current-head decisions for the product's
+current Client at admission and immediately before merging. A Request changes
+decision blocks even after notes are edited to engineering-only or while its
+GitHub projection is stale. A later Accept on that head clears the veto;
+decisions for another head, product or former Client do not veto this change.
 The consuming product's release acceptance remains required.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
