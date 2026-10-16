@@ -29,9 +29,6 @@ from control_plane.workflows.verireel_preview_driver import _verireel_template_r
 from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_destroy
 from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
 from control_plane.workflows.preview_resource_destroy import PreviewResourceDestroyResult
-from control_plane.workflows.verireel_billing_recovery_schedule import (
-    VeriReelRecoveryScheduleSnapshot,
-)
 
 
 def _runtime_binding(binding_key: str) -> SecretBinding:
@@ -74,25 +71,11 @@ def _refresh_request() -> VeriReelPreviewRefreshRequest:
 
 class VeriReelPreviewDriverTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.quiesce_recovery_schedule = self.enterContext(
+        self.lifecycle = MagicMock()
+        self.lifecycle_factory = self.enterContext(
             patch(
-                "control_plane.workflows.verireel_preview_driver.quiesce_verireel_billing_recovery_schedule",
-                return_value=VeriReelRecoveryScheduleSnapshot(existed=False),
-            )
-        )
-        self.finalize_recovery_schedule = self.enterContext(
-            patch(
-                "control_plane.workflows.verireel_preview_driver.finalize_verireel_billing_recovery_schedule"
-            )
-        )
-        self.restore_recovery_schedule = self.enterContext(
-            patch(
-                "control_plane.workflows.verireel_preview_driver.restore_verireel_billing_recovery_schedule"
-            )
-        )
-        self.delete_recovery_schedule = self.enterContext(
-            patch(
-                "control_plane.workflows.verireel_preview_driver.delete_verireel_billing_recovery_schedule"
+                "control_plane.workflows.verireel_preview_driver.preview_application_lifecycle",
+                return_value=self.lifecycle,
             )
         )
 
@@ -109,7 +92,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             "preview-verireel-testing-verireel-pr-71-generation-0003",
         )
 
-    def test_destroy_deletes_schedule_before_application_and_tolerates_schedule_drift(
+    def test_destroy_removes_application_and_its_attached_schedules(
         self,
     ) -> None:
         request = VeriReelPreviewDestroyRequest.model_validate(
@@ -128,8 +111,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         def _destroy_application(**kwargs: object) -> PreviewResourceDestroyResult:
             cleanup_order.append("application")
             return PreviewResourceDestroyResult(status="pass")
-
-        self.delete_recovery_schedule.side_effect = _delete_recovery_schedule
 
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -171,12 +152,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                 request=request,
             )
 
-        self.assertEqual(cleanup_order, ["schedule", "application"])
-        self.delete_recovery_schedule.assert_called_once_with(
-            host="https://dokploy.example.com",
-            token="token-123",
-            application_id="app-preview",
-        )
+        self.assertEqual(cleanup_order, ["application"])
         destroy_resource.assert_called_once()
         self.assertEqual(result.destroy_status, "pass")
         self.assertEqual(result.error_message, "")
@@ -243,7 +219,6 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             self.assertTrue(result.error_message)
             destroy.assert_not_called()
             database_cleanup.assert_not_called()
-            self.delete_recovery_schedule.assert_not_called()
 
     def test_ensure_application_uses_default_server_when_template_omits_server_id(self) -> None:
         requests: list[dict[str, object]] = []
@@ -739,10 +714,10 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertNotIn("POSTGRES_PASSWORD", captured_env)
         self.assertNotIn("template-postgres-password", "\n".join(captured_env.values()))
         self.assertEqual(captured_env["NEXT_PUBLIC_SUPPORT_EMAIL"], "support@example.com")
-        self.finalize_recovery_schedule.assert_called_once()
+        self.lifecycle.complete.assert_called_once()
         self.assertEqual(
-            self.finalize_recovery_schedule.call_args.kwargs["instance"],
-            "preview",
+            self.lifecycle_factory.call_args.kwargs["extensions"],
+            profile.preview.generic_web_extensions,
         )
 
     def test_new_preview_early_failure_rolls_back_database_without_unbound_application_id(
@@ -853,7 +828,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.verireel_preview_driver._run_application_command_with_retries"
-            ) as run_command_with_retries,
+            ),
             patch(
                 "control_plane.workflows.verireel_preview_driver._wait_for_preview_health",
                 side_effect=lambda **kwargs: kwargs["expected_runtime_identity"],
@@ -865,8 +840,8 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             )
 
         self.assertEqual(result.refresh_status, "pass")
-        self.quiesce_recovery_schedule.assert_called_once()
-        self.finalize_recovery_schedule.assert_called_once()
+        self.lifecycle.prepare.assert_called_once()
+        self.lifecycle.complete.assert_called_once()
         self.assertEqual(
             result.runtime_identity, _build_preview_runtime_identity(request=_refresh_request())
         )
@@ -880,14 +855,7 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             captured_env["VERIREEL_SECRETS_MASTER_KEY"],
             base64.b64encode(bytes(range(32))).decode("ascii"),
         )
-        self.assertEqual(
-            run_command_with_retries.call_args_list[0].kwargs["command"],
-            "./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
-        )
-        self.assertEqual(
-            run_command_with_retries.call_args_list[1].kwargs["command"],
-            "node prisma/seed.mjs",
-        )
+        self.lifecycle.maintain.assert_called_once()
 
     def test_wait_for_preview_health_returns_matching_runtime_identity(self) -> None:
         expected = _build_preview_runtime_identity(request=_refresh_request())

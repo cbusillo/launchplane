@@ -161,14 +161,8 @@ copying an OIDC/fetch helper into the product repo. Product repos can still keep
 small scripts that assemble product-specific payload JSON until Launchplane owns
 that request-shaping layer too.
 
-If a product-owned smoke test creates dynamic users and needs Launchplane to
-grant, promote, or clean them up during the same browser run, install the
-Launchplane-owned smoke maintenance client with
-`cbusillo/launchplane/.github/actions/setup-smoke-maintenance-client@<launchplane-sha>` and
-import the generated client from the smoke script. The workflow job must grant
-`id-token: write` for the client to authenticate to Launchplane. Do not copy
-Launchplane OIDC, route, payload, driver intent, idempotency, or retry helpers
-into the product repo for that path.
+Product-owned smoke tests manage their own dynamic fixtures. They do not use a
+Launchplane maintenance route or a generated Launchplane smoke client.
 
 ## Choose A Driver
 
