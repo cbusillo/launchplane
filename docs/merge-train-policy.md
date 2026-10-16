@@ -495,8 +495,11 @@ the current branch tip with the saved tree, exact ordered parents and collapse
 message, and an unchanged child head. It checks current child readiness before
 checkpointing that recovered edge, without repeating the feature-branch merge or
 reconstructing the expected tree. A missing plan, different tree, changed head or
-hold refuses recovery with a controlled blocked result for review; the saved plan
-remains intact rather than causing repeated controller errors. The original trusted handoff can follow a matching saved
+hold refuses recovery. Unproven merge construction or provider effects return a controlled blocked result
+and retire the plan while retaining its history. Fresh current-policy discovery
+then needs current source authority: a retired plan cannot carry its old handoff.
+Review the current heads and post fresh checked handoffs to continue through the
+existing path, instead of repeating controller errors. The original trusted handoff can follow a matching saved
 tree plan through the admission reader's read-only proof; the executor still owns
 the mutated checkpoint. Legacy progress without a saved tree cannot recover an
 uncheckpointed changed branch tip and needs a fresh checked `gh-pr.py ready`

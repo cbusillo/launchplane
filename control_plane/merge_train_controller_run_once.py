@@ -4135,14 +4135,14 @@ def _advance_planned_stack_collapse_record(
             lease=lease,
         )
 
-    def unproven_recovery(message: str) -> dict[str, object]:
+    def unproven_stack_merge(message: str) -> dict[str, object]:
         return {
             "repository": request.repository,
             "base_branch": request.base_branch,
             "mode": "blocked",
             "controller_action": "stack_unsupported",
             "blocking_reason": {
-                "code": "merge_train_stack_recovery_unproven",
+                "code": "merge_train_stack_merge_unproven",
                 "message": message
                 + " Review the current heads and post fresh checked handoffs before replanning.",
             },
@@ -4209,9 +4209,9 @@ def _advance_planned_stack_collapse_record(
                 parent_pull_request_number=root_mutation.parent_pull_request_number,
             )
         except MergeTrainGitHubStaleHeadError as error:
-            if root_mutation.expected_merge_tree_sha:
-                return unproven_recovery(str(error))
             retire("root_moved")
+            if root_mutation.expected_merge_tree_sha:
+                return unproven_stack_merge(str(error))
             return None
         if observed_root_sha != root_pull_request.head_sha:
             # A ref probe and PR snapshot can disagree while GitHub converges.
@@ -4328,7 +4328,8 @@ def _advance_planned_stack_collapse_record(
                 checkpoint=checkpoint_collapse_progress,
             )
         except MergeTrainGitHubStaleHeadError as error:
-            return unproven_recovery(str(error))
+            retire("unproven_stack_recovery")
+            return unproven_stack_merge(str(error))
         except MergeTrainStackChildNotReadyError as error:
             return {
                 "repository": request.repository,

@@ -60,6 +60,8 @@ class _Provider:
         )
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        if method == "GET" and "/labels/" in path:
+            return {"name": unquote(path.rsplit("/", 1)[1])}
         if method == "GET" and "/branches/" in path:
             return {"commit": {"sha": self.heads[unquote(path.split("/branches/")[1])]}}
         if method == "GET" and "/compare/" in path:
@@ -267,7 +269,7 @@ class StackRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "waiting_for_root_checks")
         self.assertEqual(self.provider.feature_effects, effects)
 
-    async def test_changed_child_returns_controlled_block_on_repeated_controller_passes(
+    async def test_changed_child_blocks_then_fresh_discovery_replans_current_heads(
         self,
     ) -> None:
         from control_plane.http_app import create_launchplane_fastapi_app
@@ -332,7 +334,7 @@ class StackRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 Client,
             ),
         ):
-            for _ in range(2):
+            for index in range(2):
                 response = await _post_merge_train_controller_run_once(
                     app,
                     {
@@ -343,10 +345,16 @@ class StackRecoveryTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertEqual(response.status_code, 202, response.text)
                 result = response.json()["result"]
-                self.assertEqual(result["controller_action"], "stack_unsupported")
-                self.assertEqual(
-                    result["blocking_reason"]["code"], "merge_train_stack_recovery_unproven"
-                )
+                if index == 0:
+                    self.assertEqual(result["controller_action"], "stack_unsupported")
+                    self.assertEqual(
+                        result["blocking_reason"]["code"], "merge_train_stack_merge_unproven"
+                    )
+                else:
+                    self.assertEqual(result["controller_action"], "plan_stack_collapse")
+                    self.assertEqual(
+                        result["stack_collapse_plan"]["entries"][1]["head_sha"], "new-child"
+                    )
         self.assertFalse(provider.feature_effects)
         self.assertFalse(store.list_merge_train_batch_candidate_records())
 

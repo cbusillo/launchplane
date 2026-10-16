@@ -712,8 +712,10 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "sha": "parent-after-child",
                     "commit": {
                         "tree": {"sha": "planned-tree"},
-                        "message": (
-                            "Launchplane stack collapse collapse-123: merge PR #11 into PR #10"
+                        "message": _stack_collapse_commit_message(
+                            collapse_id="collapse-123",
+                            child_pull_request_number=11,
+                            parent_pull_request_number=10,
                         ),
                     },
                     "parents": [{"sha": "parent-head"}, {"sha": "child-head"}],

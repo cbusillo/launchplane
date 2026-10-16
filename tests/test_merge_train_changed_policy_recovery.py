@@ -45,6 +45,9 @@ class _StackTransport:
         self.trees: dict[str, str] = {}
         self.merge_requests: list[dict[str, object]] = []
 
+    def tree_sha(self, head: str) -> str:
+        return self.trees.get(head, f"tree:{head}")
+
     def contains(self, head: str, child: str) -> bool:
         return head == child or any(
             self.contains(parent, child) for parent in self.parents.get(head, ())
@@ -64,7 +67,7 @@ class _StackTransport:
             head = path.rsplit("/", 1)[1]
             return {
                 "sha": head,
-                "tree": {"sha": self.trees.get(head, f"tree:{head}")},
+                "tree": {"sha": self.tree_sha(head)},
                 "parents": [{"sha": parent} for parent in self.parents.get(head, ())],
             }
         if method == "GET" and "/commits/" in path:
@@ -73,7 +76,7 @@ class _StackTransport:
                 "sha": head,
                 "commit": {
                     "message": self.messages.get(head, "unrelated root push"),
-                    "tree": {"sha": self.trees.get(head, f"tree:{head}")},
+                    "tree": {"sha": self.tree_sha(head)},
                 },
                 "parents": [{"sha": parent} for parent in self.parents.get(head, ())],
             }
@@ -257,7 +260,7 @@ class ChangedPolicyRecoveryTests(unittest.IsolatedAsyncioTestCase):
                     str(kwargs["child_head_sha"]),
                 )
                 if graph.contains(parent, child):
-                    return graph.trees.get(parent, f"tree:{parent}")
+                    return graph.tree_sha(parent)
                 return super().plan_stack_child_merge_tree(**kwargs)
 
             @staticmethod
