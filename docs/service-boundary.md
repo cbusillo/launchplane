@@ -2049,7 +2049,7 @@ for the bounded client and separate isolation/sanitization requirements.
 
 Expected-config apply is a narrower metadata mutation for runtime contract
 requirements already owned by product profiles. The authenticated Director's
-local operator can add declarations on any product, including Live products,
+`local_operator` credential can add declarations on any product, including Live products,
 without an additional grant. This exception cannot remove requirements and
 does not extend to other agent identities. Other callers and removals require
 `product_profile.expected_config.apply` for the target product in the
