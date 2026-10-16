@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path, PurePosixPath
+from urllib.parse import urlparse
 import re
 import subprocess
 import tomllib
@@ -3188,6 +3189,27 @@ def _allow_reason(
         and re.fullmatch(r"py3(?:[3-9]|1[0-5])", value)
     ):
         return ALLOW_REASON_REPO_METADATA_ERGONOMICS
+    if (
+        normalized.startswith("control_plane/contracts/")
+        and normalized.endswith("_migration.py")
+        and key_text.endswith("COMMAND")
+        and isinstance(value, str)
+    ):
+        urls = URL_PATTERN.findall(value)
+        try:
+            parsed_urls = [urlparse(url) for url in urls]
+        except ValueError:
+            parsed_urls = []
+        if parsed_urls and all(
+            url.hostname in {"127.0.0.1", "localhost", "::1"}
+            and url.scheme in {"http", "https"}
+            and url.username is None
+            and url.password is None
+            for url in parsed_urls
+        ):
+            # Historical in-container commands translate stored schema behavior;
+            # they select no product host, provider, repository or credentials.
+            return ALLOW_REASON_SCHEMA_ONLY
     if normalized.endswith(".py") and (
         key_text.startswith("ALLOW_REASON_")
         or key_text.startswith("PRODUCT_DRIVER_REUSABLE_")

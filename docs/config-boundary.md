@@ -406,7 +406,11 @@ managed-secret, topology, or workflow-default fixtures before merge.
 
 Relative and absolute filesystem paths in Python command declarations are not
 repository references. An owner/repository reference elsewhere in the same
-command is still audited.
+command is still audited. Historical profile-conversion command constants in
+`control_plane/contracts/*_migration.py` may contain HTTP loopback endpoints:
+they translate in-container behavior into stored declarations. This does not
+classify external hosts, embedded credentials, or runtime defaults outside a
+profile conversion as schema.
 
 For Python source, a fixed protocol identifier can be classified as `schema_only`
 when a single uppercase module binding holds an identifier-shaped string and

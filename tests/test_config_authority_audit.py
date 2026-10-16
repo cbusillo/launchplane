@@ -10,7 +10,10 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
-from control_plane.config_authority_audit import ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
+from control_plane.config_authority_audit import (
+    ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT,
+    ALLOW_REASON_SCHEMA_ONLY,
+)
 from control_plane.config_authority_audit import build_config_authority_audit
 from control_plane.config_authority_audit import evaluate_config_authority_gate
 from control_plane.config_authority_audit import render_config_authority_markdown
@@ -1131,6 +1134,40 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(len(script_findings), 1)
         self.assertEqual(script_findings[0]["key"], "repository")
         self.assertEqual(script_findings[0]["classification"], "needs_classification")
+
+    def test_profile_migration_loopback_commands_do_not_allow_external_runtime_defaults(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            contracts = root / "control_plane" / "contracts"
+            contracts.mkdir(parents=True)
+            (contracts / "sample_migration.py").write_text(
+                'LOCAL_COMMAND = "curl http://127.0.0.1:3000/internal-job"\n'
+                'EXTERNAL_COMMAND = "curl https://application.example.test/internal-job"\n',
+                encoding="utf-8",
+            )
+            (contracts / "sample.py").write_text(
+                'LOCAL_COMMAND = "curl http://127.0.0.1:3000/internal-job"\n', encoding="utf-8"
+            )
+            _commit_all(root)
+            findings = _findings(build_config_authority_audit(control_plane_root=root))
+        by_location = {(finding["path"], finding["key"]): finding for finding in findings}
+        self.assertEqual(
+            by_location["control_plane/contracts/sample_migration.py", "LOCAL_COMMAND"][
+                "allow_reason"
+            ],
+            ALLOW_REASON_SCHEMA_ONLY,
+        )
+        self.assertFalse(
+            by_location["control_plane/contracts/sample_migration.py", "EXTERNAL_COMMAND"][
+                "allow_reason"
+            ]
+        )
+        self.assertFalse(
+            by_location["control_plane/contracts/sample.py", "LOCAL_COMMAND"]["allow_reason"]
+        )
 
     def test_python_command_paths_are_not_repository_authority(self) -> None:
         with TemporaryDirectory() as directory:
