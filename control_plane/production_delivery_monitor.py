@@ -7,9 +7,9 @@ from datetime import datetime, timezone
 import hashlib
 import logging
 import re
+from typing import Literal
 
 from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
-from typing import Literal
 from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
 
@@ -25,6 +25,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.public_ingress_monitoring import (
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
+    PRODUCTION_REQUEST_REFUSED,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
     PublicIngressIncidentRecord,
@@ -32,6 +33,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     build_public_ingress_observation_id,
 )
 from control_plane.product_reconcile import resolve_build_provenance_transport
+from control_plane.release_review import ProductionChangeRequiresPromotion
 from control_plane.lane_runtime_verification import (
     monitor_observation_provenance,
     read_lane_runtime_verification,
@@ -45,6 +47,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 Store = PostgresRecordStore | FilesystemRecordStore
 DELIVERY_CHECK_PREFIX = "production-delivery-"
+REFUSED_REQUEST_CHECK_PREFIX = "production-request-refused-"
 DELIVERY_EVIDENCE_PAGE_SIZE = 100
 _SCOPE = "launchplane:production-delivery-monitor"
 _ROUTE = "service:production-delivery-monitor"
@@ -64,7 +67,7 @@ _NONTERMINAL_CODES = frozenset(
 
 
 class RefusedProductionRequestReconciliation(BaseModel):
-    """An operator attests caller retirement; the service verifies refusal and health."""
+    """An admin attests caller retirement; the service verifies refusal and health."""
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -80,7 +83,7 @@ def is_guard_refusal_incident(incident: PublicIngressIncidentRecord) -> bool:
         and incident.check_name.startswith(DELIVERY_CHECK_PREFIX)
         and incident.material_fingerprint
         and incident.material_fingerprint.route_authority.provider_check
-        == "production-delivery/promotion_required"
+        == "production-delivery/" + ProductionChangeRequiresPromotion.code
     )
 
 
@@ -93,6 +96,7 @@ def reconcile_refused_production_requests(
     """One-time supported disposition; never infer caller retirement from runtime health."""
     now = _time(observed_at)
     resolved: list[str] = []
+    latest_refusals: dict[tuple[str, str], datetime | None] = {}
     for request in requests:
         incident = store.read_public_ingress_incident_record(request.incident_id)
         with (
@@ -103,7 +107,29 @@ def reconcile_refused_production_requests(
                 raise ValueError(
                     "Delivery monitoring is active; retry reconciliation after it finishes."
                 )
-            resolved.append(_reconcile_refused_production_request(store, request=request, now=now))
+            lane_key = (incident.product, incident.context)
+            if lane_key not in latest_refusals:
+                latest_refusals[lane_key] = next(
+                    (
+                        _time(record.observed_at)
+                        for record in store.list_public_ingress_observation_records(
+                            product=incident.product,
+                            context_name=incident.context,
+                            instance_name="prod",
+                            check_kind="provider",
+                        )
+                        if record.check_name.startswith(REFUSED_REQUEST_CHECK_PREFIX)
+                    ),
+                    None,
+                )
+            resolved.append(
+                _reconcile_refused_production_request(
+                    store,
+                    request=request,
+                    now=now,
+                    latest_refusal_at=latest_refusals[lane_key],
+                )
+            )
     return tuple(resolved)
 
 
@@ -112,13 +138,18 @@ def _reconcile_refused_production_request(
     *,
     request: RefusedProductionRequestReconciliation,
     now: datetime,
+    latest_refusal_at: datetime | None,
 ) -> str:
     incident = store.read_public_ingress_incident_record(request.incident_id)
     observed_at = now.isoformat()
     if not is_guard_refusal_incident(incident):
         raise ValueError("Only a promotion guard refusal can be reconciled as refused.")
     if incident.status == "resolved":
-        return incident.incident_id
+        if incident.resolution_reason == PRODUCTION_REQUEST_REFUSED:
+            return incident.incident_id
+        raise ValueError(
+            "This incident already resolved by another outcome; retain that disposition."
+        )
     if not _time(incident.opened_at) <= request.caller_retired_at <= now:
         raise ValueError("Caller retirement must follow the refused request and precede now.")
     profile = store.read_product_profile_record(incident.product)
@@ -130,22 +161,13 @@ def _reconcile_refused_production_request(
         observation.status != "fail"
         or not observation.targets
         or any(
-            target.url != "provider://launchplane/production-delivery/promotion_required"
+            target.url != _delivery_target_url(ProductionChangeRequiresPromotion.code)
             for target in observation.targets
         )
         for observation in history
     ):
         raise ValueError("Incident history includes a failure or uncertain outcome beyond refusal.")
-    if any(
-        observation.check_name.startswith("production-request-refused-")
-        and _time(observation.observed_at) >= request.caller_retired_at
-        for observation in store.list_public_ingress_observation_records(
-            product=profile.product,
-            context_name=lane.context,
-            instance_name="prod",
-            check_kind="provider",
-        )
-    ):
+    if latest_refusal_at is not None and latest_refusal_at >= request.caller_retired_at:
         raise ValueError("A production caller is still making refused requests.")
     checks = tuple(
         check
@@ -210,6 +232,10 @@ def _candidate_key(candidate: str) -> str:
     return hashlib.sha256(candidate.strip().encode()).hexdigest()[:24]
 
 
+def _delivery_target_url(reason: str) -> str:
+    return "provider://launchplane/production-delivery/" + reason
+
+
 def _observe(
     store: Store,
     profile: LaunchplaneProductProfileRecord,
@@ -247,7 +273,7 @@ def _observe(
         targets=(
             PublicIngressTargetObservation(
                 target="provider",
-                url="provider://launchplane/production-delivery/" + reason,
+                url=_delivery_target_url(reason),
                 status="fail" if failed else "pass",
                 failure_code="production_delivery_failed" if failed else None,
                 summary=summary,
@@ -300,6 +326,9 @@ def _observe(
         ),
         notification_drivers=None,
         expected_incident_sha256=expected_incident_sha256,
+        reconciliation_reason=PRODUCTION_REQUEST_REFUSED
+        if expected_incident_sha256
+        else "monitoring_intent_changed",
     )
     if result.authority_changed:
         raise RuntimeError("Production delivery alert authority changed during persistence")
@@ -452,12 +481,12 @@ def _record_rejected_payload(
         from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
 
         candidate = normalize_generic_web_artifact_id(profile=profile, artifact_id=candidate)
-    if reason == "promotion_required":
+    if reason == ProductionChangeRequiresPromotion.code:
         _observe(
             store,
             profile,
             lane,
-            check_name="production-request-refused-" + _candidate_key(candidate + trace_id),
+            check_name=REFUSED_REQUEST_CHECK_PREFIX + _candidate_key(candidate + trace_id),
             failed=False,
             refused=True,
             summary=f"Production request refused, nothing changed; promotion_required; trace: {trace_id}.",

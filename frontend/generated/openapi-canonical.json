@@ -34214,7 +34214,8 @@
               "recovered",
               "monitoring_intent_changed",
               "migration_baseline",
-              "duplicate_reconciled"
+              "duplicate_reconciled",
+              "request_refused"
             ],
             "title": "Reason",
             "type": "string"
@@ -34883,7 +34884,8 @@
                 "enum": [
                   "recovered",
                   "monitoring_intent_changed",
-                  "duplicate_reconciled"
+                  "duplicate_reconciled",
+                  "request_refused"
                 ],
                 "type": "string"
               },
@@ -42737,7 +42739,7 @@
       },
       "RefusedProductionRequestReconciliation": {
         "additionalProperties": false,
-        "description": "An operator attests caller retirement; the service verifies refusal and health.",
+        "description": "An admin attests caller retirement; the service verifies refusal and health.",
         "properties": {
           "caller_retired": {
             "const": true,

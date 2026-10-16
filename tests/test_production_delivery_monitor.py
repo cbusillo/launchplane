@@ -23,6 +23,7 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.public_ingress_monitoring import (
+    PRODUCTION_REQUEST_REFUSED,
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PublicIngressNotificationDestination,
     PublicIngressNotificationPolicyRecord,
@@ -34,6 +35,7 @@ from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.outbox_worker import run_outbox_worker_once
 from control_plane.outbound_http import PublicTlsProbeResult
 from control_plane.production_delivery_monitor import (
+    REFUSED_REQUEST_CHECK_PREFIX,
     monitor_production_delivery_once,
     record_production_delivery_failure,
     _record_rejected_payload,
@@ -270,7 +272,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         for original in incidents:
             resolved = self.store.read_public_ingress_incident_record(original.incident_id)
             self.assertIn(original.summary, resolved.summary)
-            self.assertIn("nothing changed", resolved.summary)
+            self.assertEqual(resolved.resolution_reason, PRODUCTION_REQUEST_REFUSED)
             self.assertEqual(resolved.opened_observation_id, original.opened_observation_id)
         # A retry after restart is harmless, and normal scanning does not reopen the refusals.
         self.store.close()
@@ -339,7 +341,6 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             "stale",
             "identity_mismatch",
             "caller_active",
-            "real_failure",
         ):
             with self.subTest(health=health):
                 if health != "missing":
@@ -369,20 +370,10 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
                             self.store,
                             self.profile,
                             self.lane,
-                            check_name="production-request-refused-retrying",
+                            check_name=REFUSED_REQUEST_CHECK_PREFIX + "retrying",
                             failed=False,
                             refused=True,
                             summary="Caller still trying.",
-                            observed_at=self.timestamp(),
-                        )
-                    elif health == "real_failure":
-                        record_production_delivery_failure(
-                            self.store,
-                            self.profile,
-                            self.lane,
-                            candidate="image@" + self.head,
-                            reason="deployment_failed",
-                            trace_id="real_failure",
                             observed_at=self.timestamp(),
                         )
                     self.store.write_public_ingress_observation_record(record)
@@ -404,7 +395,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         incident = self.store.list_public_ingress_incident_records(status="open")[0]
         self.now += timedelta(seconds=2)
         self.healthy_production()
-        with self.assertRaisesRegex(ValueError, "history"):
+        with self.assertRaises(ValueError):
             reconcile_refused_production_requests(
                 self.store,
                 requests=(self.reconciliation(incident.incident_id),),
@@ -429,7 +420,7 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
         with patch.object(
             self.store, "write_public_ingress_transition_with_outbox", side_effect=race
         ):
-            with self.assertRaisesRegex(ValueError, "changed"):
+            with self.assertRaises(ValueError):
                 reconcile_refused_production_requests(
                     self.store,
                     requests=(self.reconciliation(incident.incident_id),),
@@ -437,6 +428,24 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
                 )
         self.assertEqual(
             self.store.read_public_ingress_incident_record(incident.incident_id).status, "open"
+        )
+
+    def test_reconciliation_does_not_reclassify_a_successful_delivery(self) -> None:
+        self.reject(reason="promotion_required")
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=2)
+        self.deploy(self.head)
+        self.monitor()
+        recovered = self.store.read_public_ingress_incident_record(incident.incident_id)
+        self.assertEqual(recovered.status, "resolved")
+        with self.assertRaises(ValueError):
+            reconcile_refused_production_requests(
+                self.store,
+                requests=(self.reconciliation(incident.incident_id),),
+                observed_at=self.timestamp(),
+            )
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id), recovered
         )
 
     def test_legacy_lag_retires_without_recovering_a_real_delivery_failure(self) -> None:

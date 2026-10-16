@@ -1990,12 +1990,13 @@ concurrent incident changes. It shares the delivery monitor's lane lock. Each
 qualified occurrence resolves independently through the normal atomic incident,
 event and reminder transition, with “Production request refused, nothing changed”
 and the retirement evidence in its summary. Its original observations and trace
-remain linked; `resolution_reason=monitoring_intent_changed` records retirement
-of the former incident classification, not a successful deployment. The response's
+remain linked; `resolution_reason=request_refused` records the refusal disposition,
+not a successful deployment. The safe incident API summary says “refused, nothing changed”. The response's
 `refused_production_requests_resolved` lists the disposed occurrences. A blocked
 entry returns 409 `refused_request_reconciliation_blocked`; earlier entries may
-already have resolved. Read back before retrying; already-resolved entries are
-harmless. Reconciliation sends no recovery notification. The normal outbox worker
+already have resolved. Read back before retrying; entries already resolved as
+`request_refused` are harmless. Incidents resolved by another outcome keep that
+outcome and refuse reclassification. Reconciliation sends no recovery notification. The normal outbox worker
 skips its queued failure notices before resolving a destination; interrupted
 provider sends retain an unknown outcome. Read the incident list/detail APIs to
 verify the resulting disposition. Deploying the source alone does not clear the

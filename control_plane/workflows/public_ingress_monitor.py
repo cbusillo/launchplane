@@ -53,6 +53,7 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    PRODUCTION_REQUEST_REFUSED,
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     MONITOR_CADENCE_CHECK_PREFIX,
     monitored_check_identity,
@@ -1012,6 +1013,9 @@ def _store_monitor_observation(
     notify: bool,
     notification_drivers: PublicIngressNotificationDrivers | None,
     expected_incident_sha256: str = "",
+    reconciliation_reason: Literal[
+        "monitoring_intent_changed", "request_refused"
+    ] = "monitoring_intent_changed",
 ) -> _StoredMonitorTransition:
     transition_writer = getattr(record_store, "write_public_ingress_transition_with_outbox", None)
     plan: _PlannedIncidentTransition | None = None
@@ -1022,6 +1026,7 @@ def _store_monitor_observation(
             record=record,
             incident_eligible=incident_eligible,
             recovery_observation_threshold=recovery_observation_threshold,
+            reconciliation_reason=reconciliation_reason,
         )
         if (
             expected_incident_sha256
@@ -1441,6 +1446,9 @@ def _plan_public_ingress_incident_transition(
     record: PublicIngressObservationRecord,
     incident_eligible: bool,
     recovery_observation_threshold: int,
+    reconciliation_reason: Literal[
+        "monitoring_intent_changed", "request_refused"
+    ] = "monitoring_intent_changed",
 ) -> _PlannedIncidentTransition:
     open_incidents = _open_incidents(record_store=record_store, record=record)
     existing = min(
@@ -1497,7 +1505,7 @@ def _plan_public_ingress_incident_transition(
         incident, resolved_event = _resolve_incident(
             incident=existing,
             record=record,
-            reason="monitoring_intent_changed",
+            reason=reconciliation_reason,
             summary=(f"{record.summary} Previous incident evidence: {existing.summary}"),
         )
         reminder_states = _resolved_reminder_states(
@@ -2045,7 +2053,7 @@ def _resolve_incident(
     *,
     incident: PublicIngressIncidentRecord,
     record: PublicIngressObservationRecord,
-    reason: Literal["recovered", "monitoring_intent_changed"],
+    reason: Literal["recovered", "monitoring_intent_changed", "request_refused"],
     summary: str,
     recovery_count: int = 0,
     recovery_observation_threshold: int | None = None,
@@ -3470,12 +3478,9 @@ def deliver_public_ingress_notification_outbox_delivery(
         destination_payload = _dict_payload(payload.get("destination"))
         if record_store is not None:
             incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
-            from control_plane.production_delivery_monitor import is_guard_refusal_incident
-
             retired_refusal = (
                 incident.status == "resolved"
-                and incident.resolution_reason == "monitoring_intent_changed"
-                and is_guard_refusal_incident(incident)
+                and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED
             )
             if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK or retired_refusal:
                 # An earlier send may have happened; preserve its uncertain outcome.
