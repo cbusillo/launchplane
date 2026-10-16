@@ -36459,6 +36459,22 @@
           "updated_at": {
             "title": "Updated At",
             "type": "string"
+          },
+          "value_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "supplied",
+                  "copy",
+                  "provider"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Source"
           }
         },
         "required": [
@@ -36474,7 +36490,8 @@
           "secret_id",
           "sharing_reason",
           "status",
-          "updated_at"
+          "updated_at",
+          "value_source"
         ],
         "title": "SecretBinding",
         "type": "object"

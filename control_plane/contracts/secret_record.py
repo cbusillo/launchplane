@@ -10,6 +10,7 @@ SecretPolicy = Literal["write_only"]
 SecretStatus = Literal["configured", "disabled"]
 SecretEventType = Literal["created", "rotated", "imported", "validated", "disabled", "relabelled"]
 SecretSharingKind = IntegrationAllowanceKind | Literal["site_shared"]
+SecretValueSource = Literal["supplied", "copy", "provider"]
 
 
 class SecretRecord(BaseModel):
@@ -125,6 +126,9 @@ class SecretBinding(BaseModel):
     # The writer's key-safety classification for a secret stored on one exact
     # lane. Runtime key safety uses it only for that lane's own bindings.
     declared_secret_class: RuntimeSecretClass | None = None
+    # Set by the value-writing service, never by caller-supplied classification.
+    # Legacy bindings have no origin proof and retain key-name policy precedence.
+    value_source: SecretValueSource | None = None
     # Why the declared class is safe, for a production integration key shared
     # with a non-production lane. Metadata only; never part of the value.
     sharing_reason: SecretSharingReason | None = None

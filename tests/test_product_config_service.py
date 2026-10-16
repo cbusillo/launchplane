@@ -152,12 +152,17 @@ class ProductConfigServiceTests(unittest.TestCase):
 
 
 class _ReadinessStore:
-    def __init__(self, bindings: tuple[SecretBinding, ...]) -> None:
+    def __init__(
+        self, bindings: tuple[SecretBinding, ...], *, policy_available: bool = True
+    ) -> None:
         self.bindings = bindings
+        self.policy_available = policy_available
 
     def list_runtime_key_safety_policy_records(
         self, *, status: str = "", limit: int | None = None
     ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        if not self.policy_available:
+            return ()
         return (
             RuntimeKeySafetyPolicyRecord(
                 record_id="runtime-key-safety-policy-test",
@@ -180,7 +185,9 @@ class _ReadinessStore:
         return self.bindings
 
 
-def _testing_integration_secret_readiness(declared_class: RuntimeSecretClass | None) -> bool:
+def _testing_integration_secret_readiness(
+    declared_class: RuntimeSecretClass | None, *, policy_available: bool = True, stored: bool = True
+) -> bool:
     payload = _generic_site_profile_payload()
     payload["expected_config"] = {
         "managed_secret_bindings": [
@@ -207,6 +214,9 @@ def _testing_integration_secret_readiness(declared_class: RuntimeSecretClass | N
                 updated_at="2026-09-29T00:00:00Z",
             ),
         )
+        if stored
+        else (),
+        policy_available=policy_available,
     )
     return product_config_write_prerequisites(
         store, profile=profile, lane=lane
@@ -214,10 +224,16 @@ def _testing_integration_secret_readiness(declared_class: RuntimeSecretClass | N
 
 
 class ProductConfigReadinessTests(unittest.TestCase):
-    def test_readiness_uses_the_declared_class_of_the_stored_lane_binding(self) -> None:
+    def test_policy_availability_does_not_prejudge_the_proposed_binding(self) -> None:
         self.assertTrue(_testing_integration_secret_readiness("testing"))
-        self.assertFalse(_testing_integration_secret_readiness(None))
-        self.assertFalse(_testing_integration_secret_readiness("prod_only"))
+        self.assertTrue(_testing_integration_secret_readiness(None))
+        self.assertTrue(_testing_integration_secret_readiness("prod_only"))
+
+    def test_first_entry_needs_a_policy_but_not_an_existing_binding(self) -> None:
+        self.assertTrue(_testing_integration_secret_readiness(None, stored=False))
+        self.assertFalse(
+            _testing_integration_secret_readiness(None, stored=False, policy_available=False)
+        )
 
 
 if __name__ == "__main__":

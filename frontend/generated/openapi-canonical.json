@@ -45766,6 +45766,22 @@
           "updated_at": {
             "title": "Updated At",
             "type": "string"
+          },
+          "value_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "supplied",
+                  "copy",
+                  "provider"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Source"
           }
         },
         "required": [
