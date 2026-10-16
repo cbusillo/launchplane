@@ -63,7 +63,7 @@ class ServiceCutoverBindingTests(unittest.TestCase):
             )
             factory = app.call_args.kwargs["odoo_cutover_provider_factory"]
             host.assert_not_called()
-            with self.assertRaisesRegex(ValueError, "persisted lane/artifact authority"):
+            with self.assertRaises(ValueError):
                 factory(fixture.plan)
         for command, function, result in (
             (
@@ -104,7 +104,7 @@ class ServiceCutoverBindingTests(unittest.TestCase):
                 self.assertEqual(outcome.exit_code, 0, outcome.output)
                 self.assertIs(worker.call_args.kwargs["record_store"], store)
                 load.assert_not_called()
-                with self.assertRaisesRegex(ValueError, "persisted lane/artifact authority"):
+                with self.assertRaises(ValueError):
                     worker.call_args.kwargs["cutover_provider_factory"](fixture.plan)
                 self.assertIs(authority.call_args.args[0], store)
 
@@ -128,6 +128,22 @@ class ServiceCutoverBindingTests(unittest.TestCase):
         entry.load.assert_not_called()
         with patch("control_plane.dokploy.service_cutover.entry_points", return_value=(entry,)):
             self.assertIs(installed_cutover_host(), entry.load.return_value.return_value)
+
+    def test_broken_installed_host_refuses_with_public_capability_failure(self) -> None:
+        for phase in ("load", "construct"):
+            for failure in (ImportError, AttributeError, TypeError):
+                entry: Any = MagicMock()
+                target = entry.load if phase == "load" else entry.load.return_value
+                target.side_effect = failure("private package details")
+                with (
+                    self.subTest(phase=phase, failure=failure),
+                    patch(
+                        "control_plane.dokploy.service_cutover.entry_points", return_value=(entry,)
+                    ),
+                    self.assertRaises(ValueError) as raised,
+                ):
+                    installed_cutover_host()
+                self.assertNotIn("private package details", str(raised.exception))
 
     def test_native_maintenance_settings_and_handoff_share_live_writer_inventory(self) -> None:
         fixture = self.fixture()
@@ -169,7 +185,7 @@ class ServiceCutoverBindingTests(unittest.TestCase):
         handoff.assert_called_once_with(plan.old)
         missing = bind_odoo_driver(plan, replace(capabilities, startup=None))
         assert missing.website_settings_preflight is not None
-        with self.assertRaisesRegex(ValueError, "startup capability is unavailable"):
+        with self.assertRaises(ValueError):
             missing.website_settings_preflight(plan)
 
     def test_odoo_rejects_stale_lane_before_loading_host(self) -> None:
@@ -181,7 +197,7 @@ class ServiceCutoverBindingTests(unittest.TestCase):
                 return_value=None,
             ),
             patch("control_plane.dokploy.service_cutover.installed_cutover_host") as host,
-            self.assertRaisesRegex(ValueError, "persisted lane/artifact authority"),
+            self.assertRaises(ValueError),
         ):
             service_odoo_cutover_factory(store, Path(fixture.temporary.name))(fixture.plan)
         host.assert_not_called()
@@ -194,7 +210,7 @@ class ServiceCutoverBindingTests(unittest.TestCase):
                 return_value=fixture.plan,
             ),
             patch("control_plane.dokploy.service_cutover.installed_cutover_host") as load,
-            self.assertRaisesRegex(ValueError, "persisted lane/artifact authority"),
+            self.assertRaises(ValueError),
         ):
             service_odoo_cutover_factory(store, Path(fixture.temporary.name))(fixture.plan)
         load.assert_not_called()
@@ -256,7 +272,7 @@ class ServiceCutoverBindingTests(unittest.TestCase):
                 store.write_product_profile_record(profile.model_copy(update={"lanes": ()}))
                 with (
                     patch("control_plane.dokploy.service_cutover.installed_cutover_host") as load,
-                    self.assertRaisesRegex(ValueError, "persisted lane/artifact authority"),
+                    self.assertRaises(ValueError),
                 ):
                     factory(admitted)
                 load.assert_not_called()

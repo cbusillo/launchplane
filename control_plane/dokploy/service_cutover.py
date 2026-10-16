@@ -57,7 +57,12 @@ def installed_cutover_host() -> InstalledCutoverHost:
             "cutover_host_capability_unavailable: install exactly one Dokploy host "
             "capability in the API and worker packages before lane activation"
         )
-    return cast(InstalledCutoverHost, candidates[0].load()())
+    try:
+        return cast(InstalledCutoverHost, candidates[0].load()())
+    except (ImportError, AttributeError, TypeError) as error:
+        raise ValueError(
+            "cutover_host_capability_unavailable: installed host cannot load"
+        ) from error
 
 
 def bind_odoo_driver(plan: OdooCutoverPlan, capabilities: OdooHostCapabilities) -> OdooSlotDriver:
