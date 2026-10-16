@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier, Event, Thread
+from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 from pydantic import JsonValue
@@ -198,20 +199,36 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         next_slot = monitor_slot(self.now) + 1
         waits: list[float] = []
         batches: list[frozenset[tuple[str, str, str]]] = []
+        fixture = _Store((_profile(), other))
+        identity = _identity()
+        fixture.lane_summaries[("example-site", "prod")] = _lane_summary(identity)
 
         def advance(seconds: float) -> bool:
+            # The scheduled batch publishes the unchanged lane before its wait.
+            self.assertEqual(
+                [record.product for record in fixture.records],
+                [other.product] if len(batches) > 1 else [],
+            )
             waits.append(seconds)
             self.now += seconds
             return False
 
-        def confirm(*, lane_keys: frozenset[tuple[str, str, str]], **kwargs: object) -> None:
+        def confirm(
+            *, lane_keys: frozenset[tuple[str, str, str]], **kwargs: Any
+        ) -> PublicIngressMonitorResult:
             batches.append(lane_keys)
-            sleep = kwargs["sleep"]
-            should_stop = kwargs["should_stop"]
-            assert callable(sleep) and callable(should_stop)
-            sleep(30)
-            if should_stop():
-                raise MonitorRunCancelled()
+            kwargs["record_store"] = fixture
+            kwargs["http_get"] = lambda url, _timeout: HttpObservation(
+                200,
+                url,
+                0,
+                payload={
+                    "runtime_identity": identity.model_copy(
+                        update={"deployment_record_id": "previous"}
+                    ).model_dump(mode="json")
+                },
+            )
+            return run_public_ingress_monitor_once(lane_keys=lane_keys, **kwargs)
 
         self.scheduler.run_monitor = self.scheduler._run_monitor
         with (
@@ -236,6 +253,10 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         )
         self.assertFalse(self.scheduler.watch_once())
         self.assertFalse(self.make_scheduler().run_once())
+        self.assertEqual(
+            [record.failure_code for record in fixture.records if record.product == "example-site"],
+            ["wrong_runtime_identity"],
+        )
 
     def test_cancelled_change_immediately_retries_scheduled_work(self) -> None:
         calls = 0
@@ -763,7 +784,12 @@ class MonitorCadenceIncidentTests(unittest.TestCase):
         self.assertEqual(
             [record.product for record in result.records], [changing.product, healthy.product]
         )
-        self.assertEqual(store.incidents[0].product, changing.product)
+        self.assertEqual(
+            next(
+                record for record in result.records if record.product == changing.product
+            ).failure_code,
+            "wrong_runtime_identity",
+        )
 
     def test_completed_probe_publishes_before_slow_probe_and_later_waves(self) -> None:
         profiles = tuple(
@@ -786,13 +812,15 @@ class MonitorCadenceIncidentTests(unittest.TestCase):
             for name in ("slow", "healthy", "later")
         )
         store = _Store(profiles)
-        published, release = Event(), Event()
+        published, later_published, release = Event(), Event(), Event()
         write = store.write_public_ingress_observation_record
 
         def record(observation: PublicIngressObservationRecord) -> None:
             write(observation)
             if store.records[-1].product == "healthy":
                 published.set()
+            if store.records[-1].product == "later":
+                later_published.set()
 
         def probe(url: str, _timeout: int) -> HttpObservation:
             if "slow.test" in url and not release.wait(30):
@@ -811,6 +839,7 @@ class MonitorCadenceIncidentTests(unittest.TestCase):
             runner.start()
             try:
                 self.assertTrue(published.wait(5))
+                self.assertTrue(later_published.wait(5))
                 self.assertFalse(release.is_set())
             finally:
                 release.set()
