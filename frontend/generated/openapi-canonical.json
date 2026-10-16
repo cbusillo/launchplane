@@ -23686,9 +23686,30 @@
             ],
             "title": "Account Id"
           },
+          "artifact_id": {
+            "default": "",
+            "title": "Artifact Id",
+            "type": "string"
+          },
           "code": {
             "default": "",
             "title": "Code",
+            "type": "string"
+          },
+          "context": {
+            "default": "",
+            "title": "Context",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "default": "",
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
             "type": "string"
           },
           "operation": {
@@ -23703,6 +23724,19 @@
           "plan_sha256": {
             "title": "Plan Sha256",
             "type": "string"
+          },
+          "product": {
+            "default": "",
+            "title": "Product",
+            "type": "string"
+          },
+          "screenshot_sha256": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Screenshot Sha256",
+            "type": "array"
           },
           "screenshots": {
             "default": [],

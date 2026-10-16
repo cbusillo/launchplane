@@ -130,7 +130,7 @@ def run_walkthrough_browser(
                             raise ValueError("A step must select exactly one element.")
                         # Browser scripts may not fill secrets or select an iframe.
                         safe = locator.evaluate("""element =>
-                            element.ownerDocument === document &&
+                            element.ownerDocument.defaultView === window.top &&
                             !['password', 'hidden', 'file'].includes(element.type) &&
                             !element.closest('iframe') &&
                             !/password|token|secret|api.?key/i.test(

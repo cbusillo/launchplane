@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Literal, Mapping
+from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_ACTION, WALKTHROUGH_PLAN_ACTION
 
 
 ActionEffect = Literal["read", "plan", "write"]
@@ -131,8 +132,8 @@ ACTION_DECLARATIONS: Mapping[str, ActionDeclaration] = MappingProxyType(
         "merge_train_policy_operation.read": ActionDeclaration("read"),
         "merge_train_policy_operation.revoke": ActionDeclaration("write"),
         "odoo_app_maintenance.execute": ActionDeclaration("write"),
-        "odoo_testing_walkthrough.execute": ActionDeclaration("write"),
-        "odoo_testing_walkthrough.plan": ActionDeclaration("plan"),
+        WALKTHROUGH_ACTION: ActionDeclaration("write"),
+        WALKTHROUGH_PLAN_ACTION: ActionDeclaration("plan"),
         "odoo_config_parameter_override.write": ActionDeclaration("write"),
         "odoo_post_deploy.execute": ActionDeclaration("write"),
         ODOO_CONNECTION_ISOLATION_ACTIONS["dry-run"]: ActionDeclaration("plan"),

@@ -5,12 +5,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import secrets as random_secrets
 import time
+import hashlib
+import base64
 from urllib.parse import urlsplit
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
-from control_plane.contracts.odoo_walkthrough import OdooWalkthroughRequest, OdooWalkthroughResult
+from control_plane.contracts.odoo_walkthrough import (
+    OdooWalkthroughRequest,
+    OdooWalkthroughResult,
+    WALKTHROUGH_LOGIN_PREFIX,
+)
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.dokploy.compose import ODOO_DATABASE_DATA_DIRECTORY
+from control_plane.dokploy.native_copy_stream import inspect_native_testing_receiver
 from control_plane.contracts.runtime_identity import RUNTIME_IDENTITY_ENV_KEY
-from control_plane.dokploy.odoo_walkthrough import testing_account_command
+from control_plane.dokploy.odoo_walkthrough import (
+    testing_account_command,
+    testing_account_dispatch_finished,
+)
+from control_plane.dokploy import source
 from control_plane.odoo_runtime_reads import (
     OdooRuntimeConnection,
     assert_selection_current,
@@ -28,6 +41,8 @@ from control_plane.provider_operations import (
     ProviderMutationOutcome,
     ProviderObservation,
     ProviderOperationLease,
+    ProviderMutationRejectedError,
+    ProviderMutationUnknownError,
 )
 from control_plane.secrets import _decrypt_secret_value, write_secret_value
 from control_plane.storage.postgres import PostgresRecordStore
@@ -81,15 +96,22 @@ def plan_walkthrough(
     ):
         raise ValueError("Testing origin aliases another lane.")
     generation = read_current_testing_generation(
-        store, product=request.product, context=request.context, instance="testing"
+        store,
+        product=request.product,
+        context=request.context,
+        instance="testing",
+        task_account_cleanup=request.operation == "cleanup",
     )
     if generation is None or not generation.completed_at:
         raise ValueError("A completed isolated testing generation is required.")
-    require_drill_use_unprotected(store, request.product, request.context)
+    if request.operation != "cleanup":
+        require_drill_use_unprotected(store, request.product, request.context)
     # This performs the existing real host storage/network/image/copy-witness
     # inspection. Its recent-use boolean is deliberately NOT a walkthrough
     # permission: the account program checks other users independently.
-    read_drill_recent_signins(store, generation, time.time())
+    recent_signins = False
+    if request.operation != "cleanup":
+        recent_signins = read_drill_recent_signins(store, generation, time.time())
     connection = connect_runtime(
         store=store, selection=selection, control_plane_root=root, database_url=store.database_url
     )
@@ -106,6 +128,27 @@ def plan_walkthrough(
     if not database or database != connection.credentials.get("ODOO_DB_NAME"):
         raise ValueError("Testing database is unavailable or changed.")
     copy_binding = generation_binding(generation)
+    if request.operation == "cleanup":
+        frames: list[dict[str, object]] = []
+        inspect_native_testing_receiver(
+            host=connection.host,
+            token=connection.token,
+            server_id=connection.server_id,
+            spec={
+                "generation": generation.model_dump(mode="json"),
+                "compose_project": connection.app_name,
+                "image_reference": selection.identity.image_reference,
+                "database_name": database,
+                "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
+                "workflow_environment": {},
+                "copy_binding_sha256": copy_binding,
+                "usage_only": True,
+                "task_account_cleanup": True,
+            },
+            receive=frames.append,
+        )
+        if len(frames) != 1 or frames[0].get("cleanup_qualified") is not True:
+            raise ValueError("Testing cleanup isolation is unavailable.")
     binding = canonical_json_sha256(
         [request.product, request.context, request.task_id, copy_binding]
     )
@@ -117,6 +160,8 @@ def plan_walkthrough(
         context=request.context,
         instance="testing",
     )
+    if request.operation == "provision" and secret is None and recent_signins:
+        raise ValueError("Testing has recent sign-ins before this task account exists.")
     if request.operation in {"run", "cleanup"} and secret is None:
         raise ValueError("There is no task account for this testing copy.")
     if secret is not None and secret.status != "configured" and request.operation != "cleanup":
@@ -159,6 +204,7 @@ class WalkthroughAdapter:
             plan,
             trace,
         )
+        self.transient_screenshots: tuple[str, ...] = ()
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -172,24 +218,14 @@ class WalkthroughAdapter:
     def reconciliation_key(self) -> str:
         return self.plan.digest
 
+    def original_intent(self) -> dict[str, object]:
+        return {"host": self.plan.connection.host, "server_id": self.plan.connection.server_id}
+
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
-        # Never repeat browser transactions after a lost response/process. The
-        # original task account has its independent cleanup operation below.
-        return ProviderObservation(
-            "present",
-            response_status_code=200,
-            response_payload=self.response(
-                OdooWalkthroughResult(
-                    status="unknown",
-                    plan_sha256=self.plan.digest,
-                    task_id=self.request.task_id,
-                    operation=self.request.operation,
-                    code="interrupted_task_requires_cleanup",
-                )
-            ),
-        )
+        # Only the evidence-only recovery adapter can settle a prior dispatch.
+        return ProviderObservation("unknown")
 
     def response(self, result: OdooWalkthroughResult) -> dict[str, object]:
         return {
@@ -208,12 +244,17 @@ class WalkthroughAdapter:
             operation=self.request.operation,
             code="task_outcome_unknown",
         )
+        lease.assert_current()
         try:
-            lease.assert_current()
             current = plan_walkthrough(self.store, self.root, self.request, self.actor)
             if current.digest != self.plan.digest:
                 raise ValueError("Testing task plan changed.")
-            lease.checkpoint_effect("testing_task")
+        except Exception:
+            raise ProviderMutationRejectedError(
+                ValueError("Testing task plan is no longer eligible.")
+            ) from None
+        lease.checkpoint_effect("managed_secret")
+        try:
             secret = self.store.find_secret_record(
                 scope="context_instance",
                 integration=WALKTHROUGH_SECRET_INTEGRATION,
@@ -245,15 +286,21 @@ class WalkthroughAdapter:
                 )
             assert secret is not None
             version = self.store.read_secret_version(secret.current_version_id)
-            password = _decrypt_secret_value(version.ciphertext, version.key_id)
+            password = (
+                _decrypt_secret_value(version.ciphertext, version.key_id)
+                if self.request.operation != "cleanup"
+                else ""
+            )
             connection = self.plan.connection
             assert_selection_current(self.store, connection.selection)
+            lease.checkpoint_effect("account_dispatch")
             account = testing_account_command(
                 host=connection.host,
                 token=connection.token,
                 server_id=connection.server_id,
                 payload={
                     "instance": "testing",
+                    "dispatch_id": hashlib.sha256(provider_operation_key.encode()).hexdigest(),
                     "project": connection.app_name,
                     "identity": connection.selection.identity.model_dump(mode="json"),
                     "identity_key": RUNTIME_IDENTITY_ENV_KEY,
@@ -264,7 +311,7 @@ class WalkthroughAdapter:
                     "task_id": self.request.task_id,
                     "binding": self.plan.binding,
                     "groups": self.request.groups,
-                    "password": password,
+                    **({"password": password} if self.request.operation == "provision" else {}),
                     "operation": self.request.operation,
                 },
             )
@@ -300,6 +347,7 @@ class WalkthroughAdapter:
                             )
                         )
             elif self.request.operation == "run":
+                lease.checkpoint_effect("browser_dispatch")
 
                 def checkpoint() -> None:
                     lease.assert_current()
@@ -311,7 +359,7 @@ class WalkthroughAdapter:
                 passed, screenshots = run_walkthrough_browser(
                     origin=connection.selection.base_url.rstrip("/"),
                     database=self.plan.database,
-                    login="lp_walk_" + self.request.task_id,
+                    login=WALKTHROUGH_LOGIN_PREFIX + self.request.task_id,
                     password=password,
                     account_id=uid,
                     identity=connection.selection.identity,
@@ -320,12 +368,84 @@ class WalkthroughAdapter:
                 )
                 result.signed_in = True
                 result.steps_passed = passed
-                result.screenshots = screenshots
+                self.transient_screenshots = screenshots
+                result.screenshot_sha256 = tuple(
+                    hashlib.sha256(base64.b64decode(png)).hexdigest() for png in screenshots
+                )
             result.status, result.code = "pass", ""
+        except ProviderMutationRejectedError:
+            raise
         except Exception:
             # Provider/browser errors can echo credentials or page content. No
             # exception string, traceback, body or raw output enters a receipt.
-            result.status, result.code = "unknown", "task_outcome_unknown_cleanup_required"
+            raise ProviderMutationUnknownError(
+                "Task outcome is unknown; reconcile the original dispatch before cleanup."
+            ) from None
+        result.product, result.context = self.request.product, self.request.context
+        result.deployment_record_id = self.plan.connection.selection.identity.deployment_record_id
+        result.artifact_id = self.plan.connection.selection.identity.artifact_id
         return ProviderMutationOutcome(
             response_status_code=200, response_payload=self.response(result)
         )
+
+
+class InterruptedWalkthroughAdapter:
+    """Settle an expired dispatch as UNKNOWN without resolving any current lane."""
+
+    def __init__(
+        self,
+        original: LaunchplaneIdempotencyRecord,
+        request: OdooWalkthroughRequest,
+        trace: str,
+        store: PostgresRecordStore,
+        root: Path,
+    ) -> None:
+        self.original, self.request, self.trace = original, request, trace
+        self.store, self.root = store, root
+
+    def target_key(self) -> str:
+        return self.original.provider_target_key
+
+    def reconciliation_key(self) -> str:
+        return self.original.reconciliation_key
+
+    def observe(
+        self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
+    ) -> ProviderObservation:
+        if provider_effect_phase not in {"", "managed_secret"}:
+            try:
+                intent = self.store.read_original_mutation_intent(self.original)
+                host, token = source.read_dokploy_config(
+                    control_plane_root=self.root, database_url=self.store.database_url
+                )
+                if host != intent.get("host") or not testing_account_dispatch_finished(
+                    host=host,
+                    token=token,
+                    server_id=str(intent["server_id"]),
+                    dispatch_id=hashlib.sha256(provider_operation_key.encode()).hexdigest(),
+                ):
+                    return ProviderObservation("unknown")
+            except Exception:
+                return ProviderObservation("unknown")
+        return ProviderObservation(
+            "present",
+            response_status_code=200,
+            response_payload={
+                "status": "accepted",
+                "trace_id": self.trace,
+                "result": OdooWalkthroughResult(
+                    status="unknown",
+                    task_id=self.request.task_id,
+                    operation=self.request.operation,
+                    plan_sha256=self.request.reviewed_plan_sha256,
+                    product=self.request.product,
+                    context=self.request.context,
+                    code="interrupted_task_requires_cleanup",
+                ).model_dump(mode="json"),
+            },
+        )
+
+    def apply(
+        self, provider_operation_key: str, lease: ProviderOperationLease
+    ) -> ProviderMutationOutcome:
+        raise RuntimeError("Evidence recovery cannot dispatch task work.")

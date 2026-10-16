@@ -2,6 +2,7 @@
 
 from control_plane.dokploy.native_copy_stream import _read_remote
 from control_plane.odoo_testing_restore import TESTING_COPY_COMPLETION_PARAMETER
+from control_plane.contracts.odoo_walkthrough import WALKTHROUGH_LOGIN_PREFIX
 
 
 def testing_account_command(
@@ -24,11 +25,48 @@ def testing_account_command(
     return {"account_id": frames[0]["account_id"], "status": "pass"}
 
 
+def testing_account_dispatch_finished(
+    *, host: str, token: str, server_id: str, dispatch_id: str
+) -> bool:
+    frames: list[dict[str, object]] = []
+    _read_remote(
+        host=host,
+        token=token,
+        server_id=server_id,
+        program=ACCOUNT_JOURNAL_READ_PROGRAM,
+        payload={"dispatch_id": dispatch_id},
+        receive=frames.append,
+        timeout_seconds=30,
+    )
+    return len(frames) == 1 and frames[0].get("finished") is True
+
+
+ACCOUNT_JOURNAL_READ_PROGRAM = r"""
+import base64,json,re,sys,os,stat
+from pathlib import Path
+spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
+if not re.fullmatch('[a-f0-9]{64}',spec['dispatch_id']): raise RuntimeError('Invalid dispatch')
+path=Path('/tmp/launchplane-walkthrough')/(spec['dispatch_id']+'.json')
+finished=False
+try:
+    directory=path.parent
+    mode=directory.lstat()
+    if directory.is_symlink() or mode.st_uid!=os.getuid() or stat.S_IMODE(mode.st_mode)&0o077 or path.is_symlink():
+        raise ValueError('Untrusted journal')
+    value=json.loads(path.read_text())
+    finished=value.get('finished') is True
+except (OSError,ValueError):
+    pass
+print(sys.argv[2]+json.dumps({'type':'complete','finished':finished}),flush=True)
+"""
+
+
 # There are no user-selected executable names, paths, SQL, shell or Python.
 # The caller's password travels only in the echo-disabled input and docker
 # exec stdin. Neither Docker argv, a schedule, nor a provider log carries it.
 ACCOUNT_HOST_PROGRAM = r'''
-import base64, json, subprocess, sys
+import base64, json, subprocess, sys, os, re, stat
+from pathlib import Path
 spec=json.loads(base64.b64decode(sys.argv[1],validate=True))
 def docker(*args, data=None):
     result=subprocess.run(['docker',*args],input=data,capture_output=True,timeout=100)
@@ -36,6 +74,15 @@ def docker(*args, data=None):
     return result.stdout
 try:
     if spec['instance']!='testing': raise RuntimeError('Not testing')
+    if not re.fullmatch('[a-f0-9]{64}',spec['dispatch_id']): raise RuntimeError('Invalid dispatch')
+    directory=Path('/tmp/launchplane-walkthrough')
+    directory.mkdir(mode=0o700,exist_ok=True)
+    mode=directory.lstat()
+    if directory.is_symlink() or mode.st_uid!=os.getuid() or stat.S_IMODE(mode.st_mode)&0o077:
+        raise RuntimeError('Untrusted journal directory')
+    journal=directory/(spec['dispatch_id']+'.json')
+    with os.fdopen(os.open(journal,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
+        json.dump({'finished':False},stream);stream.flush();os.fsync(stream.fileno())
     project=spec['project']
     ids=docker('ps','--filter','label=com.docker.compose.project='+project,
         '--filter','label=com.docker.compose.service=script-runner','--format','{{.ID}}').decode().split()
@@ -75,6 +122,10 @@ with tempfile.TemporaryDirectory(prefix='launchplane-walkthrough-') as directory
     result=json.loads(docker('exec','-i',ids[0],'python3','-c',wrapper,
         data=json.dumps({**spec,'program':source}).encode()))
     if set(result)!={'account_id','status'}: raise RuntimeError('Invalid account receipt')
+    temporary=journal.with_suffix('.complete')
+    with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
+        json.dump({'finished':True},stream);stream.flush();os.fsync(stream.fileno())
+    os.replace(temporary,journal)
     print(sys.argv[2]+json.dumps({'type':'complete',**result}),flush=True)
 except Exception:
     print(sys.argv[2]+json.dumps({'type':'complete','status':'unknown'}),flush=True)
@@ -93,7 +144,7 @@ users=env['res.users'].sudo().with_context(active_test=False,tracking_disable=Tr
 key='launchplane.walkthrough.'+request['task_id']
 raw=parameters.get_param(key)
 marker=json.loads(raw) if raw else None
-login='lp_walk_'+request['task_id']
+login=__TASK_LOGIN_PREFIX__+request['task_id']
 user=users.browse(marker['account_id']).exists() if marker else users.browse([])
 if marker and (marker['binding']!=request['binding'] or len(user)!=1
                or user.id<=2 or user.login!=login):
@@ -102,9 +153,10 @@ if marker and marker['groups']!=sorted(request['groups']):
     raise RuntimeError('Testing task group request changed')
 if not marker and users.search_count([('login','=',login)]):
     raise RuntimeError('Existing login cannot be adopted')
-env.cr.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= %s::timestamptz AT TIME ZONE 'UTC' AND create_uid != %s)",(request['usage_since'],user.id if user else -1,))
-if request['operation']!='cleanup' and env.cr.fetchone()[0]:
-    raise RuntimeError('Testing lane has other recent successful sign-ins')
+if request['operation']!='cleanup':
+    env.cr.execute("SELECT EXISTS (SELECT 1 FROM res_users_log WHERE create_date >= %s::timestamptz AT TIME ZONE 'UTC' AND create_uid != %s)",(request['usage_since'],user.id if user else -1,))
+    if env.cr.fetchone()[0]:
+        raise RuntimeError('Testing lane has other recent successful sign-ins')
 if request['operation']=='provision':
     if marker:
         if marker['state']!='active' or not user.active: raise RuntimeError('Task already closed')
@@ -125,13 +177,17 @@ elif request['operation']=='cleanup':
             env['res.users.apikeys'].sudo().search([('user_id','=',user.id)]).unlink()
         marker['state']='closed'
         parameters.set_param(key,json.dumps(marker,sort_keys=True))
-    if marker and user.active: raise RuntimeError('Account cleanup readback failed')
 else:
     if not marker or marker['state']!='active' or not user.active:
         raise RuntimeError('Task is not active')
     if user.has_group('base.group_system') or user.has_group('base.group_erp_manager'):
         raise RuntimeError('Task privileges changed')
 env.cr.commit()
+if request['operation']=='cleanup' and marker:
+    user.invalidate_recordset(['active'])
+    if user.active: raise RuntimeError('Account cleanup readback failed')
 with os.fdopen(os.open(request['result_file'],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as stream:
     json.dump({'status':'pass','account_id':user.id if marker else 0},stream)
-""".replace("__LP_COPY_WITNESS__", TESTING_COPY_COMPLETION_PARAMETER)
+""".replace("__LP_COPY_WITNESS__", TESTING_COPY_COMPLETION_PARAMETER).replace(
+    "__TASK_LOGIN_PREFIX__", repr(WALKTHROUGH_LOGIN_PREFIX)
+)

@@ -22,7 +22,11 @@ from control_plane.http_routes.support import (
     run_in_worker_thread,
 )
 from control_plane.drivers import native_routes
-from control_plane.odoo_walkthrough import WalkthroughAdapter, plan_walkthrough
+from control_plane.odoo_walkthrough import (
+    WalkthroughAdapter,
+    InterruptedWalkthroughAdapter,
+    plan_walkthrough,
+)
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.service_auth import (
     AuthorizationTarget,
@@ -115,6 +119,25 @@ def register_walkthrough_route(
                         )
                     if original.state == "completed":
                         return OdooWalkthroughResponse.model_validate(original.response_payload)
+                    recovery = run_durable_provider_operation(
+                        store=record_store,
+                        scope=scope,
+                        route_path=WALKTHROUGH_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint=fingerprint,
+                        lease_owner=trace,
+                        response_trace_id=trace,
+                        adapter=InterruptedWalkthroughAdapter(
+                            original, payload, trace, record_store, dependencies.control_plane_root
+                        ),
+                        allow_mutation=False,
+                    )
+                    if recovery.status in {"completed", "replayed", "adopted"}:
+                        return OdooWalkthroughResponse.model_validate(recovery.response_payload)
+                    refuse(
+                        "testing_task_reconciliation_required",
+                        "The original dispatch is still active or unobservable; preserve its key and task account.",
+                    )
             with record_store.odoo_synchronous_lane_reservation(
                 product=payload.product,
                 context=payload.context,
@@ -140,6 +163,10 @@ def register_walkthrough_route(
                             task_id=payload.task_id,
                             operation=payload.operation,
                             plan_sha256=plan.digest,
+                            product=payload.product,
+                            context=payload.context,
+                            deployment_record_id=plan.connection.selection.identity.deployment_record_id,
+                            artifact_id=plan.connection.selection.identity.artifact_id,
                         ),
                     )
                 if plan.digest != payload.reviewed_plan_sha256:
@@ -154,18 +181,28 @@ def register_walkthrough_route(
                     plan=plan,
                     trace=trace,
                 )
-                result = run_durable_provider_operation(
-                    store=record_store,
-                    scope=scope,
-                    route_path=WALKTHROUGH_ROUTE,
-                    idempotency_key=key,
-                    request_fingerprint=fingerprint,
-                    lease_owner=trace,
-                    response_trace_id=trace,
-                    adapter=adapter,
-                )
+                try:
+                    result = run_durable_provider_operation(
+                        store=record_store,
+                        scope=scope,
+                        route_path=WALKTHROUGH_ROUTE,
+                        idempotency_key=key,
+                        request_fingerprint=fingerprint,
+                        lease_owner=trace,
+                        response_trace_id=trace,
+                        adapter=adapter,
+                        original_intent=adapter.original_intent(),
+                    )
+                except ValueError:
+                    refuse(
+                        "testing_task_plan_changed", "Review the current testing task plan again."
+                    )
+                    raise AssertionError
                 if result.status in {"completed", "replayed", "adopted"}:
-                    return OdooWalkthroughResponse.model_validate(result.response_payload)
+                    response = OdooWalkthroughResponse.model_validate(result.response_payload)
+                    if result.status == "completed":
+                        response.result.screenshots = adapter.transient_screenshots
+                    return response
                 refuse(
                     "testing_task_reconciliation_required",
                     "Retry only this original key; then clean up its task account.",

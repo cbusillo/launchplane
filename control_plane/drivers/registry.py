@@ -6,6 +6,11 @@ from typing import Literal, Protocol, cast
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.lane_service_restart import SERVICE_RESTART_ROUTE
+from control_plane.contracts.odoo_walkthrough import (
+    WALKTHROUGH_ROUTE,
+    WALKTHROUGH_ACTION,
+    WALKTHROUGH_PLAN_ACTION,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -564,9 +569,9 @@ ODOO_DRIVER = DriverDescriptor(
             "Create a task account, keep its password inside Launchplane, run a browser or revoke the account.",
             safety="mutation",
             scope="instance",
-            route_path="/v1/drivers/odoo/testing-walkthrough",
-            authz_action="odoo_testing_walkthrough.execute",
-            alternate_authz_actions=("odoo_testing_walkthrough.plan",),
+            route_path=WALKTHROUGH_ROUTE,
+            authz_action=WALKTHROUGH_ACTION,
+            alternate_authz_actions=(WALKTHROUGH_PLAN_ACTION,),
             writes_records=("secret", "odoo_testing_task"),
         ),
         _action(

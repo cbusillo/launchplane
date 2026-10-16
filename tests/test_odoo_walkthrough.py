@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 from contextlib import ExitStack
 import json
 import logging
+import subprocess
+import sys
+from types import SimpleNamespace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -20,8 +25,9 @@ from control_plane.contracts.odoo_walkthrough import (
     OdooWalkthroughRequest,
     WalkthroughStep,
 )
-from control_plane.contracts.runtime_identity import RuntimeIdentity
-from control_plane.dokploy.odoo_walkthrough import ACCOUNT_ODOO_PROGRAM
+from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.dokploy.odoo_walkthrough import ACCOUNT_ODOO_PROGRAM, ACCOUNT_HOST_PROGRAM
 from control_plane.http_routes.odoo_walkthrough import (
     WalkthroughDependencies,
     register_walkthrough_route,
@@ -151,6 +157,18 @@ class TaskRouteTests(unittest.TestCase):
         self.browser = self.stack.enter_context(
             patch("control_plane.odoo_walkthrough.run_walkthrough_browser", return_value=(0, ()))
         )
+        self.finished = self.stack.enter_context(
+            patch(
+                "control_plane.odoo_walkthrough.testing_account_dispatch_finished",
+                return_value=True,
+            )
+        )
+        self.stack.enter_context(
+            patch(
+                "control_plane.odoo_walkthrough.source.read_dokploy_config",
+                return_value=(connection.host, connection.token),
+            )
+        )
         self.allowed = True
         self.actions: list[str] = []
         self.app: Any = FastAPI()
@@ -249,11 +267,87 @@ class TaskRouteTests(unittest.TestCase):
         self.browser.side_effect = RuntimeError("cookie=session-secret; password=" + password)
         run = task_request(operation="run", mode="apply", reviewed_plan_sha256=self.plan.digest)
         status, result = self.invoke(run, "failed-browser")
-        self.assertEqual((status, result["result"]["status"]), (200, "unknown"))
+        self.assertEqual(status, 409)
         self.assertNotIn(password, json.dumps(result))
         self.assertNotIn("session-secret", json.dumps(result))
-        self.invoke(run, "failed-browser")
+        self.planner.side_effect = ValueError("expired or held or changed runtime")
+        status, recovered = self.invoke(run, "failed-browser")
+        self.assertEqual((status, recovered["result"]["status"]), (200, "unknown"))
         self.assertEqual(self.browser.call_count, 1)
+
+    def test_unobserved_dispatch_keeps_the_fence_and_never_retries_account_writes(self) -> None:
+        self.account.side_effect = RuntimeError("provider-private-password")
+        provision = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)
+        self.assertEqual(self.invoke(provision, "unknown")[0], 409)
+        self.finished.return_value = False
+        self.planner.side_effect = ValueError("lane changed")
+        status, response = self.invoke(provision, "unknown")
+        self.assertEqual(status, 409)
+        self.assertNotIn("provider-private-password", json.dumps(response))
+        self.assertEqual(self.account.call_count, 1)
+        original = self.store.read_idempotency_record(
+            scope="odoo-walkthrough:example-odoo",
+            route_path=WALKTHROUGH_ROUTE,
+            idempotency_key="unknown",
+        )
+        assert original is not None
+        self.assertEqual(original.state, "reconcile_required")
+
+    def test_pre_dispatch_plan_failure_releases_its_reservation(self) -> None:
+        with patch(
+            "control_plane.odoo_walkthrough.plan_walkthrough", side_effect=ValueError("changed")
+        ):
+            status, _ = self.invoke(
+                task_request(mode="apply", reviewed_plan_sha256=self.plan.digest), "not-dispatched"
+            )
+        self.assertEqual(status, 409)
+        self.account.assert_not_called()
+        self.assertIsNone(
+            self.store.read_idempotency_record(
+                scope="odoo-walkthrough:example-odoo",
+                route_path=WALKTHROUGH_ROUTE,
+                idempotency_key="not-dispatched",
+            )
+        )
+
+    def test_live_original_lease_cannot_be_settled_or_inspected_as_an_ended_dispatch(self) -> None:
+        provision = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)
+        identity = LocalOperatorIdentity(subject="test-agent", token_label="test-token")
+        actor = f"{type(identity).__name__}:{identity.subject}"
+        self.store.reserve_mutation(
+            scope="odoo-walkthrough:example-odoo",
+            route_path=WALKTHROUGH_ROUTE,
+            idempotency_key="live",
+            request_fingerprint=canonical_json_sha256([actor, provision.model_dump(mode="json")]),
+            lease_owner="other-live-worker",
+            reconciliation_key=self.plan.digest,
+            provider_target_key="active-fixture-target",
+        )
+        self.planner.side_effect = ValueError("current lane is held")
+        self.assertEqual(self.invoke(provision, "live")[0], 409)
+        self.finished.assert_not_called()
+        self.account.assert_not_called()
+
+    def test_screenshot_bytes_are_transient_and_replay_keeps_only_their_digest(self) -> None:
+        self.invoke(task_request(mode="apply", reviewed_plan_sha256=self.plan.digest), "provision")
+        png = base64.b64encode(b"private-png-fixture").decode()
+        self.browser.return_value = (1, (png,))
+        run = task_request(operation="run", mode="apply", reviewed_plan_sha256=self.plan.digest)
+        status, first = self.invoke(run, "screenshot")
+        self.assertEqual(status, 200)
+        self.assertEqual(first["result"]["screenshots"], [png])
+        replay = self.invoke(run, "screenshot")[1]
+        self.assertEqual(replay["result"]["screenshots"], [])
+        self.assertEqual(
+            first["result"]["screenshot_sha256"], replay["result"]["screenshot_sha256"]
+        )
+        stored = self.store.read_idempotency_record(
+            scope="odoo-walkthrough:example-odoo",
+            route_path=WALKTHROUGH_ROUTE,
+            idempotency_key="screenshot",
+        )
+        assert stored is not None
+        self.assertNotIn(png, json.dumps(stored.response_payload))
 
     def test_changed_task_cannot_reuse_a_key(self) -> None:
         first = task_request(mode="apply", reviewed_plan_sha256=self.plan.digest)
@@ -272,13 +366,18 @@ class AccountProgramTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.parameters: dict[str, str] = {TESTING_COPY_COMPLETION_PARAMETER: "testing-copy"}
         self.user = MagicMock()
-        self.user.id, self.user.login, self.user.active = 17, "lp_walk_" + "1" * 32, True
+        self.user.id, self.user.login, self.user.active = 17, "", True
         self.user.__len__.return_value = 1
         self.user.has_group.return_value = False
         self.users = MagicMock()
         self.users.with_context.return_value = self.users
         self.users.search_count.return_value = 0
-        self.users.create.return_value = self.user
+
+        def create_user(values: dict[str, Any]) -> MagicMock:
+            self.user.login = values["login"]
+            return self.user
+
+        self.users.create.side_effect = create_user
         self.users.browse.return_value.exists.return_value = self.user
         parameters = MagicMock()
         parameters.get_param.side_effect = lambda key: self.parameters.get(key)
@@ -348,15 +447,17 @@ class AccountProgramTests(unittest.TestCase):
 
     def test_cleanup_archives_only_the_witnessed_task_and_changes_its_password(self) -> None:
         self.execute()
+        self.env.cr.execute.side_effect = RuntimeError("login history unavailable")
         self.request["operation"] = "cleanup"
         self.user.write.side_effect = lambda values: setattr(self.user, "active", values["active"])
         self.execute()
         values = self.user.write.call_args.args[0]
         self.assertFalse(values["active"])
         self.assertNotEqual(values["password"], self.request["password"])
-        self.assertEqual(
-            json.loads(self.parameters["launchplane.walkthrough." + "1" * 32])["state"], "closed"
-        )
+        self.request["operation"] = "provision"
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.request["operation"] = "cleanup"
         self.user.write.reset_mock()
         self.execute()
         self.user.write.assert_not_called()
@@ -380,3 +481,154 @@ class AccountProgramTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.execute()
         self.user.write.assert_not_called()
+
+    def test_groups_implying_administration_refuse_before_commit(self) -> None:
+        self.user.has_group.return_value = True
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.env.cr.commit.assert_not_called()
+
+    def test_commit_failure_has_no_passing_consumer_receipt(self) -> None:
+        self.env.cr.commit.side_effect = RuntimeError("commit failed")
+        with self.assertRaises(RuntimeError):
+            self.execute()
+        self.assertEqual(list(Path(self.directory.name).iterdir()), [])
+
+    def test_fixed_host_wrapper_executes_stdin_consumer_and_writes_only_terminal_journal(
+        self,
+    ) -> None:
+        identity = RuntimeIdentity(
+            product="example-odoo",
+            context="example",
+            instance="testing",
+            deployment_record_id="deployment",
+            artifact_id="artifact",
+            source_git_ref="a" * 40,
+            image_reference="example@sha256:" + "b" * 64,
+        )
+        payload = {
+            **self.request,
+            "database": "testing",
+            "project": "fixture",
+            "dispatch_id": "d" * 64,
+            "identity": identity.model_dump(mode="json"),
+            "identity_key": next(iter(runtime_identity_env(identity))),
+            "image": identity.image_reference,
+            "account_program": ACCOUNT_ODOO_PROGRAM,
+        }
+        environment = {
+            **runtime_identity_env(identity),
+            "PLATFORM_INSTANCE": "testing",
+            "ODOO_DB_HOST": "database",
+            "ODOO_DB_NAME": "testing",
+        }
+        startup = SimpleNamespace(
+            _load_settings=lambda args: args,
+            _write_runtime_config=lambda settings: print("private startup noise"),
+            _build_odoo_shell_command=lambda settings: ["odoo", "shell"],
+            _odoo_environment=lambda settings: {},
+        )
+        original_path = Path
+        output = io.StringIO()
+        invocations: list[list[str]] = []
+
+        def run(arguments: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            invocations.append(arguments)
+            if arguments[:2] == ["docker", "ps"]:
+                raw = b"fixture-runner\n"
+            elif arguments[:2] == ["docker", "inspect"]:
+                raw = json.dumps(
+                    [
+                        {
+                            "Config": {
+                                "Env": [key + "=" + value for key, value in environment.items()],
+                                "Image": identity.image_reference,
+                            }
+                        }
+                    ]
+                ).encode()
+            elif arguments[:2] == ["docker", "exec"]:
+                private = io.StringIO()
+                with (
+                    patch.object(sys, "stdin", io.StringIO(kwargs["input"].decode())),
+                    patch.object(sys, "stdout", private),
+                ):
+                    exec(compile(arguments[-1], "container-wrapper", "exec"), {})
+                raw = private.getvalue().encode()
+            else:
+                exec(compile(kwargs["input"].decode(), "odoo-consumer", "exec"), {"env": self.env})
+                raw = b"discarded private output"
+            return subprocess.CompletedProcess(arguments, 0, stdout=raw, stderr=b"")
+
+        with (
+            patch("subprocess.run", side_effect=run),
+            patch.dict(sys.modules, {"run_odoo_startup": startup}),
+            patch.object(sys, "path", sys.path.copy()),
+            patch.object(sys, "stdout", output),
+            patch.object(
+                sys,
+                "argv",
+                ["host", base64.b64encode(json.dumps(payload).encode()).decode(), "FRAME:"],
+            ),
+            patch(
+                "pathlib.Path",
+                side_effect=lambda path: (
+                    original_path(self.directory.name) / "journal"
+                    if path == "/tmp/launchplane-walkthrough"
+                    else original_path(path)
+                ),
+            ),
+        ):
+            exec(compile(ACCOUNT_HOST_PROGRAM, "account-host", "exec"), {})
+        self.assertNotIn(self.request["password"], output.getvalue())
+        self.assertNotIn("private startup noise", output.getvalue())
+        self.assertTrue(
+            json.loads(
+                (original_path(self.directory.name) / "journal" / ("d" * 64 + ".json")).read_text()
+            )["finished"]
+        )
+        self.assertTrue(any(arguments[:2] == ["docker", "exec"] for arguments in invocations))
+        self.assertTrue(
+            all(
+                self.request["password"] not in argument
+                for arguments in invocations
+                for argument in arguments
+            )
+        )
+        from control_plane.dokploy.odoo_walkthrough import ACCOUNT_JOURNAL_READ_PROGRAM
+
+        def read_journal() -> bool:
+            receipt = io.StringIO()
+            with (
+                patch.object(sys, "stdout", receipt),
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "host",
+                        base64.b64encode(
+                            json.dumps({"dispatch_id": payload["dispatch_id"]}).encode()
+                        ).decode(),
+                        "FRAME:",
+                    ],
+                ),
+                patch(
+                    "pathlib.Path",
+                    side_effect=lambda path: (
+                        original_path(self.directory.name) / "journal"
+                        if path == "/tmp/launchplane-walkthrough"
+                        else original_path(path)
+                    ),
+                ),
+            ):
+                exec(compile(ACCOUNT_JOURNAL_READ_PROGRAM, "journal-reader", "exec"), {})
+            return json.loads(receipt.getvalue().removeprefix("FRAME:"))["finished"] is True
+
+        self.assertTrue(read_journal())
+        journal = (
+            original_path(self.directory.name) / "journal" / (payload["dispatch_id"] + ".json")
+        )
+        journal.write_text(json.dumps({"finished": False}))
+        self.assertFalse(read_journal())
+        journal.unlink()
+        self.assertFalse(read_journal())

@@ -7,6 +7,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 WALKTHROUGH_ROUTE = "/v1/drivers/odoo/testing-walkthrough"
 WALKTHROUGH_ACTION = "odoo_testing_walkthrough.execute"
+WALKTHROUGH_PLAN_ACTION = "odoo_testing_walkthrough.plan"
+WALKTHROUGH_LOGIN_PREFIX = "lp_walk_"
 
 
 class WalkthroughStep(BaseModel):
@@ -84,6 +86,12 @@ class OdooWalkthroughResult(BaseModel):
     steps_passed: int = 0
     # PNG only, after login and redaction; never an HTML/trace/HAR/storage artifact.
     screenshots: tuple[str, ...] = ()
+    screenshot_sha256: tuple[str, ...] = ()
+    product: str = ""
+    context: str = ""
+    instance: Literal["testing"] = "testing"
+    deployment_record_id: str = ""
+    artifact_id: str = ""
     code: str = ""
 
 

@@ -480,6 +480,45 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         status, output = self.run_program()
         self.assertNotEqual(status, 0)
 
+    def test_task_cleanup_qualifies_physical_copy_without_reading_login_history(self) -> None:
+        self.spec.update(inspection_only=True, usage_only=True, task_account_cleanup=True)
+        self.existing_database = True
+        command = self.command
+
+        def read(arguments: list[str], **kwargs: Any) -> Any:
+            query = kwargs.get("input") or b""
+            if b"res_users_log" in query:
+                raise AssertionError("Task cleanup must not depend on login history")
+            if b"ir_config_parameter" in query:
+                return subprocess.CompletedProcess(
+                    arguments, 0, stdout=self.spec["copy_binding_sha256"].encode(), stderr=b""
+                )
+            return command(arguments, **kwargs)
+
+        with patch.object(self, "command", side_effect=read):
+            status, output = self.run_program()
+        self.assertEqual(status, 0, output)
+        frames = [
+            json.loads(line.removeprefix("fixture:"))
+            for line in output.splitlines()
+            if line.startswith("fixture:")
+        ]
+        self.assertEqual(frames, [{"type": "complete", "cleanup_qualified": True}])
+        self.assertFalse(
+            any(
+                call[:2] in (["docker", "stop"], ["docker", "start"], ["docker", "cp"])
+                for call in self.calls
+            )
+        )
+        self.containers["other"] = {
+            "Id": "other",
+            "Config": {},
+            "Mounts": [{"Name": self.gen.namespace + "-data"}],
+        }
+        with patch.object(self, "command", side_effect=read):
+            status, _ = self.run_program()
+        self.assertNotEqual(status, 0)
+
     def test_reclaim_preserves_a_new_copy_that_has_started_serving(self) -> None:
         from datetime import datetime, timezone
 
