@@ -7344,13 +7344,15 @@ class FilesystemRecordStore:
         *,
         context_name: str = "",
         limit: int | None = None,
+        exclude_source: str = "",
     ) -> tuple[PreviewInventoryScanRecord, ...]:
         records = [
             record
             for record in self._list_models(
                 PreviewInventoryScanRecord, "launchplane_preview_inventory_scans"
             )
-            if not context_name or record.context == context_name
+            if (not context_name or record.context == context_name)
+            and (not exclude_source or record.source != exclude_source)
         ]
         records.sort(key=lambda record: (record.scanned_at, record.scan_id), reverse=True)
         if limit is not None:
