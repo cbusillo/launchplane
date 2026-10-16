@@ -70,7 +70,11 @@ settings and writer adapters described in
 [the cutover binding contract](generic-web-two-slot-releases.md). The installed
 host must provide startup preflight and recreation in both slots; missing
 capabilities refuse before candidate effects. The same writer inventory flows
-through fencing, settings verification and handoff. Source assembly does not
+through fencing, settings verification and handoff. A rollback factory refusal
+records a failed rollback before any provider effect, preserving its failure
+receipt instead of leaving it pending. Installed-package import or construction
+errors report an unavailable host capability without exposing package details.
+Source assembly does not
 prove installation, lane activation or visitor behavior; #3268 retains that
 qualification. Never change a live product's driver to bypass the refusal.
 
