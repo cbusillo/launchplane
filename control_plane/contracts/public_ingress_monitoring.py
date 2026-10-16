@@ -20,6 +20,9 @@ from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 
 
+# Historical source-age incidents are retained as evidence, never failure alerts.
+RETIRED_PRODUCTION_DELIVERY_LAG_CHECK = "production-delivery-lag"
+
 PublicIngressObservationStatus = Literal["pass", "fail", "skipped"]
 PublicIngressObservationPurpose = Literal["probe", "reconciliation"]
 PublicIngressIncidentStatus = Literal["open", "resolved"]
