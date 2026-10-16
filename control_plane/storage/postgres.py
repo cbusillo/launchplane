@@ -11785,6 +11785,7 @@ class PostgresRecordStore(HumanSessionStore):
             disposable_testing_supersession,
         )
         from control_plane.disposable_lanes import DisposableLaneSafetyUnknown
+        from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
 
         preparation = self.read_disposable_replacement_preparation(expected.operation_id)
         safety = self.read_disposable_lane_safety(
@@ -11942,6 +11943,16 @@ class PostgresRecordStore(HumanSessionStore):
                     ),
                     safety,
                     preparation,
+                    non_use_records=(
+                        self.read_testing_non_use_records(
+                            expected.product,
+                            expected.context,
+                            target_id_row.target_id,
+                            shared_session=session,
+                        )
+                        if safety.usage_evidence.startswith(NON_USE_EVIDENCE_PREFIX)
+                        else None
+                    ),
                 )
                 try:
                     replacement = disposable_testing_supersession(current, bindings)

@@ -937,7 +937,8 @@ fresh-resource bootstrap. It requires all of the following:
   not completed, no drill database was selected, and the witness has never been
   revoked. Legacy records have no witness and stay UNKNOWN; there is no backfill.
 - Complete public and private HTTP histories since preparation both contain
-  failed public checks bound to the generation's hostname and failed private checks
+  failed public checks whose base, health and probed URLs bind to the generation's
+  hostname, and failed private checks
   bound to its active, lane-owned private endpoint authority. Private observations
   have no public base URL. Neither history may contain a successful or skipped
   check or target. Missing either history or private endpoint authority stays UNKNOWN.
@@ -964,7 +965,8 @@ early. Publication and consumption use their existing locked transaction. The pr
 binds to the generation rather than a growing list of failed checks. Failed checks
 against an earlier route do not count toward coverage. The predicate is rechecked
 under the shared authority lock before publication and again when
-consumed. Dispatch/hold revocation removes an already-published never-served
+consumed, including through the supersession snapshot adapter. Dispatch/hold
+revocation removes an already-published never-served
 observation; a delayed collector cannot republish it. Data custody, physical
 isolation, backup gates and retained-operation fences remain independent.
 

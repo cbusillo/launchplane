@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
+from typing import cast
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
@@ -51,6 +52,7 @@ class NeverServedTestingTests(unittest.TestCase):
                 "context": self.context,
                 "operation_id": self.fixture.fixture.operation.operation_id,
                 "target_id": self.fixture.resources.target_id,
+                "domain_host": "testing.example.com",
                 "namespace": self.fixture.resources.namespace,
                 "resources_binding_sha256": self.fixture.resources.binding_sha256,
                 "prepared_at": self.at.isoformat(),
@@ -64,6 +66,7 @@ class NeverServedTestingTests(unittest.TestCase):
                     lane.model_copy(
                         update={
                             "base_url": f"https://{self.gen.domain_host}",
+                            "health_url": "",
                             "health_monitoring": ProductLaneHealthMonitoringPolicy(
                                 monitoring_intent="public",
                                 checks=(
@@ -135,6 +138,79 @@ class NeverServedTestingTests(unittest.TestCase):
             ).usage,
             "unknown",
         )
+
+    def test_public_coverage_cannot_include_an_explicit_foreign_health_url(self) -> None:
+        records = self.snapshot()
+        public = self.check("public_http")
+        foreign = public.model_copy(
+            update={
+                "health_url": "https://old.example.invalid/health",
+                "targets": tuple(
+                    t.model_copy(update={"url": "https://old.example.invalid/health"})
+                    if t.target == "health_url"
+                    else t
+                    for t in public.targets
+                ),
+            }
+        )
+        self.assertEqual(
+            qualify_never_served(
+                replace(records, checks=(self.check("private_http"), foreign))
+            ).usage,
+            "unknown",
+        )
+
+    def test_replacement_binding_adapter_rechecks_the_locked_generation_snapshot(self) -> None:
+        from control_plane.disposable_testing_rebuild import ReplacementBindings
+        from control_plane.disposable_lanes import (
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
+            DisposableLaneStore,
+        )
+
+        records = self.snapshot()
+        proof = self.read()
+        record_safety(
+            self.store,
+            self.product,
+            self.context,
+            "testing",
+            usage_evidence=NON_USE_EVIDENCE_PREFIX + proof.proof_sha256,
+        )
+        evidence = self.store.read_disposable_lane_safety(self.product, self.context, "testing")
+        assert evidence is not None
+        bindings = ReplacementBindings(
+            profile=self.profile,
+            target=records.target,
+            target_id=self.store.read_dokploy_target_id_record(
+                context_name=self.context, instance_name="testing"
+            ),
+            all_target_ids=self.store.list_dokploy_target_id_records(),
+            runtime_records=self.store.list_runtime_environment_records(),
+            secret_records=self.store.list_secret_records(integration="runtime_environment"),
+            secret_bindings=self.store.list_secret_bindings(integration="runtime_environment"),
+            safety=evidence,
+            preparation=records.allocation,
+            non_use_records=records,
+        )
+        self.assertTrue(
+            require_disposable_lane(
+                cast(DisposableLaneStore, bindings),
+                product=self.product,
+                context=self.context,
+                instance="testing",
+            )
+        )
+        bindings.non_use_records = replace(
+            records, generation=self.gen.model_copy(update={"non_use_invalidated": True})
+        )
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                cast(DisposableLaneStore, bindings),
+                product=self.product,
+                context=self.context,
+                instance="testing",
+            )
 
     def test_pending_testing_deployment_permanently_revokes_a_published_proof(self) -> None:
         proof = self.read()

@@ -93,6 +93,8 @@ def qualify_never_served(records: NeverServedRecords) -> OdooTestingUsage:
                 continue
             bound = (
                 urlsplit(check.base_url).hostname == gen.domain_host
+                and (not check.health_url or urlsplit(check.health_url).hostname == gen.domain_host)
+                and all(urlsplit(t.url).hostname == gen.domain_host for t in check.targets)
                 if check.check_kind == "public_http"
                 else (check.check_name, check.health_url) in records.private_checks
                 and all(
