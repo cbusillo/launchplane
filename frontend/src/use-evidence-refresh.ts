@@ -16,7 +16,7 @@ export function useEvidenceRefresh<T>(
 ) {
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
-  const deadlineRead = useRef<{ key: string; deadline: number; retryUntil: number } | null>(null);
+  const deadlineReads = useRef<{ key: string; pending: Map<number, number> }>({ key, pending: new Map() });
   // Keep the dependency stable across expiry-only renders. Already expired
   // evidence cannot schedule a read loop; normal polling still retries it.
   const deadlineKey = evidenceDeadlines.join(",");
@@ -29,15 +29,19 @@ export function useEvidenceRefresh<T>(
     let requested = false;
     const now = Date.now();
     const deadlines = deadlineKey.split(",").map(value => Date.parse(value)).filter(Number.isFinite);
-    const previous = deadlineRead.current;
-    const retryDeadline = resource.status === "ready" && previous?.key === key &&
-      deadlines.includes(previous.deadline) && now >= previous.deadline &&
-      now < previous.deadline + READ_REFRESH_INTERVAL_MS &&
-      performance.now() < previous.retryUntil;
-    if (!retryDeadline) deadlineRead.current = null;
+    if (deadlineReads.current.key !== key || resource.status !== "ready") {
+      deadlineReads.current = { key, pending: new Map() };
+    }
+    const pending = deadlineReads.current.pending;
+    for (const [deadline, retryUntil] of pending) {
+      if (!deadlines.includes(deadline) || now < deadline ||
+          now >= deadline + READ_REFRESH_INTERVAL_MS || performance.now() >= retryUntil) {
+        pending.delete(deadline);
+      }
+    }
     const nextExpiry = Math.min(...deadlines.filter(value => value > now));
     const interval = Math.min(READ_REFRESH_INTERVAL_MS, nextExpiry - now,
-      retryDeadline ? DEADLINE_RETRY_INTERVAL_MS : Infinity);
+      pending.size ? DEADLINE_RETRY_INTERVAL_MS : Infinity);
     const dueAt = performance.now() + interval;
     const wallDueAt = now + interval;
     const update = () => {
@@ -56,9 +60,8 @@ export function useEvidenceRefresh<T>(
       // A monitor publishes after probing, so a deadline read may still return
       // its previous observation. Retry that exact deadline for at most one
       // cadence, without renewing proof or creating an unbounded read loop.
-      if (!retryDeadline && nextExpiry === wallDueAt) {
-        deadlineRead.current = { key, deadline: nextExpiry,
-          retryUntil: performance.now() + READ_REFRESH_INTERVAL_MS };
+      if (nextExpiry === wallDueAt) {
+        pending.set(nextExpiry, performance.now() + READ_REFRESH_INTERVAL_MS);
       }
       refreshRef.current();
     };

@@ -1,4 +1,4 @@
-import { expect, setClockTime, test } from "./state";
+import { expect, setClockTime, test, waitForState } from "./state";
 import { DEADLINE_RETRY_INTERVAL_MS, READ_REFRESH_INTERVAL_MS } from "../../src/use-evidence-refresh";
 
 for (const view of ["index", "workspace", "environment"] as const) {
@@ -24,14 +24,16 @@ for (const view of ["index", "workspace", "environment"] as const) {
     // The service updates at its evidence deadline, independently of when the
     // browser opened. The first response has only a small fresh window left.
     // Independent fixture input: production observations have a one-minute
-    // lifetime, and this monitor publishes ten seconds after the slot starts.
+    // lifetime, and this monitor publishes after the slot starts.
     const cadence = 60_000;
-    const publicationDelay = 2 * DEADLINE_RETRY_INTERVAL_MS;
+    const publicationDelay = 11_000;
     const origin = Date.now();
     let serviceTime = origin + cadence * 0.9;
+    let browserTime = serviceTime;
     let stoppedAt: number | undefined;
     let unavailable = false;
     let reads = 0;
+    let lastName = "";
     const mutations: string[] = [];
     await setClockTime(page, serviceTime);
     page.on("request", request => {
@@ -65,7 +67,7 @@ for (const view of ["index", "workspace", "environment"] as const) {
     });
     await page.route(target, async route => {
       reads++;
-      const name = `Cadence observation ${reads}`;
+      const name = lastName = `Cadence observation ${reads}`;
       if (unavailable) return route.fulfill({ status: 503, json: { error: { code: "read_unavailable", message: "Cadence fixture unavailable" } } });
       serviceTime = await page.evaluate(() => Date.now());
       const product = { ...response(fixture.product), display_name: name };
@@ -79,21 +81,20 @@ for (const view of ["index", "workspace", "environment"] as const) {
     const attribute = view === "index" ? "data-operational" : "data-tone";
     const healthy = view === "environment" ? "pass" : "verified";
     await expect(signal).toHaveAttribute(attribute, healthy);
-    // Observe the boundary before publication rather than jumping over it.
-    const beforeDeadline = reads;
-    await page.clock.runFor(cadence * 0.1 + 1);
-    await expect(page.getByText(`Cadence observation ${beforeDeadline + 1}`, { exact: true }).last()).toBeVisible();
-    await expect(signal).toHaveAttribute(attribute, "warning");
-    for (let retry = 0; retry < publicationDelay / DEADLINE_RETRY_INTERVAL_MS; retry++) {
+    const advance = async (milliseconds: number) => {
       const before = reads;
-      await page.clock.runFor(DEADLINE_RETRY_INTERVAL_MS);
-      await expect(page.getByText(`Cadence observation ${before + 1}`, { exact: true }).last()).toBeVisible();
-    }
-    await expect(signal).toHaveAttribute(attribute, healthy);
+      browserTime += milliseconds;
+      await page.clock.runFor(milliseconds);
+      await waitForState(() => reads).toBeGreaterThan(before);
+      await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
+    };
     for (let minute = 0; minute < 31; minute++) {
-      const before = reads;
-      await page.clock.runFor(cadence);
-      await expect(page.getByText(`Cadence observation ${before + 1}`, { exact: true }).last()).toBeVisible();
+      // Observe each boundary before publication, then its recovery. A single
+      // minute-sized clock jump would answer the pending read too late and
+      // hide the publication race for the rest of this long-lived page.
+      await advance(origin + (minute + 1) * cadence + 1 - browserTime);
+      await expect(signal).toHaveAttribute(attribute, "warning");
+      await advance(publicationDelay + DEADLINE_RETRY_INTERVAL_MS);
       await expect(signal).toHaveAttribute(attribute, healthy);
     }
     await page.screenshot({ path: `../tmp/browser-smoke/production-cadence-${view}-${testInfo.project.name}.png`, fullPage: true });
@@ -115,3 +116,72 @@ for (const view of ["index", "workspace", "environment"] as const) {
     expect(mutations).toEqual([]);
   });
 }
+
+test("staggered lane deadlines recover independently", async ({ page }) => {
+  await page.goto("/ui/products?fixture=products");
+  const fixture = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const module = await import(modulePath);
+    const product = structuredClone(module.productsForFixture("products")[0]);
+    const lane = product.environments.find(lane => lane.environment === "testing")!;
+    lane.warnings = [];
+    lane.topology.warnings = [];
+    lane.health_monitoring.open_incidents = [];
+    lane.health_monitoring.checks = [lane.health_monitoring.checks[0]];
+    Object.assign(lane.health_monitoring.checks[0], { status: "pass", probe_effective: true, incident_status: "" });
+    product.environments = [lane, { ...structuredClone(lane), environment: "prod" }];
+    return { product, identity: module.fixtureIdentity };
+  });
+  const start = Date.now();
+  await setClockTime(page, start);
+  let reads = 0;
+  let lastName = "";
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", identity: fixture.identity } }));
+  await page.route("**/v1/products", async route => {
+    const name = lastName = `Staggered observation ${++reads}`;
+    const now = await page.evaluate(() => Date.now());
+    const product = structuredClone(fixture.product);
+    product.display_name = name;
+    for (const lane of product.environments) {
+      // Production's proof recovers first; testing was already due during its
+      // retry window but publishes later. These are independent service inputs.
+      const testing = lane.environment === "testing";
+      const deadline = start + (testing ? 7_000 : 5_000);
+      const published = now >= start + (testing ? 30_000 : 15_000);
+      const expires = deadline + (published ? testing ? 300_000 : 60_000 : 0);
+      const stamp = (value: unknown) => {
+        if (!value || typeof value !== "object") return;
+        const record = value as Record<string, unknown>;
+        if ("stale_after" in record) {
+          record.stale_after = new Date(expires).toISOString();
+          record.freshness_status = expires >= now ? "verified" : "stale";
+        }
+        if ("trust_state" in record) record.trust_state = expires >= now ? "verified" : "stale";
+        Object.values(record).forEach(stamp);
+      };
+      stamp(lane);
+    }
+    return route.fulfill({ json: { status: "ok", products: [product] } });
+  });
+  await page.goto("/ui/products");
+  const prod = page.locator('.directory-lane[data-lane="prod"]');
+  const testing = page.locator('.directory-lane[data-lane="testing"]');
+  await expect(prod).toHaveAttribute("data-operational", "verified");
+  await expect(testing).toHaveAttribute("data-operational", "verified");
+  const advance = async (milliseconds: number) => {
+    const before = reads;
+    await page.clock.runFor(milliseconds);
+    await waitForState(() => reads).toBeGreaterThan(before);
+    await expect(page.getByText(lastName, { exact: true }).last()).toBeVisible();
+  };
+  await advance(5_001);
+  await expect(prod).toHaveAttribute("data-operational", "warning");
+  await expect(testing).toHaveAttribute("data-operational", "verified");
+  await advance(2_000);
+  await expect(testing).toHaveAttribute("data-operational", "warning");
+  await advance(10_000);
+  await expect(prod).toHaveAttribute("data-operational", "verified");
+  await expect(testing).toHaveAttribute("data-operational", "warning");
+  await advance(15_000);
+  await expect(testing).toHaveAttribute("data-operational", "verified");
+});
