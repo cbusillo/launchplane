@@ -312,9 +312,15 @@ keeps that fence until positive terminal evidence exists.
 Host custody lives under `/var/lib/launchplane/recipient-execution/<namespace>/`
 and `/var/lib/launchplane/recipient-writers/<binding>/`. Execution tombstones and
 writer witnesses are fsynced and retained. A permanent writer-release marker
-rejects delayed pauses after restoration. A repeated resume never starts a
-container again, so an older resume cannot undo a later pause. Preserve these directories and recovery
+rejects delayed pauses after restoration. A completed resume never starts a
+container again. An interrupted start can retry only while its original pause
+still owns the writer; an older resume cannot undo a later pause. Preserve these directories and recovery
 archives through host maintenance and rollback; removing them would remove the
 late-worker fence. There is no automatic host-custody or old-volume cleanup.
 Retirement remains a separate scoped operation after the successful-cutover
 observation period above, with fresh reference checks.
+
+A writer dispatch with no terminal host witness stays unknown, including a
+pre-witness host refusal after schedule dispatch. Its reserved target cannot be
+reused or abandoned by guessing that the queued job will never run. The narrower
+per-operation host-fence recovery is tracked in [#3811](https://github.com/cbusillo/launchplane/issues/3811).

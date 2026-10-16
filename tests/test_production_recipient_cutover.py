@@ -293,6 +293,9 @@ class RecipientCutoverTests(unittest.TestCase):
                     ]
                 )
             elif command in {"start", "stop"}:
+                if old and command == "start" and getattr(self, "fail_old_start_once", False):
+                    self.fail_old_start_once = False
+                    raise TimeoutError("old writer start interrupted")
                 self.assertEqual(args[-1], identifier)
                 if old:
                     self.old_running = command == "start"
@@ -970,3 +973,19 @@ class RecipientCutoverTests(unittest.TestCase):
         self.assertEqual(payload["plan_sha256"], plan.plan_sha256)
         self.assertTrue(self.old_running)
         self.assertFalse(self.new_running)
+
+    def test_interrupted_old_writer_start_retries_original_rollback_without_redeploy(self) -> None:
+        self.fail_old_start_once = True
+        with patch(
+            "control_plane.production_recipient_cutover._verify_health_evidence_with_identity",
+            return_value=HealthcheckEvidence(status="fail"),
+        ):
+            self.assertEqual(self.run_release().response_status_code, 409)
+        self.assertFalse(self.old_running)
+        self.assertFalse(self.new_running)
+        result = self.run_release()
+        self.assertEqual(result.response_status_code, 202, result.response_payload)
+        self.assertEqual(result.response_payload["result"]["promotion_status"], "fail")
+        self.assertTrue(self.old_running)
+        self.assertFalse(self.new_running)
+        self.assertEqual(self.deploys, 1)

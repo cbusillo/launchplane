@@ -103,6 +103,43 @@ class RecipientWriterProgramTests(unittest.TestCase):
             self.run_program("pause")
         self.assertEqual(self.effects, ["stop", "start"])
 
+    def test_interrupted_start_retries_under_same_pause_and_cannot_override_a_later_pause(
+        self,
+    ) -> None:
+        self.run_program("pause")
+        original = self.docker
+        failures: list[bool] = []
+
+        def fail_start(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if args[1] == "start" and not failures:
+                failures.append(True)
+                raise TimeoutError("start interrupted")
+            return original(args, **kwargs)
+
+        with patch.object(self, "docker", side_effect=fail_start):
+            with self.assertRaises(TimeoutError):
+                self.run_program("resume")
+        self.assertFalse(self.row["State"]["Running"])
+        self.run_program("receipt_resume_retryable")
+        scope: dict[str, Any] = {}
+        exec(WRITER_RECEIPT_LIBRARY, scope)
+        with (
+            redirect_stdout(io.StringIO()),
+            patch("subprocess.run", side_effect=AssertionError("Retained read is read-only")),
+        ):
+            scope["read_writer_receipt"](
+                {**self.spec, "action": "receipt_resume_retryable"}, base=self.root / "writers"
+            )
+        self.run_program("resume")
+        self.assertTrue(self.row["State"]["Running"])
+        self.spec["binding"] = "b" * 64
+        self.run_program("pause")
+        self.spec["binding"] = "a" * 64
+        with self.assertRaises(ValueError):
+            self.run_program("resume")
+        self.assertFalse(self.row["State"]["Running"])
+        self.assertEqual(self.effects, ["stop", "start", "stop"])
+
     def test_originally_stopped_writer_is_not_started_by_rollback(self) -> None:
         self.row["State"]["Running"] = False
         self.run_program("pause")

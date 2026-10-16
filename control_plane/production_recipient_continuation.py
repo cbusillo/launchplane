@@ -253,7 +253,11 @@ def supersede_recipient(
         )
         if row is None or ProductionRecipientRecord.model_validate(row.payload) != current:
             raise ValueError("Custody changed while fencing the retained namespace.")
-        if authority_snapshot(store, product, request.context) != replacement.authority_snapshot:
+        from control_plane.production_recipient import same_recipient_authority
+
+        if not same_recipient_authority(
+            authority_snapshot(store, product, request.context), replacement.authority_snapshot
+        ):
             raise ValueError("Authority changed during continuation; review it again.")
         locked = session.scalars(
             select(LaunchplaneIdempotencyRow)

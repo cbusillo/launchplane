@@ -378,7 +378,15 @@ def writer_action(
     record: ProductionRecipientRecord,
     *,
     old: bool,
-    action: Literal["pause", "resume", "inspect", "parked", "receipt_pause", "receipt_resume"],
+    action: Literal[
+        "pause",
+        "resume",
+        "inspect",
+        "parked",
+        "receipt_pause",
+        "receipt_resume",
+        "receipt_resume_retryable",
+    ],
     checkpoint: Callable[[str], None],
     binding: str | None = None,
 ) -> None:
@@ -437,6 +445,29 @@ def writer_action(
         raise ValueError("Writer coordination was not verified.")
 
 
+def resume_receipt(
+    root: Path,
+    record: ProductionRecipientRecord,
+    *,
+    old: bool,
+    checkpoint: Callable[[str], None],
+    binding: str | None = None,
+) -> None:
+    try:
+        writer_action(
+            root, record, old=old, action="receipt_resume", checkpoint=checkpoint, binding=binding
+        )
+    except Exception:
+        writer_action(
+            root,
+            record,
+            old=old,
+            action="receipt_resume_retryable",
+            checkpoint=checkpoint,
+            binding=binding,
+        )
+
+
 WRITER_LIBRARY = (
     "WRITER_ACTION_MARKER="
     + repr(WRITER_ACTION_MARKER)
@@ -444,15 +475,29 @@ WRITER_LIBRARY = (
     + repr(WRITER_BINDING_MARKER)
     + "\n"
     + r"""
-import base64,hashlib,json,os,re,subprocess,sys,uuid
+import base64,fcntl,hashlib,json,os,re,subprocess,sys,uuid
 from pathlib import Path
 WRITER_CUSTODY_ROOT=Path('/var/lib/launchplane/recipient-writers')
 def coordinate_writer(spec, *, base=None):
     base=base or WRITER_CUSTODY_ROOT
+    if any(not re.fullmatch(r'[A-Za-z0-9_-]+',spec[key]) for key in ('project','service')) or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
+        raise ValueError('invalid writer identity')
+    writer=hashlib.sha256(json.dumps([spec['project'],spec['service']]).encode()).hexdigest()
+    directory=base/'active'/writer
+    if directory.is_symlink() or any(parent.is_symlink() for parent in directory.parents):
+        raise ValueError('invalid active writer custody')
+    directory.mkdir(parents=True,exist_ok=True,mode=0o700)
+    descriptor=os.open(directory/'lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)
+    try:
+        fcntl.flock(descriptor,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        return _coordinate_writer(spec,base=base,owner_path=directory/'binding.json')
+    finally:
+        os.close(descriptor)
+def _coordinate_writer(spec, *, base, owner_path):
     requested=spec['action']
     receipt=requested.startswith('receipt_')
     action=requested.removeprefix('receipt_')
-    if not re.fullmatch(r'[A-Za-z0-9_-]+',spec['project']) or not re.fullmatch(r'[A-Za-z0-9_-]+',spec['service']) or requested not in ('pause','resume','inspect','parked','receipt_pause','receipt_resume') or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
+    if not re.fullmatch(r'[A-Za-z0-9_-]+',spec['project']) or not re.fullmatch(r'[A-Za-z0-9_-]+',spec['service']) or requested not in ('pause','resume','inspect','parked','receipt_pause','receipt_resume','receipt_resume_retryable') or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
         raise ValueError('invalid writer identity')
     def docker(*args):
         result=subprocess.run(['docker',*args],capture_output=True,text=True,timeout=60)
@@ -510,19 +555,38 @@ def coordinate_writer(spec, *, base=None):
             persist()
         else:
             raise ValueError('the original writer state was not witnessed')
+    if action=='resume_retryable':
+        if not witness.get('released') or witness.get('resumed') or json.loads(owner_path.read_text()).get('binding')!=spec['binding']:
+            raise ValueError('this resume cannot be retried')
+        print(WRITER_ACTION_MARKER+'='+requested)
+        print(WRITER_BINDING_MARKER+'='+spec['binding'])
+        return
     if not receipt:
         if action=='pause':
             if witness.get('released'):
                 raise ValueError('this writer pause was permanently released')
+            temporary=owner_path.with_name('owner-'+uuid.uuid4().hex+'.json')
+            with os.fdopen(os.open(temporary,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w') as output:
+                json.dump({'binding':spec['binding']},output)
+                output.flush()
+                os.fsync(output.fileno())
+            os.replace(temporary,owner_path)
+            descriptor=os.open(owner_path.parent,os.O_RDONLY|os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
             docker('stop','--time','30',ids[0])
         elif action=='resume':
             if not witness.get('paused'):
                 raise ValueError('the original stop did not complete')
+            if json.loads(owner_path.read_text()).get('binding')!=spec['binding']:
+                raise ValueError('a later pause owns this writer')
             if not witness.get('released'):
                 witness['released']=True
                 persist()
-                if witness['was_running']:
-                    docker('start',ids[0])
+            if not witness.get('resumed') and witness['was_running'] and row.get('State',{}).get('Running') is not True:
+                docker('start',ids[0])
     state=json.loads(docker('inspect',ids[0]))[0]
     wanted=action=='inspect' or action=='resume' and witness['was_running']
     if state.get('State',{}).get('Running') is not wanted or state.get('Image')!=expected['image']:
@@ -551,7 +615,7 @@ WRITER_RECEIPT_LIBRARY = (
     + r"""
 def read_writer_receipt(spec, *, base=None):
     base=base or WRITER_CUSTODY_ROOT
-    if not re.fullmatch(r'[a-f0-9]{64}',spec['binding']) or any(not re.fullmatch(r'[A-Za-z0-9_-]+',spec[key]) for key in ('project','service')) or spec['action'] not in ('receipt_pause','receipt_resume'):
+    if not re.fullmatch(r'[a-f0-9]{64}',spec['binding']) or any(not re.fullmatch(r'[A-Za-z0-9_-]+',spec[key]) for key in ('project','service')) or spec['action'] not in ('receipt_pause','receipt_resume','receipt_resume_retryable'):
         raise ValueError('invalid retained writer receipt')
     writer=hashlib.sha256(json.dumps([spec['project'],spec['service']]).encode()).hexdigest()
     directory=base/spec['binding']/writer
@@ -561,7 +625,21 @@ def read_writer_receipt(spec, *, base=None):
     witness=json.loads(path.read_text())
     if any(witness.get(key)!=spec[key] for key in ('project','service')) or type(witness.get('was_running')) is not bool or not witness.get('id') or not witness.get('image'):
         raise ValueError('retained writer witness changed')
-    terminal='paused' if spec['action']=='receipt_pause' else 'resumed'
+    if spec['action']=='receipt_resume_retryable':
+        owner=base/'active'/writer
+        if any(parent.is_symlink() for parent in (owner,*owner.parents)):
+            raise ValueError('invalid active writer custody')
+        descriptor=os.open(owner/'lock',os.O_RDONLY|os.O_NOFOLLOW)
+        try:
+            fcntl.flock(descriptor,fcntl.LOCK_SH|fcntl.LOCK_NB)
+            if not witness.get('paused') or not witness.get('released') or witness.get('resumed') or json.loads((owner/'binding.json').read_text()).get('binding')!=spec['binding']:
+                raise ValueError('this resume cannot be retried')
+        finally:
+            os.close(descriptor)
+        print(WRITER_ACTION_MARKER+'='+spec['action'])
+        print(WRITER_BINDING_MARKER+'='+spec['binding'])
+        return
+    terminal='paused' if spec['action']=='receipt_pause' else 'resumed' 
     if witness.get(terminal) is not True or terminal=='resumed' and witness.get('released') is not True:
         raise ValueError('no terminal retained writer witness')
     print(WRITER_ACTION_MARKER+'='+spec['action'])
@@ -583,6 +661,7 @@ class RecipientCutoverAdapter:
     backup_record_id: str
     validate_release: Callable[[], None]
     rollback_observed: bool = False
+    rollback_resume_pending: bool = False
 
     def target_key(self) -> str:
         return generic_web_provider_target_key(
@@ -633,6 +712,10 @@ class RecipientCutoverAdapter:
             if self.rollback_witnessed(current, provider_operation_key):
                 self.rollback_observed = True
                 return ProviderObservation("absent", retry_safe=True)
+            if self.rollback_resume_retryable(current, provider_operation_key):
+                self.rollback_observed = True
+                self.rollback_resume_pending = True
+                return ProviderObservation("absent", retry_safe=True)
             if current.execution:
                 if current.execution.get(attempt + ":old_pause_dispatched_at"):
                     try:
@@ -650,11 +733,10 @@ class RecipientCutoverAdapter:
                             ),
                         )
                         if current.execution.get("writer_binding:" + attempt):
-                            writer_action(
+                            resume_receipt(
                                 self.root,
                                 current,
                                 old=False,
-                                action="receipt_resume",
                                 checkpoint=lambda _phase: None,
                                 binding=current.publication.get("inverse_writer_binding")
                                 or current.publication.get("writer_binding")
@@ -680,6 +762,29 @@ class RecipientCutoverAdapter:
                 ValueError("Finish the original inverse before another forward operation.")
             )
         if self.rollback_observed:
+            if self.rollback_resume_pending:
+                if not isinstance(
+                    lease, ProviderEvidenceLease
+                ) or not self.rollback_resume_retryable(self.record, provider_operation_key):
+                    raise ProviderMutationUnknownError("Original writer resume is not retryable.")
+                try:
+                    writer_action(
+                        self.root,
+                        self.record,
+                        old=True,
+                        action="resume",
+                        checkpoint=lease.checkpoint_effect,
+                        binding=canonical_sha256(
+                            {
+                                "preparation": self.record.plan_sha256,
+                                "operation": provider_operation_key,
+                            }
+                        ),
+                    )
+                except Exception as error:
+                    raise ProviderMutationUnknownError(
+                        "Keep the interrupted original writer resume."
+                    ) from error
             if not isinstance(lease, ProviderEvidenceLease) or not self.rollback_witnessed(
                 self.record, provider_operation_key
             ):
@@ -702,7 +807,11 @@ class RecipientCutoverAdapter:
             )
             self.record = record
             self.fail_pending_promotion(provider_operation_key, lease)
-            return self.result("fail", rollback_status="pass", provider_effect_performed=False)
+            return self.result(
+                "fail",
+                rollback_status="pass",
+                provider_effect_performed=self.rollback_resume_pending,
+            )
         if self.record.execution.get("native_inverse"):
             raise ProviderMutationRejectedError(
                 ValueError(
@@ -1186,6 +1295,40 @@ class RecipientCutoverAdapter:
             raise ProviderMutationUnknownError(
                 "Retain exact cutover custody; reconcile before restarting either writer."
             ) from error
+
+    def rollback_resume_retryable(self, record: ProductionRecipientRecord, key: str) -> bool:
+        attempt = canonical_sha256(key)
+        if not record.execution.get(attempt + ":old_pause_dispatched_at"):
+            return False
+        binding = canonical_sha256({"preparation": record.plan_sha256, "operation": key})
+        try:
+            if (
+                self.store.read_provider_target_record(
+                    context_name=record.context, instance_name="prod"
+                )
+                != record.retained_provider
+            ):
+                return False
+            if record.execution.get("trigger_requested_at"):
+                writer_action(
+                    self.root,
+                    record,
+                    old=False,
+                    action="receipt_pause",
+                    checkpoint=lambda _phase: None,
+                    binding=binding,
+                )
+            writer_action(
+                self.root,
+                record,
+                old=True,
+                action="receipt_resume_retryable",
+                checkpoint=lambda _phase: None,
+                binding=binding,
+            )
+            return True
+        except Exception:
+            return False
 
     def rollback_witnessed(
         self, record: ProductionRecipientRecord, provider_operation_key: str

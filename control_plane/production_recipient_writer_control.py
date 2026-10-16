@@ -60,6 +60,8 @@ def retained_writer_receipt(
     record: ProductionRecipientRecord,
     entry: dict[str, object],
     checkpoint: Callable[[str], None],
+    *,
+    retry_resume: bool = False,
 ) -> RecipientWriterPlan:
     from typing import cast, Any
     from control_plane.production_recipient_host import run_recipient_program
@@ -77,7 +79,7 @@ def retained_writer_receipt(
             ),
         }
     )
-    action = "receipt_" + request.action
+    action = "receipt_resume_retryable" if retry_resume else "receipt_" + request.action
     evidence = run_recipient_program(
         root,
         projected,
@@ -104,7 +106,7 @@ def retained_writer_receipt(
         preparation_plan_sha256=request.preparation_plan_sha256,
         binding_id=request.binding_id,
         action=request.action,
-        completed=True,
+        completed=not retry_resume,
         pause_operation_id=saved["record_id"]
         if request.action == "pause"
         else request.pause_operation_id,
@@ -273,7 +275,15 @@ class RecipientWriterAdapter:
             ]
             if len(entries) != 1:
                 return ProviderObservation("unknown")
-            result = retained_writer_receipt(self.root, record, entries[0], lambda _phase: None)
+            try:
+                result = retained_writer_receipt(self.root, record, entries[0], lambda _phase: None)
+            except Exception:
+                if self.request.action != "resume":
+                    raise
+                retained_writer_receipt(
+                    self.root, record, entries[0], lambda _phase: None, retry_resume=True
+                )
+                return ProviderObservation("absent", retry_safe=True)
             return ProviderObservation(
                 "present",
                 response_payload=provider_operation_response_payload(
@@ -293,6 +303,9 @@ class RecipientWriterAdapter:
             record, target, plan = self.current()
             if plan.plan_sha256 != self.request.reviewed_plan_sha256:
                 raise ValueError("Review the exact testing writer plan.")
+            require_disposable_lane(
+                self.store, product=self.product, context=target.context, instance="testing"
+            )
             current = custody(self.store, self.product, record.context)
             assert current is not None
             witness_binding = record.execution.get("writer_binding") or canonical_sha256(
