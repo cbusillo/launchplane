@@ -488,13 +488,13 @@ def execute_odoo_prod_rollback(
                     "Rollback website snapshots differ from the release decision."
                 )
             _require_cutover_image_rollback(current_deployment)
-            if cutover_provider is None and cutover_provider_factory is not None:
-                cutover_provider = cutover_provider_factory(current_deployment.odoo_cutover.plan)
-            if cutover_provider is None:
-                raise click.ClickException(
-                    "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
-                )
             try:
+                if cutover_provider is None and cutover_provider_factory is not None:
+                    cutover_provider = cutover_provider_factory(plan)
+                if cutover_provider is None:
+                    raise click.ClickException(
+                        "Compatible cutover rollback requires its bound slot provider; in-place fallback is refused."
+                    )
                 cutover_provider.preflight(plan)
             except ValueError as error:
                 raise click.ClickException(str(error)) from error
