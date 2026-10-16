@@ -10,7 +10,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
-from tempfile import TemporaryDirectory, gettempdir
+from tempfile import TemporaryDirectory
 from threading import Lock
 from time import monotonic
 from typing import Literal
@@ -25,6 +25,7 @@ SCAN_UNAVAILABLE_TTL_SECONDS = 60
 GHCR_ARTIFACT_READ_INTEGRATION = "ghcr_artifact_read"
 _SCAN_LOCK = Lock()
 _RESULTS_LOCK = Lock()
+_SCANNER_CACHE: TemporaryDirectory[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +72,48 @@ def scan_product_artifact(image_reference: str) -> ArtifactScanResult:
     except (click.ClickException, OSError, ValueError):
         pass  # Public registries remain usable without private registry authority.
     return scan_artifact(image_reference, credentials=credentials)
+
+
+def qualify_product_artifact(record_store: object, *, product: str) -> ArtifactScanResult:
+    """Read-only qualification of the verified testing candidate, even before activation."""
+    from typing import cast
+    from control_plane.product_reconcile import (
+        ProductReconcileError,
+        ProductReconcileStore,
+        _plan_testing_target,
+        product_repository_identity,
+        resolve_build_provenance_transport,
+    )
+    from control_plane.build_provenance import BuildProvenanceError
+
+    store = cast(ProductReconcileStore, record_store)
+    try:
+        profile = store.read_product_profile_record(product)
+    except FileNotFoundError:
+        raise ValueError("An active product profile is required.") from None
+    if not profile.is_active:
+        raise ValueError("An active product profile is required.")
+    try:
+        identity = product_repository_identity(store, profile)
+        transport = resolve_build_provenance_transport(store, profile)
+        _plan, verified = _plan_testing_target(
+            record_store=store,
+            profile=profile,
+            repository_id=identity.repository_id,
+            transport=transport,
+        )
+        if verified is not None:
+            return scan_product_artifact(
+                f"{verified.manifest.image.repository}@{verified.manifest.image.digest}"
+            )
+    except (BuildProvenanceError, ProductReconcileError, OSError, ValueError):
+        pass
+    return ArtifactScanResult(
+        image_reference="",
+        status="unavailable",
+        reason="verified_build_unavailable",
+        scanned_at=datetime.now(UTC).isoformat(),
+    )
 
 
 def scan_artifact(
@@ -141,6 +184,9 @@ def _scan_artifact(
     if not _IMAGE.fullmatch(image_reference):
         return unavailable("immutable_image_required")
     try:
+        global _SCANNER_CACHE
+        if _SCANNER_CACHE is None:
+            _SCANNER_CACHE = TemporaryDirectory(prefix="launchplane-artifact-cache-")
         with TemporaryDirectory(prefix="launchplane-artifact-scan-") as directory:
             root = Path(directory)
             config = root / "trivy.yaml"
@@ -187,7 +233,7 @@ def _scan_artifact(
                     "--ignorefile",
                     str(ignore),
                     "--cache-dir",
-                    str(Path(gettempdir()) / "launchplane-artifact-scan-cache"),
+                    _SCANNER_CACHE.name,
                     "--timeout",
                     "4m",
                     "--output",

@@ -145,6 +145,25 @@ class ArtifactRetentionHttpTests(IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(response.json()["retention"]["candidates"], [1])
                 planner.assert_called_once()
+                from control_plane.artifact_scan import ArtifactScanResult
+
+                with patch(
+                    "control_plane.http_routes.products.qualify_product_artifact"
+                ) as scanner:
+                    scanner.return_value = ArtifactScanResult(
+                        image_reference=IMAGE,
+                        status="pass",
+                        reason="clean",
+                        scanned_at=NOW.isoformat(),
+                    )
+                    qualified = await get(
+                        app,
+                        "/v1/artifacts/scan?product=verireel",
+                        headers={"Authorization": "Bearer local-operator-token"},
+                    )
+                    self.assertEqual(qualified.status_code, 200)
+                    self.assertEqual(qualified.json()["scan"]["status"], "pass")
+                    scanner.assert_called_once_with(store, product="verireel")
                 planner.reset_mock()
                 anonymous = await get(app, "/v1/artifacts/retention?product=verireel")
                 self.assertEqual(anonymous.status_code, 401)
@@ -162,11 +181,16 @@ class ArtifactRetentionHttpTests(IsolatedAsyncioTestCase):
             authz_policy=_local_operator_artifact_protection_policy(),
             record_store_factory=object,
         )
-        with patch("control_plane.http_routes.products.product_retention_dry_run") as planner:
-            response = await get(
-                app,
-                "/v1/artifacts/retention?product=example",
-                headers={"Authorization": "Bearer valid-token"},
-            )
-            self.assertEqual(response.status_code, 403)
-            planner.assert_not_called()
+        with (
+            patch("control_plane.http_routes.products.product_retention_dry_run") as planner,
+            patch("control_plane.http_routes.products.qualify_product_artifact") as scanner,
+        ):
+            for route in ("retention", "scan"):
+                response = await get(
+                    app,
+                    f"/v1/artifacts/{route}?product=example",
+                    headers={"Authorization": "Bearer valid-token"},
+                )
+                self.assertEqual(response.status_code, 403)
+                planner.assert_not_called()
+                scanner.assert_not_called()

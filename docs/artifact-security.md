@@ -36,6 +36,15 @@ product-profile write path (`POST /v1/product-profiles`) after registry reads
 are qualified. Default serialization omits this field so existing fingerprints
 do not change. A disabled scan is explicit in the reconcile plan.
 
+Qualify first with `GET /v1/artifacts/scan?product=<product>`, using the existing
+whole-product `artifact_protection.read` authority. The service selects and
+verifies the current testing build through the same provenance planner and
+scans its immutable digest, even while activation is disabled. Missing build
+or registry evidence returns unavailable. It queues no reconcile, records no
+artifact or deployment, and changes no profile. Allow up to five minutes for
+the bounded scan and read its image reference, counts and status before
+activation; no credential value leaves the service.
+
 For private GHCR images, the service supports an exact context-scoped managed
 secret integration `ghcr_artifact_read` in its own `launchplane` context, with
 `username` and `password` bindings. The password must be a separately approved
@@ -50,8 +59,8 @@ credential through the existing managed-secret UI; the agent verifies only
 redacted reads. Absent credentials allow public reads; an enabled private scan
 without usable credentials remains unavailable and holds the deploy.
 
-Scanner databases and image-analysis cache stay in a dedicated service-container
-temporary cache, with one scan at a time per process. A bounded in-memory result
+Scanner databases and image-analysis cache stay in a private, process-owned
+temporary directory, with one scan at a time per process. A bounded in-memory result
 cache reuses pass/fail evidence for 30 minutes and unavailable evidence for one
 minute, keyed by immutable digest and a one-way credential fingerprint. A
 credential rotation or process restart forces fresh qualification. Trivy checks

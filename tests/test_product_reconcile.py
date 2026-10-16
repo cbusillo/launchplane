@@ -5374,6 +5374,27 @@ class ProductReconcileWorkerTests(ProductReconcileTestCase):
 
 
 class ProductArtifactScanGateTests(ProductReconcileTestCase):
+    def test_read_only_qualification_works_before_activation_without_queueing(self) -> None:
+        from control_plane.artifact_scan import qualify_product_artifact
+
+        profile = self.store.read_product_profile_record("site")
+        self.store.write_product_profile_record(
+            profile.model_copy(
+                update={
+                    "image": profile.image.model_copy(update={"scan_enabled": False}),
+                }
+            )
+        )
+        self.github.add_run(20, DEPLOYABLE)
+        result = qualify_product_artifact(self.store, product="site")
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.image_reference, f"{IMAGE_REPOSITORY}@{_digest(DEPLOYABLE)}")
+        self.assertFalse(self.store.read_product_profile_record("site").image.scan_enabled)
+        self.assertFalse(self.store.list_product_reconcile_requests(product="site"))
+        self.assertFalse(self.store.list_odoo_stable_target_replacement_operation_records())
+        self.assertFalse(self.store.list_artifact_manifests())
+        self.assertFalse(self.provider.applied)
+
     def test_unavailable_and_vulnerable_scans_hold_before_testing_or_preview_effects(self) -> None:
         from control_plane.artifact_scan import ArtifactScanResult
 
