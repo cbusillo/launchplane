@@ -691,13 +691,14 @@ function RuntimeSettingInput({
       </label>
       <label htmlFor={inputId}>
         New value
-        <input
+        <textarea
           autoComplete="off"
           disabled={!selected}
           id={inputId}
           onChange={(event) => onValue(event.target.value)}
           placeholder="Enter a replacement value"
-          type="text"
+          rows={4}
+          spellCheck={false}
           value={value}
         />
       </label>
@@ -734,12 +735,13 @@ function SiteSettingsInput({
               </label>
               <label htmlFor={`site-setting-${index}-value`}>
                 Setting value
-                <input
+                <textarea
                   autoComplete="off"
                   id={`site-setting-${index}-value`}
                   onChange={(event) => update(index, { value: event.target.value })}
                   placeholder="A plain setting, not a credential"
-                  type="text"
+                  rows={4}
+                  spellCheck={false}
                   value={setting.value}
                 />
               </label>
