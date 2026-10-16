@@ -1917,8 +1917,9 @@ Manual workflow dispatches use explicit workflow inputs. Missing manual
 repository or base branch input fails closed before any worker request.
 
 Observe at least two scheduled dry-run passes before enabling mutation. A healthy
-observation pass has a retained service-worker receipt, an admitted or explicitly
-deferred admission response, `runner_mode=controller`, `mutate=false`, and a
+observation pass has retained worker summary logs with scheduler trace IDs and
+matching merge-train run or controller records, an admitted or explicitly
+deferred admission decision, `runner_mode=controller`, `mutate=false`, and a
 controller result whose mode is `dry-run`. Dry-run controller passes may render
 feedback payloads for inspection, but they must report zero delivered feedback
 comments and must not create or update Launchplane-managed PR comments. The
@@ -1929,8 +1930,9 @@ controller action without requiring a GitHub read.
 Enable mutation only after the Director explicitly chooses to promote the dry-run
 lane. Import a replacement active policy record with `scheduler.mutate = true`
 for that promotion and confirm that service deploy health, required checks,
-runner capacity, and target PR heads are still current. A mutate run still
-performs at most one controller action per scheduled pass. Managed PR feedback
+runner capacity, and target PR heads are still current. A mutate pass uses the normal admission and controller lease for every action
+and makes bounded progress as described in [merge-train events](merge-train-events.md).
+Managed PR feedback
 comments are allowed in mutate mode and should summarize whether a PR is queued,
 blocked, waiting, stale, or completed.
 
