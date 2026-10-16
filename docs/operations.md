@@ -3408,6 +3408,23 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   in the same transaction, and preserves pending website intent and apply snapshots.
   A conflicting destination's scope, status, or safety metadata requires explicit
   local/bootstrap repair before retry. No secret values or versions are copied.
+- For a former relabel that omitted metadata, use `odoo-overrides
+  migrate-secret-transport --context C --instance I
+  --repair-metadata-from-relabel-history` to review one exact lane without
+  writing. Add `--apply --allow-direct-db-mutation` only for an explicitly
+  authorized local/bootstrap repair; arbitrary-checkout live repair is unsupported.
+  This covers both partial and completed pointer transitions. It fills missing
+  classification, sharing evidence and value-source metadata from the retained
+  disabled source binding, preserving explicit destination fields. Sharing
+  evidence follows only an agreeing classification. It requires a unique
+  retained relabel audit naming both bindings and keys, matching secret and lane
+  identities, unchanged relabel timestamps, and current secret metadata no newer
+  than that audit. Missing, ambiguous, edited or rotated provenance refuses with
+  the binding id and the explicit local/bootstrap continuation; never infer safety
+  from a key name. The atomic write guards the override, whole binding set and
+  current secret metadata. It changes no value/version or source activation,
+  records a metadata-only audit, and is idempotent after repair. Historical
+  sources that never recorded classification or value origin cannot establish it.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
   persisted to the Dokploy compose target environment before the web container

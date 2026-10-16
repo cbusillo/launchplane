@@ -7,7 +7,8 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
 )
-from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding
+from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord
+from control_plane.odoo_secret_metadata import recover_odoo_secret_metadata
 from control_plane.odoo_instance_overrides import (
     addon_setting_secret_env_key,
     config_parameter_secret_env_key,
@@ -47,12 +48,29 @@ def plan_odoo_secret_transport(
     records: tuple[OdooInstanceOverrideRecord, ...],
     bindings: tuple[SecretBinding, ...],
     source_label: str,
+    repair_metadata: bool = False,
+    secret_records: tuple[SecretRecord, ...] = (),
+    audit_events: tuple[SecretAuditEvent, ...] = (),
 ) -> OdooSecretTransportPlan:
     if not any(odoo_instance_override_records_match(record, other) for other in records):
         raise OdooInstanceOverrideConflictError("Odoo overrides changed before planning.")
     now = utc_now_timestamp()
+    original_bindings = bindings
+    repairs, expected_secrets = (
+        recover_odoo_secret_metadata(
+            record=record,
+            bindings=bindings,
+            secret_records=secret_records,
+            events=audit_events,
+            now=now,
+        )
+        if repair_metadata
+        else ((), ())
+    )
+    repairs_by_id = {binding.binding_id: binding for binding in repairs}
+    bindings = tuple(repairs_by_id.get(binding.binding_id, binding) for binding in bindings)
     binding_by_id = {binding.binding_id: binding for binding in bindings}
-    writes: dict[str, SecretBinding] = {}
+    writes: dict[str, SecretBinding] = dict(repairs_by_id)
     sources: dict[str, SecretBinding] = {}
     changes: list[dict[str, str]] = []
 
@@ -201,23 +219,44 @@ def plan_odoo_secret_transport(
                 },
             )
         )
-    secret_ids = {binding.secret_id for binding in sources.values()}
+    for binding in repairs:
+        changes.append(
+            {
+                "kind": "binding_metadata",
+                "key": binding.binding_key,
+                "action": "metadata_pending",
+                "binding_id": binding.binding_id,
+            }
+        )
+        events.append(
+            SecretAuditEvent(
+                event_id=f"{binding.secret_id}-metadata-{uuid4().hex}",
+                secret_id=binding.secret_id,
+                event_type="validated",
+                recorded_at=now,
+                actor=source_label,
+                detail="Recovered omitted Odoo relabel metadata from retained provenance.",
+                metadata={"binding_id": binding.binding_id, "action": "relabel_metadata_repair"},
+            )
+        )
+    secret_ids = {binding.secret_id for binding in (*sources.values(), *repairs)}
     return OdooSecretTransportPlan(
         record=updated,
         changes=changes,
         bundle=ProductAuthorityBundle(
             odoo_instance_override_writes=(
                 (OdooInstanceOverrideWrite(record=updated, expected_record=record),)
-                if changed
+                if changed or repairs
                 else ()
             ),
             secret_bindings=tuple(writes.values()),
             secret_audit_events=tuple(events),
+            expected_secret_records=expected_secrets,
             secret_binding_sets=tuple(
                 SecretBindingSetExpectation(
                     secret_id=secret_id,
                     bindings=tuple(
-                        binding for binding in bindings if binding.secret_id == secret_id
+                        binding for binding in original_bindings if binding.secret_id == secret_id
                     ),
                 )
                 for secret_id in sorted(secret_ids)
