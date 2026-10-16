@@ -42,6 +42,7 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
 from control_plane.odoo_testing_drill import OdooTestingDrillScheduler
 from control_plane.preview_lifecycle_scheduler import PreviewLifecycleScheduler
+from control_plane.release_digest import ReleaseDigestScheduler
 from control_plane.work_graph_github_projects import (
     build_github_project_planning_facts,
     load_github_project_planning_facts_config_from_env,
@@ -208,6 +209,11 @@ def create_launchplane_service_application(
         record_store_factory=lambda: service_record_store,
         odoo_cutover_provider_factory=service_odoo_cutover_factory(
             service_record_store, control_plane_root_path or control_plane_root()
+        ),
+        release_digest_scheduler=ReleaseDigestScheduler(
+            service_record_store,
+            control_plane_root=control_plane_root_path or control_plane_root(),
+            public_url=github_oauth_config.public_url if github_oauth_config else "",
         ),
         health_monitor_scheduler=HealthMonitorScheduler(service_record_store),
         testing_drill_scheduler=OdooTestingDrillScheduler(service_record_store),

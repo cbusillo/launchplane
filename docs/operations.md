@@ -1334,6 +1334,14 @@ read with all mutation flags disabled so drift fails closed instead of changing
 the route. Context-scoped callers retain the existing provider-mutation
 contract; do not grant that broader scope merely to inspect one testing lane.
 
+For a current independent Odoo testing generation whose new domain is absent
+from the public edge, use the separate
+[testing public-edge continuation](disposable-lanes.md#continue-a-restored-generations-public-edge).
+It derives the exact route from service records and reuses a covering existing
+certificate without changing generic instance-scoped ingress authority. It
+preserves the restored copy and supplies same-key recovery; another bootstrap
+or restore is never a TLS repair.
+
 For explicitly approved maintenance of an already-authorized transitional set,
 use `Manage Launchplane Authorization` on the default branch. Select the
 intended `managed_set`, then dispatch `mode=dry_run` with the final single-line
@@ -3401,6 +3409,17 @@ alone is not proof that an existing testing copy has been repaired.
 mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   changes. `migrate-secret-transport` dry-run, `odoo-overrides list`, and
   `odoo-overrides show` stay read-only inspection paths.
+- Secret-transport migration commits each override's references, binding metadata,
+  and audit events in one transaction. Concurrent override or binding edits refuse
+  that transaction; review the fresh dry-run and rerun instead of replaying stale
+  intent. Already committed lanes remain valid if a later lane fails. A legacy
+  binding remains enabled while another override still references it, including
+  lanes excluded by `--context` or `--instance`; migrating the last consumer
+  disables it. Rerunning also repairs an old partial relabel whose destination is
+  already configured, restoring safety metadata the former relabel helper omitted
+  in the same transaction, and preserves pending website intent and apply snapshots.
+  A conflicting destination's scope, status, or safety metadata requires explicit
+  local/bootstrap repair before retry. No secret values or versions are copied.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
   persisted to the Dokploy compose target environment before the web container
@@ -4844,3 +4863,52 @@ failures do not hide other source observations. Responses, errors and logs
 contain no passwords, hashes, host/account values or raw grant rows. This read
 changes no configuration, binding, account, grants, runtime, source data or
 business data, and invokes no importer, deployment or synchronization.
+
+### Daily waiting-release digest
+
+The service's daily release-digest scheduler (UTC calendar days, rolling over at 8 PM EDT / 7 PM EST) lists source changes ahead of each
+active product's recorded production version. It does not create incidents,
+change product colors, send Client invitations, or start or approve a release.
+The list includes an immutable source comparison, a short list of changes, time
+on the default branch, testing/review blockers, and the Launchplane promotion or invitation step.
+Shared-addon, website-settings and updated-artifact changes in testing are also
+listed when the product repository itself has not moved. The digest stays quiet
+when production already contains the current source and release components.
+Unavailable or diverged evidence records a partial scheduler result rather than
+inventing a waiting release. Waiting time uses default-branch first-parent landing dates; incomplete history
+or component-only changes show age unavailable rather than guessing. Age is
+informational, never a failure signal.
+
+A signed-in admin can create a dedicated Director Discord digest policy through
+`POST /v1/public-ingress/notification-policies/apply` (`mode: dry-run`, then
+`mode: apply`) with `purpose: release_digest`. It requires an explicit product,
+production context and `instance: prod`, Discord destinations only, and no check
+filters. The existing product/context authorization check still applies; source
+delivery adds no grants. Policy IDs retain their original purpose and product/context/instance scope; changing
+that tuple returns a conflict. Create a new policy ID in the intended scope and
+disable the old policy in its original scope. A destination's disabled status is
+respected both before queuing and immediately before delivery.
+The policy's managed webhook reference must already be
+applicable to that exact context/prod lane. Missing scope is recorded as unavailable;
+the scheduler never copies secrets or invents access. Incident policies keep their
+default purpose, and digest policies never match incidents. Configuring health
+alerts alone does not opt anyone into the digest.
+The service's existing public OAuth URL supplies Launchplane links. Without that
+bootstrap URL or an enabled digest policy no digest is sent. Source delivery alone does
+not activate a destination or claim a live Discord receipt.
+
+Daily receipts use the existing idempotency store; per-product, policy,
+destination and message-part outbox keys deduplicate restarts and replicas.
+The existing outbox worker delivers the separate `release_digest` kind. It
+rechecks current policy and product scope and drops expired daily messages.
+Failures before sending and explicit rate-limit refusals retry through the existing
+outbox backoff, within the current daily slot and attempt budget. Invalid or rejected
+destinations remain recorded; a Discord timeout, 5xx response or interrupted send
+retains its provider marker and uncertain outcome, and is not blindly repeated.
+Evidence failures wait for the next daily slot. Outbox records and scheduler
+receipts are the maintenance/diagnostic path. An outbox `delivered` state means
+processing completed: only `action: sent_release_digest` proves a successful send;
+`skipped_*` actions distinguish disabled, retired, expired or changed-production
+messages that were deliberately not sent. Disable the dedicated policy (`status: disabled`)
+through the same service surface to stop future and queued sends; it leaves
+health-alert policies and historical delivery evidence intact.
