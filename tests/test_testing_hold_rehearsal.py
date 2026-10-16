@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from httpx2 import Response
 
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.http_app import create_launchplane_fastapi_app
@@ -74,25 +75,43 @@ class DirectorHoldRehearsalTests(unittest.IsolatedAsyncioTestCase):
         self.app = self.make_app()
 
     def make_app(self, *, explicit_grant: bool = False) -> FastAPI:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "schema_version": 2,
+                "local_operators": [
+                    {
+                        "subjects": ["director-fixture"],
+                        "token_labels": ["fixture"],
+                        "products": [_PRODUCT],
+                        "contexts": [_CONTEXT],
+                        "instances": ["testing"],
+                        "actions": ["product_config.apply"],
+                    }
+                ],
+            }
+            if explicit_grant
+            else {}
+        )
+        # Real service startup requires a DB-native policy, including an empty
+        # policy proving that Director rehearsal needs no matching grant.
+        active = self.store.list_authz_policy_records(status="active")
+        revision = active[0].revision + 1 if active else 1
+        record = LaunchplaneAuthzPolicyRecord(
+            record_id=f"hold-rehearsal-fixture-policy-{revision}",
+            source="fixture",
+            updated_at=_TIMESTAMP,
+            revision=revision,
+            policy=policy,
+        )
+        if active:
+            self.store.compare_and_write_authz_policy_record(
+                expected_record=active[0], replacement_record=record
+            )
+        else:
+            self.store.seed_authz_policy_if_absent(record)
         return create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=LaunchplaneAuthzPolicy.model_validate(
-                {
-                    "schema_version": 2,
-                    "local_operators": [
-                        {
-                            "subjects": ["director-fixture"],
-                            "token_labels": ["fixture"],
-                            "products": [_PRODUCT],
-                            "contexts": [_CONTEXT],
-                            "instances": ["testing"],
-                            "actions": ["product_config.apply"],
-                        }
-                    ],
-                }
-                if explicit_grant
-                else {}
-            ),
+            authz_policy=policy,
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
             bearer_identity_config=BearerIdentityConfig(
