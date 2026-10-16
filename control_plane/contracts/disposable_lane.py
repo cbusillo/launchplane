@@ -15,6 +15,7 @@ DISPOSABLE_LANE_OBSERVATION_ROUTE = "/v1/disposable-lanes/observations"
 TESTING_REPLACEMENT_RESOURCES_ROUTE = "/v1/products/{product}/testing-replacement-resources"
 TESTING_REPLACEMENT_BOOTSTRAP_ROUTE = "/v1/products/{product}/testing-replacement-bootstrap"
 TESTING_PUBLIC_INGRESS_ROUTE = "/v1/products/{product}/testing-public-ingress"
+TESTING_VERIFICATION_ROUTE = "/v1/products/{product}/testing-verification"
 
 
 class DisposableLaneSafety(BaseModel):

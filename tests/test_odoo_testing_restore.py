@@ -414,6 +414,86 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             )
         )
 
+    def test_public_verification_requires_live_copy_digest_identity_and_open_gate_without_writes(
+        self,
+    ) -> None:
+        import hashlib
+
+        self.spec.update(
+            inspection_only=True,
+            verification_only=True,
+            runtime_identity={"deployment_record_id": "installed"},
+        )
+        gate = self.root / "verified-gate"
+        self.spec["web_gate_path"] = str(gate)
+        payload = "fixture-payload"
+        gate.write_text(hashlib.sha256((self.database + "\n" + payload).encode()).hexdigest())
+        (self.root / (self.gen.namespace + "-copy.lock")).touch()
+        self.existing_database = True
+        for container in self.containers.values():
+            container["State"] = {"Status": "running"}
+            container["Image"] = "fixture-image"
+            container["Config"]["Env"].extend(
+                [
+                    "LAUNCHPLANE_RUNTIME_IDENTITY_JSON="
+                    + json.dumps(self.spec["runtime_identity"]),
+                    "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64=" + payload,
+                ]
+            )
+        original = self.command
+        witness = generation_binding(self.gen)
+        actual_image = self.spec["image_reference"]
+
+        def read(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+            data = kwargs.get("input") or b""
+            if command[:3] == ["docker", "image", "inspect"]:
+                self.calls.append(command)
+                return subprocess.CompletedProcess(
+                    command,
+                    0,
+                    stdout=json.dumps([{"RepoDigests": [actual_image]}]).encode(),
+                    stderr=b"",
+                )
+            if b"SELECT value FROM ir_config_parameter" in data:
+                self.calls.append(command)
+                return subprocess.CompletedProcess(command, 0, stdout=witness.encode(), stderr=b"")
+            if (
+                "-c" in command
+                and "Path(sys.argv[2]).read_text()" in command[command.index("-c") + 1]
+            ):
+                self.calls.append(command)
+                with (
+                    patch.dict(os.environ, {"ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": payload}),
+                    patch.object(sys, "argv", ["gate", self.database, str(gate)]),
+                ):
+                    exec(command[command.index("-c") + 1], {})
+                return subprocess.CompletedProcess(command, 0, stdout=b"", stderr=b"")
+            return original(command, **kwargs)
+
+        with patch.object(self, "command", side_effect=read):
+            status, output = self.run_program()
+            self.assertEqual(status, 0, output)
+            self.assertIn('"copy_verified": true', output)
+            for fault in ("witness", "image", "gate"):
+                with self.subTest(fault=fault):
+                    witness = "wrong" if fault == "witness" else generation_binding(self.gen)
+                    actual_image = "wrong" if fault == "image" else self.spec["image_reference"]
+                    gate.write_text(
+                        "wrong"
+                        if fault == "gate"
+                        else hashlib.sha256((self.database + "\n" + payload).encode()).hexdigest()
+                    )
+                    status, _ = self.run_program()
+                    self.assertNotEqual(status, 0)
+        self.assertFalse(
+            any(
+                call[0] in {"ssh", "rsync"}
+                or call[:2] in (["docker", "stop"], ["docker", "start"], ["docker", "cp"])
+                or "rm" in call
+                for call in self.calls
+            )
+        )
+
     def test_drill_usage_reads_successful_logins_without_starting_or_restoring(self) -> None:
         from datetime import datetime, timezone
 

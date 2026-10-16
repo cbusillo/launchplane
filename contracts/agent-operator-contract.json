@@ -56,6 +56,36 @@
           "apply",
           "readback"
         ],
+        "operation_id": "complete_testing_verification",
+        "path": "/v1/products/{product}/testing-verification",
+        "purpose": "Verify the installed Odoo testing copy and finish its deployment and inventory publication without another deployment or restore.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "6b47a49547415639977863d2d2747e5fb896ebfef965f4cd6703e881f0abc8d3",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
         "operation_id": "prepare_testing_public_ingress",
         "path": "/v1/products/{product}/testing-public-ingress",
         "purpose": "Publish the current independent Odoo testing hostname at its recorded edge using an existing covering certificate; preserve its restored copy and retained routes.",
@@ -744,8 +774,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "40a3371c1660b7d3cde67c84a05ed4f46008e126"
+    "source_commit_sha": "19aaa68b8c1db4298d9b0fb8ac1e266cf51c8ad4"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "1542afdfd02d09e8405a1f9617244cf325feabefac0dfb7b7b83271385a1b9b5"
+  "semantic_digest_sha256": "f458fb10995255d2724483d8eb5b6f8d89d82b909a56f7fa2457d6cc94674669"
 }

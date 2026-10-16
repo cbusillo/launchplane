@@ -799,7 +799,7 @@ def restore_main():
     if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}", database):
         raise RuntimeError("Testing database identity is invalid")
     modules = [name.strip() for name in str(spec.get("workflow_environment", {}).get("ODOO_UPDATE_MODULES", "")).split(",") if name.strip()]
-    if not (spec.get('storage_maintenance') or spec.get('usage_only')) and (not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules)):
+    if not (spec.get('storage_maintenance') or spec.get('usage_only') or spec.get('verification_only')) and (not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules)):
         raise RuntimeError("Testing restore has no exact declared module update intent")
     volumes = {namespace + "-data", namespace + "-db", namespace + "-logs"}
     containers = {}
@@ -834,7 +834,7 @@ def restore_main():
             allowed_databases = spec.get('usage_database_names',[database]) if spec.get('usage_only') else [database]
             if environment.get("PLATFORM_INSTANCE") != "testing" or environment.get("ODOO_DB_HOST") != "database" or environment.get("ODOO_DB_NAME") not in allowed_databases:
                 raise RuntimeError("Testing database endpoint is not local")
-            if not (spec.get('storage_maintenance') or spec.get('usage_only')) and environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "") != spec["expected_overrides_payload"]:
+            if not (spec.get('storage_maintenance') or spec.get('usage_only') or spec.get('verification_only')) and environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "") != spec["expected_overrides_payload"]:
                 raise RuntimeError("Testing settings changed after execution preflight")
             if environment.get("ODOO_MAX_CRON_THREADS") != "0":
                 raise RuntimeError("Fresh testing must have no cron workers")
@@ -907,6 +907,27 @@ def restore_main():
             if marker!=spec['copy_binding_sha256']:
                 raise RuntimeError('Existing testing database lacks its generation witness')
         prefix=sys.argv[2]
+        if spec.get('verification_only'):
+            if present != '1' or any(item[1].get('State',{}).get('Status') != 'running' for item in containers.values()):
+                raise RuntimeError('The installed testing copy is not running')
+            if containers['web'][1]['Image'] != containers['script-runner'][1]['Image']:
+                raise RuntimeError('Testing runner and web images differ')
+            image=json.loads(docker('image','inspect',containers['web'][1]['Image']))[0]
+            if spec['image_reference'] not in image.get('RepoDigests',[]):
+                raise RuntimeError('The actual installed image digest differs')
+            for service in ('web','script-runner'):
+                environment=dict(item.split('=',1) for item in containers[service][1]['Config']['Env'] if '=' in item)
+                identity=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
+                if not isinstance(identity,dict):
+                    raise RuntimeError('The installed runtime identity is unavailable')
+                identity.pop('deployed_at',None)
+                if identity != spec['runtime_identity']:
+                    raise RuntimeError('The installed deployment identity differs')
+            docker('exec',runner,'python3','-c',
+                "import hashlib,os,sys;from pathlib import Path;p=os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','');expected=hashlib.sha256((sys.argv[1]+'\\n'+p).encode()).hexdigest();assert Path(sys.argv[2]).read_text()==expected",
+                database,spec['web_gate_path'])
+            print(prefix+json.dumps({'type':'complete','copy_verified':True}),flush=True)
+            return
         if spec.get('task_account_cleanup') is True:
             if present != '1':
                 raise RuntimeError('Testing cleanup database is unavailable')
@@ -1088,11 +1109,11 @@ def main():
     namespace = spec["generation"]["namespace"]
     if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
         raise RuntimeError("Invalid testing host lock identity")
-    if spec.get('inspection_only'):
+    if spec.get('inspection_only') and not spec.get('verification_only'):
         restore_main()
         return
     path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
-    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         restore_main()

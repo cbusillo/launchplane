@@ -809,6 +809,63 @@ change the origin certificate policy, or dismiss an incident to resolve TLS.
 Retain private review/receipts outside the checkout for same-key recovery.
 The retained edge host and its certificate are not changed or removed.
 
+### Complete verification after public TLS repair
+
+A completed copy and post-deploy pass can precede a public TLS failure. Until
+public verification finishes, the generation remains incomplete and inventory
+still names the previous deployment. Repeating bootstrap or restore would not
+repair that publication gap. This applies to every fresh Odoo testing lane.
+
+`POST /v1/products/{product}/testing-verification` is the Director-agent
+continuation for the same generation and installed terminal deployment. It
+accepts only context, `instance: testing`, original generation operation ID,
+deployment record ID, reason, mode and reviewed plan digest. It derives the
+artifact, target, database, hostname and copy witness from service records.
+Production and slot-cutover lanes are excluded.
+
+```bash
+uv run python scripts/complete-testing-verification.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product example-odoo --context example \
+  --operation-id original-testing-generation-operation \
+  --deployment-record-id installed-terminal-deployment \
+  --reason 'Finish public verification after TLS repair' \
+  --evidence-file /private/operator-evidence/testing-verification.json
+```
+
+Review the private evidence, then repeat the identical arguments with `apply`,
+`--reviewed-dry-run` and one stable `--idempotency-key`. Use `readback` with
+the same evidence afterward. The service must already expose this capability;
+apply requires PostgreSQL. A newer local checkout does not activate the API.
+
+Both planning and application qualify the current target, actual running web
+and runner image digests and deployment identity, original database copy marker,
+isolated volumes/networks and payload-bound web gate. The fixed host inspection
+opens the existing copy lock without creating it and performs no restore,
+registry initialization, setting change, container restart or provider schedule.
+All public HTTPS health, canonical, logo and runtime-identity checks must pass.
+A hold, active operation/fence, changed generation/authority, missing copy
+witness, wrong artifact or later deployment refuses publication.
+
+Application holds the generation executor lock and existing synchronous lane
+reservation, preventing another deploy from starting. After the live reads,
+a short authority comparison transaction preserves the failed deployment in a
+separate prior-evidence record, completes the original deployment, and publishes
+inventory, testing release tuple and generation completion atomically. Original
+operation requests, keys, terminal results, retry budgets, capture receipts,
+retained custody and the restored password are unchanged. The new deployment's
+`testing_verification_previous_record_id` links the preserved failure.
+
+Recovery uses the exact reviewed request and original key. A lost response
+replays the atomic receipt without another provider effect; `readback` separately
+checks current records and live evidence. A failure before commit publishes
+nothing. Preserve evidence and record a refusal with its trace; never change
+records by hand, reset attempt budgets or restore again. If authority changed,
+review the changed evidence before planning further. Incidents resolve through
+normal monitor checks after truthful inventory publication; this endpoint never
+dismisses or edits an incident. Keep operational acceptance open until that
+monitor observation is recorded.
+
 Existing provider certificate renewal remains its maintenance path. A changed
 certificate ID or route is drift requiring the supported ingress maintenance
 path and fresh review; this create-only continuation never updates, disables
