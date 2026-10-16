@@ -364,6 +364,12 @@ def execute_generic_web_prod_promotion(
             error_message=str(error),
         )
 
+    if destination_lane.generic_web_cutover is not None and not deployment_record_id:
+        from control_plane.workflows.ship import generate_deployment_record_id
+
+        deployment_record_id = generate_deployment_record_id(
+            context_name=destination_lane.context, instance_name=destination_lane.instance
+        )
     with production_promotion_backup_guard(
         record_store=record_store,
         product=request.product,
@@ -403,26 +409,52 @@ def execute_generic_web_prod_promotion(
             if provider_effect_checkpoint is not None:
                 provider_effect_checkpoint(phase)
 
-        deploy_result = execute_generic_web_deploy(
-            control_plane_root=control_plane_root,
-            record_store=record_store,
-            request=GenericWebDeployRequest(
-                product=request.product,
-                instance=destination_lane.instance,
-                artifact_id=request.artifact_id,
-                deploy_reference=request.deploy_reference,
-                source_git_ref=request.source_git_ref,
-                timeout_seconds=request.timeout_seconds,
-                no_cache=request.no_cache,
-            ),
-            profile=profile,
-            lane=destination_lane,
-            deploy_provider=deploy_provider,
-            resolved_deploy_target=resolved_deploy_target,
-            provider_operation_title=provider_operation_title,
-            deployment_record_id=deployment_record_id,
-            provider_effect_checkpoint=promotion_checkpoint,
-        )
+        try:
+            deploy_result = execute_generic_web_deploy(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=GenericWebDeployRequest(
+                    product=request.product,
+                    instance=destination_lane.instance,
+                    artifact_id=request.artifact_id,
+                    deploy_reference=request.deploy_reference,
+                    source_git_ref=request.source_git_ref,
+                    timeout_seconds=request.timeout_seconds,
+                    no_cache=request.no_cache,
+                ),
+                profile=profile,
+                lane=destination_lane,
+                deploy_provider=deploy_provider,
+                resolved_deploy_target=resolved_deploy_target,
+                provider_operation_title=provider_operation_title,
+                deployment_record_id=deployment_record_id,
+                provider_effect_checkpoint=promotion_checkpoint,
+            )
+        except (ValueError, TimeoutError, click.ClickException) as error:
+            if destination_lane.generic_web_cutover is None or not deployment_record_id:
+                raise
+            try:
+                failed_cutover = record_store.read_deployment_record(deployment_record_id)
+            except FileNotFoundError:
+                raise error
+            if failed_cutover.generic_web_cutover is None:
+                raise error
+            from control_plane.workflows.generic_web_deploy import cutover_deploy_result
+
+            # Preserve the existing promotion failure/automatic rollback path.
+            # This is an attempt failure, never a claim that uncertain effects
+            # are absent. The compatible rollback reconciles actual authority.
+            deploy_result = cutover_deploy_result(
+                failed_cutover,
+                product=profile.product,
+                provider_id=(deploy_provider.provider_id if deploy_provider else "dokploy"),
+            ).model_copy(
+                update={
+                    "deploy_status": "fail",
+                    "post_deploy_status": "fail",
+                    "error_message": type(error).__name__,
+                }
+            )
     backup_gate.evidence.update(backup_checkpoint.evidence)
     deployment_record = _read_deployment_record(
         record_store=record_store,
@@ -1046,6 +1078,10 @@ def _write_deployment_health(
     deployment_record: DeploymentRecord,
     destination_health: HealthcheckEvidence,
 ) -> DeploymentRecord:
+    if deployment_record.generic_web_cutover is not None:
+        # Automatic switch-back may have finalized this attempt since the
+        # original deploy returned. Never overwrite its recovery checkpoint.
+        deployment_record = record_store.read_deployment_record(deployment_record.record_id)
     updated_record = deployment_record.model_copy(
         update={
             "verify_destination_health": destination_health.status != "skipped",

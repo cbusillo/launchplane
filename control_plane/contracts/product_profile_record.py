@@ -5,6 +5,7 @@ import re
 from typing import Literal, get_args
 
 from control_plane.contracts.odoo_cutover_lane import OdooCutoverLane
+from control_plane.contracts.generic_web_cutover import GenericWebCutoverLane
 from control_plane.contracts.odoo_business_hours import OdooBusinessHoursPolicy
 from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
 
@@ -305,6 +306,11 @@ class ProductLaneProfile(BaseModel):
     generic_web_extensions: GenericWebLaneExtensions = Field(
         default_factory=GenericWebLaneExtensions,
         exclude_if=lambda value: not value.configured,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
+    generic_web_cutover: GenericWebCutoverLane | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     odoo_cutover: OdooCutoverLane | None = Field(
@@ -697,6 +703,16 @@ class LaunchplaneProductProfileRecord(BaseModel):
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneProductProfileRecord":
+        if (
+            any(lane.generic_web_cutover is not None for lane in self.lanes)
+            and self.driver_id != "generic-web"
+        ):
+            raise ValueError("generic-web cutover requires the explicit generic-web driver")
+        if any(
+            lane.generic_web_cutover is not None and lane.odoo_cutover is not None
+            for lane in self.lanes
+        ):
+            raise ValueError("a lane cannot have two traffic authorities")
         if self.odoo_business_hours is not None and self.driver_id != "odoo":
             raise ValueError("Business-hours scheduling requires an Odoo product.")
         if self.public_website == "none" and any(

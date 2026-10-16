@@ -393,8 +393,16 @@ def _validate_rollback_target(
                 "generic web rollback target must use an immutable image digest",
             )
         )
-    elif _deployment_target_is_application(deployment_record) and not _deploy_reference(
-        deployment_record
+    elif (
+        _deployment_target_is_application(deployment_record)
+        and not _deploy_reference(deployment_record)
+        and not (
+            lane.generic_web_cutover is not None
+            and deployment_record.runtime_identity is not None
+            and deployment_record.runtime_identity.slot
+            in {slot.slot_id for slot in lane.generic_web_cutover.slots}
+            and deployment_record.runtime_identity.image_reference == immutable_artifact_id
+        )
     ):
         blockers.append(
             _blocker(

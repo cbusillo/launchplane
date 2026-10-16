@@ -21,6 +21,7 @@
     "authorizationAuthority": "docs/authorization-authority.md",
     "disposableLanes": "docs/disposable-lanes.md",
     "serviceBoundary": "docs/service-boundary.md",
+    "genericWebTwoSlotReleases": "docs/generic-web-two-slot-releases.md",
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
     "dokployInventory": "docs/dokploy-inventory.md",
     "driverDescriptors": "docs/driver-descriptors.md",
