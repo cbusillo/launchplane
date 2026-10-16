@@ -272,6 +272,15 @@ class RecipientUpstreamTests(unittest.TestCase):
                 root: Any, record: Any, spec: Any, program: Any, checkpoint: Any, **kwargs: Any
             ) -> dict[str, str]:
                 checkpoint("upstream_probe")
+                # Exercise the adapter's actual scrub callback inside its live
+                # operation lease. Authority drift must block further effects
+                # without preventing removal of the private provider script.
+                with patch.object(
+                    fixture.adapter, "require_unchanged", side_effect=ValueError("authority drift")
+                ):
+                    with self.assertRaises(ValueError):
+                        checkpoint("further_provider_effect")
+                    kwargs["scrub_guard"]()
                 return {
                     "recipient_upstreams_ok": "true",
                     "recipient_upstreams_binding": spec["binding"],

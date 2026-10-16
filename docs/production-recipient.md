@@ -159,7 +159,11 @@ terminal host witness after the archive digest is verified. A per-binding file
 lock excludes an active or late host writer. Only a terminal failure with verified
 verifier cleanup permits another attempt under the original key; every attempt
 keeps its own capture and receipt. Absence, lock contention or uncertain effects
-never authorize a retry. The archives are retained at
+never authorize a retry. A repeated explicit apply after a verified terminal
+failure automatically makes another attempt under the original key, including
+after a deterministic verifier refusal. Each such attempt retains another full
+archive and consumes additional space; readback/receipt mode does not request an
+apply. Inspect the failure before another apply. The archives are retained at
 `/var/lib/launchplane/recipient-recovery/<recovery-binding>/attempt-*/capture.tar`,
 with per-attempt receipts and an atomic `outcome.json` pointer. Failed or uncertain attempts retain
 their archive and any scratch state whose cleanup could not be verified. No
