@@ -18,6 +18,7 @@ import time
 from typing import Any
 import unittest
 from tests import test_product_retirement_previews as integrated_retirement_tests
+from tests import test_odoo_secret_transport as secret_transport_tests
 from tests import test_testing_runtime_separation as testing_separation
 from tests import test_testing_separation_resources as independent_storage
 from tests import test_testing_activation as testing_activation
@@ -12771,3 +12772,8 @@ class RealPostgresNeverServedTests(unittest.TestCase):
             self.assertEqual(fixture.read().usage, "unknown")
             # The reverse order must refuse the stale negative, too.
             self.assertFalse(fixture.store.publish_collected_disposable_lane_safety(evidence))
+
+
+class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTransportTests):
+    def make_store(self) -> PostgresRecordStore:
+        return self.enterContext(_store_for_fresh_head_database())
