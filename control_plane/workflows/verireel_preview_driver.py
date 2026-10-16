@@ -25,12 +25,10 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.workflows.preview_resource_destroy import (
     destroy_dokploy_preview_resource,
 )
-from control_plane.workflows.verireel_billing_recovery_schedule import (
-    VeriReelRecoveryScheduleSnapshot,
-    delete_verireel_billing_recovery_schedule,
-    finalize_verireel_billing_recovery_schedule,
-    quiesce_verireel_billing_recovery_schedule,
-    restore_verireel_billing_recovery_schedule,
+from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensions
+from control_plane.workflows.generic_web_application_lifecycle import (
+    DokployApplicationLifecycle,
+    preview_application_lifecycle,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane import runtime_platform_credentials
@@ -1214,7 +1212,9 @@ def execute_verireel_preview_refresh(
     created_domain_id = ""
     stale_domain_ids: tuple[str, ...] = ()
     migration_started = False
-    recovery_schedule_snapshot = VeriReelRecoveryScheduleSnapshot(existed=False)
+    lifecycle: DokployApplicationLifecycle | None = None
+    image_effect_attempted = False
+    previous_application_restored = False
 
     try:
         admin_database_url = _build_admin_database_url(template_database_url)
@@ -1291,13 +1291,21 @@ def execute_verireel_preview_refresh(
         application_id = str(application.get("applicationId") or "").strip()
         if existing_snapshot is None:
             created_application_id = application_id
-        else:
-            recovery_schedule_snapshot = quiesce_verireel_billing_recovery_schedule(
-                host=host,
-                token=token,
-                application_id=application_id,
-                instance="preview",
-            )
+        lifecycle = preview_application_lifecycle(
+            host=host,
+            token=token,
+            application_id=application_id,
+            product=profile.product if profile is not None else "",
+            context=request.context,
+            instance=request.preview_slug,
+            artifact_id=request.image_reference,
+            source_git_ref=request.anchor_head_sha,
+            extensions=profile.preview.generic_web_extensions
+            if profile is not None
+            else GenericWebLaneExtensions(),
+        )
+        lifecycle.capture()
+        lifecycle.prepare()
         _configure_application(
             host=host,
             token=token,
@@ -1318,6 +1326,7 @@ def execute_verireel_preview_refresh(
             target_type="application",
             target_id=application_id,
         )
+        image_effect_attempted = True
         dokploy_api.trigger_deployment(
             host=host,
             token=token,
@@ -1334,34 +1343,13 @@ def execute_verireel_preview_refresh(
             timeout_seconds=request.timeout_seconds,
         )
         migration_started = True
-        _run_application_command_with_retries(
-            host=host,
-            token=token,
-            application_id=application_id,
-            schedule_name=f"{app_name}-migrate",
-            command="./node_modules/.bin/prisma migrate deploy --config prisma.config.ts",
-            timeout_seconds=request.timeout_seconds,
-        )
-        _run_application_command_with_retries(
-            host=host,
-            token=token,
-            application_id=application_id,
-            schedule_name=f"{app_name}-seed",
-            command="node prisma/seed.mjs",
-            timeout_seconds=request.timeout_seconds,
-        )
+        lifecycle.maintain()
         observed_runtime_identity = _wait_for_preview_health(
             preview_url=preview_url,
             timeout_seconds=request.timeout_seconds,
             expected_runtime_identity=expected_runtime_identity,
         )
-        finalize_verireel_billing_recovery_schedule(
-            host=host,
-            token=token,
-            application_id=application_id,
-            instance="preview",
-            snapshot=recovery_schedule_snapshot,
-        )
+        lifecycle.complete()
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
     except click.ClickException as exc:
@@ -1384,18 +1372,17 @@ def execute_verireel_preview_refresh(
                     application_snapshot=existing_snapshot,
                     timeout_seconds=request.timeout_seconds,
                 )
+                previous_application_restored = True
             except click.ClickException as rollback_exc:
                 rollback_errors.append(f"existing preview rollback failed: {rollback_exc}")
-        try:
-            restore_verireel_billing_recovery_schedule(
-                host=host,
-                token=token,
-                application_id=application_id,
-                instance="preview",
-                snapshot=recovery_schedule_snapshot,
-            )
-        except click.ClickException as rollback_exc:
-            rollback_errors.append(f"recovery schedule restoration failed: {rollback_exc}")
+        if lifecycle is not None and not created_application_id:
+            try:
+                if image_effect_attempted or not previous_application_restored:
+                    lifecycle.hold()
+                else:
+                    lifecycle.restore()
+            except click.ClickException as rollback_exc:
+                rollback_errors.append(f"application schedule recovery failed: {rollback_exc}")
         if created_preview_database:
             try:
                 _run_application_command(
@@ -1508,16 +1495,7 @@ def execute_verireel_preview_destroy(
     )
 
     cleanup_errors: list[str] = []
-    recovery_schedule_cleanup_error = ""
     if application_id:
-        try:
-            delete_verireel_billing_recovery_schedule(
-                host=host,
-                token=token,
-                application_id=application_id,
-            )
-        except click.ClickException as exc:
-            recovery_schedule_cleanup_error = str(exc)
         destroy_result = destroy_dokploy_preview_resource(
             host=host,
             token=token,
@@ -1525,10 +1503,6 @@ def execute_verireel_preview_destroy(
             resource_id=application_id,
         )
         cleanup_errors.extend(destroy_result.cleanup_errors)
-        if destroy_result.cleanup_errors and recovery_schedule_cleanup_error:
-            cleanup_errors.append(
-                f"recovery schedule cleanup failed: {recovery_schedule_cleanup_error}"
-            )
     try:
         _run_application_command_with_retries(
             host=host,

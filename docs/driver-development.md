@@ -124,16 +124,15 @@ no retired release endpoint is enabled by those grants. Production still changes
 accepted release.
 
 A generic-web testing lane selects `verification_extension="verireel-testing"`
-in `generic_web_extensions` to reuse VeriReel's migration and creator/admin
+in `generic_web_extensions` to reuse VeriReel's creator/admin
 qualification. The preset accepts only a recorded testing lane and exact
 reserved application target; other lanes and an absent executor are refused
 before deployment. The preset is selected only by the declaration; a product
-name or historical driver identifier does not enable testing qualification. The extension runs
-the existing `stable-testing-migration` maintenance intent, then verifies a
+name or historical driver identifier does not enable testing qualification. The shared lifecycle runs the profile's migration commands first. The extension verifies a
 disposable creator's QR/public flow, creator denial of admin pages, and the admin
 pages after the existing smoke-maintenance intent elevates that fixture. Cleanup
 uses the existing test-account deletion intent. The deployment's
-`post_deploy_update.evidence` binds migration, creator, admin and cleanup statuses
+`post_deploy_update.evidence` binds creator, admin and cleanup statuses
 to the deployment ID, immutable artifact and source revision; all must pass.
 The service image includes matching Playwright Chromium. The Compose browser
 service uses Playwright's built-in remote server in an unprivileged, read-only
@@ -496,10 +495,36 @@ PostgreSQL preview persistence adapter is internal to the declared transport;
 it does not expose a parallel native preview API. Legacy deployment, promotion
 and backup schemas and migrations remain readers for stored history.
 
-The existing `POST /v1/drivers/verireel/app-maintenance` repair endpoint remains
-for testing and preview fixture cleanup. It uses the existing instance-scoped
-maintenance action, idempotency and allow-listed intents, and requires the
-profile's testing-verification or preview-transport declaration for that lane.
-It cannot target production. This is an extension repair path, not a release
-driver or a new grant. Routine migrations and billing schedules execute from
-the profile declarations through the shared deployment lifecycle.
+The VeriReel app-maintenance endpoint and source-control smoke-client action are
+retired. Fixture setup remains internal to the testing qualification extension
+until the product checks move into the product repository. No product workflow
+calls a Launchplane maintenance route.
+
+### Profile maintenance and explicit testing reset
+
+Testing lanes and `preview.generic_web_extensions` declare their own maintenance
+commands and recurring schedules. Preview refresh pauses declared schedules,
+runs maintenance after deploying, verifies runtime health, then canaries each
+enabled schedule before enabling it. A failed refresh after an image effect
+keeps jobs paused. Destroying the preview application removes its attached jobs.
+
+Commands normally run on deploy. A command with `on_reset: true` runs only when
+an explicit generic-web testing deploy includes `reset: true`; ordinary deploys
+skip it. Reset uses the existing deploy reservation, exact recorded application,
+artifact provenance, effect fence, verification and schedule lifecycle. It also
+requires current disposable-lane evidence and refuses production or rollback.
+The reset command must include all required schema and seed work. It executes
+inside the new image, so resetting never needs a second deploy or a call-in
+workflow. Scheduled jobs are canaried after reset just as after a normal deploy.
+
+Stored profiles carrying the retired testing-verification or PostgreSQL preview
+extensions are converted once to editable declarations. The conversion changes
+only testing and preview declarations; production lanes are preserved. The
+schema migration performs no provider calls. Rollback leaves declarations
+intact because they may have been edited since conversion. Subsequent profile
+edits, including removing commands, are never replaced by legacy defaults.
+
+Required Compose environment substitutions such as `${APP_SECRET:?required}`
+are operator inputs regardless of product. They do not name a Launchplane
+secret binding. The product profile's `expected_config.managed_secret_bindings`
+owns actual managed bindings; no product-specific allowlist lives in the audit.

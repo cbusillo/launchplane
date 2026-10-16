@@ -1,4 +1,4 @@
-"""Testing-only migration and product verification under the deploy reservation."""
+"""Testing-only product verification under the deploy reservation."""
 
 from __future__ import annotations
 
@@ -154,7 +154,6 @@ def recorded_verireel_testing_qualification(
         and all(
             evidence.get(key) == "pass"
             for key in (
-                "migration_status",
                 "creator_verification_status",
                 "admin_verification_status",
                 "cleanup_status",
@@ -434,7 +433,6 @@ def execute_verireel_testing_post_deploy(
         "deployment_record_id": context.deployment_record_id,
         "source_git_ref": context.source_git_ref,
         "artifact_id": context.artifact_id,
-        "migration_status": "skipped",
         "creator_verification_status": "skipped",
         "admin_verification_status": "skipped",
         "cleanup_status": "skipped",
@@ -463,12 +461,6 @@ def execute_verireel_testing_post_deploy(
         wait_for_verireel_testing_identity(base_url, context)
         phase = "browser_availability"
         check_testing_browser_availability()
-        phase = "migration"
-        evidence["migration_status"] = "fail"
-        _maintenance(
-            control_plane_root, context, guard, action="migrate", intent="stable-testing-migration"
-        )
-        evidence["migration_status"] = "pass"
         phase = "product_verification"
         evidence["creator_verification_status"] = "fail"
         evidence["admin_verification_status"] = "fail"
@@ -477,7 +469,6 @@ def execute_verireel_testing_post_deploy(
         if any(
             evidence[key] != "pass"
             for key in (
-                "migration_status",
                 "creator_verification_status",
                 "admin_verification_status",
                 "cleanup_status",
@@ -487,7 +478,7 @@ def execute_verireel_testing_post_deploy(
                 "Testing qualification did not return complete passing evidence."
             )
         status = "pass"
-        detail = "Testing migrations and creator/admin verification passed; fixture removed."
+        detail = "Testing creator/admin verification passed; fixture removed."
     except ProviderMutationUnknownError:
         raise
     except Exception as error:

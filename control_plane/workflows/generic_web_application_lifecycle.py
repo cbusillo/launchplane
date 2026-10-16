@@ -9,6 +9,7 @@ import click
 
 from control_plane.contracts.generic_web_extensions import (
     GenericWebApplicationSchedule,
+    GenericWebLaneExtensions,
     GenericWebMaintenanceCommand,
 )
 from control_plane.dokploy import api, source
@@ -167,6 +168,8 @@ class DokployApplicationLifecycle:
             return {}
         evidence: dict[str, str] = {}
         for definition in self.snapshot.extensions.maintenance:
+            if definition.on_reset != self.snapshot.reset:
+                continue
             self._run_command(definition)
             evidence[f"maintenance:{definition.name}"] = "pass"
         return evidence
@@ -288,3 +291,31 @@ def dokploy_application_lifecycle(
         raise click.ClickException("Declared application lifecycle requires a Dokploy application.")
     host, token = source.read_dokploy_config(control_plane_root=control_plane_root)
     return DokployApplicationLifecycle(host, token, target_id, snapshot, checkpoint, effect_started)
+
+
+def preview_application_lifecycle(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    product: str,
+    context: str,
+    instance: str,
+    artifact_id: str,
+    source_git_ref: str,
+    extensions: "GenericWebLaneExtensions",
+) -> DokployApplicationLifecycle:
+    snapshot = ApplicationLifecycleSnapshot(
+        product=product,
+        context=context,
+        instance=instance,
+        provider_id="dokploy",
+        target_id=application_id,
+        artifact_id=artifact_id,
+        source_git_ref=source_git_ref,
+        extensions=extensions,
+        managed_names=tuple(item.name for item in extensions.schedules),
+    )
+    return DokployApplicationLifecycle(
+        host, token, application_id, snapshot, lambda _phase: None, lambda: None
+    )

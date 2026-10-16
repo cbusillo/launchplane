@@ -12817,6 +12817,11 @@
             "title": "Name",
             "type": "string"
           },
+          "on_reset": {
+            "default": false,
+            "title": "On Reset",
+            "type": "boolean"
+          },
           "timeout_seconds": {
             "default": 300,
             "maximum": 3600,
@@ -12830,6 +12835,7 @@
           "cron_expression",
           "enabled",
           "name",
+          "on_reset",
           "timeout_seconds"
         ],
         "title": "GenericWebApplicationSchedule",
@@ -13088,6 +13094,13 @@
             "title": "Schedules",
             "type": "array"
           },
+          "schema_version": {
+            "default": 1,
+            "maximum": 1,
+            "minimum": 1,
+            "title": "Schema Version",
+            "type": "integer"
+          },
           "verification_extension": {
             "default": "",
             "enum": [
@@ -13103,7 +13116,8 @@
         "type": "object",
         "required": [
           "maintenance",
-          "schedules"
+          "schedules",
+          "schema_version"
         ]
       },
       "GenericWebMaintenanceCommand": {
@@ -13121,6 +13135,11 @@
             "title": "Name",
             "type": "string"
           },
+          "on_reset": {
+            "default": false,
+            "title": "On Reset",
+            "type": "boolean"
+          },
           "timeout_seconds": {
             "default": 300,
             "maximum": 3600,
@@ -13132,6 +13151,7 @@
         "required": [
           "command",
           "name",
+          "on_reset",
           "timeout_seconds"
         ],
         "title": "GenericWebMaintenanceCommand",
@@ -30735,6 +30755,10 @@
             "default": false,
             "title": "Enabled",
             "type": "boolean"
+          },
+          "generic_web_extensions": {
+            "$ref": "#/components/schemas/GenericWebLaneExtensions",
+            "x-launchplane-optional-response": true
           },
           "historical_transport": {
             "additionalProperties": {

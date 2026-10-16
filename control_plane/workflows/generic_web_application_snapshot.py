@@ -32,6 +32,7 @@ class ApplicationLifecycleSnapshot(BaseModel):
     originals: dict[str, dict[str, JsonValue] | None] = Field(default_factory=dict)
     managed_names: tuple[str, ...] = ()
     mode: Literal["deploy", "rollback"] = "deploy"
+    reset: bool = False
     state: Literal["prepared", "held", "qualified", "restored", "restore_failed"] = "prepared"
     previous_owned_names: tuple[str, ...] = ()
     current_originals: dict[str, dict[str, JsonValue] | None] = Field(default_factory=dict)

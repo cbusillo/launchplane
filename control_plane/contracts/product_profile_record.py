@@ -364,6 +364,11 @@ class ProductPreviewProfile(BaseModel):
         pattern=r"^(-[a-z0-9-]+)?$",
     )
     template_instance: str = "testing"
+    generic_web_extensions: GenericWebLaneExtensions = Field(
+        default_factory=GenericWebLaneExtensions,
+        exclude_if=lambda value: not value.configured,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     required_template_env_keys: tuple[str, ...] = ()
     copied_env_keys: tuple[str, ...] = ()
     omitted_env_keys: tuple[str, ...] = ()

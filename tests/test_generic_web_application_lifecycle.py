@@ -94,7 +94,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             raise click.ClickException("application command failed")
 
     def _deploy(
-        self, *, failure_command: str = "", verification_fails: bool = False
+        self, *, failure_command: str = "", verification_fails: bool = False, reset: bool = False
     ) -> tuple[GenericWebDeployResult, _GenericWebDeployStore]:
         self.failure_command = failure_command
         profile = _profile()
@@ -113,7 +113,10 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         )
 
         def verification(*_args: object) -> PostDeployUpdateEvidence:
-            self.assertEqual(self.commands, [self.extensions.maintenance[0].command])
+            self.assertEqual(
+                self.commands,
+                [item.command for item in self.extensions.maintenance if item.on_reset == reset],
+            )
             self.assertFalse(self.schedules["billing-recovery"]["enabled"])
             return PostDeployUpdateEvidence(
                 attempted=True,
@@ -133,13 +136,76 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
             result = execute_generic_web_deploy(
                 control_plane_root=Path("."),
                 record_store=store,
-                request=_request(),
+                request=_request().model_copy(update={"reset": reset}),
                 deploy_provider=provider,
                 post_deploy_executor=verification,
                 provider_operation_title="deploy-test",
                 provider_effect_checkpoint=self.phases.append,
             )
         return result, store
+
+    def test_testing_reset_is_explicit_and_uses_the_disposable_lane_guard(self) -> None:
+        reset_command = GenericWebMaintenanceCommand(
+            name="reset-data", command="./reset-data", on_reset=True
+        )
+        self.extensions = self.extensions.model_copy(
+            update={"maintenance": (*self.extensions.maintenance, reset_command)}
+        )
+        ordinary, _ = self._deploy()
+        self.assertEqual(ordinary.deploy_status, "pass")
+        self.assertNotIn(reset_command.command, self.commands)
+        self.commands.clear()
+        with patch("control_plane.disposable_lanes.require_disposable_lane") as disposable:
+            result, store = self._deploy(reset=True)
+        disposable.assert_called_once_with(
+            store,
+            product=store.read_product_profile_record(_request().product).product,
+            context=store.read_product_profile_record(_request().product).lanes[0].context,
+            instance="testing",
+        )
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(self.commands[0], reset_command.command)
+        self.assertNotIn(self.extensions.maintenance[0].command, self.commands)
+        self.assertTrue(self.schedules["billing-recovery"]["enabled"])
+
+    def test_production_reset_is_refused_before_any_schedule_mutation(self) -> None:
+        self._api_context()
+        profile = _profile()
+        lane = profile.lanes[0].model_copy(
+            update={"instance": "prod", "generic_web_extensions": self.extensions}
+        )
+        profile = profile.model_copy(update={"lanes": (lane,)})
+        provider = _LifecycleDeployProvider(target_id="app-123")
+        result = execute_generic_web_deploy(
+            control_plane_root=Path("."),
+            record_store=_GenericWebDeployStore(profile),
+            request=_request().model_copy(update={"instance": "prod", "reset": True}),
+            profile=profile,
+            lane=lane,
+            deploy_provider=provider,
+        )
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(self.commands, [])
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
+
+    def test_reset_refusal_changes_no_schedules(self) -> None:
+        self.extensions = self.extensions.model_copy(
+            update={
+                "maintenance": (
+                    GenericWebMaintenanceCommand(
+                        name="reset-data", command="./reset-data", on_reset=True
+                    ),
+                )
+            }
+        )
+        with patch(
+            "control_plane.disposable_lanes.require_disposable_lane",
+            side_effect=ValueError("staff using testing"),
+        ):
+            result, _ = self._deploy(reset=True)
+        self.assertEqual(result.deploy_status, "fail")
+        self.assertEqual(self.schedules["billing-recovery"], self.original)
+        self.assertEqual(self.commands, [])
 
     def _api_context(self) -> None:
         self.enterContext(

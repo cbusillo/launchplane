@@ -29,17 +29,6 @@ ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT = "operator_supplied_runtime_input"
 ALLOW_REASON_PRODUCT_OWNED_ADDON = "product_owned_addon"
 ALLOW_REASON_REPO_METADATA_ERGONOMICS = "repo_metadata_ergonomics"
 
-VERIREEL_DOKPLOY_MANAGED_SECRET_BINDINGS = frozenset(
-    (
-        "BETTER_AUTH_SECRET",
-        "VERIREEL_CRON_SECRET",
-        "VERIREEL_INDEXNOW_KEY",
-        "VERIREEL_INDEXNOW_SUBMIT_SECRET",
-        "VERIREEL_SECRETS_MASTER_KEY",
-        "VERIREEL_SMOKE_MAINTENANCE_SECRET",
-    )
-)
-
 SCAN_MODES = ("full-audit", "changed-files-gate")
 OUTPUT_FORMATS = ("json", "markdown")
 GATE_PROFILES = ("default", "product-repo")
@@ -3381,7 +3370,7 @@ def _allow_reason(
         value=value,
     ):
         return ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
-    if _is_verireel_dokploy_managed_secret_binding(
+    if _is_required_compose_environment_input(
         path=normalized,
         key=key,
         value=value,
@@ -3424,11 +3413,11 @@ def _allow_reason(
     return ""
 
 
-def _is_verireel_dokploy_managed_secret_binding(*, path: str, key: str, value: object) -> bool:
+def _is_required_compose_environment_input(*, path: str, key: str, value: object) -> bool:
     if path != "compose.dokploy.yaml":
         return False
     key_text = key.strip().upper()
-    if key_text not in VERIREEL_DOKPLOY_MANAGED_SECRET_BINDINGS:
+    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key_text):
         return False
     return _string_value(value).strip() == f"${{{key_text}:?required}}"
 
