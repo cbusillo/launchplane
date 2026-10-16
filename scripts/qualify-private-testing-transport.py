@@ -12,11 +12,13 @@ import logging
 import os
 from pathlib import Path
 import socket
+import signal
 import ssl
 import subprocess
 from tempfile import TemporaryDirectory
 import threading
 import time
+from typing import Any, cast
 from unittest.mock import patch
 
 from cryptography import x509
@@ -30,11 +32,16 @@ from websockets.http11 import Request, Response
 from websockets.sync.server import ServerConnection, serve
 
 from control_plane.local_consumer import _verify_bridge, prepare_consumer
-from control_plane.private_testing_transport import nginx_configuration
+from control_plane.private_testing_transport import (
+    PrivateTestingTransportIntent,
+    nginx_configuration,
+    nginx_entrypoint,
+    transport_overlay,
+)
 from control_plane.workflows.public_ingress_monitor import fetch_private_health_url
 
 
-def qualify(binary: Path) -> None:
+def qualify(binary: Path, compose_binary: Path) -> None:
     with TemporaryDirectory(prefix="lp-private-tls-fixture-") as temporary:
         root = Path(temporary).resolve()
         ca_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -158,15 +165,118 @@ def qualify(binary: Path) -> None:
                     certificate_file=str(cert_file),
                     key_file=str(key_file),
                 )
-                (root / "nginx.conf").write_text(config)
+                intent = PrivateTestingTransportIntent(
+                    context="fixture",
+                    endpoint_key="fixture",
+                    private_ip=ipaddress.IPv4Address("10.77.0.9"),
+                    listener_port=9443,
+                    runtime_service="bridge",
+                    nginx_image="fixture@sha256:" + "a" * 64,
+                    ca_bundle_sha256="b" * 64,
+                    certificate_sha256="c" * 64,
+                    monitor_ca_bundle_path=str(ca_file),
+                    receiver_ca_bundle_path=str(ca_file),
+                    trust_review="disposable isolated Compose qualification",
+                )
+                overlay = cast(
+                    dict[str, Any],
+                    transport_overlay(
+                        intent,
+                        namespace="fixture-tls",
+                        runtime_port=backend.socket.getsockname()[1],
+                    ),
+                )
+                overlay["services"]["bridge"] = {"image": intent.nginx_image}
+                compose_file = root / "compose.json"
+                compose_file.write_text(json.dumps(overlay))
+                composed = subprocess.run(
+                    [
+                        str(compose_binary),
+                        "--project-name",
+                        "lp-private-tls-fixture",
+                        "-f",
+                        str(compose_file),
+                        "config",
+                        "--format",
+                        "json",
+                    ],
+                    env={
+                        "PATH": os.environ["PATH"],
+                        "DOCKER_CONFIG": str(root / "docker-config"),
+                        "COMPOSE_DISABLE_ENV_FILE": "true",
+                    },
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                )
+                if composed.stderr:
+                    raise AssertionError("Compose reported a warning for the actual overlay.")
+                materialized = json.loads(composed.stdout)
+                # Round-trip a real generated artifact, not a copied command literal.
+                if (
+                    materialized["services"]["fixture-tls"]["entrypoint"]
+                    != overlay["services"]["fixture-tls"]["entrypoint"]
+                ):
+                    raise AssertionError("Compose altered the generated proxy invocation.")
+                proxy_hashes = []
+                for reviewed in (
+                    intent,
+                    intent.model_copy(update={"certificate_sha256": "d" * 64}),
+                ):
+                    reviewed_overlay = cast(
+                        dict[str, Any],
+                        transport_overlay(
+                            reviewed,
+                            namespace="fixture-tls",
+                            runtime_port=backend.socket.getsockname()[1],
+                        ),
+                    )
+                    reviewed_overlay["services"]["bridge"] = {"image": reviewed.nginx_image}
+                    compose_file.write_text(json.dumps(reviewed_overlay))
+                    hashed = subprocess.run(
+                        [
+                            str(compose_binary),
+                            "--project-name",
+                            "lp-private-tls-fixture",
+                            "-f",
+                            str(compose_file),
+                            "config",
+                            "--hash",
+                            "fixture-tls",
+                        ],
+                        env={
+                            "PATH": os.environ["PATH"],
+                            "DOCKER_CONFIG": str(root / "docker-config"),
+                            "COMPOSE_DISABLE_ENV_FILE": "true",
+                        },
+                        capture_output=True,
+                        text=True,
+                        check=True,
+                    )
+                    proxy_hashes.append(hashed.stdout)
+                if proxy_hashes[0] == proxy_hashes[1]:
+                    raise AssertionError("Reviewed certificate rotation cannot recreate the proxy.")
                 (root / "logs").mkdir()
-                command = [str(binary), "-p", str(root), "-c", str(root / "nginx.conf")]
-                checked = subprocess.run([*command, "-t"], capture_output=True)
+                command = nginx_entrypoint(
+                    config,
+                    configuration_file=str(root / "nginx.conf"),
+                    nginx_binary=str(binary),
+                    nginx_arguments=("-p", str(root)),
+                )
+                checked = subprocess.run(
+                    nginx_entrypoint(
+                        config,
+                        configuration_file=str(root / "nginx.conf"),
+                        nginx_binary=str(binary),
+                        nginx_arguments=("-p", str(root), "-t"),
+                    ),
+                    capture_output=True,
+                )
                 if checked.returncode:
                     raise RuntimeError(checked.stderr.decode())
                 with (root / "nginx.log").open("wb") as log:
                     process = subprocess.Popen(
-                        [*command, "-g", "daemon off; master_process off;"], stdout=log, stderr=log
+                        command, stdout=log, stderr=log, start_new_session=True
                     )
                     try:
                         deadline = time.monotonic() + 10
@@ -189,10 +299,12 @@ def qualify(binary: Path) -> None:
                             endpoint_key="fixture-testing",
                             server_url=origin.replace("https:", "wss:") + "/agent-session/connect",
                         )
+                        monitor = fetch_private_health_url(
+                            origin + "/health", 5, tls_ca_pem=ca_file.read_text()
+                        )
+                        if monitor.status_code != 200:
+                            raise AssertionError("Private monitor did not reach the runtime.")
                         with patch.dict(os.environ, {"SSL_CERT_FILE": str(ca_file)}):
-                            monitor = fetch_private_health_url(origin + "/health", 5)
-                            if monitor.status_code != 200:
-                                raise AssertionError("Private monitor did not reach the runtime.")
                             _verify_bridge(consumer, fake_value)
                             try:
                                 _verify_bridge(consumer, "wrong-fictional-value")
@@ -230,7 +342,11 @@ def qualify(binary: Path) -> None:
                             )
                             with patch.dict(os.environ, {"SSL_CERT_FILE": bundle}):
                                 try:
-                                    fetch_private_health_url(bad_origin + "/health", 5)
+                                    fetch_private_health_url(
+                                        bad_origin + "/health",
+                                        5,
+                                        tls_ca_pem=Path(bundle).read_text(),
+                                    )
                                 except ssl.SSLError:
                                     pass
                                 else:
@@ -249,16 +365,27 @@ def qualify(binary: Path) -> None:
                             raise AssertionError("Transport qualification sent bridge messages.")
                     finally:
                         process.terminate()
-                        process.wait(timeout=10)
+                        try:
+                            process.wait(timeout=10)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                            process.wait(timeout=10)
             finally:
                 backend.shutdown()
                 thread.join(timeout=5)
         print(
-            "PASS: generated Nginx; monitor HTTPS; receiver WSS; issuer/hostname/auth/lane/path negatives; no messages"
+            "PASS: Compose overlay/renewal; generated entrypoint/Nginx; monitor HTTPS; receiver WSS; issuer/hostname/auth/lane/path negatives; no messages"
         )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--nginx-binary", required=True, type=Path)
-    qualify(parser.parse_args().nginx_binary.resolve(strict=True))
+    parser.add_argument("--compose-binary", required=True, type=Path)
+    arguments = parser.parse_args()
+    qualify(
+        arguments.nginx_binary.resolve(strict=True), arguments.compose_binary.resolve(strict=True)
+    )
