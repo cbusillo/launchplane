@@ -228,6 +228,21 @@ unknown even when a count is recorded; zero recorded is not verified empty.
 Recorded counts remain labelled recorded, stale and unsupported evidence retain
 their uncertainty, and only verified inventory uses active or empty wording.
 
+Product Ops labels combined static lane records separately from operational
+health. A product profile's edit date is labelled as a profile update, never
+presented as the age of its lanes' verification. Route evidence badges describe
+topology records; runtime observation timestamps describe their own evidence.
+An explicit no-public-website declaration makes the public endpoint and TLS
+not applicable, while private checks, identity and incidents still apply.
+Disabled previews are not applicable; enabled previews without inventory proof
+retain their unknown state and disclose only a recorded count.
+
+The warnings view counts each finding once when it appears in both summary
+and typed topology projections, preserving the typed severity and lane/domain.
+Distinct domain findings and non-topology warnings remain visible, including
+findings beyond the first six. Informational limitations remain information
+rather than adding to the actionable warning count.
+
 ## Responsive Product Contract
 
 Desktop layouts optimize for fast comparison across testing, production, and
