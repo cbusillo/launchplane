@@ -28,6 +28,7 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
         verified: bool = True,
         initial_generation: bool = False,
         released: bool = False,
+        wrong_receipt: bool = False,
     ) -> tuple[int, dict[str, Any], Mock]:
         client = runpy.run_path(
             str(
@@ -83,6 +84,8 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
                     resources_binding_sha256=binding,
                     schedule_id="fixture-schedule",
                 )
+        if wrong_receipt:
+            result["operation_id"] = "another-preparation"
         post = Mock(
             return_value={"status": "accepted", "trace_id": "fixture-trace", "result": result}
         )
@@ -196,4 +199,12 @@ class TestingReplacementResourceClientTests(unittest.TestCase):
         self.assertEqual(status, 1)
         self.assertEqual(result["status"], "released")
         self.assertFalse(result["resources_verified"])
+        post.assert_called_once()
+
+    def test_release_rejects_a_receipt_for_another_reviewed_preparation(self) -> None:
+        status, result, post = self.call(
+            mode="release", initial_generation=True, wrong_receipt=True
+        )
+        self.assertEqual(status, 1)
+        self.assertEqual(result["status"], "accepted_unverified")
         post.assert_called_once()

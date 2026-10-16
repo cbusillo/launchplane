@@ -143,6 +143,8 @@ def main() -> int:
             ) as output:
                 json.dump({"request": review_request, "plan": plan.model_dump(mode="json")}, output)
         elif args.mode == "release":
+            if result["operation_id"] != plan.operation_id:
+                raise ValueError("The released receipt belongs to another reviewed intent.")
             TestingInitialPreparationRelease.model_validate(result)
         elif args.mode == "apply":
             applied = TestingReplacementResourcesResult.model_validate(result)

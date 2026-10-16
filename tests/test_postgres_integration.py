@@ -10482,6 +10482,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
             )
             calls: list[tuple[str, dict[str, Any]]] = []
             phases: list[str] = []
+            active_hold_writes: list[str] = []
             adoption_lost = False
             original_merge = fixture.store._merge_authority_row
 
@@ -10519,6 +10520,39 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 )
 
             def mutate(host: str, token: str, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+                if fault == "normal" and path == PROJECT_CREATE_PATH:
+                    from control_plane.contracts.dokploy_target_record import (
+                        DokployTargetStaffTestingHold,
+                    )
+
+                    preparation = fixture.store.read_disposable_resource_preparation(plan_id[0])
+                    assert preparation is not None
+                    if initial_generation:
+                        self.assertTrue(preparation.initial_apply_started_at)
+                    current = fixture.store.read_dokploy_target_record(
+                        context_name=fixture.context, instance_name="testing"
+                    )
+                    self.assertEqual(current, retained_record)
+                    held = current.model_copy(
+                        update={
+                            "policies": current.policies.model_copy(
+                                update={
+                                    "staff_testing_hold": DokployTargetStaffTestingHold(
+                                        reason="staff using original testing"
+                                    )
+                                }
+                            )
+                        }
+                    )
+                    fixture.store.write_dokploy_target_record(held)
+                    self.assertEqual(
+                        fixture.store.read_dokploy_target_record(
+                            context_name=fixture.context, instance_name="testing"
+                        ),
+                        held,
+                    )
+                    fixture.store.write_dokploy_target_record(current)
+                    active_hold_writes.append(path)
                 calls.append((path, payload))
                 identifiers = {
                     PROJECT_CREATE_PATH: "projectId",
@@ -10596,6 +10630,8 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                     "schedule_id": "resource-schedule",
                 }
 
+            plan_id: list[str] = []
+
             async def scenario() -> None:
                 before_profile = fixture.store.read_product_profile_record(fixture.profile.product)
                 before_production = fixture.store.read_dokploy_target_id_record(
@@ -10603,6 +10639,7 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 )
                 plan = await fixture.post()
                 self.assertEqual(plan.status_code, 202, plan.text)
+                plan_id.append(plan.json()["result"]["operation_id"])
                 body = {
                     "mode": "apply",
                     "reviewed_plan_sha256": plan.json()["result"]["plan_sha256"],
@@ -10686,6 +10723,8 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                         count = len(calls)
                     applied = await fixture.post(**body)
                     self.assertEqual(applied.status_code, 202, applied.text)
+                    if fault == "normal":
+                        self.assertEqual(active_hold_writes, [PROJECT_CREATE_PATH])
                     if fault != "normal":
                         self.assertEqual(len(calls), count)
                     count = len(calls)
