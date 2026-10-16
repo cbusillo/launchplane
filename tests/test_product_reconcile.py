@@ -3680,6 +3680,24 @@ class FakeGenericWebPreviewDriver:
 
 
 class ProductReconcileGenericWebPreviewTests(ProductReconcileTestCase):
+    def test_pr_closed_during_scan_never_reaches_preview_provider(self) -> None:
+        from control_plane.artifact_scan import ArtifactScanResult
+
+        def scan_then_close(image: str) -> ArtifactScanResult:
+            self.github.pull_request["state"] = "closed"
+            return ArtifactScanResult(
+                image_reference=image,
+                status="pass",
+                reason="clean",
+                scanned_at="2026-10-16T12:00:00Z",
+            )
+
+        self.artifact_scanner.side_effect = scan_then_close
+        self.github.add_run(50, PR_HEAD, event="pull_request")
+        self.request("preview", 5)
+        self.run_once()
+        self.assertFalse(self.driver.changes)
+
     def test_director_standing_preview_needs_valid_notes_without_a_client_invitation(self) -> None:
         payload = _generic_web_preview_profile().model_dump(mode="json")
         payload["owner"] = {"github_login": "site-owner", "github_id": "4242"}

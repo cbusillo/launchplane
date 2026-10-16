@@ -2127,6 +2127,9 @@ def _run_generic_web_preview_operation(
             # Every sweep would otherwise run the same failing refresh again.
             plan["preview_result_status"] = previous_plan["preview_result_status"]
             return _preview_failure(plan, "preview_build_failed")
+    if isinstance(verified, VerifiedGenericWebBuild):
+        if not _scan_deploy_artifact(profile, plan, verified):
+            return ReconcileOutcome(plan)
     if decision.observed and _pull_request_moved(
         transport=transport,
         profile=profile,
@@ -2137,9 +2140,6 @@ def _run_generic_web_preview_operation(
         return ReconcileOutcome(plan, deferred=True)
     if not lease_held():
         raise ProductReconcileError(_LEASE_LOST, code="preview_lease_lost")
-    if isinstance(verified, VerifiedGenericWebBuild):
-        if not _scan_deploy_artifact(profile, plan, verified):
-            return ReconcileOutcome(plan)
     try:
         if isinstance(verified, VerifiedGenericWebBuild):
             _records, result = preview_hooks.refresh_generic_web(
