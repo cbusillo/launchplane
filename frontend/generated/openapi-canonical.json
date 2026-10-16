@@ -28918,6 +28918,102 @@
         "title": "PrivateHealthEndpointRecordsResponse",
         "type": "object"
       },
+      "PrivateTestingTransportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "ca_bundle_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Ca Bundle Sha256",
+            "type": "string"
+          },
+          "certificate_sha256": {
+            "pattern": "^[a-f0-9]{64}$",
+            "title": "Certificate Sha256",
+            "type": "string"
+          },
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "endpoint_key": {
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+            "title": "Endpoint Key",
+            "type": "string"
+          },
+          "expected_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Expected Plan Sha256",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "listener_port": {
+            "maximum": 65535.0,
+            "minimum": 1024.0,
+            "title": "Listener Port",
+            "type": "integer"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "monitor_ca_bundle_path": {
+            "title": "Monitor Ca Bundle Path",
+            "type": "string"
+          },
+          "nginx_image": {
+            "pattern": "^[a-z0-9][a-z0-9./:_-]+@sha256:[a-f0-9]{64}$",
+            "title": "Nginx Image",
+            "type": "string"
+          },
+          "private_ip": {
+            "format": "ipv4",
+            "title": "Private Ip",
+            "type": "string"
+          },
+          "receiver_ca_bundle_path": {
+            "title": "Receiver Ca Bundle Path",
+            "type": "string"
+          },
+          "runtime_service": {
+            "pattern": "^[a-z][a-z0-9_-]{0,62}$",
+            "title": "Runtime Service",
+            "type": "string"
+          },
+          "trust_review": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Trust Review",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "endpoint_key",
+          "private_ip",
+          "listener_port",
+          "runtime_service",
+          "nginx_image",
+          "ca_bundle_sha256",
+          "certificate_sha256",
+          "monitor_ca_bundle_path",
+          "receiver_ca_bundle_path",
+          "trust_review"
+        ],
+        "title": "PrivateTestingTransportRequest",
+        "type": "object"
+      },
       "PrivilegedOperationActor": {
         "additionalProperties": false,
         "properties": {
@@ -88544,6 +88640,107 @@
           }
         },
         "summary": "Read original preview reservation classifications"
+      }
+    },
+    "/v1/products/{product}/private-testing-transport/plan": {
+      "post": {
+        "operationId": "plan_private_testing_transport",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^[a-z0-9][a-z0-9_-]*$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrivateTestingTransportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Plan or read back isolated private testing HTTPS/WSS configuration without changes"
       }
     },
     "/v1/products/{product}/production-recipient": {
