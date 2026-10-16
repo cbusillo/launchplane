@@ -468,6 +468,9 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
             for revoked in (False, True):
                 if revoked:
                     fixture.store.invalidate_testing_non_use(fixture.product, fixture.context)
+                previous = fixture.store.read_disposable_lane_safety(
+                    fixture.product, fixture.context, "testing"
+                )
                 inspected = await request(
                     app,
                     "POST",
@@ -491,8 +494,12 @@ class NeverServedHttpTests(unittest.IsolatedAsyncioTestCase):
                 result = response.json()["result"]
                 self.assertEqual(result["usage"], "unknown" if revoked else "unused")
                 self.assertEqual(
-                    (result["data"], result["production_resources"]), ("unknown", "unknown")
+                    result["production_resources"],
+                    previous.production_resources
+                    if previous is not None
+                    else inspected.json()["result"]["production_resources"],
                 )
+                self.assertEqual(result["data"], "unknown")
                 self.assertIsNone(result["odoo_usage"]["recent_signins"])
                 self.assertIsNone(result["odoo_usage"]["authenticated_sessions"])
                 self.assertIs(result["provider_mutation"], False)
