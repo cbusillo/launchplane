@@ -234,11 +234,13 @@ a profile update, never presented as the age of its lanes' verification.
 Topology evidence badges include route, placement and observation evidence;
 runtime observation timestamps describe their own evidence.
 Combined lane and product evidence expire when their topology expires, even if
-the health observation has a later deadline; that does not change the separate
-operational health decision for advisory route records.
+the health observation has a later deadline. Operational health continues to
+evaluate effective checks, runtime identity and incidents separately.
 An explicit no-public-website declaration makes the public endpoint and TLS
 not applicable when no observation is returned, while existing observations,
 private checks, identity and incidents remain visible.
+Retained public ingress observations are labelled as recorded observations on
+no-website products, rather than implying the public route is still required.
 Disabled previews are not applicable; enabled previews without inventory proof
 retain their unknown state and disclose only a recorded count.
 

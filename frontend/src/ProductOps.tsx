@@ -1219,6 +1219,9 @@ function compareEnvironments(
 
 function ingressHeadline(environment: ProductEnvironmentSummary): string {
   if (environment.topology.desired.public_website === "none") {
+    if (environment.public_ingress.observed_at) {
+      return `Recorded public observation: ${environment.public_ingress.summary || humanize(environment.public_ingress.status)}`;
+    }
     const tone = environmentOperationalTone(environment);
     return tone === "verified" ? "Private checks passed" : tone === "danger" ? "Monitoring needs attention" : "Verification incomplete";
   }

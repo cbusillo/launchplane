@@ -68,6 +68,10 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   testing.topology.observed.tls_domains = [tlsObservation];
   await page.getByRole("button", { name: "Refresh current evidence" }).click();
   await expect(privateLane).toContainText(tlsObservation.summary);
+  testing.public_ingress.observed_at = tlsObservation.observed_at;
+  testing.public_ingress.summary = "The previous public route returned a failure.";
+  await page.getByRole("button", { name: "Refresh current evidence" }).click();
+  await expect(privateLane).toContainText(testing.public_ingress.summary);
   await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-workspace-${testInfo.project.name}.png`, fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
