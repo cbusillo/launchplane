@@ -10807,6 +10807,60 @@ class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
 
+    def test_down_lane_usage_and_locked_successor_on_postgres(self) -> None:
+        from tests.test_down_lane_collection import DownLaneCollectionTests
+        from tests.test_lane_usage import LaneUsageTests
+        from tests.test_odoo_testing_drill import TestingDrillTests
+
+        for scenario in (
+            "test_locked_successor_adapter_consumes_the_service_downtime_rule",
+            "test_current_staff_hold_always_blocks_down_lane",
+            "test_private_serving_or_unresolved_endpoint_protects_a_publicly_down_lane",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                fixture = LaneUsageTests(scenario)
+                fixture.database_url = url
+                try:
+                    fixture.setUp()
+                    getattr(fixture, scenario)()
+                finally:
+                    fixture.doCleanups()
+        for usage in ("unknown", "in_use"):
+            with self.subTest(usage=usage), _head_postgres_database() as url:
+                drill = TestingDrillTests()
+                try:
+                    drill.seed(
+                        make_url(url)
+                        .update_query_dict({"options": "-c statement_timeout=1000"})
+                        .render_as_string(hide_password=False)
+                    )
+                    database_errors: list[str] = []
+                    event.listen(
+                        drill.store._engine,
+                        "handle_error",
+                        lambda error: database_errors.append(
+                            type(error.original_exception).__name__
+                        ),
+                    )
+                    drill.assert_down_lane_drill_admitted(usage)
+                    self.assertFalse(database_errors, database_errors)
+                finally:
+                    drill.doCleanups()
+        for scenario in (
+            "test_collect_produces_real_resource_facts_then_admits_down_runtime_repair",
+            "test_expired_positive_usage_is_retained_but_does_not_block_fresh_down_repair",
+            "test_needed_copy_and_failed_physical_inspection_still_refuse",
+            "test_resource_denial_and_binding_drift_do_not_publish",
+            "test_recorded_shared_resources_survive_passing_inspection",
+            "test_positive_usage_reads_are_distinct_but_retained_history_stays_stable",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                collected = DownLaneCollectionTests(scenario)
+                collected.database_url = url
+                result = unittest.TestResult()
+                collected.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_legacy_inspection_with_unrelated_build_history_on_postgres(self) -> None:
         from tests.test_testing_replacement_recovery import TestingReplacementRecoveryTests
 
@@ -12834,6 +12888,20 @@ class RealPostgresRuntimeSettingRemovalTests(unittest.TestCase):
 
 
 class RealPostgresNeverServedTests(unittest.TestCase):
+    def test_usage_revocation_preserves_independent_protection_on_postgres(self) -> None:
+        from tests.test_testing_never_served import NeverServedHttpTests
+
+        for protection in NeverServedHttpTests.revocation_protections:
+            with self.subTest(protection=protection), _head_postgres_database() as url:
+                fixture = NeverServedHttpTests(
+                    "test_usage_revocation_preserves_independent_copy_and_resource_protection"
+                )
+                fixture.database_url = url
+                fixture.revocation_protections = (protection,)
+                result = unittest.TestResult()
+                fixture.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_lifetime_non_use_and_revocation_on_postgres(self) -> None:
         from tests.test_testing_never_served import NeverServedTestingTests
 
