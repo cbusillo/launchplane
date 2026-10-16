@@ -54,7 +54,11 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_lane_hold import read_staff_testing_hold
 from control_plane.provider_operations import _ReservationHeartbeat
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillEvidence
-from control_plane.lane_usage import evaluate_lane_usage, lane_usage_protected
+from control_plane.lane_usage import (
+    evaluate_lane_usage,
+    lane_usage_protected,
+    VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX,
+)
 
 DRILL_INTERVAL_SECONDS = 24 * 60 * 60
 DRILL_TIMEOUT_SECONDS = 2 * 60 * 60
@@ -256,7 +260,7 @@ def collect_drill_admission(
         data="reproducible",
         production_resources="isolated",
         usage_evidence=(
-            "service:verified-down:" + ",".join(decision.observation_ids)
+            VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX + ",".join(decision.observation_ids)
             if decision.reason == "verified_down"
             else reference
         ),
@@ -410,7 +414,7 @@ def require_drill_checkpoint(
             admitted.usage != "unused"
             and not (
                 admitted.usage == "unknown"
-                and admitted.usage_evidence.startswith("service:verified-down:")
+                and admitted.usage_evidence.startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
             )
         )
         or admitted.data != "reproducible"

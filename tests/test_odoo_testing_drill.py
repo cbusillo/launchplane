@@ -311,6 +311,7 @@ class TestingDrillTests(TestingDrillScenario):
 
     def test_down_lane_queues_without_login_history_and_keeps_resource_qualification(self) -> None:
         from tests.support.down_lanes import record_lane_health
+        from control_plane.lane_usage import VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX
 
         record_lane_health(
             self.store,
@@ -331,7 +332,9 @@ class TestingDrillTests(TestingDrillScenario):
         safety = receipt.response_payload["activation_safety"]
         assert isinstance(safety, dict)
         self.assertEqual(safety["usage"], "unknown")
-        self.assertTrue(str(safety["usage_evidence"]).startswith("service:verified-down:"))
+        self.assertTrue(
+            str(safety["usage_evidence"]).startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
+        )
         require_drill_checkpoint(self.store, operation)
 
     def test_idle_lane_runs_without_renewing_general_safety_facts(self) -> None:

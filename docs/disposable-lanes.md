@@ -1067,7 +1067,8 @@ hold. Every account counts, including staff, Client, portal and administrator
 accounts; no maintained account list or current-use registry is required. The
 read excludes logins older than copy preparation, uses a read-only SQL transaction,
 creates no Odoo login, and returns only a
-boolean. Recent sign-ins, a hold or an unreadable check skip the daily slot with
+boolean. A hold skips the daily slot. On a serving or unverified lane, recent
+sign-ins or an unreadable check also skip the slot with
 a value-free reason on the lane's drill evidence. Missing tables/databases,
 runtime mismatch, provider refusal, incomplete reads and unavailable credentials
 cannot mean idle. This is the agreed recent-use check, not proof that an old
@@ -1112,7 +1113,9 @@ does not expire in the middle of that continuously leased restore. A reclaimed
 attempt requires fresh admission. It reads login history from the original served database and its committed
 copy witness, including when web is stopped or the new copy is incomplete;
 copied production login rows in the new database cannot stand in for testing use.
-An unavailable original database still skips rather than assuming non-use.
+An unavailable original login database normally skips rather than assuming
+non-use. The verified-down repair rule above can instead qualify usage while
+preserving UNKNOWN; the independent resource/copy inspection must still pass.
 If the selected new copy already has its web-start gate, reclaim
 skips and preserves it: people may have used it before final completion was
 recorded. A stopped web process alone does not erase that gate's protection.

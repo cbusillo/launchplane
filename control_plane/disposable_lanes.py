@@ -332,9 +332,21 @@ def require_disposable_lane(
             or qualified.usage != "unused"
             or evidence.usage_evidence != NON_USE_EVIDENCE_PREFIX + qualified.proof_sha256
         ):
-            raise DisposableLaneSafetyUnknown(
-                "The never-served generation proof is no longer current."
+            # An invalid lifetime witness is UNKNOWN usage, never evidence that
+            # the current down lane must remain broken. Reapply the same rule.
+            usage = evaluate_lane_usage(
+                usage_store if usage_store is not None else store,
+                profile=profile,
+                target=target,
+                target_id=target_id,
+                instance=instance,
+                usage="unknown",
+                now=now,
             )
+            if usage.protected:
+                raise DisposableLaneSafetyUnknown(
+                    "The never-served generation proof is no longer current."
+                )
     allowed_resources = {"isolated", "separation_ready"} if separation_only else {"isolated"}
     if (
         usage.protected

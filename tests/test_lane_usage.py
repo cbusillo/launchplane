@@ -130,6 +130,21 @@ class LaneUsageTests(unittest.TestCase):
                 self.health(status=status)
                 self.assertTrue(self.decision().protected)
 
+    def test_incomplete_http_failure_is_not_verified_downtime(self) -> None:
+        self.health()
+        for record in self.store.list_public_ingress_observation_records(product=self.product):
+            self.store.write_public_ingress_observation_record(
+                record.model_copy(
+                    update={
+                        "targets": tuple(
+                            probe.model_copy(update={"http_status": None})
+                            for probe in record.targets
+                        ),
+                    }
+                )
+            )
+        self.assertTrue(self.decision().protected)
+
     def test_new_success_cancels_the_down_qualification_immediately(self) -> None:
         self.health()
         self.assertFalse(self.decision().protected)
@@ -245,6 +260,27 @@ class LaneUsageTests(unittest.TestCase):
         self.assertEqual(superseded.status, "superseded")
         self.assertIsNone(superseded.recovery_journal)
         self.assertIsNotNone(superseded.disposable_supersession)
+
+    def test_invalid_lifetime_proof_is_unknown_usage_with_the_same_down_repair_rule(self) -> None:
+        from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
+
+        def evidence() -> None:
+            record_safety(
+                self.store,
+                self.product,
+                self.context,
+                "testing",
+                usage_evidence=NON_USE_EVIDENCE_PREFIX + "a" * 64,
+                observed_at=self.now,
+                expires_at=self.now + timedelta(minutes=5),
+            )
+
+        evidence()
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            self.require()
+        self.health()
+        evidence()
+        self.assertTrue(self.require())
 
     def test_successful_target_inside_failed_aggregate_does_not_mean_down(self) -> None:
         self.health()

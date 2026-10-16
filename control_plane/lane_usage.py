@@ -13,6 +13,8 @@ from control_plane.contracts.public_ingress_monitoring import (
     health_monitor_interval_seconds,
 )
 
+VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX = "service:verified-down:"
+
 
 class UsageStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
@@ -143,6 +145,10 @@ def _down_observations(
                     "self_redirect",
                 }
                 or (probe.http_status is not None and probe.http_status < 500)
+                or (
+                    probe.failure_code in {"http_error", "health_status_error"}
+                    and probe.http_status is None
+                )
                 for probe in record.targets
             ):
                 return ()
