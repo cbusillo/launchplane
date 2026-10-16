@@ -8,24 +8,34 @@ import hashlib
 import logging
 import re
 
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from typing import Literal
 from starlette.requests import Request
 from starlette.concurrency import run_in_threadpool
 
 from control_plane.build_provenance import BuildProvenanceTransport
 from control_plane.contracts.deployment_record import DeploymentRecord, deployment_record_passed
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
     product_profile_record_sha256,
+    product_lane_monitoring_probe_effective,
 )
 from control_plane.contracts.public_ingress_monitoring import (
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
+    PublicIngressIncidentRecord,
+    public_ingress_incident_record_sha256,
     build_public_ingress_observation_id,
 )
 from control_plane.product_reconcile import resolve_build_provenance_transport
+from control_plane.lane_runtime_verification import (
+    monitor_observation_provenance,
+    read_lane_runtime_verification,
+)
 from control_plane.source_control_change import read_branch_revision
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.storage.delivery_evidence import DeliveryEvidenceIndex, DeliveryEvidenceWork
@@ -53,6 +63,149 @@ _NONTERMINAL_CODES = frozenset(
 )
 
 
+class RefusedProductionRequestReconciliation(BaseModel):
+    """An operator attests caller retirement; the service verifies refusal and health."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    incident_id: str = Field(min_length=1)
+    caller_retired: Literal[True]
+    caller_retired_at: AwareDatetime
+    caller_retirement_evidence: str = Field(min_length=1, max_length=2000)
+
+
+def is_guard_refusal_incident(incident: PublicIngressIncidentRecord) -> bool:
+    return bool(
+        incident.instance == "prod"
+        and incident.check_name.startswith(DELIVERY_CHECK_PREFIX)
+        and incident.material_fingerprint
+        and incident.material_fingerprint.route_authority.provider_check
+        == "production-delivery/promotion_required"
+    )
+
+
+def reconcile_refused_production_requests(
+    store: Store,
+    *,
+    requests: tuple[RefusedProductionRequestReconciliation, ...],
+    observed_at: str,
+) -> tuple[str, ...]:
+    """One-time supported disposition; never infer caller retirement from runtime health."""
+    now = _time(observed_at)
+    resolved: list[str] = []
+    for request in requests:
+        incident = store.read_public_ingress_incident_record(request.incident_id)
+        with (
+            store.delivery_evidence_index() as index,
+            index.lane_lock(incident.context, incident.product) as acquired,
+        ):
+            if not acquired:
+                raise ValueError(
+                    "Delivery monitoring is active; retry reconciliation after it finishes."
+                )
+            resolved.append(_reconcile_refused_production_request(store, request=request, now=now))
+    return tuple(resolved)
+
+
+def _reconcile_refused_production_request(
+    store: Store,
+    *,
+    request: RefusedProductionRequestReconciliation,
+    now: datetime,
+) -> str:
+    incident = store.read_public_ingress_incident_record(request.incident_id)
+    observed_at = now.isoformat()
+    if not is_guard_refusal_incident(incident):
+        raise ValueError("Only a promotion guard refusal can be reconciled as refused.")
+    if incident.status == "resolved":
+        return incident.incident_id
+    if not _time(incident.opened_at) <= request.caller_retired_at <= now:
+        raise ValueError("Caller retirement must follow the refused request and precede now.")
+    profile = store.read_product_profile_record(incident.product)
+    lane = next(lane for lane in profile.lanes if lane.instance == "prod")
+    if not profile.is_active or lane.context != incident.context:
+        raise ValueError("The production lane has changed; inspect its current evidence.")
+    history = store.list_public_ingress_observation_records(incident_id=incident.incident_id)
+    if not history or any(
+        observation.status != "fail"
+        or not observation.targets
+        or any(
+            target.url != "provider://launchplane/production-delivery/promotion_required"
+            for target in observation.targets
+        )
+        for observation in history
+    ):
+        raise ValueError("Incident history includes a failure or uncertain outcome beyond refusal.")
+    if any(
+        observation.check_name.startswith("production-request-refused-")
+        and _time(observation.observed_at) >= request.caller_retired_at
+        for observation in store.list_public_ingress_observation_records(
+            product=profile.product,
+            context_name=lane.context,
+            instance_name="prod",
+            check_kind="provider",
+        )
+    ):
+        raise ValueError("A production caller is still making refused requests.")
+    checks = tuple(
+        check
+        for check in lane.health_monitoring.checks
+        if check.enabled
+        and product_lane_monitoring_probe_effective(
+            monitoring_intent=lane.health_monitoring.monitoring_intent,
+            check_kind=check.kind,
+        )
+    )
+    if not checks:
+        raise ValueError("Production has no effective health checks.")
+    for check in checks:
+        observations = store.list_public_ingress_observation_records(
+            product=profile.product,
+            context_name=lane.context,
+            instance_name="prod",
+            check_name=check.name,
+            check_kind=check.kind,
+            limit=1,
+        )
+        if (
+            not observations
+            or observations[0].status != "pass"
+            or _time(observations[0].observed_at) < request.caller_retired_at
+            or monitor_observation_provenance(observations[0], now=now).freshness_status
+            != "verified"
+        ):
+            raise ValueError("Production health must pass freshly after caller retirement.")
+    verification = read_lane_runtime_verification(
+        record_store=store,
+        profile=profile,
+        lane=lane,
+        summary=LaunchplaneLaneSummary(
+            context=lane.context,
+            instance="prod",
+            inventory=store.read_environment_inventory(
+                context_name=lane.context, instance_name="prod"
+            ),
+        ),
+        now=now,
+    )
+    if verification.provenance.freshness_status != "verified":
+        raise ValueError("Current production runtime identity is not verified.")
+    _observe(
+        store,
+        profile,
+        lane,
+        check_name=incident.check_name,
+        failed=False,
+        retired=True,
+        observed_at=observed_at,
+        summary="Production request refused, nothing changed. Caller retired at "
+        f"{request.caller_retired_at.isoformat()}; evidence: {request.caller_retirement_evidence}. "
+        "Production health and runtime identity remain verified.",
+        expected_incident_sha256=public_ingress_incident_record_sha256(incident),
+    )
+    return incident.incident_id
+
+
 def _candidate_key(candidate: str) -> str:
     return hashlib.sha256(candidate.strip().encode()).hexdigest()[:24]
 
@@ -68,6 +221,8 @@ def _observe(
     observed_at: str,
     reason: str = "delivery_failed",
     retired: bool = False,
+    refused: bool = False,
+    expected_incident_sha256: str = "",
 ) -> None:
     observation = PublicIngressObservationRecord(
         record_id=build_public_ingress_observation_id(
@@ -99,24 +254,52 @@ def _observe(
             ),
         ),
     )
+    if refused:
+        observation = observation.model_copy(
+            update={
+                "status": "skipped",
+                "failure_code": None,
+                "targets": tuple(
+                    target.model_copy(update={"status": "skipped", "failure_code": None})
+                    for target in observation.targets
+                ),
+            }
+        )
     if retired:
         observation = observation.model_copy(
             update={
                 "status": "skipped",
                 "failure_code": "monitoring_intent_changed",
                 "purpose": "reconciliation",
-                "targets": (),
+                "targets": (
+                    PublicIngressTargetObservation(
+                        target="monitoring_intent",
+                        url="monitoring-intent://production-delivery",
+                        status="skipped",
+                        failure_code="monitoring_intent_changed",
+                        summary=summary,
+                    ),
+                ),
             }
         )
     # On the service store, observation, incident and notification outbox commit together.
     result = _store_monitor_observation(
         record_store=store,
         record=observation,
-        incident_eligible=not retired,
+        incident_eligible=not (retired or refused),
         expected_profile_sha256=product_profile_record_sha256(profile),
         recovery_observation_threshold=1,
-        notify=not (retired and check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK),
+        notify=not (
+            refused
+            or (
+                retired
+                and (
+                    check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK or expected_incident_sha256
+                )
+            )
+        ),
         notification_drivers=None,
+        expected_incident_sha256=expected_incident_sha256,
     )
     if result.authority_changed:
         raise RuntimeError("Production delivery alert authority changed during persistence")
@@ -269,6 +452,19 @@ def _record_rejected_payload(
         from control_plane.workflows.generic_web_deploy import normalize_generic_web_artifact_id
 
         candidate = normalize_generic_web_artifact_id(profile=profile, artifact_id=candidate)
+    if reason == "promotion_required":
+        _observe(
+            store,
+            profile,
+            lane,
+            check_name="production-request-refused-" + _candidate_key(candidate + trace_id),
+            failed=False,
+            refused=True,
+            summary=f"Production request refused, nothing changed; promotion_required; trace: {trace_id}.",
+            observed_at=utc_now_timestamp(),
+            reason=reason,
+        )
+        return
     record_production_delivery_failure(
         store,
         profile,

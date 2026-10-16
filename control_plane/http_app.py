@@ -1,3 +1,8 @@
+from control_plane.production_delivery_monitor import (
+    RefusedProductionRequestReconciliation,
+    reconcile_refused_production_requests,
+)
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.dokploy_target_comparison import (
     DokployTargetComparisonEvidenceUnavailableError,
     require_provider_target_expectation,
@@ -2991,6 +2996,9 @@ class PublicIngressMonitorRunOnceRequest(BaseModel):
     product: str = "launchplane"
     timeout_seconds: int = Field(default=10, ge=1, le=120)
     notify: bool = True
+    refused_production_requests: tuple[RefusedProductionRequestReconciliation, ...] = Field(
+        default=(), max_length=100
+    )
 
     @model_validator(mode="after")
     def _validate_request(self) -> "PublicIngressMonitorRunOnceRequest":
@@ -26323,6 +26331,29 @@ def create_launchplane_fastapi_app(
             ),
         )
         result = monitor_result.model_dump(mode="json")
+        if monitor_request.refused_production_requests:
+            if not isinstance(record_store, (PostgresRecordStore, FilesystemRecordStore)):
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message="Refusal reconciliation requires a supported record store.",
+                )
+            try:
+                resolved_refusals = await run_in_threadpool(
+                    reconcile_refused_production_requests,
+                    record_store,
+                    requests=monitor_request.refused_production_requests,
+                    observed_at=utc_now_timestamp(),
+                )
+            except (ValueError, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="refused_request_reconciliation_blocked",
+                    message=str(error),
+                ) from error
+            result["refused_production_requests_resolved"] = list(resolved_refusals)
         response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
         if idempotency_store is not None and normalized_idempotency_key:
             idempotency_store.write_idempotency_record(

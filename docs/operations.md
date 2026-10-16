@@ -1901,6 +1901,12 @@ material-event deliveries in the same transaction as the observation and inciden
 Production delivery has separate `production-delivery-*` provider incidents.
 Rejected production deploy/promotion requests record a bounded reason code and
 the caller's trace even when refusal precedes deployment-record creation.
+The pre-effect promotion guard's HTTP 409 `promotion_required` is a correct
+refusal, not a failed delivery: it records a skipped
+`production-request-refused-*` observation with the trace and sends no failure
+notification. It neither changes production nor resolves any existing incident.
+Failures after a deploy starts, other rejections, and uncertain outcomes remain
+delivery incidents.
 The service's independent delivery-monitor thread checks terminal deployment,
 promotion and queued Odoo release failures once per minute, including products
 without HTTP health checks. As with other incidents, existing matching
@@ -1964,6 +1970,36 @@ incident. A later verified source read resolves only that monitoring incident.
 Explicit lifecycle retirement resolves automatic delivery monitoring; prelaunch
 products have no automatic production deadline. This is notification evidence,
 never acceptance or a release gate.
+
+Historical promotion-guard incidents can be disposed of once their caller is
+retired and production remains healthy. Use the deployed service's existing
+`POST /v1/products/public-ingress-monitor/run-once` with its existing
+`public_ingress_monitor.run_once` authority and an `Idempotency-Key`. Add
+`refused_production_requests`, a list of objects containing `incident_id`,
+`caller_retired: true`, `caller_retired_at` (a timezone-aware timestamp), and
+`caller_retirement_evidence` (the merged change or other explicit evidence that
+the admin checked). Caller retirement is an admin attestation, never an
+inference from health or elapsed time. Verify all old callers/in-flight jobs have
+stopped before attesting it. No new grant, release, or hand-edited record is needed.
+
+That run first performs normal monitoring. Reconciliation then requires every
+effective production check to be fresh and passing after caller retirement,
+with current runtime identity verified. It rejects continuing refusal observations,
+non-refusal or mixed/uncertain incident history, changed lane authority, and
+concurrent incident changes. It shares the delivery monitor's lane lock. Each
+qualified occurrence resolves independently through the normal atomic incident,
+event and reminder transition, with “Production request refused, nothing changed”
+and the retirement evidence in its summary. Its original observations and trace
+remain linked; `resolution_reason=monitoring_intent_changed` records retirement
+of the former incident classification, not a successful deployment. The response's
+`refused_production_requests_resolved` lists the disposed occurrences. A blocked
+entry returns 409 `refused_request_reconciliation_blocked`; earlier entries may
+already have resolved. Read back before retrying; already-resolved entries are
+harmless. Reconciliation sends no recovery notification. The normal outbox worker
+skips its queued failure notices before resolving a destination; interrupted
+provider sends retain an unknown outcome. Read the incident list/detail APIs to
+verify the resulting disposition. Deploying the source alone does not clear the
+historical incidents.
 
 Exact replays of an unresolved candidate retain its original reason and trace and
 reuse the incident/outbox. A different failure stage updates that incident, and

@@ -41716,6 +41716,15 @@
             "title": "Product",
             "type": "string"
           },
+          "refused_production_requests": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RefusedProductionRequestReconciliation"
+            },
+            "maxItems": 100,
+            "title": "Refused Production Requests",
+            "type": "array"
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -42724,6 +42733,41 @@
           "description"
         ],
         "title": "RecordFailure",
+        "type": "object"
+      },
+      "RefusedProductionRequestReconciliation": {
+        "additionalProperties": false,
+        "description": "An operator attests caller retirement; the service verifies refusal and health.",
+        "properties": {
+          "caller_retired": {
+            "const": true,
+            "title": "Caller Retired",
+            "type": "boolean"
+          },
+          "caller_retired_at": {
+            "format": "date-time",
+            "title": "Caller Retired At",
+            "type": "string"
+          },
+          "caller_retirement_evidence": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Caller Retirement Evidence",
+            "type": "string"
+          },
+          "incident_id": {
+            "minLength": 1,
+            "title": "Incident Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "incident_id",
+          "caller_retired",
+          "caller_retired_at",
+          "caller_retirement_evidence"
+        ],
+        "title": "RefusedProductionRequestReconciliation",
         "type": "object"
       },
       "ReleaseChecklist": {

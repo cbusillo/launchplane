@@ -1011,6 +1011,7 @@ def _store_monitor_observation(
     recovery_observation_threshold: int,
     notify: bool,
     notification_drivers: PublicIngressNotificationDrivers | None,
+    expected_incident_sha256: str = "",
 ) -> _StoredMonitorTransition:
     transition_writer = getattr(record_store, "write_public_ingress_transition_with_outbox", None)
     plan: _PlannedIncidentTransition | None = None
@@ -1022,6 +1023,11 @@ def _store_monitor_observation(
             incident_eligible=incident_eligible,
             recovery_observation_threshold=recovery_observation_threshold,
         )
+        if (
+            expected_incident_sha256
+            and plan.expected_open_incident_sha256 != expected_incident_sha256
+        ):
+            raise ValueError("Incident changed during reconciliation; read its evidence again.")
         outbox_deliveries = (
             _public_ingress_notification_outbox_deliveries(
                 record_store=record_store,
@@ -1492,10 +1498,7 @@ def _plan_public_ingress_incident_transition(
             incident=existing,
             record=record,
             reason="monitoring_intent_changed",
-            summary=(
-                "Monitoring intent changed; this check is no longer incident-eligible. "
-                f"Previous incident evidence: {existing.summary}"
-            ),
+            summary=(f"{record.summary} Previous incident evidence: {existing.summary}"),
         )
         reminder_states = _resolved_reminder_states(
             record_store=record_store,
@@ -3467,7 +3470,14 @@ def deliver_public_ingress_notification_outbox_delivery(
         destination_payload = _dict_payload(payload.get("destination"))
         if record_store is not None:
             incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
-            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK:
+            from control_plane.production_delivery_monitor import is_guard_refusal_incident
+
+            retired_refusal = (
+                incident.status == "resolved"
+                and incident.resolution_reason == "monitoring_intent_changed"
+                and is_guard_refusal_incident(incident)
+            )
+            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK or retired_refusal:
                 # An earlier send may have happened; preserve its uncertain outcome.
                 if record.provider_operation_key:
                     return record.model_copy(
@@ -3482,13 +3492,17 @@ def deliver_public_ingress_notification_outbox_delivery(
                     {
                         **attempt_payload,
                         "delivery_status": "skipped",
-                        "action": "retired_source_lag",
+                        "action": "retired_production_refusal"
+                        if retired_refusal
+                        else "retired_source_lag",
                     }
                 )
                 return record.model_copy(
                     update={
                         "state": "delivered",
-                        "action": "skipped_retired_source_lag",
+                        "action": "skipped_retired_production_refusal"
+                        if retired_refusal
+                        else "skipped_retired_source_lag",
                         "error_code": "",
                         "lease_owner": "",
                         "lease_expires_at": "",
