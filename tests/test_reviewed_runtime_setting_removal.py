@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.runtime_setting_removal import RuntimeSettingRemovalRequest, REVIEW_ROUTE
+from control_plane.runtime_setting_removal import RuntimeSettingRemovalRequest, REVIEW_ROUTE, ROUTE
 from control_plane.service_auth import (
     GitHubHumanIdentity,
     LocalAdminIdentity,
@@ -132,7 +132,13 @@ class RuntimeRemovalTests(unittest.TestCase):
         second = self.call(request())
         self.assertNotEqual(first["record_sha256"], second["record_sha256"])
         self.assertNotEqual(first["plan_sha256"], second["plan_sha256"])
-        self.assertNotIn("private_nonce", json.dumps(first))
+        archive = self.store.read_idempotency_record(
+            scope="runtime-setting-review",
+            route_path=REVIEW_ROUTE,
+            idempotency_key=str(first["review_id"]),
+        )
+        assert archive is not None
+        self.assertNotIn(archive.response_payload["private_nonce"], json.dumps(first))
         self.assertEqual(self.store.list_runtime_environment_records(), (self.before,))
 
     def test_last_key_removes_record_and_keeps_delete_event_and_preimage(self) -> None:
@@ -272,14 +278,14 @@ class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
             headers = {"Authorization": "Bearer reader-token"}
             async with lifespan_client(app) as client:
                 dry = await client.post(
-                    "/v1/admin/runtime-settings/removal",
+                    ROUTE,
                     json=request().model_dump(mode="json"),
                     headers=headers,
                 )
                 self.assertEqual(dry.status_code, 200, dry.text)
                 result = dry.json()["result"]
                 applied = await client.post(
-                    "/v1/admin/runtime-settings/removal",
+                    ROUTE,
                     json=request(
                         mode="apply",
                         review_id=result["review_id"],
@@ -297,7 +303,7 @@ class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
             headers, _, _ = _browser_headers(sessions, admin())
             async with lifespan_client(app) as client:
                 dry = await client.post(
-                    "/v1/admin/runtime-settings/removal",
+                    ROUTE,
                     json=request().model_dump(mode="json"),
                     headers=headers,
                 )
@@ -309,7 +315,7 @@ class RuntimeRemovalHttpTests(unittest.IsolatedAsyncioTestCase):
                     reviewed_plan_sha256=plan["plan_sha256"],
                 )
                 applied = await client.post(
-                    "/v1/admin/runtime-settings/removal",
+                    ROUTE,
                     json=body.model_dump(mode="json"),
                     headers={**_browser_headers(sessions, admin())[0], "Idempotency-Key": "http"},
                 )

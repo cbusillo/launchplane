@@ -101,6 +101,19 @@ class WorkflowRulePlanTests(unittest.TestCase):
         self.assertEqual(selected["scope"]["products"], list(policy.github_actions[-1].products))
         self.assertFalse(result["apply_supported"])
 
+    def test_all_actions_rule_is_broad_even_with_an_exact_caller(self) -> None:
+        original = mixed_policy()
+        for actions in ((), ("*",)):
+            with self.subTest(actions=actions):
+                rule = original.github_actions[0].model_copy(
+                    update={"actions": actions, "instances": ()}
+                )
+                policy = original.model_copy(update={"github_actions": (rule,)})
+                result = workflow_rule_retirement_plan(_record(policy=policy), request(policy))
+                selected = result["selected_rules"][0]  # type: ignore[index]
+                self.assertTrue(selected["broad_or_shared_scope"])
+                self.assertFalse(result["apply_supported"])
+
     def test_policy_drift_fingerprint_identity_and_duplicate_selection_refuse(self) -> None:
         policy = mixed_policy()
         active = _record(policy=policy)

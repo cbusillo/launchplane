@@ -60,6 +60,8 @@ def shared_scope(rule: GitHubActionsPolicyRule) -> bool:
         not (rule.workflow_refs or rule.job_workflow_refs)
         or not rule.products
         or not rule.contexts
+        or not rule.actions
+        or any(any(c in action for c in "*?[") for action in rule.actions)
         or any(
             len(values) > 1 or any(any(c in value for c in "*?[") for value in values)
             for values in selectors
