@@ -18,6 +18,36 @@ from control_plane.contracts.production_recipient import (
 )
 from control_plane.production_recipient import ROUTE
 from control_plane.production_recipient_recovery import RECOVERY_ROUTE
+from control_plane.production_recipient_continuation import (
+    CONTINUATION_ROUTE,
+    RecipientContinuationRequest,
+    RecipientContinuationPlan,
+)
+from control_plane.production_recipient_cutover import (
+    CUTOVER_ROUTE,
+    RecipientCutoverRequest,
+    RecipientCutoverPlan,
+)
+
+from control_plane.production_recipient_writer_control import (
+    WRITER_ROUTE,
+    RecipientWriterRequest,
+    RecipientWriterPlan,
+)
+
+
+from control_plane.production_recipient_release_recovery import (
+    RELEASE_RECOVERY_ROUTE,
+    RecipientReleaseRecoveryRequest,
+    RecipientReleaseRecoveryPlan,
+)
+
+
+from control_plane.production_recipient_inverse import (
+    INVERSE_ROUTE,
+    RecipientInverseRequest,
+    RecipientInversePlan,
+)
 
 
 def save(path: Path, payload: object) -> None:
@@ -39,7 +69,7 @@ def save(path: Path, payload: object) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply", "readback", "receipt"))
+    parser.add_argument("mode", choices=("dry-run", "apply", "readback", "receipt", "custody"))
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--product", required=True)
     parser.add_argument("--request-file", type=Path, required=True)
@@ -49,10 +79,32 @@ def main() -> int:
     parser.add_argument("--config")
     parser.add_argument("--env-config")
     parser.add_argument("--url")
-    parser.add_argument(
+    operation = parser.add_mutually_exclusive_group()
+    operation.add_argument(
+        "--continuation", action="store_true", help="Review retained same-key custody supersession."
+    )
+    operation.add_argument(
+        "--cutover",
+        action="store_true",
+        help="Arm exact intent; Client acceptance starts the release.",
+    )
+    operation.add_argument(
         "--recovery",
         action="store_true",
         help="Qualify isolated cold-data recovery of the exact preparation.",
+    )
+    operation.add_argument(
+        "--writer-control", action="store_true", help="Coordinate a recorded testing API writer."
+    )
+    operation.add_argument(
+        "--release-recovery",
+        action="store_true",
+        help="Reconcile the original Client release operation.",
+    )
+    operation.add_argument(
+        "--inverse",
+        action="store_true",
+        help="Review the exact scoped inverse through existing production rollback authority.",
     )
     args = parser.parse_args()
     submitted = False
@@ -70,17 +122,88 @@ def main() -> int:
         transport["validate_service_url"](settings["service_url"])
         if not settings["token"]:
             raise ValueError("The existing caller credential is unavailable.")
-        request_type = RecipientRecoveryRequest if args.recovery else ProductionRecipientRequest
-        result_type = RecipientRecoveryPlan if args.recovery else ProductionRecipientPlan
+        request_type: (
+            type[ProductionRecipientRequest]
+            | type[RecipientRecoveryRequest]
+            | type[RecipientContinuationRequest]
+            | type[RecipientCutoverRequest]
+            | type[RecipientWriterRequest]
+            | type[RecipientReleaseRecoveryRequest]
+            | type[RecipientInverseRequest]
+        )
+        result_type: (
+            type[ProductionRecipientPlan]
+            | type[RecipientRecoveryPlan]
+            | type[RecipientContinuationPlan]
+            | type[RecipientCutoverPlan]
+            | type[RecipientWriterPlan]
+            | type[RecipientReleaseRecoveryPlan]
+            | type[RecipientInversePlan]
+        )
+        if args.inverse:
+            request_type, result_type, route = (
+                RecipientInverseRequest,
+                RecipientInversePlan,
+                INVERSE_ROUTE,
+            )
+        elif args.release_recovery:
+            request_type, result_type, route = (
+                RecipientReleaseRecoveryRequest,
+                RecipientReleaseRecoveryPlan,
+                RELEASE_RECOVERY_ROUTE,
+            )
+        elif args.writer_control:
+            request_type, result_type, route = (
+                RecipientWriterRequest,
+                RecipientWriterPlan,
+                WRITER_ROUTE,
+            )
+        elif args.continuation:
+            request_type, result_type, route = (
+                RecipientContinuationRequest,
+                RecipientContinuationPlan,
+                CONTINUATION_ROUTE,
+            )
+        elif args.cutover:
+            request_type, result_type, route = (
+                RecipientCutoverRequest,
+                RecipientCutoverPlan,
+                CUTOVER_ROUTE,
+            )
+        elif args.recovery:
+            request_type, result_type, route = (
+                RecipientRecoveryRequest,
+                RecipientRecoveryPlan,
+                RECOVERY_ROUTE,
+            )
+        else:
+            request_type, result_type, route = (
+                ProductionRecipientRequest,
+                ProductionRecipientPlan,
+                ROUTE,
+            )
+        if (args.continuation or args.cutover or args.release_recovery) and args.mode in {
+            "receipt",
+            "custody",
+        }:
+            raise ValueError("Use readback for this control operation.")
         draft = request_type.model_validate(json.loads(args.request_file.read_text()))
         if draft.mode != "dry-run" or draft.reviewed_plan_sha256:
             raise ValueError("The request file must be the original planning request.")
         body = draft.model_dump(mode="json")
-        path = (RECOVERY_ROUTE if args.recovery else ROUTE).format(product=args.product)
+        if isinstance(draft, RecipientContinuationRequest):
+            if args.idempotency_key and args.idempotency_key != draft.original_key:
+                raise ValueError("Continuation retains the original preparation key.")
+            args.idempotency_key = draft.original_key
+        path = route.format(product=args.product)
         if args.mode == "apply":
+            evidence = json.loads(args.evidence_file.read_text())
+            if args.release_recovery and not args.idempotency_key.strip():
+                args.idempotency_key = RecipientReleaseRecoveryPlan.model_validate(
+                    evidence["result"]
+                ).original_key
             if not args.idempotency_key.strip() or not args.reviewed_dry_run:
                 raise ValueError("Apply requires saved review and the original stable key.")
-            evidence = json.loads(args.evidence_file.read_text())
             if evidence["request"] != body or evidence["path"] != path:
                 raise ValueError("The review belongs to another preparation.")
             body["reviewed_plan_sha256"] = result_type.model_validate(
@@ -100,7 +223,11 @@ def main() -> int:
             timeout=900,
             **(
                 {"idempotency_key": args.idempotency_key}
-                if submitted or args.mode == "receipt"
+                if submitted
+                or args.mode in {"receipt", "custody"}
+                or args.continuation
+                or args.release_recovery
+                or args.writer_control
                 else {}
             ),
         )

@@ -62,7 +62,7 @@ class ProductionRecipientRequest(BaseModel):
     database_service: str = Field(min_length=1)
     service_limits: dict[str, RecipientServiceLimits]
     upstreams: tuple[RecipientUpstream, ...] = ()
-    mode: Literal["dry-run", "apply", "readback", "receipt"] = "dry-run"
+    mode: Literal["dry-run", "apply", "readback", "receipt", "custody"] = "dry-run"
     reason: str = Field(min_length=1)
     reviewed_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
@@ -124,19 +124,44 @@ class ProductionRecipientRecord(BaseModel):
     prior_attempts: list[dict[str, Any]] = Field(default_factory=list)
     upstream_proof: dict[str, Any] = Field(default_factory=dict)
     recovery_proof: dict[str, Any] = Field(default_factory=dict)
+    publication: dict[str, Any] = Field(default_factory=dict)
+    continuation: dict[str, Any] = Field(default_factory=dict)
+    activation: dict[str, Any] = Field(default_factory=dict)
+    activation_history: list[dict[str, Any]] = Field(default_factory=list)
+    execution: dict[str, Any] = Field(default_factory=dict)
+    writer_custody: list[dict[str, Any]] = Field(default_factory=list)
+    execution_fence_version: int = 0
 
     @property
     def volumes(self) -> dict[str, str]:
         return {"database": self.namespace + "-db", "config": self.namespace + "-config"}
 
 
+class RecipientWriterReference(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    operation_id: str = Field(min_length=1)
+    binding_id: str = Field(min_length=1)
+    preparation_plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    action: Literal["pause", "resume"]
+
+
 class ProductionRecipientPlan(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    writer_operations: tuple[RecipientWriterReference, ...] = Field(
+        default=(),
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     product: str
     context: str
     instance: Literal["prod"] = "prod"
     plan_sha256: str
+    publication_sha256: str = Field(
+        default="",
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     source_commit: str
     image_reference: str
     retained_binding_sha256: str
@@ -149,6 +174,8 @@ class ProductionRecipientPlan(BaseModel):
     qualified_at: str = ""
     upstream_qualified: bool = False
     recovery_qualified: bool = False
+    custody_sha256: str = ""
+    phase: str = "prepared"
 
 
 class RecipientRecoveryRequest(BaseModel):
