@@ -13,14 +13,19 @@ type TransitionRequest = ApplyProductGenericWebTransitionData["body"];
 type Declarations = Pick<TransitionRequest, "lanes" | "preview">;
 interface Review { request: TransitionRequest; changed: boolean; driverBefore: string }
 
+function previewDeclarations(preview: Declarations["preview"]): Declarations["preview"] {
+  if (!preview) return preview;
+  const extensions = preview.generic_web_extensions;
+  return {
+    data_transport_mode: preview.data_transport_mode,
+    ...(extensions && (extensions.maintenance?.length || extensions.schedules?.length || extensions.verification_extension) ? { generic_web_extensions: extensions } : {}),
+    transport_extension: preview.transport_extension ?? "",
+    transport_database_prefix: preview.transport_database_prefix ?? "",
+    app_name_suffix: preview.app_name_suffix ?? "",
+  };
+}
 function declarations(profile: LaunchplaneProductProfileRecord): Declarations {
-  return { lanes: profile.lanes.map(lane => ({ context: lane.context, instance: lane.instance, extensions: lane.generic_web_extensions ?? { maintenance: [], schedules: [] } })), preview: {
-    data_transport_mode: profile.preview.data_transport_mode,
-    generic_web_extensions: profile.preview.generic_web_extensions,
-    transport_extension: profile.preview.transport_extension ?? "",
-    transport_database_prefix: profile.preview.transport_database_prefix ?? "",
-    app_name_suffix: profile.preview.app_name_suffix ?? "",
-  } };
+  return { lanes: profile.lanes.map(lane => ({ context: lane.context, instance: lane.instance, extensions: lane.generic_web_extensions ?? { maintenance: [], schedules: [] } })), preview: previewDeclarations(profile.preview) };
 }
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(",")}]`;
@@ -122,7 +127,7 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
     try {
       const profile = await refresh(controller.signal);
       if (!profile) return;
-      if (expected && (profile.driver_id !== "generic-web" || stable(declarations(profile)) !== stable({ lanes: expected.lanes, preview: expected.preview }))) {
+      if (expected && (profile.driver_id !== "generic-web" || stable(declarations(profile)) !== stable({ lanes: expected.lanes, preview: previewDeclarations(expected.preview) }))) {
         setError("Apply completed, but the current declarations differ. Read the profile before another change.");
       } else { setNotice(expected ? "Shared-web profile applied and read back. Testing qualification is still required; no production deployment was started." : `Read back: ${profile.driver_id}.`); onSaved(); }
     } catch (failure) { if (!controller.signal.aborted) setError(`Profile read-back could not be confirmed. ${failure instanceof Error ? failure.message : "Read failed."}`); }
@@ -151,7 +156,7 @@ export function ProductGenericWebTransitionPanel({ product, fixtureMode, onSaved
       }
       const profile = await refresh(controller.signal);
       if (!profile || controller.signal.aborted) return;
-      const matchesOriginal = review && profile.driver_id === "generic-web" && stable(declarations(profile)) === stable({ lanes: review.request.lanes, preview: review.request.preview });
+      const matchesOriginal = review && profile.driver_id === "generic-web" && stable(declarations(profile)) === stable({ lanes: review.request.lanes, preview: previewDeclarations(review.request.preview) });
       if (apply.reconcile(identity, { trace_id: receipt.trace_id, original_trace_id: receipt.original_trace_id, replayed: true })) {
         setReview(null); try { sessionStorage.removeItem(storageKey); } catch { /* Receipt settled the operation. */ }
         if (!matchesOriginal) {
