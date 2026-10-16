@@ -56,6 +56,36 @@
           "apply",
           "readback"
         ],
+        "operation_id": "retire_incomplete_testing_generation",
+        "path": "/v1/products/{product}/testing-generation-retirement",
+        "purpose": "Retain an incomplete legacy testing generation and its unknown history without releasing the operation; an isolated successor remains separately qualified.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "a647fa4ac57158aebdfc4fecde23df3299549aea436c09259b8c1ab0746e0e81",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
         "operation_id": "prepare_fresh_testing_bootstrap",
         "path": "/v1/products/{product}/testing-replacement-bootstrap",
         "purpose": "Bind the exact fresh Odoo testing generation to its independent hostname and sanitized production-copy reconcile path; runtime proof remains separate.",
@@ -626,8 +656,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "220fadc40d80b7eb4dbfe2229a2506c9d731409a"
+    "source_commit_sha": "f8c067ea2b8afdf8cfd9d5dab221006ddf4db7cd"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "47d51593c1aa8850a76acc2960805fb1a9bf596913fc246380619165d53bcec8"
+  "semantic_digest_sha256": "c1b760646804a64099e73b81cd6fa05f76e409d6988f7b724da893a560274411"
 }
