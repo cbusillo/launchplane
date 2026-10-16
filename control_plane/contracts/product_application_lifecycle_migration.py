@@ -3,6 +3,7 @@
 from copy import deepcopy
 from control_plane.contracts.product_profile_record import (
     APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION,
+    LaunchplaneProductProfileRecord,
 )
 
 
@@ -30,6 +31,14 @@ def migrate_product_application_lifecycle_payload(payload: object) -> object:
         preview["generic_web_extensions"] = extensions
     if converted:
         migrated["schema_version"] = APPLICATION_LIFECYCLE_PROFILE_SCHEMA_VERSION
+        try:
+            LaunchplaneProductProfileRecord.model_validate(
+                migrated, context={"stored_product_profile": True}
+            )
+        except ValueError:
+            raise ValueError(
+                "Stored profile lifecycle conversion conflicts with existing declarations; review its testing/preview commands before upgrade."
+            ) from None
     return migrated
 
 
@@ -54,16 +63,35 @@ def _convert(extensions: dict[str, object], *, preview: bool) -> None:
     existing = extensions.setdefault("maintenance", [])
     if not isinstance(existing, list):
         raise ValueError("Legacy application maintenance must be a list.")
-    names = {item["name"] for item in existing}
-    existing.extend(item for item in commands if item["name"] not in names)
     schedules = extensions.setdefault("schedules", [])
     if not isinstance(schedules, list):
         raise ValueError("Legacy application schedules must be a list.")
-    if not any(item["name"] == "verireel-billing-recovery" for item in schedules):
+    names = {item["name"] for item in existing}
+    schedule_names = {item["name"] for item in schedules}
+    for command in commands:
+        if command["name"] in names or any(
+            item.get("command") == command["command"]
+            and bool(item.get("on_reset", False)) == bool(command.get("on_reset", False))
+            for item in existing
+        ):
+            continue
+        if command["name"] in schedule_names:
+            raise ValueError(
+                "Legacy maintenance name conflicts with a declared schedule; review the testing/preview profile before upgrade."
+            )
+        existing.append(command)
+    recovery_command = "sh ./docker/invoke-billing-recovery-cron.sh --target-url 'http://127.0.0.1:3000/api/cron/billing-recovery'"
+    if any(item.get("command") == recovery_command for item in schedules):
+        return
+    if "verireel-billing-recovery" not in schedule_names:
+        if "verireel-billing-recovery" in names:
+            raise ValueError(
+                "Legacy schedule name conflicts with a declared maintenance command; review the testing/preview profile before upgrade."
+            )
         schedules.append(
             {
                 "name": "verireel-billing-recovery",
-                "command": "sh ./docker/invoke-billing-recovery-cron.sh --target-url 'http://127.0.0.1:3000/api/cron/billing-recovery'",
+                "command": recovery_command,
                 "cron_expression": "12,27,42,57 * * * *" if preview else "2,17,32,47 * * * *",
                 "timeout_seconds": 180,
             }

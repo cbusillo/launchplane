@@ -81,6 +81,32 @@ class ApplicationLifecycleMigrationTests(unittest.TestCase):
             migrated["lanes"][0]["generic_web_extensions"]["maintenance"],
         )
 
+    def test_existing_commands_under_other_names_are_not_duplicated(self) -> None:
+        baseline = cast(
+            dict[str, Any], migrate_product_application_lifecycle_payload(self.payload())
+        )
+        payload = self.payload()
+        existing = deepcopy(baseline["lanes"][0]["generic_web_extensions"])
+        existing["maintenance"][0]["name"] = "custom-migrate"
+        existing["schedules"][0]["name"] = "custom-billing"
+        payload["lanes"][0]["generic_web_extensions"] = existing
+        migrated = cast(dict[str, Any], migrate_product_application_lifecycle_payload(payload))
+        self.assertEqual(migrated["lanes"][0]["generic_web_extensions"], existing)
+
+    def test_cross_kind_name_collision_refuses_without_modifying_the_input(self) -> None:
+        baseline = cast(
+            dict[str, Any], migrate_product_application_lifecycle_payload(self.payload())
+        )
+        payload = self.payload()
+        command_name = baseline["lanes"][0]["generic_web_extensions"]["maintenance"][0]["name"]
+        payload["lanes"][0]["generic_web_extensions"]["schedules"] = [
+            {"name": command_name, "command": "./different-job", "cron_expression": "*/15 * * * *"}
+        ]
+        original = deepcopy(payload)
+        with self.assertRaises(ValueError):
+            migrate_product_application_lifecycle_payload(payload)
+        self.assertEqual(payload, original)
+
     def test_database_migration_persists_declarations_without_production_edits(self) -> None:
         import importlib
         from unittest.mock import patch

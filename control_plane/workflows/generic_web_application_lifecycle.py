@@ -322,28 +322,37 @@ class RecordedPreviewApplicationLifecycle(DokployApplicationLifecycle):
             return
         snapshot = self.snapshot
         qualified = snapshot.state == "qualified"
-        self.store.write_deployment_record(
-            DeploymentRecord(
-                record_id=self.record_id,
-                artifact_identity=ArtifactIdentityReference(artifact_id=snapshot.artifact_id),
-                context=snapshot.context,
-                instance=snapshot.instance,
-                source_git_ref=snapshot.source_git_ref,
-                delegated_executor="control-plane.preview-application-lifecycle",
-                deploy=DeploymentEvidence(
-                    target_name=self.application_id,
-                    target_type="application",
-                    deploy_mode="preview-lifecycle",
-                    status="pass" if qualified else "pending",
-                    started_at=snapshot.captured_at,
-                ),
-                post_deploy_update=PostDeployUpdateEvidence(
-                    attempted=qualified or self.effect_attempted,
-                    status="pass" if qualified else "fail" if self.effect_attempted else "skipped",
-                    evidence=snapshot.evidence(),
-                ),
+        try:
+            self.store.write_deployment_record(
+                DeploymentRecord(
+                    record_id=self.record_id,
+                    artifact_identity=ArtifactIdentityReference(artifact_id=snapshot.artifact_id),
+                    context=snapshot.context,
+                    instance=snapshot.instance,
+                    source_git_ref=snapshot.source_git_ref,
+                    delegated_executor="control-plane.preview-application-lifecycle",
+                    deploy=DeploymentEvidence(
+                        target_name=self.application_id,
+                        target_type="application",
+                        deploy_mode="preview-lifecycle",
+                        status="pass" if qualified else "pending",
+                        started_at=snapshot.captured_at,
+                    ),
+                    post_deploy_update=PostDeployUpdateEvidence(
+                        attempted=qualified or self.effect_attempted,
+                        status="pass"
+                        if qualified
+                        else "fail"
+                        if self.effect_attempted
+                        else "skipped",
+                        evidence=snapshot.evidence(),
+                    ),
+                )
             )
-        )
+        except Exception as error:
+            raise click.ClickException(
+                "Preview application lifecycle receipt storage failed."
+            ) from error
 
     def capture(self) -> None:
         super().capture()
@@ -428,6 +437,8 @@ def preview_application_lifecycle(
             extensions=extensions,
             managed_names=tuple(item.name for item in extensions.schedules),
         )
+    if not snapshot.managed_names and not snapshot.extensions.maintenance:
+        store = None
     return RecordedPreviewApplicationLifecycle(
         host,
         token,
@@ -438,3 +449,15 @@ def preview_application_lifecycle(
         store=store,
         record_id=record_id,
     )
+
+
+def recover_preview_application_lifecycle(
+    lifecycle: DokployApplicationLifecycle,
+    *,
+    image_effect_attempted: bool,
+    target_restored: bool,
+) -> None:
+    if image_effect_attempted or not target_restored or lifecycle.snapshot.resume_from_hold:
+        lifecycle.hold()
+    else:
+        lifecycle.restore()

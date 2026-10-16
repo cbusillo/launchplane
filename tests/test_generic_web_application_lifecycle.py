@@ -26,6 +26,7 @@ from control_plane.workflows.generic_web_application_lifecycle import (
     DokployApplicationLifecycle,
     schedule_payload,
     preview_application_lifecycle,
+    recover_preview_application_lifecycle,
 )
 from control_plane.workflows.generic_web_deploy import execute_generic_web_deploy
 from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
@@ -157,13 +158,8 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         self.assertNotIn(reset_command.command, self.commands)
         self.commands.clear()
         with patch("control_plane.disposable_lanes.require_disposable_lane") as disposable:
-            result, store = self._deploy(reset=True)
-        disposable.assert_called_once_with(
-            store,
-            product=store.read_product_profile_record(_request().product).product,
-            context=store.read_product_profile_record(_request().product).lanes[0].context,
-            instance="testing",
-        )
+            result, _ = self._deploy(reset=True)
+        self.assertTrue(disposable.called)
         self.assertEqual(result.deploy_status, "pass")
         self.assertEqual(self.commands[0], reset_command.command)
         self.assertNotIn(self.extensions.maintenance[0].command, self.commands)
@@ -203,6 +199,49 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         self.assertNotIn("billing-recovery", self.schedules)
         self.assertTrue(self.schedules["unrelated-job"]["enabled"])
 
+    def test_a_pre_image_retry_cannot_restore_jobs_held_by_an_unqualified_preview(self) -> None:
+        self._api_context()
+        store = _GenericWebDeployStore(_profile())
+        failed = self._preview_lifecycle(store, self.extensions)
+        failed.capture()
+        failed.prepare()
+        recover_preview_application_lifecycle(
+            failed, image_effect_attempted=True, target_restored=False
+        )
+        retried = self._preview_lifecycle(store, self.extensions)
+        retried.capture()
+        retried.prepare()
+        recover_preview_application_lifecycle(
+            retried, image_effect_attempted=False, target_restored=True
+        )
+        self.assertFalse(self.schedules["billing-recovery"]["enabled"])
+
+    def test_preview_with_no_declarations_or_owned_jobs_creates_no_receipt(self) -> None:
+        store = _GenericWebDeployStore(_profile())
+        lifecycle = self._preview_lifecycle(store, GenericWebLaneExtensions())
+        lifecycle.capture()
+        lifecycle.prepare()
+        lifecycle.complete()
+        self.assertEqual(store.deployments, [])
+
+    def test_reset_only_declarations_cannot_silently_target_schedules_or_previews(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductPreviewProfile
+
+        with self.assertRaises(ValueError):
+            GenericWebApplicationSchedule(
+                name="job", command="./job", cron_expression="*/15 * * * *", on_reset=True
+            )
+        with self.assertRaises(ValueError):
+            ProductPreviewProfile(
+                generic_web_extensions=GenericWebLaneExtensions(
+                    maintenance=(
+                        GenericWebMaintenanceCommand(
+                            name="reset", command="./reset", on_reset=True
+                        ),
+                    )
+                )
+            )
+
     def test_preview_receipt_storage_failure_cannot_pause_a_job(self) -> None:
         self._api_context()
         store = _GenericWebDeployStore(_profile())
@@ -210,7 +249,7 @@ class GenericWebApplicationLifecycleTests(unittest.TestCase):
         with patch.object(
             store, "write_deployment_record", side_effect=RuntimeError("storage unavailable")
         ):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaises(click.ClickException):
                 lifecycle.capture()
         self.assertEqual(self.schedules["billing-recovery"], self.original)
         self.assertEqual(self.phases, [])

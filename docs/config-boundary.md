@@ -404,6 +404,10 @@ reintroduced
 Launchplane-owned authz, route, provider-target, domain, runtime-environment,
 managed-secret, topology, or workflow-default fixtures before merge.
 
+Relative and absolute filesystem paths in Python command declarations are not
+repository references. An owner/repository reference elsewhere in the same
+command is still audited.
+
 For Python source, a fixed protocol identifier can be classified as `schema_only`
 when a single uppercase module binding holds an identifier-shaped string and
 every local reference uses the same protocol field role. Evidence must include

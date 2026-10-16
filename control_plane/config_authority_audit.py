@@ -14,6 +14,7 @@ import subprocess
 import tomllib
 import tokenize
 from typing import Protocol, cast
+from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 
 
 MAX_SCANNED_FILE_BYTES = 1_000_000
@@ -3027,7 +3028,8 @@ def _candidate_is_interesting(*, path: str, key: str, value: object) -> bool:
         return True
     repository_reference = (
         _contains_owner_repo_reference(value_text)
-        if normalized == "package.json" and key.startswith("scripts.")
+        if normalized.endswith(".py")
+        or (normalized == "package.json" and key.startswith("scripts."))
         else OWNER_REPO_PATTERN.search(value_text) is not None
     )
     return bool(
@@ -3193,6 +3195,8 @@ def _allow_reason(
         or "PATH_GLOBS" in key_text
     ):
         return ALLOW_REASON_SCHEMA_ONLY
+    if normalized == "compose.dokploy.yaml" and key_text in PLATFORM_CREDENTIAL_KEYS:
+        return ""
     if key_text in BOOTSTRAP_ENV_KEYS:
         return ALLOW_REASON_LAUNCHPLANE_SELF_BOOTSTRAP
     if normalized.startswith(".github/workflows/") and _is_launchplane_public_url_reference(
@@ -3417,7 +3421,7 @@ def _is_required_compose_environment_input(*, path: str, key: str, value: object
     if path != "compose.dokploy.yaml":
         return False
     key_text = key.strip().upper()
-    if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key_text):
+    if key_text in PLATFORM_CREDENTIAL_KEYS or not re.fullmatch(r"[A-Z_][A-Z0-9_]*", key_text):
         return False
     return _string_value(value).strip() == f"${{{key_text}:?required}}"
 

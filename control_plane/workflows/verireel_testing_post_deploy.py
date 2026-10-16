@@ -478,7 +478,7 @@ def execute_verireel_testing_post_deploy(
                 "Testing qualification did not return complete passing evidence."
             )
         status = "pass"
-        detail = "Testing creator/admin verification passed; fixture removed."
+        detail = "Testing creator and admin verification passed; fixture removed."
     except ProviderMutationUnknownError:
         raise
     except Exception as error:

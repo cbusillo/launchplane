@@ -29,6 +29,7 @@ from control_plane.contracts.generic_web_extensions import GenericWebLaneExtensi
 from control_plane.workflows.generic_web_application_lifecycle import (
     DokployApplicationLifecycle,
     preview_application_lifecycle,
+    recover_preview_application_lifecycle,
 )
 from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 from control_plane import runtime_platform_credentials
@@ -1379,10 +1380,11 @@ def execute_verireel_preview_refresh(
                 rollback_errors.append(f"existing preview rollback failed: {rollback_exc}")
         if lifecycle is not None and not created_application_id:
             try:
-                if image_effect_attempted or not previous_application_restored:
-                    lifecycle.hold()
-                else:
-                    lifecycle.restore()
+                recover_preview_application_lifecycle(
+                    lifecycle,
+                    image_effect_attempted=image_effect_attempted,
+                    target_restored=previous_application_restored,
+                )
             except click.ClickException as rollback_exc:
                 rollback_errors.append(f"application schedule recovery failed: {rollback_exc}")
         if created_preview_database:

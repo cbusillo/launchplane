@@ -527,6 +527,6 @@ intact because they may have been edited since conversion. Subsequent profile
 edits, including removing commands, are never replaced by legacy defaults.
 
 Required Compose environment substitutions such as `${APP_SECRET:?required}`
-are operator inputs regardless of product. They do not name a Launchplane
+are admin-supplied inputs regardless of product. They do not name a Launchplane
 secret binding. The product profile's `expected_config.managed_secret_bindings`
 owns actual managed bindings; no product-specific allowlist lives in the audit.

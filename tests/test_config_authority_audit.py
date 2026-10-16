@@ -9,6 +9,7 @@ from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.runtime_platform_credentials import PLATFORM_CREDENTIAL_KEYS
 from control_plane.config_authority_audit import ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT
 from control_plane.config_authority_audit import build_config_authority_audit
 from control_plane.config_authority_audit import evaluate_config_authority_gate
@@ -1130,6 +1131,24 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
         self.assertEqual(len(script_findings), 1)
         self.assertEqual(script_findings[0]["key"], "repository")
         self.assertEqual(script_findings[0]["classification"], "needs_classification")
+
+    def test_python_command_paths_are_not_repository_authority(self) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / "lifecycle.py").write_text(
+                'COMMANDS = [{"command": "./node_modules/.bin/prisma migrate deploy"}]\n'
+                'REPOSITORY = "example/production"\n'
+                'MIXED_COMMAND = "./node_modules/.bin/prisma --repo example/production"\n',
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            findings = _findings(build_config_authority_audit(control_plane_root=root))
+        keys = {finding["key"] for finding in findings}
+        self.assertNotIn("COMMANDS", keys)
+        self.assertNotIn("COMMANDS[0].command", keys)
+        self.assertIn("REPOSITORY", keys)
+        self.assertIn("MIXED_COMMAND", keys)
 
     def test_hashes_are_stable_for_same_inputs_and_findings(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -3882,6 +3901,27 @@ class ConfigAuthorityAuditTest(unittest.TestCase):
             ALLOW_REASON_OPERATOR_SUPPLIED_RUNTIME_INPUT,
         )
         self.assertFalse(findings["OTHER_SECRET"]["allow_reason"])
+
+    def test_required_compose_placeholders_cannot_classify_platform_credentials_as_app_inputs(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            _init_repo(root)
+            (root / "compose.dokploy.yaml").write_text(
+                "services:\n  app:\n    environment:\n"
+                + "".join(
+                    f"      {key}: ${{{key}:?required}}\n"
+                    for key in sorted(PLATFORM_CREDENTIAL_KEYS)
+                ),
+                encoding="utf-8",
+            )
+            _commit_all(root)
+            findings = _findings(build_config_authority_audit(control_plane_root=root))
+        by_key = {finding["key"]: finding for finding in findings}
+        for key in PLATFORM_CREDENTIAL_KEYS:
+            with self.subTest(key=key):
+                self.assertFalse(by_key[key]["allow_reason"])
 
     def test_product_repo_gate_rejects_managed_secret_binding_fixtures(self) -> None:
         with TemporaryDirectory() as temp_dir:

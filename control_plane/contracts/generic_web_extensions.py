@@ -29,6 +29,8 @@ class GenericWebApplicationSchedule(GenericWebMaintenanceCommand):
 
     @model_validator(mode="after")
     def _validate_cron(self) -> "GenericWebApplicationSchedule":
+        if self.on_reset:
+            raise ValueError("Recurring schedules cannot be reset-only commands.")
         self.cron_expression = self.cron_expression.strip()
         validate_cron_expression(self.cron_expression)
         return self

@@ -426,6 +426,8 @@ class ProductPreviewProfile(BaseModel):
 
     @model_validator(mode="after")
     def _validate_preview(self) -> "ProductPreviewProfile":
+        if any(item.on_reset for item in self.generic_web_extensions.maintenance):
+            raise ValueError("Reset-only commands require a recorded testing lane, not a preview.")
         if self.enabled and not self.context.strip():
             raise ValueError("enabled product preview profile requires context")
         if self.enabled and "{number}" not in self.slug_template:
