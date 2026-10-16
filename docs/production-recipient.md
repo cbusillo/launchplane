@@ -228,7 +228,7 @@ The bounded custody result includes `publication_sha256` after publication.
 `POST /v1/products/{product}/production-recipient/inverse` through existing production
 rollback authority. It works independently of whether this release has a drill.
 Apply requires its saved exact review and original inverse key; terminal agents
-cannot apply. It never grants authority or starts a new release. An operator
+cannot apply. It never grants authority or starts a new release. An admin
 inverse ends this generation's automatic forward continuation; a later move needs
 a freshly reviewed generation and the Client accepted-release path.
 
