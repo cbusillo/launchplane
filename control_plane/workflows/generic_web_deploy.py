@@ -492,6 +492,94 @@ def execute_generic_web_deploy(
         current = record_store.read_product_profile_record(request.product)
         if not current.is_active:
             raise click.ClickException("Product is retiring and cannot deploy.")
+        # Re-read lane authority under the existing product serializer; callers
+        # cannot bypass it with a stale profile or a cached provider target.
+        current_lane = next(
+            (item for item in current.lanes if item.instance == request.instance), None
+        )
+        list_records = getattr(record_store, "list_deployment_records", None)
+        retained_cutover = bool(
+            current_lane
+            and callable(list_records)
+            and any(
+                item.generic_web_cutover is not None
+                and item.generic_web_cutover.step not in {"rolled_back", "blocked"}
+                for item in list_records(
+                    context_name=current_lane.context, instance_name=current_lane.instance
+                )
+            )
+        )
+        if current_lane is not None and (
+            current_lane.generic_web_cutover is not None or retained_cutover
+        ):
+            from control_plane.generic_web_cutover import (
+                WebCutoverAuthorityStore,
+                execute_web_cutover_deployment,
+            )
+            from control_plane.contracts.generic_web_cutover import GenericWebCutoverPlan
+            from control_plane.workflows.generic_web_cutover import WebCutoverProvider
+
+            if current.driver_id != "generic-web" or current_lane.generic_web_cutover is None:
+                raise ValueError(
+                    "recorded traffic authority cannot fall back to in-place deployment"
+                )
+            if post_deploy_executor is not None:
+                raise ValueError(
+                    "two-slot releases cannot run an unqualified post-deploy extension"
+                )
+            if not rollback:
+                require_forward_lane_build(
+                    record_store=record_store,
+                    profile=current,
+                    context=current_lane.context,
+                    instance=current_lane.instance,
+                    desired=LaneBuild(
+                        request.artifact_id,
+                        request.source_git_ref,
+                        request.artifact_id,
+                        deploy_reference=request.deploy_reference,
+                    ),
+                )
+            selected_provider = deploy_provider or default_generic_web_deploy_provider()
+            factory = cast(
+                Callable[[GenericWebCutoverPlan], WebCutoverProvider] | None,
+                getattr(selected_provider, "cutover_provider_factory", None),
+            )
+            record_id = deployment_record_id or generate_deployment_record_id(
+                context_name=current_lane.context, instance_name=current_lane.instance
+            )
+            deployment = execute_web_cutover_deployment(
+                cast(WebCutoverAuthorityStore, record_store),
+                product=request.product,
+                lane=current_lane,
+                artifact_id=request.artifact_id,
+                source_git_ref=request.source_git_ref,
+                deploy_reference=request.deploy_reference,
+                record_id=record_id,
+                factory=factory,
+                rollback=rollback,
+                checkpoint=provider_effect_checkpoint or (lambda _phase: None),
+                before_records_commit=before_records_commit or (lambda: None),
+            )
+            target = deployment.resolved_target
+            assert target is not None
+            return GenericWebDeployResult(
+                deployment_record_id=deployment.record_id,
+                deploy_status="pass",
+                deploy_started_at=deployment.deploy.started_at,
+                deploy_finished_at=deployment.deploy.finished_at,
+                product=current.product,
+                context=current_lane.context,
+                instance=current_lane.instance,
+                target_name=target.target_name,
+                target_id=target.target_id,
+                target_category=target.target_type,
+                provider_id=selected_provider.provider_id,
+                provider_target_type=target.target_type,
+                provider_effect_attempted=True,
+                image_effect_attempted=not rollback,
+                post_deploy_status="pass",
+            )
         return _execute_generic_web_deploy_unserialized(
             control_plane_root=control_plane_root,
             record_store=record_store,

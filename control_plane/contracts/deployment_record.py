@@ -14,6 +14,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.odoo_cutover import OdooCutoverRecord
+from control_plane.contracts.generic_web_cutover import GenericWebCutoverRecord
 
 DelegatedExecutor = str
 IntegrationKeyReadbackStatus = Literal["pass", "reported", "fail", "unavailable", "skipped"]
@@ -92,6 +93,11 @@ class DeploymentRecord(BaseModel):
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
     integration_key_readback: IntegrationKeyReadbackEvidence | None = None
     odoo_cutover: OdooCutoverRecord | None = None
+    generic_web_cutover: GenericWebCutoverRecord | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     failure: RecordFailure | None = None
 
     @model_validator(mode="after")

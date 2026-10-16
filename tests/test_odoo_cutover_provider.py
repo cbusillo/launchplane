@@ -49,6 +49,37 @@ class OdooCutoverProviderTests(unittest.TestCase):
                     "http://new:8069",
                 )
 
+    def test_recovery_renotifies_exact_owned_intent_after_lost_file_event(self) -> None:
+        import os
+
+        with TemporaryDirectory() as temporary:
+            target = TraefikRouteTarget(
+                route_id="lane",
+                host="fixture.invalid",
+                entrypoints=("web",),
+                route_file=Path(temporary) / "route.yaml",
+                api_url="http://fixture.invalid",
+                tls=False,
+            )
+            target.route_file.write_text(json.dumps(route_payload(target, "http://new:8069")))
+            route = TraefikFileRoute(target, apply_timeout_seconds=0.005)
+            applied = "http://old:8069"
+            replace = os.replace
+
+            def publish(source: Any, destination: Any) -> None:
+                nonlocal applied
+                replace(source, destination)
+                applied = "http://new:8069"
+
+            with (
+                patch.object(route, "observed_target", side_effect=lambda: applied),
+                patch("control_plane.dokploy.traefik_cutover.os.replace", side_effect=publish),
+            ):
+                self.assertEqual(
+                    route.publish("http://new:8069", expected=("http://old:8069",)), applied
+                )
+            self.assertEqual(applied, "http://new:8069")
+
     def test_single_route_switch_never_deletes_another_service_in_its_file(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "route.yaml"

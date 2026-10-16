@@ -24,6 +24,7 @@ from control_plane.contracts.odoo_website_settings import OdooWebsiteSettingsInt
 from control_plane.prepared_public_pause import PreparedPublicPause, PublicPauseProvider
 from control_plane.prepared_public_site import verify_snapshot
 from control_plane.odoo_cutover_plan import rollback_pause_identity
+from control_plane.traffic_switch import require_serving_route, require_fresh_readiness
 
 
 class OdooCutoverStore(Protocol):
@@ -87,23 +88,27 @@ class _PauseStore:
 
 
 def _require_route(route: OdooRouteObservation, plan: OdooCutoverPlan, slot: OdooSlot) -> None:
-    if (
-        route.route_id != plan.route_id
-        or route.host != plan.host
-        or route.target_url != slot.private_url
-        or route.slot_id != slot.slot_id
-        or route.binding != slot.binding
-        or route.runtime_identity != slot.runtime_identity
-        or route.public_health is None
-        or not route.public_health.verified
-        or route.public_health.status != "pass"
-    ):
+    require_serving_route(
+        route,
+        route_id=plan.route_id,
+        host=plan.host,
+        target_url=slot.private_url,
+        slot_id=slot.slot_id,
+        identity=slot.runtime_identity,
+    )
+    if route.binding != slot.binding:
         raise ValueError("applied route/public identity differs from expected slot")
 
 
 def _require_ready(
     readiness: OdooSlotReadiness, plan: OdooCutoverPlan, slot: OdooSlot, now: datetime
 ) -> None:
+    require_fresh_readiness(
+        observed_at=readiness.observed_at,
+        now=now,
+        actual=readiness.runtime_identity,
+        expected=slot.runtime_identity,
+    )
     if (
         readiness.binding != slot.binding
         or readiness.slot_id != slot.slot_id
