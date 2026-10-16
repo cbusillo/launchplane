@@ -410,6 +410,24 @@ def _settle_completed_invitation(
             completion = (
                 COMPLETED_PREFIX + hashlib.sha256(decision.record_id.encode()).hexdigest() + " -->"
             )
+            continued_request = None
+            if (
+                previous_decision is not None
+                and previous_decision.checklist_digest == decision.checklist_digest
+            ):
+                # A changed decision or release retry can use the same checklist
+                # without another invitation. Settle only its newest open receipt.
+                for comment in reversed(comments):
+                    lines = _comment_lines(comment)
+                    if marker not in lines or REPLACED_MARKER in lines:
+                        continue
+                    if any(line.startswith(COMPLETED_PREFIX) for line in lines):
+                        continue
+                    if _timestamp(comment.get("created_at")) <= _timestamp(
+                        previous_decision.decided_at
+                    ):
+                        continued_request = comment
+                    break
             matched = False
             pending = False
             for comment in comments:
@@ -430,6 +448,7 @@ def _settle_completed_invitation(
                 if marker not in lines or (
                     previous_decision is not None
                     and created_at <= _timestamp(previous_decision.decided_at)
+                    and comment is not continued_request
                 ):
                     # Preserve earlier rejected/decided requests as history.
                     if last_decision is None or created_at > _timestamp(last_decision.decided_at):

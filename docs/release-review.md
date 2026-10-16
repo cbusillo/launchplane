@@ -164,6 +164,9 @@ newer requests remain pending until the Client decides. A newer testing
 candidate keeps its own request open while the completed invitation settles.
 Renewed requests for the exact version that subsequently released also settle;
 earlier rejected requests keep their history rather than being marked released.
+When the Client changes their decision or retries a release on the same checklist
+without a renewed invitation, its newest open invitation settles from the final
+acceptance and passed run. Older decided invitations remain history.
 Completion receipts make
 retries and replica restarts idempotent, and the product publication lock and
 fresh decision/run/lane checks protect concurrent workers. Workers throttle

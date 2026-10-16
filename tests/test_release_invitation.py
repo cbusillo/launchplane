@@ -1695,6 +1695,37 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn(accepted.release_issue_url, self.comments[-1]["body"])
         self.assertEqual(self.issues[0]["state"], "closed")
 
+    def assert_redecision_settles_existing_invitation(self, outcome: str) -> None:
+        self.publish()
+        self.now += timedelta(minutes=1)
+        previous = decision(self.store, outcome=outcome, date=self.now.isoformat())
+        self.store.create_release_review_decision_record_if_absent(previous)
+        accepted, _ = self.complete_release()
+        self.assertEqual(previous.checklist_digest, accepted.checklist_digest)
+        posts = self.posts.copy()
+
+        self.assertFalse(self.publish())
+
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertEqual(self.posts, posts)
+        self.assertIn(accepted.release_issue_url, self.comments[0]["body"])
+        self.assertNotIn(f"@{self.profile.owner.github_login}", self.comments[0]["body"])
+        self.assertEqual(
+            self.store.read_release_review_decision_record(
+                product=self.profile.product, record_id=previous.record_id
+            ),
+            previous,
+        )
+        edits = self.edits.copy()
+        self.publish(ReleaseInvitationBackoff())
+        self.assertEqual(self.edits, edits)
+
+    def test_acceptance_after_same_checklist_rejection_settles_existing_invitation(self) -> None:
+        self.assert_redecision_settles_existing_invitation("changes_requested")
+
+    def test_retried_acceptance_settles_existing_invitation_after_release_passes(self) -> None:
+        self.assert_redecision_settles_existing_invitation("accepted")
+
     def test_settled_history_needs_no_more_reads_while_candidate_waits(
         self,
     ) -> None:
