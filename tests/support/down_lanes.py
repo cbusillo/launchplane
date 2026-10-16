@@ -21,6 +21,7 @@ def record_lane_health(
     instance: str = "testing",
     status: int = 503,
     configure: bool = True,
+    observed_at: tuple[datetime, ...] | None = None,
 ) -> tuple[str, ...]:
     profile = store.read_product_profile_record(product)
     if configure:
@@ -57,7 +58,7 @@ def record_lane_health(
         )
         if target is None:
             continue
-        for moment in (now - cadence * 1.5, now - cadence * 0.25):
+        for moment in observed_at or (now - cadence * 1.25, now - cadence * 0.25):
             record = check_public_ingress_target(
                 target=target,
                 checked_at=moment.isoformat(),

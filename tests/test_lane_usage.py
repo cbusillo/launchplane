@@ -130,6 +130,25 @@ class LaneUsageTests(unittest.TestCase):
                 self.health(status=status)
                 self.assertTrue(self.decision().protected)
 
+    def test_adjacent_monitor_slots_qualify_despite_an_earlier_offset_in_the_later_slot(
+        self,
+    ) -> None:
+        from control_plane.contracts.public_ingress_monitoring import (
+            health_monitor_interval_seconds,
+        )
+
+        cadence = health_monitor_interval_seconds("testing")
+        from control_plane.health_monitor_scheduler import monitor_slot
+
+        slot = monitor_slot(self.now.timestamp(), "testing") * cadence
+        earlier = datetime.fromtimestamp(slot - cadence + 3, timezone.utc)
+        later = datetime.fromtimestamp(slot + 1, timezone.utc)
+        self.now = later + timedelta(seconds=1)
+        record_lane_health(
+            self.store, self.product, self.context, self.now, observed_at=(earlier, later)
+        )
+        self.assertFalse(self.decision().protected)
+
     def test_incomplete_http_failure_is_not_verified_downtime(self) -> None:
         self.health()
         for record in self.store.list_public_ingress_observation_records(product=self.product):

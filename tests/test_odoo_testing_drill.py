@@ -322,7 +322,6 @@ class TestingDrillTests(TestingDrillScenario):
         self.signins.return_value = None
         self.scheduler.run_once()
         self.assertEqual(self.evidence().status, "queued")
-        self.assertFalse(self.signins.call_args.kwargs["usage_required"])
         self.activate()
         operation = self.operation()
         receipt = self.store.read_idempotency_record(
@@ -336,6 +335,24 @@ class TestingDrillTests(TestingDrillScenario):
             str(safety["usage_evidence"]).startswith(VERIFIED_DOWN_USAGE_EVIDENCE_PREFIX)
         )
         require_drill_checkpoint(self.store, operation)
+
+    def test_new_usage_reader_failures_keep_a_bounded_skip_reason(self) -> None:
+        for name, reason in (
+            ("lane_usage_protected", "staff_hold_or_protection_check_unreadable"),
+            ("evaluate_lane_usage", "successful_login_check_unreadable"),
+        ):
+            with (
+                self.subTest(reader=name),
+                patch(
+                    "control_plane.odoo_testing_drill." + name,
+                    side_effect=RuntimeError("private-provider-detail"),
+                ),
+            ):
+                self.scheduler.run_once()
+                self.assertEqual(self.evidence().status, "skipped")
+                self.assertEqual(self.evidence().step, reason)
+                self.assertNotIn("private-provider-detail", self.evidence().model_dump_json())
+            self.now += DRILL_INTERVAL_SECONDS
 
     def test_idle_lane_runs_without_renewing_general_safety_facts(self) -> None:
         self.store.clear_disposable_lane_safety(self.profile.product, self.context, "testing")

@@ -157,21 +157,23 @@ def require_drill_use_unprotected(store: PostgresRecordStore, product: str, cont
         store.read_dokploy_target_record(context_name=context, instance_name="testing")
         hold = read_staff_testing_hold(record_store=store, context=context)
         recorded = store.read_disposable_lane_safety(product, context, "testing")
+        protected = (
+            recorded is not None
+            and hold is None
+            and lane_usage_protected(
+                store,
+                product=product,
+                context=context,
+                instance="testing",
+                usage=recorded.usage,
+                require_unused=False,
+            )
+        )
     except Exception as error:
         raise DrillSkipped("staff_hold_or_protection_check_unreadable") from error
     if hold is not None:
         raise DrillSkipped("staff_testing_hold")
-    if recorded is not None and (
-        lane_usage_protected(
-            store,
-            product=product,
-            context=context,
-            instance="testing",
-            usage=recorded.usage,
-            require_unused=False,
-        )
-        or recorded.data == "only_copy"
-    ):
+    if recorded is not None and (protected or recorded.data == "only_copy"):
         raise DrillSkipped("lane_use_or_only_copy_protected")
     if recorded is not None and recorded.production_resources in {"shared", "separation_ready"}:
         raise DrillSkipped("testing_resources_protected")
@@ -192,24 +194,24 @@ def collect_drill_admission(
     )
     if not generation_snapshot_matches(current, generation):
         raise DrillSkipped("drill_admission_snapshot_changed")
-    profile = store.read_product_profile_record(generation.product)
-    target = store.read_dokploy_target_record(
-        context_name=generation.context, instance_name="testing"
-    )
-    target_id = store.read_dokploy_target_id_record(
-        context_name=generation.context, instance_name="testing"
-    )
     moment = datetime.fromtimestamp(now, timezone.utc)
-    downtime = evaluate_lane_usage(
-        store,
-        profile=profile,
-        target=target,
-        target_id=target_id,
-        instance="testing",
-        usage="unknown",
-        now=moment,
-    )
     try:
+        profile = store.read_product_profile_record(generation.product)
+        target = store.read_dokploy_target_record(
+            context_name=generation.context, instance_name="testing"
+        )
+        target_id = store.read_dokploy_target_id_record(
+            context_name=generation.context, instance_name="testing"
+        )
+        downtime = evaluate_lane_usage(
+            store,
+            profile=profile,
+            target=target,
+            target_id=target_id,
+            instance="testing",
+            usage="unknown",
+            now=moment,
+        )
         used = read_drill_recent_signins(
             store,
             generation,
@@ -218,19 +220,19 @@ def collect_drill_admission(
             history_database=history_database,
             **({"usage_required": False} if downtime.reason == "verified_down" else {}),
         )
+        decision = evaluate_lane_usage(
+            store,
+            profile=profile,
+            target=target,
+            target_id=target_id,
+            instance="testing",
+            usage="in_use" if used else "unknown" if used is None else "unused",
+            now=moment,
+        )
     except DrillCopyAlreadyServing as error:
         raise DrillSkipped("new_testing_copy_already_serving") from error
     except Exception as error:
         raise DrillSkipped("successful_login_check_unreadable") from error
-    decision = evaluate_lane_usage(
-        store,
-        profile=profile,
-        target=target,
-        target_id=target_id,
-        instance="testing",
-        usage="in_use" if used else "unknown" if used is None else "unused",
-        now=moment,
-    )
     if decision.protected:
         raise DrillSkipped("recent_successful_signin")
     require_drill_use_unprotected(store, generation.product, generation.context)

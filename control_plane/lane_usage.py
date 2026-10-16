@@ -67,6 +67,7 @@ def _down_observations(
     # inherited drivers and private endpoints. A diagnostic failure is not an
     # application outage, nor is one failed URL alongside a serving URL.
     from control_plane.workflows.public_ingress_monitor import effective_health_check_monitor_target
+    from control_plane.health_monitor_scheduler import monitor_slot
 
     reader = getattr(store, "list_public_ingress_observation_records", None)
     if not callable(reader):
@@ -85,11 +86,12 @@ def _down_observations(
     if not checks:
         return ()
     interval = timedelta(seconds=health_monitor_interval_seconds(lane.instance))
-    # Two independent monitor slots spanning at least one cadence, within a
-    # two-cadence window. Missing/late monitoring cannot qualify an outage.
+    # Consecutive scheduler slots tolerate run-offset jitter. Requiring a whole
+    # wall-clock cadence between runs would randomly reject continuously down
+    # lanes whenever the later slot starts earlier within its period.
     earliest = max(_timestamp(item.updated_at) for item in (profile, target, target_id))
     accepted: list[PublicIngressObservationRecord] = []
-    intervals: list[tuple[datetime, datetime]] = []
+    common_slots: set[int] | None = None
     for check in checks:
         monitor = effective_health_check_monitor_target(
             profile=profile, lane=lane, check=check, record_store=store
@@ -156,14 +158,12 @@ def _down_observations(
         if not window:
             return ()
         moments = sorted({_timestamp(record.observed_at) for record in window})
-        if now - moments[-1] >= interval or moments[-1] - moments[0] < interval:
+        if now - moments[-1] >= interval:
             return ()
         accepted.extend(window)
-        intervals.append((moments[0], moments[-1]))
-    if (
-        not intervals
-        or min(end for _, end in intervals) - max(start for start, _ in intervals) < interval
-    ):
+        slots = {monitor_slot(moment.timestamp(), lane.instance) for moment in moments}
+        common_slots = slots if common_slots is None else common_slots.intersection(slots)
+    if not common_slots or not any(slot - 1 in common_slots for slot in common_slots):
         return ()
     return tuple(accepted)
 

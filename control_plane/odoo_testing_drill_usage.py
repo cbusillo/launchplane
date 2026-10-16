@@ -107,6 +107,13 @@ def read_drill_recent_signins(
         receive=frames.append,
     )
     assert_selection_current(store, selection)
+    return parse_drill_usage_result(frames, usage_required=usage_required)
+
+
+def parse_drill_usage_result(
+    frames: list[dict[str, object]], *, usage_required: bool
+) -> bool | None:
+    """Consume the fixed receiver protocol, including scoped resource-only proof."""
     if (
         len(frames) == 1
         and frames[0].get("type") == "complete"

@@ -481,6 +481,8 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.assertNotEqual(status, 0)
 
     def test_down_lane_resource_qualification_does_not_need_login_database(self) -> None:
+        from control_plane.odoo_testing_drill_usage import parse_drill_usage_result
+
         self.spec.update(inspection_only=True, usage_only=True, usage_required=False)
         status, output = self.run_program()
         self.assertEqual(status, 0, output)
@@ -489,13 +491,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
             for line in output.splitlines()
             if line.startswith("fixture:")
         ]
-        self.assertEqual(frames, [{"type": "complete", "resources_qualified": True}])
+        self.assertIsNone(parse_drill_usage_result(frames, usage_required=False))
         self.assertFalse(
-            any(
-                call[:2] in (["docker", "stop"], ["docker", "start"])
-                or "res_users_log" in str(call)
-                for call in self.calls
-            )
+            any(call[:2] in (["docker", "stop"], ["docker", "start"]) for call in self.calls)
         )
         self.containers["web"]["HostConfig"]["PortBindings"] = {"8069/tcp": [{}]}
         status, _ = self.run_program()

@@ -18,10 +18,11 @@ is repair eligibility, not an assertion that nobody ever used the copy.
 Serving or unverified lanes retain their existing usage protections.
 Production admission and release gates are unchanged.
 
-Verified down means every effective application HTTP check has failed across
-at least one whole monitor cadence inside the preceding two cadences, with
-the latest result less than one cadence old. The failure intervals must overlap
-for a whole cadence. The cadence comes from the monitor's existing source rule.
+Verified down means every effective application HTTP check has failed in each
+of the same two consecutive monitor scheduler slots inside the preceding two
+cadences, with each latest result less than one cadence old. The scheduler's
+existing slot rule owns this timing; variation in the run's offset inside its
+slot does not disqualify a continuously failing lane.
 All observations must follow the current profile, tracked target and target-ID
 updates and match the monitor's current URLs and expected runtime identity.
 Every probed URL must fail: network/DNS/TLS failure or server error qualifies;
@@ -31,6 +32,12 @@ do not. Public and declared private checks both count. Provider-only or
 unmonitored states remain unverified. No probe or live action is initiated by
 this decision. The guard logs the durable monitor record IDs and interval;
 the drill also preserves those references in its private admission receipt.
+
+These observations describe Launchplane's monitor vantage. A network, DNS or
+TLS fault in that vantage can look like a lane outage even if a person can reach
+it elsewhere. A staff-testing hold remains authoritative regardless of monitor
+results. Network-only qualification is the explicit policy choice recorded on
+the owning issue before this rule is used on a live lane.
 
 The common disposable guard covers runtime repair/deploy, preview operations,
 replacement target setup, held-operation supersession and rehearsal admission.
