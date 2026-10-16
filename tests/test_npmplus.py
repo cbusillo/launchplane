@@ -265,6 +265,15 @@ class NpmplusProxyHostPayloadTests(unittest.TestCase):
 
 
 class NpmplusClientTests(unittest.TestCase):
+    def test_disabled_creation_refuses_before_exposing_a_temporarily_enabled_host(self) -> None:
+        opener = _Opener()
+        client = NpmplusClient(credentials=_credentials(), opener=opener)
+        with self.assertRaises(click.ClickException):
+            client.create_proxy_host(
+                NpmplusProxyHostPayload.model_validate({**_proxy_host_payload(), "enabled": False})
+            )
+        self.assertEqual(opener.requests, [])
+
     def test_public_read_refuses_private_tls_and_unloaded_configuration(self) -> None:
         opener = _Opener()
         client = NpmplusClient(credentials=_credentials(), opener=opener)

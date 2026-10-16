@@ -695,6 +695,10 @@ That marker is a generated Nginx comment, with no directives or caller-supplied
 config. The service also refuses active redirection/404 host claims before
 creation. Provider legacy protocol settings must retain their supported
 defaults; enable/disable remains the provider's separate lifecycle operation.
+Existing disabled hosts retain that state during updates and can use the normal
+lifecycle endpoints. The provider always creates hosts enabled, so a request
+to create a disabled host refuses before transport rather than briefly exposing
+it. This continuation deliberately publishes an enabled public testing route.
 Its pending audit binds the generation, route authority and exact provider
 payload, so certificate renewal with the same ID and unrelated metadata refresh
 do not strand adoption. Meaningful authority or payload drift still refuses;

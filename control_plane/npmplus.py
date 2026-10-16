@@ -315,6 +315,11 @@ class NpmplusClient:
         return certificate
 
     def create_proxy_host(self, payload: NpmplusProxyHostPayload) -> NpmplusProxyHost:
+        if not payload.enabled:
+            raise click.ClickException(
+                "The current NPMplus API cannot atomically create a disabled host; "
+                "existing hosts use the separate enable/disable lifecycle."
+            )
         response = self._request(
             method="POST",
             path="/api/nginx/proxy-hosts",
