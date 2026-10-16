@@ -10972,6 +10972,24 @@ class PostgresRecordStore(HumanSessionStore):
             if status != "acquired":
                 return status, reservation
             assert receipt_row is not None
+            if self.database_dialect_name == "postgresql":
+                self._lock_odoo_stable_lane(
+                    session,
+                    product=verification.product,
+                    context=request.context,
+                    instance="testing",
+                )
+            if (
+                self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=verification.product,
+                    context=request.context,
+                    instance="testing",
+                    include_synchronous=False,
+                )
+                is not None
+            ):
+                raise ValueError("A testing lane operation appeared before publication.")
             self._lock_product_authority_bundle_write(session)
             deployment_row = session.get(
                 LaunchplaneDeploymentRow, completed.record_id, with_for_update=True
@@ -11056,6 +11074,42 @@ class PostgresRecordStore(HumanSessionStore):
             checkpoint()
             session.commit()
             return "written", completion
+
+    @contextmanager
+    def testing_verification_lane_guard(
+        self, *, product: str, context: str
+    ) -> Iterator[Callable[[], None]]:
+        """Reserve the existing lane lock and prove its connection stays held."""
+        with self._session_factory() as hold_session:
+            connection = hold_session.connection()
+            if not _try_odoo_synchronous_lane_lock(
+                hold_session, product=product, context=context, instance="testing"
+            ):
+                raise ValueError("The testing lane has a synchronous operation.")
+            with self._session_factory() as check_session:
+                self._lock_odoo_stable_lane(
+                    check_session, product=product, context=context, instance="testing"
+                )
+                owner = self._active_odoo_stable_lane_operation_owner(
+                    check_session,
+                    product=product,
+                    context=context,
+                    instance="testing",
+                    include_synchronous=False,
+                )
+                check_session.rollback()
+            if owner is not None:
+                raise ValueError("The testing lane has an active operation.")
+
+            def checkpoint() -> None:
+                if connection.invalidated or not connection.in_transaction():
+                    raise RuntimeError("Testing verification lost its lane reservation.")
+                try:
+                    connection.execute(text("SELECT 1"))
+                except SQLAlchemyError as error:
+                    raise RuntimeError("Testing verification lost its lane reservation.") from error
+
+            yield checkpoint
 
     def read_native_testing_copy_capture(self, binding: str) -> NativeTestingCopyCapture | None:
         with self._session_factory() as session:

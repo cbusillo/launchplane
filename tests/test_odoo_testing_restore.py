@@ -418,6 +418,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self,
     ) -> None:
         import hashlib
+        import sqlite3
 
         self.spec.update(
             inspection_only=True,
@@ -428,7 +429,7 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         self.spec["web_gate_path"] = str(gate)
         payload = "fixture-payload"
         gate.write_text(hashlib.sha256((self.database + "\n" + payload).encode()).hexdigest())
-        (self.root / (self.gen.namespace + "-copy.lock")).touch()
+        # Temporary lock-file loss must not require another restore.
         self.existing_database = True
         for container in self.containers.values():
             container["State"] = {"Status": "running"}
@@ -443,6 +444,9 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         original = self.command
         witness = generation_binding(self.gen)
         actual_image = self.spec["image_reference"]
+        sql = sqlite3.connect(":memory:")
+        self.addCleanup(sql.close)
+        sql.execute("CREATE TABLE ir_config_parameter (key TEXT PRIMARY KEY, value TEXT)")
 
         def read(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
             data = kwargs.get("input") or b""
@@ -454,13 +458,17 @@ class FreshTestingHostProgramTests(unittest.TestCase):
                     stdout=json.dumps([{"RepoDigests": [actual_image]}]).encode(),
                     stderr=b"",
                 )
-            if b"SELECT value FROM ir_config_parameter" in data:
+            if data and command[-1] == self.database and '-d "$1"' in " ".join(command):
                 self.calls.append(command)
-                return subprocess.CompletedProcess(command, 0, stdout=witness.encode(), stderr=b"")
-            if (
-                "-c" in command
-                and "Path(sys.argv[2]).read_text()" in command[command.index("-c") + 1]
-            ):
+                sql.execute(
+                    "INSERT OR REPLACE INTO ir_config_parameter VALUES (?, ?)",
+                    (TESTING_COPY_COMPLETION_PARAMETER, witness),
+                )
+                observed = sql.execute(data.decode()).fetchone()
+                return subprocess.CompletedProcess(
+                    command, 0, stdout=str(observed[0]).encode() if observed else b"", stderr=b""
+                )
+            if command[-2:] == [self.database, str(gate)]:
                 self.calls.append(command)
                 with (
                     patch.dict(os.environ, {"ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64": payload}),
@@ -473,7 +481,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
         with patch.object(self, "command", side_effect=read):
             status, output = self.run_program()
             self.assertEqual(status, 0, output)
-            self.assertIn('"copy_verified": true', output)
+            frames = [
+                json.loads(line.removeprefix("fixture:"))
+                for line in output.splitlines()
+                if line.startswith("fixture:")
+            ]
+            self.assertEqual(frames, [{"type": "complete", "copy_verified": True}])
             for fault in ("witness", "image", "gate"):
                 with self.subTest(fault=fault):
                     witness = "wrong" if fault == "witness" else generation_binding(self.gen)

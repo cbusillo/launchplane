@@ -273,6 +273,9 @@ class TestingVerification:
                     **deployment.runtime_source,
                     "testing_verification_plan_sha256": self.request.reviewed_plan_sha256,
                     "testing_verification_at": finished,
+                    "testing_verification_canonical_status": checks.canonical_status,
+                    "testing_verification_logo_status": checks.logo_status,
+                    "testing_verification_evidence_json": checks.evidence.model_dump_json(),
                 },
             }
         )

@@ -299,7 +299,7 @@ class TestingVerificationTests(TestingVerificationScenario):
                     self.verification().plan()
                 self.store.write_deployment_record(self.deployment)
 
-    def test_hold_and_reassigned_target_refuse(self) -> None:
+    def test_hold_refuses(self) -> None:
         target = self.store.read_dokploy_target_record(
             context_name=self.fixture.context, instance_name="testing"
         )
@@ -315,6 +315,16 @@ class TestingVerificationTests(TestingVerificationScenario):
             }
         )
         self.store.write_dokploy_target_record(held)
+        with self.assertRaises(ValueError):
+            self.verification().plan()
+
+    def test_reassigned_target_refuses(self) -> None:
+        target = self.store.read_dokploy_target_id_record(
+            context_name=self.fixture.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_id_record(
+            target.model_copy(update={"target_id": "another-target"})
+        )
         with self.assertRaises(ValueError):
             self.verification().plan()
 
@@ -380,6 +390,49 @@ class TestingVerificationTests(TestingVerificationScenario):
 
 
 class TestingVerificationHttpTests(TestingVerificationScenario, unittest.IsolatedAsyncioTestCase):
+    async def test_lost_postgres_lane_reservation_refuses_publication(self) -> None:
+        if self.store.database_dialect_name != "postgresql":
+            self.skipTest("PostgreSQL is required for connection-loss fencing")
+        from sqlalchemy import text
+        from control_plane.storage import postgres
+
+        original = postgres._try_odoo_synchronous_lane_lock
+        backend: list[int] = []
+
+        def reserve(session: Any, **kwargs: Any) -> bool:
+            backend.append(int(session.scalar(text("SELECT pg_backend_pid()"))))
+            return original(session, **kwargs)
+
+        def lose_reservation(**kwargs: Any) -> None:
+            with self.store._engine.connect() as observer:
+                observer.execute(text("SELECT pg_terminate_backend(:pid)"), {"pid": backend[0]})
+            kwargs["receive"]({"type": "complete", "copy_verified": True})
+
+        self.review_verification()
+        before = self.verification().snapshot()
+        with (
+            patch(
+                "control_plane.storage.postgres._try_odoo_synchronous_lane_lock",
+                side_effect=reserve,
+            ),
+            patch(
+                "control_plane.testing_verification.inspect_native_testing_receiver",
+                side_effect=lose_reservation,
+            ),
+        ):
+            result = await request(
+                self.fixture.app,
+                "POST",
+                ROUTE.format(product=self.profile.product),
+                headers={
+                    "Authorization": "Bearer local-operator-token",
+                    "Idempotency-Key": "original-verification-key",
+                },
+                payload=self.verification_request.model_dump(mode="json"),
+            )
+        self.assertEqual(result.status_code, 409, result.text)
+        self.assertEqual(self.verification().snapshot(), before)
+
     async def test_postgres_apply_replay_and_independent_readback_preserve_original_operation(
         self,
     ) -> None:
@@ -445,6 +498,7 @@ class TestingVerificationHttpTests(TestingVerificationScenario, unittest.Isolate
             self.terminal.model_copy(
                 update={
                     "operation_id": "other-active",
+                    "deployment_record_id": "another-pending-deployment",
                     "status": "pending",
                     "phase": "created",
                     "finished_at": "",

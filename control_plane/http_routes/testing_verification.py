@@ -83,13 +83,17 @@ def register_testing_verification_routes(
             with record_store.testing_replacement_execution_lock(body.operation_id) as check:
                 if check is None:
                     raise ValueError("The original generation executor is active.")
-                with record_store.odoo_synchronous_lane_reservation(
-                    product=product, context=body.context, instance="testing"
-                ) as owner:
-                    if owner is not None:
-                        raise ValueError("A lane operation is still fenced.")
+                with record_store.testing_verification_lane_guard(
+                    product=product, context=body.context
+                ) as check_lane:
+
+                    def checkpoint() -> None:
+                        check()
+                        check_lane()
+
                     if body.mode == "readback":
                         result = verification.readback()
+                        checkpoint()
                     else:
                         expected = verification.snapshot()
                         plan = verification.plan()
@@ -99,7 +103,7 @@ def register_testing_verification_routes(
                         ):
                             raise ValueError("The reviewed verification authority changed.")
                         completed = verification.verify()
-                        check()
+                        checkpoint()
                         if canonical_json_sha256(verification.snapshot()) != plan["plan_sha256"]:
                             raise ValueError("Testing authority changed during verification.")
                         result = (
@@ -129,7 +133,7 @@ def register_testing_verification_routes(
                                         mode="json", exclude_none=True
                                     ),
                                 ),
-                                checkpoint=check,
+                                checkpoint=checkpoint,
                             )
                             if status == "replayed":
                                 return replay_idempotent_response(

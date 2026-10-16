@@ -1113,7 +1113,9 @@ def main():
         restore_main()
         return
     path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
-    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    # This coordination file is disposable across host reboot/tmp cleanup. Its
+    # existence is not copy evidence; every execution uses the same flock inode.
+    descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         restore_main()

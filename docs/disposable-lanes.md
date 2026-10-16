@@ -841,7 +841,8 @@ apply requires PostgreSQL. A newer local checkout does not activate the API.
 Both planning and application qualify the current target, actual running web
 and runner image digests and deployment identity, original database copy marker,
 isolated volumes/networks and payload-bound web gate. The fixed host inspection
-opens the existing copy lock without creating it and performs no restore,
+acquires the shared copy lock (recreating only its empty coordination file after
+host reboot or temporary-file cleanup) and performs no restore,
 registry initialization, setting change, container restart or provider schedule.
 All public HTTPS health, canonical, logo and runtime-identity checks must pass.
 A hold, active operation/fence, changed generation/authority, missing copy
