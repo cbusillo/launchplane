@@ -474,9 +474,11 @@ label controls, rather than an immutable approval journal.
 The train's own recorded branch refresh is the exception to requiring a new
 handoff after a push. It carries the source handoff only through a complete
 chain of its persisted refresh records, rechecking exact merge parents, base
-ancestry and unchanged source patches using the same proof as dependency
-refreshes. Unrecorded pushes or a changed source patch need a fresh handoff.
-Checks on the refreshed current head must still pass before admission.
+ancestry and unchanged source patches using the proof dependency refreshes use,
+except that hunk line numbers may move: base edits earlier in the same file
+shift them on every clean refresh. Changed lines, context and hunk boundaries
+must still match. Unrecorded pushes or a changed source patch need a fresh
+handoff. Checks on the refreshed current head must still pass before admission.
 
 The same carry applies to active stack collapses, including intermediate parents:
 the current policy binding, latest persisted progress and exact merge parents
