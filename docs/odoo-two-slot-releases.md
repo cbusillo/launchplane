@@ -243,6 +243,22 @@ Qualify these capabilities and representative forward/rollback recovery in
 isolation before any exact Client-accepted gated real release; source tests do
 not activate a lane.
 
+The opt-in `tests.test_odoo_slot_startup_rehearsal` exercises the startup adapter
+against real, stopped Docker Compose services. Select an already-local immutable
+image with a `sleep` executable through `LAUNCHPLANE_TEST_STARTUP_IMAGE`; run the
+`qualityGate.test.odooStartupRehearsal` command in `.github/github.json`. It
+creates disposable projects without networks, published ports or data mounts,
+uses inert environment values, and removes its projects and files afterward.
+It covers a lost reply after recreation, reconstruction from durable authority,
+zero/multiple stopped container inventories, foreign one-off refusal and
+effective forward/rollback startup payload readback.
+
+That rehearsal substitutes the Dokploy environment-record API and the guard
+and database observers. Its containers run no Odoo registry or jobs. It does
+not qualify the installed service package, remote transport, actual process
+interruption, physical-database drain, native settings commits or public traffic.
+Those remain part of #3268's installed and full-release qualification.
+
 `configure_startup` merges the selected snapshot and its legacy indexing parameter
 into both slots' durable managed startup payloads, preserves unrelated settings
 and secrets, and returns `StartupSettingsReadback` only after readback. It must
