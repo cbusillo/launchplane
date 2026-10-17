@@ -29854,6 +29854,17 @@ def create_launchplane_fastapi_app(
         root=resolved_control_plane_root,
         run_provider_mutation=run_provider_mutation,
     )
+    from control_plane.http_routes.odoo_upgrade_rehearsal import (
+        register_odoo_upgrade_rehearsal_routes,
+    )
+
+    register_odoo_upgrade_rehearsal_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
+        run_provider_mutation=run_provider_mutation,
+    )
     register_testing_replacement_bootstrap_routes(
         app,
         dependencies=read_route_dependencies,

@@ -13608,3 +13608,25 @@ class RealPostgresNeverServedTests(unittest.TestCase):
 class PostgresOdooSecretTransportTests(secret_transport_tests.OdooSecretTransportTests):
     def make_store(self) -> PostgresRecordStore:
         return self.enterContext(_store_for_fresh_head_database())
+
+
+@unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
+class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
+    def test_rehearsal_record_compare_and_write_and_native_alias_fence(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
+
+        fixture = RehearsalScenario()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_compare_and_write_preserves_the_winner()
+        fixture.test_native_registry_keeps_a_rehearsal_target_out_of_canonical_lanes()
+
+    def test_complete_rehearsal_preserves_canonical_records_on_postgres(self) -> None:
+        from tests.test_odoo_upgrade_rehearsal import RehearsalScenario
+
+        fixture = RehearsalScenario()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_lifecycle_preserves_both_recovery_states_and_all_original_lanes()

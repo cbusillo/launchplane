@@ -53,7 +53,7 @@ def storage_capacity(spec, containers, budget, staged_bytes=0, assembly_bytes=0)
         raise RuntimeError('Runner staging backing is unavailable')
     demand(upper, max(assembly_bytes, budget['staging_bytes'] - staged_bytes))
     if gen.get('source_mode', 'ssh') != 'container-export':
-        demand(tempfile.gettempdir(), budget['staging_bytes'])
+        demand(spec.get('staging_directory', tempfile.gettempdir()), budget['staging_bytes'])
     capacity = all(available[device] >= size + budget['reserve_bytes'] for device, size in required.items())
     return capacity
 """.replace("__MAX_DISPOSALS__", str(MAX_DISPOSALS_PER_PASS))
