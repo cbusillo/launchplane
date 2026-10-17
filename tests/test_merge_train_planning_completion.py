@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+from email.message import Message
 from typing import Any, cast
 from unittest import TestCase
 from unittest.mock import Mock, patch
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 
 import click
 
@@ -559,6 +560,42 @@ class PlanningCompletionTests(TestCase):
         self.provider.comments = [{"user": {"id": _BOT}, "body": _wait()}]
         self.assertEqual(self.record().delivery_status, "delivered")
 
+    def test_held_first_reference_does_not_leave_an_eligible_issue_stale(self) -> None:
+        for reason in ("waiting", "reporter", "blocker", "open"):
+            with self.subTest(reason=reason):
+                self.provider = PlanningProvider()
+                self.provider.references = [8, 7]
+                held = PlanningProvider()
+                held.issue.update(number=8, node_id="issue8")
+                if reason == "waiting":
+                    held.comments = [{"user": {"id": _BOT}, "body": _wait("waiting")}]
+                elif reason == "reporter":
+                    held.issue["user"]["id"] = 99
+                elif reason == "blocker":
+                    held.blockers = [{"state": "open"}]
+                else:
+                    held.issue["state"] = "open"
+                before = copy.deepcopy(held.issue)
+
+                def request(*, path: str, **kwargs: Any) -> Any:
+                    provider = (
+                        held if path.startswith(f"/repos/{_REPO}/issues/8") else self.provider
+                    )
+                    return provider.request(path=path, **kwargs)
+
+                self.comment_mock.reset_mock()
+                with patch.object(completion, "github_api_request", side_effect=request):
+                    record = self.record()
+                self.assertEqual(
+                    {label["name"] for label in self.provider.issue["labels"]},
+                    {"plan", "plan:done", "bug"},
+                )
+                self.assertEqual(held.issue, before)
+                self.assertFalse(held.writes)
+                self.assertEqual(record.delivery_status, "failed")
+                self.assertEqual(record.retryable, reason == "open")
+                self.comment_mock.assert_not_called()
+
     def test_failed_metadata_or_project_readback_is_never_delivered(self) -> None:
         self.provider.drop_label_write = True
         self.assertEqual(self.record().delivery_status, "failed")
@@ -571,6 +608,31 @@ class PlanningCompletionTests(TestCase):
         record = self.record()
         self.assertEqual(record.delivery_status, "delivered")
         self.assertEqual(self.provider.project_status, "done")
+
+    def test_metadata_permission_denial_stops_other_sources_without_retry(self) -> None:
+        self.provider.references = [7, 8]
+        other = PlanningProvider()
+        other.issue.update(number=8, node_id="issue8")
+        before = copy.deepcopy(other.issue)
+        attempts: list[str] = []
+
+        def request(*, path: str, method: str = "GET", **kwargs: Any) -> Any:
+            if method != "GET" and path != "/graphql":
+                attempts.append(path)
+                error = click.ClickException("provider denied metadata write")
+                error.__cause__ = HTTPError(path, 403, "Forbidden", Message(), None)
+                raise error
+            provider = other if path.startswith(f"/repos/{_REPO}/issues/8") else self.provider
+            return provider.request(path=path, method=method, **kwargs)
+
+        with patch.object(completion, "github_api_request", side_effect=request):
+            record = self.record()
+        self.assertEqual(attempts, [f"/repos/{_REPO}/issues/7/labels"])
+        self.assertEqual(other.issue, before)
+        self.assertFalse(other.writes)
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertFalse(record.retryable)
+        self.comment_mock.assert_not_called()
 
     def test_nonplans_and_no_closing_references_have_no_metadata_writes(self) -> None:
         self.provider.issue["labels"] = [{"name": "bug"}]

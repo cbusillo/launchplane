@@ -2148,6 +2148,12 @@ readbacks. The persisted record schema stays compatible with older workers
 during rolling deployment and rollback. A receipt is evidence, never authority;
 each retry uses the current policy's trusted identities.
 
+A held, reporter-owned or not-yet-closed source does not prevent other eligible
+sources in the same PR from being reconciled. The held source stays unchanged,
+and its diagnostic keeps the overall planning receipt incomplete. Provider
+metadata-write failures still stop that delivery through existing retry/denial
+handling.
+
 Provider failures use terminal feedback's existing retry and quota backoff.
 GitHub's delayed keyword-closure projection also waits for a later feedback
 attempt. A real wait, incomplete prerequisite, cross-repository closing link,
