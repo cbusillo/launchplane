@@ -1934,6 +1934,28 @@ policy covers provider incidents when qualifying notification delivery. The
 route must have passed its existing product-scope authorization check; ordinary
 in-progress retries and idempotency-protocol errors do not open delivery incidents.
 
+Ordinary testing reconciliation has separate `testing-delivery-*` provider
+incidents, including failed rendering before a deployment record exists and
+exhausted deploy retries. The reconciler records attention on completion; the
+independent delivery monitor retries from the durable testing request once per
+minute and reads its referenced Odoo operation, including failures while another
+attempt is queued. Notices contain only a bounded step code, trace and the
+supported testing path-check/retry action. Existing notification policies and
+outbox retry/deduplication apply. A policy limited to HTTP checks does not match.
+Staff holds and the retained-database credential guard remain quiet; the latter
+is a correct protective refusal, not an outage. Delivery attention
+never rewrites runtime health or gates merge, deploy, promotion or acceptance.
+A later successful deployment of the lane's current desired candidate resolves
+its earlier delivery attention, including an exhausted candidate superseded by
+a newer verified build. An unrelated build, production success or passing
+old-build health cannot do so. A pre-plan source-read incident also resolves
+when a later successful reconciliation confirms the desired build is already
+deployed; it needs no unnecessary redeploy. A pre-plan read blip adds no second
+incident to a lane that already has delivery attention. Product deactivation or
+removal of the testing lane retires its delivery attention explicitly. Notification persistence trouble is logged and retried by
+the monitor without failing reconciliation. This is delivery evidence, not a
+claim that a notification reached a person; inspect the notification receipts.
+
 Recurring delivery evidence reads use a derived storage index, not an event-time
 watermark. Each pass reads at most `DELIVERY_EVIDENCE_PAGE_SIZE` changed sources
 and recovery queries use the indexed matching successful
