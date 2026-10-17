@@ -13,6 +13,7 @@ name: Runner Lane Lifecycle
           - register
           - retire
           - relabel
+          - relabel-audit
       repository:
         description: owner/name repository that owns the runner lane.
         required: true
@@ -126,12 +127,12 @@ jobs:
                 exit 1
               fi
               ;;
-            relabel)
+            relabel|relabel-audit)
               if [ -z "$RUNNER_LABELS_INPUT" ]; then
                 echo "operation=relabel requires reviewed labels JSON." >&2
                 exit 1
               fi
-              expected_confirmation="relabel ${TARGET_REPOSITORY} ${LANE_NAME}"
+              expected_confirmation="${OPERATION} ${TARGET_REPOSITORY} ${LANE_NAME}"
               ;;
             *)
               echo "Unsupported runner lane lifecycle operation." >&2
@@ -286,7 +287,7 @@ jobs:
           echo "lifecycle_status=$status" >>"$GITHUB_OUTPUT"
 
       - name: Run runner lane relabel executor
-        if: ${{ inputs.operation == 'relabel' }}
+        if: ${{ inputs.operation == 'relabel' || inputs.operation == 'relabel-audit' }}
         id: relabel
         shell: bash
         env:
@@ -297,14 +298,29 @@ jobs:
           AUDIT_RECORD_KEY: ${{ inputs.audit_record_key }}
           GITHUB_TOKEN: ${{ secrets.LAUNCHPLANE_RUNNER_REGISTRATION_GITHUB_TOKEN }}
           MUTATE_REQUESTED: ${{ inputs.mutate }}
+          OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
+          jq -n --arg key "$AUDIT_RECORD_KEY" \
+            '{status:"refused_before_write",audit_record_key:$key,write_attempted:false}' \
+            > runner-lane-lifecycle-result.json
           approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"
           if [ "$REGISTRATION_ROOT" != "auto" ] && [ "$REGISTRATION_ROOT" != "$approved_root" ]; then
             echo "registration_root must match Launchplane approved root." >&2
             exit 1
           fi
-          jq -en \
+          audit_args=()
+          if [ "$OPERATION" = "relabel-audit" ]; then
+            jq -en --argjson packet "$LABEL_CHANGE" '$packet' > runner-lane-relabel-packet.json
+            jq -e \
+              --arg repo "$TARGET_REPOSITORY" --arg host "$RUNNER_REGISTRATION_HOST" \
+              --arg lane "$LANE_NAME" --arg root "$approved_root" --arg key "$AUDIT_RECORD_KEY" \
+              '.terminal_audit.request | select(.repository==$repo and .host_name==$host and
+                .lane_name==$lane and .registration_root==$root and .audit_record_key==$key)' \
+              runner-lane-relabel-packet.json > runner-lane-relabel-request.json
+            audit_args=(--audit-packet-file runner-lane-relabel-packet.json)
+          else
+            jq -en \
             --argjson change "$LABEL_CHANGE" \
             --arg repository "$TARGET_REPOSITORY" \
             --arg host "$RUNNER_REGISTRATION_HOST" \
@@ -318,10 +334,12 @@ jobs:
               expected_custom_labels:$change.expected_custom_labels,
               labels:$change.labels,mutate:$mutate}' \
             > runner-lane-relabel-request.json
+          fi
           mutate_flag=--dry-run
           if [ "$MUTATE_REQUESTED" = "true" ]; then
             mutate_flag=--mutate
           fi
+          executor_status=0
           flock -n /tmp/launchplane-runner-host-hygiene.lock \
             uv run launchplane work-graph runner-lane-relabel-executor \
             --request-file runner-lane-relabel-request.json \
@@ -331,9 +349,13 @@ jobs:
             --execution-lane "$RUNNER_REGISTRATION_EXECUTION_LANE" \
             --service-user "$RUNNER_REGISTRATION_SERVICE_USER" \
             --service-url "$LAUNCHPLANE_SERVICE_URL" \
-            "$mutate_flag" > runner-lane-lifecycle-result.json
+            "${audit_args[@]}" "$mutate_flag" > runner-lane-lifecycle-result.tmp || executor_status=$?
+          if [ -s runner-lane-lifecycle-result.tmp ]; then
+            mv runner-lane-lifecycle-result.tmp runner-lane-lifecycle-result.json
+          fi
           status="$(jq -r '.status // ""' runner-lane-lifecycle-result.json)"
           echo "lifecycle_status=$status" >>"$GITHUB_OUTPUT"
+          exit "$executor_status"
 
       - name: Upload lifecycle result
         if: always()
@@ -344,6 +366,7 @@ jobs:
             runner-lane-lifecycle-pre-inventory.json
             runner-lane-lifecycle-result.json
             runner-lane-relabel-request.json
+            runner-lane-relabel-packet.json
           if-no-files-found: warn
 
       - name: Fail on unexpected lifecycle result
@@ -359,6 +382,7 @@ jobs:
           fi
           if [ "$LIFECYCLE_STATUS" != "blocked" ] &&
             [ "$LIFECYCLE_STATUS" != "dry_run" ] &&
+            [ "$LIFECYCLE_STATUS" != "audit_delivered" ] &&
             [ "$LIFECYCLE_STATUS" != "completed" ]; then
             jq . runner-lane-lifecycle-result.json >&2
             exit 1

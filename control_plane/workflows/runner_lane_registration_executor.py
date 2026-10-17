@@ -213,10 +213,25 @@ def validate_local_executor_environment(
     env: Mapping[str, str] | None = None,
     current_user: str | None = None,
 ) -> None:
+    validate_ops_lane_environment(
+        service_user=request.service_user,
+        execution_lane=request.execution_lane,
+        env=env,
+        current_user=current_user,
+    )
+
+
+def validate_ops_lane_environment(
+    *,
+    service_user: str,
+    execution_lane: str,
+    env: Mapping[str, str] | None = None,
+    current_user: str | None = None,
+) -> None:
     execution_env = os.environ if env is None else env
     effective_user = current_user or pwd.getpwuid(os.getuid()).pw_name
-    if effective_user != request.service_user:
-        raise ValueError(f"runner lane registration executor must run as {request.service_user}.")
+    if effective_user != service_user:
+        raise ValueError(f"runner lane registration executor must run as {service_user}.")
     github_repository = execution_env.get("GITHUB_REPOSITORY", "").strip().lower()
     if github_repository != "cbusillo/launchplane":
         raise ValueError("runner lane registration executor must run from cbusillo/launchplane.")
@@ -226,7 +241,7 @@ def validate_local_executor_environment(
         if label.strip()
     }
     runner_name = execution_env.get("RUNNER_NAME", "").strip().lower()
-    execution_lane = request.execution_lane.lower()
+    execution_lane = execution_lane.lower()
     if execution_lane not in runner_labels and runner_name != execution_lane:
         raise ValueError(
             "runner lane registration executor is not running on the approved execution lane."

@@ -287,6 +287,26 @@ current custom labels and desired labels equal to the saved original custom
 labels. Check identity again; never overwrite intervening label changes. The
 operation never changes service configuration or runner registrations.
 
+To deliver a retained terminal packet, select the same workflow with
+`operation=relabel-audit`, `mutate=true`, the original repository, lane, root
+and audit key, and `confirmation="relabel-audit <owner/repo> <lane_name>"`.
+Pass the full saved result packet as the `labels` JSON input. This mode verifies
+the packet's typed terminal audit, original request and recorded terminal
+idempotency key, and posts **only that evidence** using the same operations
+identity/audit action. It never constructs a GitHub label client. Its terminal
+status is `audit_delivered`, which proves audit delivery, not a fresh label
+mutation or resolution of an uncertain provider outcome. The equivalent terminal
+consumer adds `--audit-packet-file <saved-result.json>` to the original reviewed
+relabel invocation. No new credential or grant is required.
+
+Scheduling labels are not proof of host-service retirement authority. The
+retirement executor independently verifies directory ownership and the narrow
+root-owned exact-target service binding before any registration deletion.
+Reserved-pool policies may intentionally remove generic managed routing labels;
+their inverse restores the saved labels. For a later approved retirement of
+such a lane, set `--required-label` to its actual approved reservation label
+instead of asserting that the old generic routing labels are still present.
+
 ### Registration and retirement
 
 The narrow host adapters for creating and retiring a repo-scoped runner lane

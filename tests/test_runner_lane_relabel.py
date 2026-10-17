@@ -3,10 +3,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import json
+import os
+import subprocess
 import unittest
 from unittest.mock import patch
 
 from click.testing import CliRunner
+import yaml
 
 from control_plane.cli_runner_relabel import runner_lane_relabel_executor
 
@@ -20,7 +24,7 @@ from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationPolicy,
     RunnerLaneRegistrationRequest,
 )
-from control_plane.workflows.runner_lane_relabel import execute_relabel
+from control_plane.workflows.runner_lane_relabel import execute_relabel, deliver_terminal_audit
 
 
 def inventory(
@@ -60,17 +64,22 @@ class Transport:
         self.unknown_write = unknown_write
         self.wrong_after = wrong_after
         self.written = False
+        self.current: tuple[str, ...] = ("general",)
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         self.calls.append((method, path, body))
         if method == "PUT":
             self.written = True
+            assert body is not None
+            values = body["labels"]
+            assert isinstance(values, list) and all(isinstance(value, str) for value in values)
+            self.current = tuple(values)
             if self.unknown_write:
                 raise TimeoutError("response lost after provider accepted write")
             return labels("general", "candidate")
         if self.written:
-            return labels("foreign" if self.wrong_after else "candidate", "general")
-        return labels("general")
+            return labels("foreign") if self.wrong_after else labels(*self.current)
+        return labels(*self.current)
 
 
 class RunnerRelabelTests(unittest.TestCase):
@@ -99,7 +108,7 @@ class RunnerRelabelTests(unittest.TestCase):
         self.audits.append(record)
         return {
             "status": "accepted",
-            "records": {"runner_lane_registration_audit_record_key": self.request.audit_record_key},
+            "records": {"runner_lane_registration_audit_record_key": record.audit_record_key},
         }
 
     def run_change(self, *, protected_lane_names: tuple[str, ...] = ()) -> dict[str, object]:
@@ -200,14 +209,15 @@ class RunnerRelabelTests(unittest.TestCase):
             reads += 1
             return inventory(runner_id=7 if reads == 1 else 8)
 
-        with self.assertRaises(ValueError):
-            execute_relabel(
-                request=self.request,
-                policy=self.policy,
-                transport=self.transport,
-                inventory_reader=changed,
-                audit_poster=self.audit,
-            )
+        result = execute_relabel(
+            request=self.request,
+            policy=self.policy,
+            transport=self.transport,
+            inventory_reader=changed,
+            audit_poster=self.audit,
+        )
+        self.assertEqual(result["status"], "refused_before_write")
+        self.assertEqual(self.audits[-1].status, "failed")
         self.assertFalse(self.transport.written)
 
     def test_uncertain_write_is_not_retried_and_is_audited(self) -> None:
@@ -230,9 +240,7 @@ class RunnerRelabelTests(unittest.TestCase):
                 raise TimeoutError()
             return {
                 "status": "accepted",
-                "records": {
-                    "runner_lane_registration_audit_record_key": self.request.audit_record_key
-                },
+                "records": {"runner_lane_registration_audit_record_key": record.audit_record_key},
             }
 
         result = execute_relabel(
@@ -245,11 +253,81 @@ class RunnerRelabelTests(unittest.TestCase):
         self.assertEqual(result["status"], "audit_delivery_pending")
         self.assertEqual(result["mutation_status"], "completed")
         self.assertIsInstance(result["terminal_audit"], dict)
+        before = list(self.transport.calls)
+        receipt = deliver_terminal_audit(result, self.audit)
+        self.assertEqual(receipt["status"], "audit_delivered")
+        self.assertEqual(self.transport.calls, before)
+        with self.assertRaises(ValueError):
+            deliver_terminal_audit({**result, "terminal_idempotency_key": "other"}, self.audit)
 
     def test_operations_lane_is_preserved(self) -> None:
         with self.assertRaises(ValueError):
             self.run_change(protected_lane_names=("general-1",))
         self.assertFalse(self.transport.written)
+
+    def test_operations_labels_cannot_be_added_or_changed_using_case(self) -> None:
+        for mode in ("add", "current"):
+            request = (
+                self.request.model_copy(update={"labels": ("general", "OpS")})
+                if mode == "add"
+                else self.request
+            )
+            reader = (
+                (
+                    lambda: inventory().model_copy(
+                        update={
+                            "lanes": (
+                                inventory()
+                                .lanes[0]
+                                .model_copy(update={"labels": ("self-hosted", "OpS")}),
+                            )
+                        }
+                    )
+                )
+                if mode == "current"
+                else inventory
+            )
+            with self.subTest(mode=mode), self.assertRaises(ValueError):
+                execute_relabel(
+                    request=request,
+                    policy=self.policy,
+                    transport=self.transport,
+                    inventory_reader=reader,
+                    audit_poster=self.audit,
+                    protected_labels=("ops",),
+                )
+        self.assertFalse(self.transport.written)
+
+    def test_reserved_label_removal_has_a_supported_inverse(self) -> None:
+        original = ("general", "launchplane", "launchplane-managed")
+        self.transport.current = original
+        forward = self.request.model_copy(
+            update={"expected_custom_labels": original, "labels": ("candidate",)}
+        )
+        result = execute_relabel(
+            request=forward,
+            policy=self.policy,
+            transport=self.transport,
+            inventory_reader=inventory,
+            audit_poster=self.audit,
+        )
+        self.assertEqual(result["status"], "completed")
+        inverse = self.request.model_copy(
+            update={
+                "expected_custom_labels": ("candidate",),
+                "labels": original,
+                "audit_record_key": "runner-label/test/inverse",
+            }
+        )
+        result = execute_relabel(
+            request=inverse,
+            policy=self.policy,
+            transport=self.transport,
+            inventory_reader=inventory,
+            audit_poster=self.audit,
+        )
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(set(self.transport.current), set(original))
 
     def test_duplicate_custom_labels_are_rejected_in_review_request(self) -> None:
         with self.assertRaises(ValueError):
@@ -302,3 +380,119 @@ class RunnerRelabelTests(unittest.TestCase):
                 )
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertFalse(self.transport.written)
+
+    def test_cli_mutate_accepts_host_fqdn_and_empty_custom_label_inverse(self) -> None:
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "request.json"
+            path.write_text(self.request.model_copy(update={"labels": ()}).model_dump_json())
+            with (
+                patch(
+                    "control_plane.cli_runner_relabel.socket.gethostname",
+                    return_value="build-1.local",
+                ),
+                patch("control_plane.cli_runner_relabel.validate_ops_lane_environment") as identity,
+                patch(
+                    "control_plane.cli_runner_relabel.build_refreshing_service_audit_poster",
+                    return_value=self.audit,
+                ),
+                patch(
+                    "control_plane.cli_runner_relabel.UrllibMergeTrainGitHubTransport",
+                    return_value=self.transport,
+                ),
+                patch("control_plane.cli_runner_relabel.GitHubRunnerLaneInventoryReader") as reader,
+            ):
+                reader.return_value.read_runner_lane_inventory.return_value = inventory()
+                result = CliRunner().invoke(
+                    runner_lane_relabel_executor,
+                    [
+                        "--request-file",
+                        str(path),
+                        "--allowed-repository",
+                        self.request.repository,
+                        "--approved-host",
+                        self.request.host_name,
+                        "--allowed-registration-root",
+                        self.request.registration_root,
+                        "--execution-lane",
+                        "ops",
+                        "--service-user",
+                        "runner-user",
+                        "--service-url",
+                        "https://service.example",
+                        "--mutate",
+                    ],
+                    env={"GITHUB_TOKEN": "fixture-token"},
+                )
+                self.assertEqual(result.exit_code, 0, result.output)
+                identity.assert_called_once_with(service_user="runner-user", execution_lane="ops")
+                self.assertEqual(self.transport.current, ())
+
+
+class RunnerRelabelWorkflowTests(unittest.TestCase):
+    def test_failed_executor_retains_terminal_packet_and_empty_preflight_keeps_fallback(
+        self,
+    ) -> None:
+        # Exercise the committed wrapper, using only disposable fixture executables.
+        workflow = yaml.safe_load(
+            subprocess.check_output(
+                [
+                    "git",
+                    "show",
+                    "HEAD:.github/workflows/runner-lane-registration.yml",
+                ],
+                text=True,
+                cwd=Path(__file__).resolve().parents[1],
+            )
+        )
+        step = next(
+            item
+            for item in workflow["jobs"]["runner-lane-lifecycle"]["steps"]
+            if item.get("id") == "relabel"
+        )
+        for output in (
+            '{"status":"audit_delivery_pending","terminal_audit":{"retained":true}}',
+            "",
+        ):
+            with self.subTest(output=output), TemporaryDirectory() as directory:
+                root = Path(directory)
+                executable = root / "flock"
+                executable.write_text('#!/bin/sh\nprintf "%s" "$FIXTURE_RESULT"\nexit 1\n')
+                executable.chmod(0o700)
+                result = subprocess.run(
+                    ["bash", "-c", step["run"]],
+                    cwd=root,
+                    capture_output=True,
+                    text=True,
+                    env={
+                        **os.environ,
+                        "PATH": f"{root}:{os.environ['PATH']}",
+                        "FIXTURE_RESULT": output,
+                        "AUDIT_RECORD_KEY": "fixture/audit",
+                        "TARGET_REPOSITORY": "example/control",
+                        "LANE_NAME": "general-1",
+                        "REGISTRATION_ROOT": "auto",
+                        "RUNNER_REGISTRATION_ALLOWED_ROOT": "/srv/runners",
+                        "RUNNER_REGISTRATION_HOST": "build-1",
+                        "RUNNER_REGISTRATION_EXECUTION_LANE": "ops",
+                        "RUNNER_REGISTRATION_SERVICE_USER": "runner-user",
+                        "LAUNCHPLANE_SERVICE_URL": "https://service.example",
+                        "MUTATE_REQUESTED": "true",
+                        "OPERATION": "relabel",
+                        "LABEL_CHANGE": json.dumps(
+                            {
+                                "runner_id": 7,
+                                "expected_custom_labels": ["general"],
+                                "labels": ["general", "candidate"],
+                            }
+                        ),
+                        "GITHUB_OUTPUT": str(root / "output"),
+                    },
+                    timeout=10,
+                )
+                self.assertNotEqual(result.returncode, 0)
+                packet = json.loads((root / "runner-lane-lifecycle-result.json").read_text())
+                self.assertEqual(
+                    packet["status"], "audit_delivery_pending" if output else "refused_before_write"
+                )
+                if output:
+                    self.assertEqual(packet["terminal_audit"], {"retained": True})

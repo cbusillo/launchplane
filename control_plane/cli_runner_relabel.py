@@ -12,13 +12,14 @@ from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrat
 from control_plane.merge_train_github import UrllibMergeTrainGitHubTransport
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.workflows.runner_lane_registration_executor import (
-    RunnerLaneRegistrationExecutorRequest,
     AuditPoster,
     build_refreshing_service_audit_poster,
     dry_run_audit_poster,
-    validate_local_executor_environment,
+    validate_ops_lane_environment,
 )
-from control_plane.workflows.runner_lane_relabel import execute_relabel
+from control_plane.workflows.runner_lane_relabel import execute_relabel, deliver_terminal_audit
+from control_plane.contracts.runner_lane_registration import RunnerLaneRegistrationAuditRecord
+from control_plane.merge_train_github import MergeTrainGitHubError
 
 
 @click.command("runner-lane-relabel-executor")
@@ -31,6 +32,7 @@ from control_plane.workflows.runner_lane_relabel import execute_relabel
 @click.option("--execution-lane", required=True)
 @click.option("--service-user", required=True)
 @click.option("--service-url", default="")
+@click.option("--audit-packet-file", type=click.Path(path_type=Path, exists=True, dir_okay=False))
 @click.option("--mutate/--dry-run", default=False)
 def runner_lane_relabel_executor(
     request_file: Path,
@@ -41,6 +43,7 @@ def runner_lane_relabel_executor(
     service_user: str,
     service_url: str,
     mutate: bool,
+    audit_packet_file: Path | None,
 ) -> None:
     """Replace custom labels on one reviewed existing runner, without restarting it."""
     from control_plane.cli_runner_lanes import _launchplane_service_bearer_token
@@ -51,27 +54,16 @@ def runner_lane_relabel_executor(
             raise ValueError("request operation/mutate must match the explicit relabel invocation")
         if mutate and not service_url:
             raise ValueError("mutating relabel requires service-backed audit")
+        if (
+            request.repository != allowed_repository.lower()
+            or request.host_name != approved_host.lower()
+            or request.registration_root != allowed_registration_root
+        ):
+            raise ValueError("request does not match the approved repository/host/root")
         if mutate:
-            if socket.gethostname().lower() != request.host_name:
+            if socket.gethostname().lower().split(".", 1)[0] != request.host_name.split(".", 1)[0]:
                 raise ValueError("runner host identity does not match")
-            validate_local_executor_environment(
-                request=RunnerLaneRegistrationExecutorRequest(
-                    repository=request.repository,
-                    host_name=request.host_name,
-                    execution_lane=execution_lane,
-                    service_user=service_user,
-                    lane_name=request.lane_name,
-                    registration_root=request.registration_root,
-                    labels=request.labels,
-                    mutate=True,
-                    audit_record_key=request.audit_record_key,
-                )
-            )
-        token = os.environ.get("GITHUB_TOKEN", "").strip()
-        if not token:
-            raise ValueError("missing existing GITHUB_TOKEN for runner administration")
-        transport = UrllibMergeTrainGitHubTransport(token=token)
-        reader = GitHubRunnerLaneInventoryReader(transport=transport)
+            validate_ops_lane_environment(service_user=service_user, execution_lane=execution_lane)
         audit_poster: AuditPoster = dry_run_audit_poster
         if mutate:
             audit_poster = build_refreshing_service_audit_poster(
@@ -82,26 +74,44 @@ def runner_lane_relabel_executor(
                     label="runner lane relabel",
                 ),
             )
-        result = execute_relabel(
-            request=request,
-            policy=RunnerLaneRegistrationPolicy(
-                allowed_repositories=(allowed_repository,),
-                approved_hosts=(approved_host,),
-                allowed_registration_roots=(allowed_registration_root,),
-            ),
-            transport=transport,
-            inventory_reader=lambda: reader.read_runner_lane_inventory(
-                repository=request.repository
-            ),
-            audit_poster=audit_poster,
-            protected_lane_names=(os.environ.get("RUNNER_NAME", ""),),
-            protected_labels=(execution_lane,),
-        )
-    except (OSError, ValueError):
+        if audit_packet_file is not None:
+            if not mutate:
+                raise ValueError("retained audit delivery requires explicit mutate")
+            packet = json.loads(audit_packet_file.read_text())
+            if not isinstance(packet, dict):
+                raise ValueError("retained packet must be an object")
+            terminal = RunnerLaneRegistrationAuditRecord.model_validate(
+                packet.get("terminal_audit")
+            )
+            if terminal.request != request:
+                raise ValueError("retained audit does not match the reviewed request")
+            result = deliver_terminal_audit(packet, audit_poster)
+        else:
+            token = os.environ.get("GITHUB_TOKEN", "").strip()
+            if not token:
+                raise ValueError("missing existing GITHUB_TOKEN for runner administration")
+            transport = UrllibMergeTrainGitHubTransport(token=token)
+            reader = GitHubRunnerLaneInventoryReader(transport=transport)
+            result = execute_relabel(
+                request=request,
+                policy=RunnerLaneRegistrationPolicy(
+                    allowed_repositories=(allowed_repository,),
+                    approved_hosts=(approved_host,),
+                    allowed_registration_roots=(allowed_registration_root,),
+                ),
+                transport=transport,
+                inventory_reader=lambda: reader.read_runner_lane_inventory(
+                    repository=request.repository
+                ),
+                audit_poster=audit_poster,
+                protected_lane_names=(os.environ.get("RUNNER_NAME", ""),),
+                protected_labels=(execution_lane,),
+            )
+    except (OSError, ValueError, MergeTrainGitHubError):
         # Do not echo authentication/transport payloads or caller-controlled JSON.
         raise click.ClickException(
             "Runner relabel preflight failed; no label write was attempted."
         ) from None
     click.echo(json.dumps(result, indent=2))
-    if result["status"] not in ("dry_run", "completed"):
+    if result["status"] not in ("dry_run", "completed", "audit_delivered"):
         raise click.exceptions.Exit(1)

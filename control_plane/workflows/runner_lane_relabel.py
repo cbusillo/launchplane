@@ -51,6 +51,35 @@ def _expected_labels(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(sorted(normalized))
 
 
+def deliver_terminal_audit(
+    packet: dict[str, object], audit_poster: AuditPoster
+) -> dict[str, object]:
+    """Deliver only the retained evidence, never repeat the label mutation."""
+    audit = RunnerLaneRegistrationAuditRecord.model_validate(packet.get("terminal_audit"))
+    key = f"runner-lane-relabel:{audit.audit_record_key}:terminal"
+    if (
+        audit.request.operation != "relabel"
+        or audit.status == "planned"
+        or not audit.request.mutate
+        or packet.get("terminal_idempotency_key") != key
+    ):
+        raise ValueError("retained terminal relabel audit/key is invalid")
+    receipt = audit_poster(audit, key)
+    records = receipt.get("records")
+    if (
+        receipt.get("status") != "accepted"
+        or not isinstance(records, dict)
+        or records.get("runner_lane_registration_audit_record_key") != audit.audit_record_key
+    ):
+        raise ValueError("service did not confirm the retained audit")
+    return {
+        "status": "audit_delivered",
+        "write_attempted": False,
+        "audit_record_key": audit.audit_record_key,
+        "audit_status": audit.status,
+    }
+
+
 def execute_relabel(
     *,
     request: RunnerLaneRegistrationRequest,
@@ -75,6 +104,9 @@ def execute_relabel(
         raise ValueError("relabel requires an audit key")
     desired = _expected_labels(request.labels)
     expected = _expected_labels(request.expected_custom_labels)
+    protected = {value.lower() for value in protected_labels}
+    if set(desired) & protected:
+        raise ValueError("operations routing labels cannot be added")
     path = f"/repos/{request.repository}/actions/runners/{request.expected_runner_id}/labels"
 
     def post_audit(record: RunnerLaneRegistrationAuditRecord, key: str) -> None:
@@ -96,8 +128,9 @@ def execute_relabel(
         matches = [lane for lane in inventory.lanes if lane.name.lower() == request.lane_name]
         if len(matches) != 1 or matches[0].github_id != request.expected_runner_id:
             raise ValueError("runner name/ID changed or is ambiguous")
-        if matches[0].name in protected_lane_names or set(matches[0].labels) & set(
-            protected_labels
+        if (
+            matches[0].name.lower() in {name.lower() for name in protected_lane_names}
+            or {label.lower() for label in matches[0].labels} & protected
         ):
             raise ValueError("operations execution lane must remain unchanged")
         if matches[0].repository.lower() != request.repository or matches[0].busy:
@@ -105,6 +138,8 @@ def execute_relabel(
         if matches[0].status != "online":
             raise ValueError("runner must be online")
         observed = _labels(transport.request(method="GET", path=path))
+        if set(observed.custom) & protected:
+            raise ValueError("operations execution lane must remain unchanged")
         if observed.custom != expected:
             raise ValueError("runner custom labels changed since review")
         if set(desired) & set(observed.automatic):
@@ -152,12 +187,12 @@ def execute_relabel(
     if not request.mutate:
         return result
     # Posting the audit can take time; do not rely on its earlier inventory.
-    _, refreshed = snapshot()
-    if refreshed != before:
-        raise ValueError("runner labels changed during audit delivery")
     terminal_status: Literal["failed", "completed"] = "failed"
     post_inventory: RunnerLaneInventory | None = None
     try:
+        _, refreshed = snapshot()
+        if refreshed != before:
+            raise ValueError("runner labels changed during audit delivery")
         result["write_attempted"] = True
         result["status"] = "mutation_reconciliation_required"
         transport.request(method="PUT", path=path, body={"labels": list(desired)})
@@ -176,10 +211,12 @@ def execute_relabel(
         result["status"] = "completed"
         result["observed_custom_labels"] = after.custom
         terminal_status = "completed"
-    except (
-        Exception
-    ):  # Adapter errors may include sensitive response data; retain only uncertainty.
-        result["status"] = "mutation_reconciliation_required"
+    except Exception:  # Adapter errors can contain sensitive response data.
+        result["status"] = (
+            "mutation_reconciliation_required"
+            if result["write_attempted"]
+            else "refused_before_write"
+        )
     terminal = RunnerLaneRegistrationAuditRecord(
         audit_record_key=request.audit_record_key,
         status=terminal_status,
@@ -197,4 +234,7 @@ def execute_relabel(
         result["mutation_status"] = result["status"]
         result["status"] = "audit_delivery_pending"
         result["terminal_audit"] = terminal.model_dump(mode="json")
+        result["terminal_idempotency_key"] = (
+            f"runner-lane-relabel:{request.audit_record_key}:terminal"
+        )
     return result
