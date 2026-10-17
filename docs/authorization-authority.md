@@ -109,8 +109,10 @@ or policy change. Every declared projection action must run its invariant proof
 in `tests/test_projection_sync.py`; an action without that proof stays `write`.
 Currently only `ingress_route.audit` qualifies. It uses the existing ingress
 endpoint with `instance` and `mode=apply`, verifies lane-owned domains, an exact
-existing host and an active DB-backed edge endpoint, and records only an unchanged
-provider route. Creation, update and enable/disable are forced off. Drift refuses
+existing host, an exclusive product context and an active DB-backed edge endpoint,
+and records only an unchanged provider route. The audit reuses the existing
+exact-instance no-op guard: creation, update and enable/disable are forced off
+for every exact-instance apply. Drift refuses
 the request. Shared-host comparison preserves sibling domains, while records and
 responses contain only the requested lane's domains and redact provider config
 for inherited standing permission. Domain-authority repair and route-binding
@@ -133,10 +135,14 @@ identity restrictions remain in force.
 
 Product-config likewise lets the authenticated Director agent plan undeclared
 non-secret settings on a Live product, including testing, production and context
-scope. The plan saves only review evidence. Applying undeclared settings still
-requires admin authority and returns `live_product_requires_operator` for the
-`local_operator` credential, even after a successful matching plan. Scoped agents
-retain their existing grants and Live-product guard.
+scope. The plan saves only review evidence. An owned testing lane is non-live
+even when its product is Live: existing product-config write authority may record
+its plain settings and provider-key retirements after a matching dry run. This
+records configuration without applying it to a provider. Production and
+context-wide undeclared settings still require admin authority and return
+`live_product_requires_operator` for the `local_operator` credential, even after
+a successful matching plan. Exact lane ownership, instance-only secret writes,
+credential safety, and scoped-agent grants remain enforced.
 An instance-scoped provider-key adoption dry run can read that lane's provider
 environment inside the service, including production. It returns key dispositions
 without values, preserves credential refusals, and records no adopted settings.

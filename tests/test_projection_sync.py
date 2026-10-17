@@ -4,7 +4,9 @@ from contextlib import ExitStack
 from unittest.mock import patch
 from typing import cast
 import unittest
+import click
 
+from control_plane import service_auth
 from control_plane.action_effects import ACTION_EFFECTS
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.npmplus import NpmplusProxyHost, NpmplusProxyHostPayload
@@ -51,6 +53,16 @@ class _ReadOnlyIngressClient(_FakeNpmplusIngressClient):
         raise AssertionError("Projection sync attempted provider disable")
 
 
+class _RecordedEvaluations(dict[object, service_auth.AuthzEvaluation]):
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list[service_auth.AuthzEvaluation] = []
+
+    def __setitem__(self, key: object, value: service_auth.AuthzEvaluation) -> None:
+        self.events.append(value)
+        super().__setitem__(key, value)
+
+
 class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_every_projection_sync_action_has_an_executed_invariant_proof(self) -> None:
         proofs = {"ingress_route.audit": self._prove_ingress_audit}
@@ -85,6 +97,7 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
             ("foreign-domain", {}, {}, 400),
             ("foreign-lane", {}, {}, 400),
             ("missing-edge", {}, {}, 400),
+            ("shared-context", {}, {}, 400),
         )
         for name, host_updates, request_updates, expected in cases:
             with (
@@ -111,6 +124,10 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
 
                 ingress = Client(() if name == "missing" else (host,))
                 store.write_product_profile_record(profile)
+                if name == "shared-context":
+                    store.write_product_profile_record(
+                        profile.model_copy(update={"product": "other-product"})
+                    )
                 store.write_edge_endpoint_record(endpoint)
                 app = create_launchplane_fastapi_app(
                     verifier=_RejectingVerifier(),
@@ -148,15 +165,17 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                         stack.enter_context(
                             patch.object(store, method, side_effect=AssertionError(method))
                         )
-                    async with lifespan_client(app) as client:
-                        response = await client.post(
-                            "/v1/drivers/ingress/route-apply",
-                            headers={
-                                "Authorization": "Bearer director-token",
-                                "Idempotency-Key": f"audit-{name}",
-                            },
-                            json=payload,
-                        )
+                    evaluations = _RecordedEvaluations()
+                    with patch.object(service_auth, "_AUTHZ_EVALUATION_BY_TASK", evaluations):
+                        async with lifespan_client(app) as client:
+                            response = await client.post(
+                                "/v1/drivers/ingress/route-apply",
+                                headers={
+                                    "Authorization": "Bearer director-token",
+                                    "Idempotency-Key": f"audit-{name}",
+                                },
+                                json=payload,
+                            )
                 self.assertEqual(response.status_code, expected, response.text)
                 self.assertFalse(set(ingress.calls) - {"list"})
                 self.assertNotIn("private-provider-config", response.text)
@@ -167,6 +186,10 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                     product=profile.product, context_name=profile.lanes[0].context
                 )
                 if expected == 202:
+                    self.assertFalse(
+                        any(event.action == "ingress_route.apply" for event in evaluations.events),
+                        "An audit must not record a denied provider-apply probe",
+                    )
                     self.assertTrue(records)
                     self.assertEqual(response.json()["result"]["status"], "unchanged")
                     self.assertEqual(records[0].status, "unchanged")
@@ -184,6 +207,8 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(records)
 
     def test_mutations_are_unreachable_with_all_provider_write_flags_false(self) -> None:
+        matching_host = _npmplus_proxy_host()
+        assert matching_host.forward_port is not None
         payload = _instance_ingress_exact_host_payload(mode="apply")
         request = NpmplusIngressApplyRequest.model_validate(payload["ingress"]).model_copy(
             update={"allow_create": False, "allow_update": False, "allow_enable_disable": False}
@@ -192,25 +217,24 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
             update={
                 "route": request.route.model_copy(
                     update={
-                        "forward_host": "100.73.170.113",
+                        "forward_host": matching_host.forward_host,
+                        "forward_port": matching_host.forward_port,
                     }
                 )
             }
         )
         for hosts in (
             (),
-            (_npmplus_proxy_host(),),
-            (_npmplus_proxy_host(forward_port=8443),),
+            (matching_host,),
+            (matching_host.model_copy(update={"forward_port": matching_host.forward_port + 1}),),
             (_npmplus_proxy_host(enabled=False),),
         ):
             ingress = _ReadOnlyIngressClient(hosts)
             with self.subTest(hosts=hosts):
-                if hosts and hosts[0].enabled and hosts[0].forward_port == 443:
+                if hosts == (matching_host,):
                     result = apply_npmplus_ingress_route(client=ingress, request=request)
                     self.assertEqual(result.status, "unchanged")
                 else:
-                    import click
-
                     with self.assertRaises(click.ClickException):
                         apply_npmplus_ingress_route(client=ingress, request=request)
                 self.assertEqual(ingress.calls, ["list"])

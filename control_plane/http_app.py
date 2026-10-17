@@ -17016,6 +17016,9 @@ def create_launchplane_fastapi_app(
             isinstance(identity, LocalOperatorIdentity)
             and (product_config_request.mode == "apply" or not director_agent_identity(identity))
             and config_profile.production_use == "live"
+            # The profile's live status describes production, not its owned
+            # testing lane. Target ownership and instance scope are checked above.
+            and product_config_request.instance != "testing"
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
             )
@@ -17024,7 +17027,7 @@ def create_launchplane_fastapi_app(
                 status_code=403,
                 trace_id=trace_id,
                 code="live_product_requires_operator",
-                message="A live product's undeclared settings are recorded by an admin, "
+                message="A live production lane's or context's undeclared settings are recorded by an admin, "
                 "not with the local_operator credential the Director's agent uses.",
             )
         if (
@@ -23213,13 +23216,15 @@ def create_launchplane_fastapi_app(
         if (
             instance_name
             and route_request.ingress.mode == "apply"
-            and not resolved_authz_policy_runtime.allows(
+            and resolved_authz_policy_runtime.evaluate(
                 identity=identity,
                 action=authz_action,
                 product=route_request.product,
                 context=route_request.context,
                 target=AuthorizationTarget(scope="instance", instances=(instance_name,)),
-            )
+                record_context=False,
+            ).decision
+            != "allowed"
         ):
             authz_action = "ingress_route.audit"
         if not resolved_authz_policy_runtime.allows(
@@ -23275,7 +23280,7 @@ def create_launchplane_fastapi_app(
                 ):
                     raise control_plane_ingress_route_scope.IngressRouteInstanceScopeError(
                         code="invalid_ingress_instance_scope",
-                        message="Planning requires the named product's exclusive context.",
+                        message="Standing access requires the named product's exclusive context.",
                     )
                 control_plane_ingress_route_scope.validate_ingress_route_instance_scope(
                     profile=profile,
