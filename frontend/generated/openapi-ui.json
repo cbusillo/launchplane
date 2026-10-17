@@ -33215,8 +33215,16 @@
       },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "The source acceptance and immutable evidence for an unchanged feature patch.",
+        "description": "The source acceptance and immutable evidence for carrying its decision.",
         "properties": {
+          "commits": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductReviewCarryCommit"
+            },
+            "title": "Commits",
+            "type": "array"
+          },
           "comparison_base_sha": {
             "default": "",
             "title": "Comparison Base Sha",
@@ -33230,7 +33238,8 @@
             "default": "merge_train_base_refresh",
             "enum": [
               "merge_train_base_refresh",
-              "unchanged_patch_base_update"
+              "unchanged_patch_base_update",
+              "client_impact_none"
             ],
             "title": "Reason",
             "type": "string"
@@ -33249,6 +33258,7 @@
           }
         },
         "required": [
+          "commits",
           "comparison_base_sha",
           "head_sha",
           "reason",
@@ -33256,6 +33266,28 @@
           "refresh_record_ids"
         ],
         "title": "ProductReviewCarry",
+        "type": "object"
+      },
+      "ProductReviewCarryCommit": {
+        "additionalProperties": false,
+        "description": "An immutable commit and the Client-impact trailer used to carry acceptance.",
+        "properties": {
+          "client_impact": {
+            "const": "none",
+            "title": "Client Impact",
+            "type": "string"
+          },
+          "sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Sha",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_impact",
+          "sha"
+        ],
+        "title": "ProductReviewCarryCommit",
         "type": "object"
       },
       "ProductReviewDecisionEnvelope": {
