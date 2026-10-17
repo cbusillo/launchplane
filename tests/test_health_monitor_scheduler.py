@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier, Event, Thread
+from typing import Any
 import unittest
 from unittest.mock import Mock, patch
 from pydantic import JsonValue
@@ -25,6 +26,7 @@ from control_plane.lane_runtime_verification import monitor_observation_provenan
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.provider_operations import _ReservationHeartbeat, DurableProviderOperationStore
 from control_plane.contracts.public_ingress_monitoring import (
+    PublicIngressObservationRecord,
     health_monitor_freshness_seconds,
     health_monitor_interval_seconds,
     PublicIngressNotificationDestination,
@@ -36,11 +38,12 @@ from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
     MonitorRunCancelled,
     PublicIngressNotificationDriverSet,
+    PublicIngressMonitorResult,
     record_monitor_cadence,
     run_public_ingress_monitor_once,
 )
 from tests.support.stores import _sqlite_database_url
-from tests.test_public_ingress_monitor import _Store, _profile
+from tests.test_public_ingress_monitor import _Store, _identity, _lane_summary, _profile
 
 
 class HealthMonitorSchedulerTests(unittest.TestCase):
@@ -180,6 +183,96 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
         self.probe.side_effect = None
         self.assertTrue(self.scheduler.run_once())
         self.assertFalse(self.scheduler.run_once())
+
+    def test_change_confirmation_yields_to_next_scheduled_slot(self) -> None:
+        other = _profile().model_copy(
+            update={
+                "product": "other-site",
+                "lanes": (_profile().lanes[0].model_copy(update={"context": "other-site"}),),
+            }
+        )
+        self.store.write_product_profile_record(other)
+        self.scheduler.run_once()
+        self.now += MONITOR_INTERVAL_SECONDS - 5
+        self.store.write_product_profile_record(
+            _profile().model_copy(update={"display_name": "New"})
+        )
+        next_slot = monitor_slot(self.now) + 1
+        waits: list[float] = []
+        batches: list[frozenset[tuple[str, str, str]]] = []
+        fixture = _Store((_profile(), other))
+        identity = _identity()
+        fixture.lane_summaries[("example-site", "prod")] = _lane_summary(identity)
+
+        def advance(seconds: float) -> bool:
+            # The scheduled batch publishes the unchanged lane before its wait.
+            self.assertEqual(
+                [record.product for record in fixture.records],
+                [other.product] if len(batches) > 1 else [],
+            )
+            waits.append(seconds)
+            self.now += seconds
+            return False
+
+        def confirm(
+            *, lane_keys: frozenset[tuple[str, str, str]], **kwargs: Any
+        ) -> PublicIngressMonitorResult:
+            batches.append(lane_keys)
+            kwargs["record_store"] = fixture
+            kwargs["http_get"] = lambda url, _timeout: HttpObservation(
+                200,
+                url,
+                0,
+                payload={
+                    "runtime_identity": identity.model_copy(
+                        update={"deployment_record_id": "previous"}
+                    ).model_dump(mode="json")
+                },
+            )
+            return run_public_ingress_monitor_once(lane_keys=lane_keys, **kwargs)
+
+        self.scheduler.run_monitor = self.scheduler._run_monitor
+        with (
+            patch(
+                "control_plane.health_monitor_scheduler.run_public_ingress_monitor_once", confirm
+            ),
+            patch.object(self.scheduler._stop, "wait", side_effect=advance),
+        ):
+            with self.assertRaises(MonitorRunCancelled):
+                self.scheduler.run_once()
+            self.assertEqual(self.now, next_slot * MONITOR_INTERVAL_SECONDS)
+            self.assertIsNone(self.scheduler._read("active"))
+            self.assertIsNone(self.scheduler._read(str(next_slot)))
+            self.assertTrue(self.scheduler.run_once())
+        self.assertEqual(waits[0], 5)
+        self.assertEqual(batches[0], frozenset({("example-site", "example-site", "prod")}))
+        self.assertEqual(
+            batches[1],
+            frozenset(
+                {("example-site", "example-site", "prod"), ("other-site", "other-site", "prod")}
+            ),
+        )
+        self.assertFalse(self.scheduler.watch_once())
+        self.assertFalse(self.make_scheduler().run_once())
+        self.assertEqual(
+            [record.failure_code for record in fixture.records if record.product == "example-site"],
+            ["wrong_runtime_identity"],
+        )
+
+    def test_cancelled_change_immediately_retries_scheduled_work(self) -> None:
+        calls = 0
+
+        def cancelled_then_stop() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise MonitorRunCancelled()
+            self.scheduler._stop.set()
+
+        with patch.object(self.scheduler._stop, "wait", wraps=self.scheduler._stop.wait) as wait:
+            self.scheduler._loop(cancelled_then_stop)
+        self.assertEqual(calls, 2)
+        self.assertEqual(wait.call_count, 1)
 
     def test_committed_authority_wakes_but_receipts_and_rollback_do_not(self) -> None:
         wake = Mock()
@@ -647,6 +740,117 @@ class HealthMonitorSchedulerTests(unittest.TestCase):
 
 
 class MonitorCadenceIncidentTests(unittest.TestCase):
+    def test_healthy_lane_is_published_before_identity_confirmation(self) -> None:
+        changing = _profile()
+        healthy = _profile().model_copy(
+            update={
+                "product": "healthy-site",
+                "lanes": (
+                    _profile()
+                    .lanes[0]
+                    .model_copy(
+                        update={"context": "healthy-site", "base_url": "https://healthy.test"}
+                    ),
+                ),
+            }
+        )
+        store = _Store((changing, healthy))
+        identity = _identity()
+        store.lane_summaries[("example-site", "prod")] = _lane_summary(identity)
+        waited: list[float] = []
+
+        def confirm(seconds: float) -> None:
+            waited.append(seconds)
+            self.assertEqual([record.product for record in store.records], [healthy.product])
+            self.assertEqual(store.incidents, [])
+
+        result = run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-10-16T12:00:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                200,
+                url,
+                0,
+                payload={
+                    "runtime_identity": identity.model_copy(
+                        update={"deployment_record_id": "previous"}
+                    ).model_dump(mode="json")
+                },
+            ),
+            runtime_identity_confirmation_delay_seconds=30,
+            sleep=confirm,
+        )
+        self.assertTrue(waited)
+        self.assertEqual(result.fail_count, 1)
+        self.assertEqual(
+            [record.product for record in result.records], [changing.product, healthy.product]
+        )
+        self.assertEqual(
+            next(
+                record for record in result.records if record.product == changing.product
+            ).failure_code,
+            "wrong_runtime_identity",
+        )
+
+    def test_completed_probe_publishes_before_slow_probe_and_later_waves(self) -> None:
+        profiles = tuple(
+            _profile().model_copy(
+                update={
+                    "product": name,
+                    "lanes": (
+                        _profile()
+                        .lanes[0]
+                        .model_copy(
+                            update={
+                                "context": name,
+                                "base_url": "",
+                                "health_url": f"https://{name}.test/healthz",
+                            }
+                        ),
+                    ),
+                }
+            )
+            for name in ("slow", "healthy", "later")
+        )
+        store = _Store(profiles)
+        published, later_published, release = Event(), Event(), Event()
+        write = store.write_public_ingress_observation_record
+
+        def record(observation: PublicIngressObservationRecord) -> None:
+            write(observation)
+            if store.records[-1].product == "healthy":
+                published.set()
+            if store.records[-1].product == "later":
+                later_published.set()
+
+        def probe(url: str, _timeout: int) -> HttpObservation:
+            if "slow.test" in url and not release.wait(30):
+                raise TimeoutError("slow probe was not released")
+            return HttpObservation(200, url, 0)
+
+        results: list[PublicIngressMonitorResult] = []
+        with patch.object(store, "write_public_ingress_observation_record", side_effect=record):
+            runner = Thread(
+                target=lambda: results.append(
+                    run_public_ingress_monitor_once(
+                        record_store=store, http_get=probe, notify=False, max_concurrent_probes=2
+                    )
+                )
+            )
+            runner.start()
+            try:
+                self.assertTrue(published.wait(5))
+                self.assertTrue(later_published.wait(5))
+                self.assertFalse(release.is_set())
+            finally:
+                release.set()
+                runner.join(5)
+        self.assertFalse(runner.is_alive())
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            [record.product for record in results[0].records], [p.product for p in profiles]
+        )
+
     def test_parallel_probe_batch_has_independent_requests_and_stable_result_order(self) -> None:
         first = _profile(
             lane=_profile()
