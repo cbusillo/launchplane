@@ -3657,6 +3657,7 @@ class GitHubMergeTrainSnapshotReader:
                     commit_shas={record.expected_head_sha, current},
                     base_branch=base_branch,
                     base_sha=base_sha,
+                    ignore_hunk_positions=True,
                 ):
                     return False
                 current = record.expected_head_sha
@@ -3909,7 +3910,11 @@ class GitHubMergeTrainSnapshotReader:
         commit_shas: set[object],
         base_branch: str,
         base_sha: str,
+        ignore_hunk_positions: bool = False,
     ) -> bool:
+        # A handoff carry ignores hunk line numbers: a clean refresh moves them
+        # whenever the base edits the same file earlier. Dependency admission
+        # keeps exact positions because it skips agent review.
         parents = commit.get("parents")
         if not isinstance(parents, list) or len(parents) != 2 or self._branch_refresh_store is None:
             return False
@@ -3957,6 +3962,7 @@ class GitHubMergeTrainSnapshotReader:
                 head=record.expected_head_sha,
                 read=read,
                 include_blobs=False,
+                ignore_hunk_positions=ignore_hunk_positions,
             )
             return before is not None and before == change_fingerprint(
                 repository=repository_path,
@@ -3964,6 +3970,7 @@ class GitHubMergeTrainSnapshotReader:
                 head=record.result_head_sha,
                 read=read,
                 include_blobs=False,
+                ignore_hunk_positions=ignore_hunk_positions,
             )
         return False
 
