@@ -386,6 +386,7 @@ def writer_action(
         "receipt_pause",
         "receipt_resume",
         "receipt_resume_retryable",
+        "fence",
     ],
     checkpoint: Callable[[str], None],
     binding: str | None = None,
@@ -493,12 +494,42 @@ def coordinate_writer(spec, *, base=None):
         return _coordinate_writer(spec,base=base,owner_path=directory/'binding.json')
     finally:
         os.close(descriptor)
+def fence_writer(spec, *, base):
+    # Runs under the active writer lock. Without the original witness this
+    # binding had no effect, and the tombstone refuses any late dispatch of it.
+    writer=hashlib.sha256(json.dumps([spec['project'],spec['service']]).encode()).hexdigest()
+    directory=base/spec['binding']/writer
+    if directory.is_symlink() or any(item.is_symlink() for item in directory.parents):
+        raise ValueError('invalid writer custody')
+    directory.mkdir(parents=True,exist_ok=True,mode=0o700)
+    if (directory/'before.json').exists() or (directory/'before.json').is_symlink():
+        raise ValueError('the original writer operation was witnessed')
+    path=directory/'fenced.json'
+    expected={'binding':spec['binding'],'project':spec['project'],'service':spec['service']}
+    if path.exists() or path.is_symlink():
+        if path.is_symlink() or json.loads(path.read_text())!=expected:
+            raise ValueError('writer fence changed')
+        return
+    with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w') as output:
+        json.dump(expected,output)
+        output.flush()
+        os.fsync(output.fileno())
+    descriptor=os.open(directory,os.O_RDONLY|os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 def _coordinate_writer(spec, *, base, owner_path):
     requested=spec['action']
     receipt=requested.startswith('receipt_')
     action=requested.removeprefix('receipt_')
-    if not re.fullmatch(r'[A-Za-z0-9_-]+',spec['project']) or not re.fullmatch(r'[A-Za-z0-9_-]+',spec['service']) or requested not in ('pause','resume','inspect','parked','receipt_pause','receipt_resume','receipt_resume_retryable') or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
+    if not re.fullmatch(r'[A-Za-z0-9_-]+',spec['project']) or not re.fullmatch(r'[A-Za-z0-9_-]+',spec['service']) or requested not in ('pause','resume','inspect','parked','receipt_pause','receipt_resume','receipt_resume_retryable','fence') or not re.fullmatch(r'[a-f0-9]{64}',spec['binding']):
         raise ValueError('invalid writer identity')
+    if requested=='fence':
+        fence_writer(spec,base=base)
+        print(WRITER_ACTION_MARKER+'='+requested)
+        print(WRITER_BINDING_MARKER+'='+spec['binding'])
+        return
     def docker(*args):
         result=subprocess.run(['docker',*args],capture_output=True,text=True,timeout=60)
         if result.returncode or len(result.stdout)>1024*1024:
@@ -541,6 +572,8 @@ def _coordinate_writer(spec, *, base, owner_path):
         directory=base/spec['binding']/writer
         if directory.is_symlink() or any(item.is_symlink() for item in directory.parents):
             raise ValueError('invalid writer custody')
+        if (directory/'fenced.json').exists() or (directory/'fenced.json').is_symlink():
+            raise ValueError('this writer operation is permanently fenced')
         if not receipt:
             directory.mkdir(parents=True,exist_ok=True,mode=0o700)
         path=directory/'before.json'
@@ -615,13 +648,21 @@ WRITER_RECEIPT_LIBRARY = (
     + r"""
 def read_writer_receipt(spec, *, base=None):
     base=base or WRITER_CUSTODY_ROOT
-    if not re.fullmatch(r'[a-f0-9]{64}',spec['binding']) or any(not re.fullmatch(r'[A-Za-z0-9_-]+',spec[key]) for key in ('project','service')) or spec['action'] not in ('receipt_pause','receipt_resume','receipt_resume_retryable'):
+    if not re.fullmatch(r'[a-f0-9]{64}',spec['binding']) or any(not re.fullmatch(r'[A-Za-z0-9_-]+',spec[key]) for key in ('project','service')) or spec['action'] not in ('receipt_pause','receipt_resume','receipt_resume_retryable','receipt_fenced'):
         raise ValueError('invalid retained writer receipt')
     writer=hashlib.sha256(json.dumps([spec['project'],spec['service']]).encode()).hexdigest()
     directory=base/spec['binding']/writer
     path=directory/'before.json'
     if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
         raise ValueError('invalid retained writer custody')
+    if spec['action']=='receipt_fenced':
+        # A fence is written only without a witness, and no witness can follow it.
+        fence=directory/'fenced.json'
+        if fence.is_symlink() or json.loads(fence.read_text())!={'binding':spec['binding'],'project':spec['project'],'service':spec['service']} or path.exists():
+            raise ValueError('no retained writer fence')
+        print(WRITER_ACTION_MARKER+'='+spec['action'])
+        print(WRITER_BINDING_MARKER+'='+spec['binding'])
+        return
     witness=json.loads(path.read_text())
     if any(witness.get(key)!=spec[key] for key in ('project','service')) or type(witness.get('was_running')) is not bool or not witness.get('id') or not witness.get('image'):
         raise ValueError('retained writer witness changed')
@@ -698,6 +739,12 @@ class RecipientCutoverAdapter:
         if current and current.plan_sha256 == self.record.plan_sha256:
             self.record = current
             attempt = canonical_sha256(provider_operation_key)
+            if current.execution.get(attempt + ":old_pause_fenced"):
+                # The reviewed host fence proved this attempt never paused a writer.
+                return ProviderObservation(
+                    "present",
+                    response_payload=self.result("fail", writer_effect="none").response_payload,
+                )
             if current.phase == "rolled_back":
                 if current.execution.get("native_inverse") or current.execution.get(
                     attempt + ":rollback_completed_at"

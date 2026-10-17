@@ -217,6 +217,82 @@ class RecipientWriterProgramTests(unittest.TestCase):
             self.run_program("resume")
         self.assertEqual(self.effects, ["stop"])
 
+    def read_fence(self) -> str:
+        scope: dict[str, Any] = {}
+        exec(WRITER_RECEIPT_LIBRARY, scope)
+        output = io.StringIO()
+        with (
+            patch("subprocess.run", side_effect=AssertionError("A fence read is read-only")),
+            redirect_stdout(output),
+        ):
+            scope["read_writer_receipt"](
+                {**self.spec, "action": "receipt_fenced"}, base=self.root / "writers"
+            )
+        return extract_odoo_post_deploy_readback_markers({"logs": output.getvalue()})[
+            WRITER_BINDING_MARKER
+        ]
+
+    def test_unwitnessed_operation_fence_refuses_its_late_dispatch_only(self) -> None:
+        with patch.object(self, "docker", side_effect=AssertionError("Fencing never runs Docker")):
+            self.run_program("fence")
+            self.run_program("fence")
+        self.assertEqual(self.read_fence(), self.spec["binding"])
+        for late in ("pause", "resume", "receipt_pause"):
+            with self.subTest(late=late), self.assertRaises(ValueError):
+                self.run_program(late)
+        self.assertTrue(self.row["State"]["Running"])
+        self.assertEqual(self.effects, [])
+        self.spec["binding"] = "b" * 64
+        with self.assertRaises(FileNotFoundError):
+            self.read_fence()
+        self.run_program("pause")
+        self.run_program("resume")
+        self.assertEqual(self.effects, ["stop", "start"])
+
+    def test_witnessed_operation_is_never_fenced(self) -> None:
+        original = self.docker
+
+        def lose_reply(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+            if args[1] == "inspect" and self.effects:
+                raise OSError("reply lost after the original stop")
+            return original(args, **kwargs)
+
+        with patch.object(self, "docker", side_effect=lose_reply):
+            with self.assertRaises(OSError):
+                self.run_program("pause")
+        with self.assertRaises(ValueError):
+            self.run_program("fence")
+        with self.assertRaises(FileNotFoundError):
+            self.read_fence()
+        self.assertFalse(self.row["State"]["Running"])
+        self.assertEqual(self.effects, ["stop"])
+
+    def test_active_writer_job_prevents_its_fence(self) -> None:
+        original = self.docker
+        refused: list[type[BaseException]] = []
+
+        def fence_while_stopping(
+            args: list[str], **kwargs: Any
+        ) -> subprocess.CompletedProcess[str]:
+            if args[1] == "stop":
+                scope: dict[str, Any] = {}
+                exec(WRITER_LIBRARY, scope)
+                try:
+                    with redirect_stdout(io.StringIO()):
+                        scope["coordinate_writer"](
+                            {**self.spec, "action": "fence"}, base=self.root / "writers"
+                        )
+                except BlockingIOError as error:
+                    refused.append(type(error))
+            return original(args, **kwargs)
+
+        with patch.object(self, "docker", side_effect=fence_while_stopping):
+            self.run_program("pause")
+        self.assertEqual(refused, [BlockingIOError])
+        with self.assertRaises(ValueError):
+            self.run_program("fence")
+        self.run_program("receipt_pause")
+
 
 class RecipientExecutionFenceTests(unittest.TestCase):
     def test_durable_tombstone_rejects_queued_worker_after_idle_lock(self) -> None:
