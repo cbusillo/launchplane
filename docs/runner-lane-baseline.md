@@ -238,88 +238,47 @@ registration roots reject explicit `..` path components rather than resolving
 them into a different path. Registration and retirement remain separate
 lifecycle contracts and are not covered by this planner validation.
 
+## Existing-runner relabel library
+
+`control_plane.workflows.runner_lane_relabel` provides the exact-existing-runner
+custom-label engine and typed audit contract. This is library support only:
+there is no relabel workflow, local live CLI, or service execution route. It
+adds no live authority, credential binding or supported dispatch path. Under
+[DIRECTION.md](../DIRECTION.md), an operator-decided relabel belongs in the
+service under the signed-in admin or agent identity. Native integration must
+record that actor, enforce the reviewed repository/runner policy, serialize
+conflicting updates, and use a purpose-bound runner-administration capability.
+Missing capability is an activation prerequisite, never permission to borrow a
+workflow's credential or identity. Existing register/retire workflow modes stay
+supported until their complete replacement is deployed.
+
+The engine takes an explicit repository/host/root policy, exact runner name/ID,
+reviewed prior custom labels and desired custom labels. It preserves automatic
+labels and caller-supplied protected operations labels/names. It reads identity
+and label types before planning, requires accepted pre-action audit before
+mutation, refreshes the prior state after that audit, attempts one label PUT,
+and reads identity and labels back independently. Dry-run never writes labels;
+no registration, service, filesystem or host operation is part of this engine.
+
+GitHub offers no conditional label replacement. The prior-state check is
+optimistic, not atomic compare-and-swap with an unrelated administrator. A
+native caller must coordinate external label writers. A job can start after an
+idle observation; relabeling never interrupts it. `mutation_reconciliation_required`
+means outcome/readback is uncertain: read the runner back and do not retry the
+write automatically. For an inverse, review the verified current custom labels
+as expected and the saved original custom labels as desired, with fresh identity
+checks. Empty custom-label sets are valid inverses.
+
+`audit_delivery_pending` retains the terminal audit, its original idempotency
+key and observed mutation status. `deliver_terminal_audit` validates that packet
+and sends only evidence through the injected poster; it cannot change labels.
+Validation is structural, not cryptographic provenance or a new provider
+observation. The native caller must bind packets to the original operation and
+actor, and retain uncertain outcomes for reconciliation. An absent result never
+proves that no provider write occurred. Audit acceptance is evidence acceptance,
+not execution authorization.
+
 ## Lifecycle Executors
-
-### Existing runner custom labels
-
-The lifecycle workflow also accepts `operation=relabel`. This changes only an
-existing runner's custom scheduling labels, without registering, retiring,
-stopping or restarting it. It uses the existing administration credential in
-place and the existing `runner_lane_registration_audit.write` action; it creates
-no credential or grant. The deployed audit service must support the `relabel`
-operation before apply. A rejected pre-action audit prevents the label write.
-
-For relabel, the workflow's `labels` input is a JSON object containing
-`runner_id`, `expected_custom_labels`, and `labels` (the desired custom labels).
-Read the exact runner name/ID and label **types** from GitHub first. Automatic
-labels such as `self-hosted` are not custom labels and must be omitted from both
-lists. Supply one exact `lane_name`; the operations execution lane is protected.
-Run `mutate=false`, inspect the prior/desired/automatic labels in the result,
-then use the same reviewed input with `mutate=true` and
-`confirmation="relabel <owner/repo> <lane_name>"`, under the task's recorded
-authority. Each apply has its own audit key. Do not dispatch apply merely to
-qualify a source PR.
-
-The supported terminal consumer is
-`launchplane work-graph runner-lane-relabel-executor --help`. It accepts a typed
-`--request-file` with lifecycle operation `relabel`, repository, host, lane,
-registration root, expected runner ID/custom labels, desired `labels`, audit
-key and `mutate`. Explicit allowed repository/host/root inputs are required.
-Mutating use additionally requires the approved operations execution identity,
-matching actual hostname, and service-backed audit. A dry run writes only local
-evidence and reads GitHub. The existing workflow supplies these inputs and holds
-its normal per-lane concurrency and host lock.
-
-Apply refreshes the runner identity and custom labels after the planned audit,
-sends at most one label replacement, then independently reads identity and label
-types back. GitHub offers no conditional label replacement: this is an optimistic
-prior-state check, not atomic compare-and-swap against an unrelated manual
-administrator. Coordinate external label writers during apply. A job can start
-after the idle observation; relabeling does not interrupt that job.
-
-`mutation_reconciliation_required` means the write's outcome or independent
-readback is uncertain. Read the exact runner back before deciding any next
-operation; never replay it automatically. `audit_delivery_pending` retains the
-complete terminal audit and the observed mutation outcome in the uploaded result;
-reconcile that evidence rather than repeating a successful label update.
-For an inverse, review a new request with expected labels equal to the verified
-current custom labels and desired labels equal to the saved original custom
-labels. Check identity again; never overwrite intervening label changes. The
-operation never changes service configuration or runner registrations.
-If the executor exits or is interrupted before producing a result, the workflow
-retains `executor_result_unavailable` with unknown `write_attempted` for an apply.
-Treat that artifact as an uncertain outcome and read the exact runner back;
-an empty stdout or cancelled job never proves no label write occurred.
-
-To deliver a retained terminal packet, select the same workflow with
-`operation=relabel-audit`, `mutate=true`, the original repository, lane, root
-and audit key, and `confirmation="relabel-audit <owner/repo> <lane_name>"`.
-Pass the full saved result packet as the `labels` JSON input. This mode verifies
-the packet's typed terminal audit, original request and recorded terminal
-idempotency key, and posts **only that evidence** using the same operations
-identity/audit action. It never constructs a GitHub label client. Its terminal
-status is `audit_delivered`, which proves audit delivery, not a fresh label
-mutation or resolution of an uncertain provider outcome. The equivalent terminal
-consumer adds `--audit-packet-file <saved-result.json>` to the original reviewed
-relabel invocation. No new credential or grant is required.
-Packet validation is structural/scope validation of caller-provided evidence,
-not cryptographic provenance or a new observation of provider state. Use only
-the original retained packet and unique lifecycle audit key; the existing audit
-store upserts by key, so fabricating or substituting a packet can overwrite
-unrelated evidence. An uncertain provider outcome still requires independent
-GitHub readback even after its audit is delivered.
-
-Scheduling labels are not proof of host-service retirement authority. The
-retirement executor independently verifies directory ownership and the narrow
-root-owned exact-target service binding before any registration deletion.
-Reserved-pool policies may intentionally remove generic managed routing labels;
-their inverse restores the saved labels. For a later approved retirement through
-the existing workflow, first apply the reviewed inverse to restore its generic
-labels: the retirement step still requires those labels. The terminal retirement
-CLI separately supports `--required-label` with the actual approved reservation
-policy on the operations lane; the workflow does not expose that override.
-
-### Registration and retirement
 
 The narrow host adapters for creating and retiring a repo-scoped runner lane
 share the manual ops-lane workflow

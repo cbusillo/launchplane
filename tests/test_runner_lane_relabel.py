@@ -1,18 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from pathlib import Path
-from tempfile import TemporaryDirectory
-import json
-import os
-import subprocess
 import unittest
-from unittest.mock import patch
 
-from click.testing import CliRunner
-import yaml
-
-from control_plane.cli_runner_relabel import runner_lane_relabel_executor
 
 from control_plane.contracts.runner_lane_inventory import (
     RunnerLaneInventory,
@@ -23,6 +13,8 @@ from control_plane.contracts.runner_lane_registration import (
     RunnerLaneRegistrationAuditRecord,
     RunnerLaneRegistrationPolicy,
     RunnerLaneRegistrationRequest,
+    plan_runner_lane_registration,
+    plan_runner_lane_retirement,
 )
 from control_plane.workflows.runner_lane_relabel import execute_relabel, deliver_terminal_audit
 
@@ -354,163 +346,7 @@ class RunnerRelabelTests(unittest.TestCase):
                 self.assertNotIn("expected_custom_labels", wire)
                 self.assertEqual(RunnerLaneRegistrationRequest.model_validate(wire), legacy)
 
-    def test_cli_dry_run_and_service_audit_requirement(self) -> None:
-        with TemporaryDirectory() as directory:
-            request_path = Path(directory) / "request.json"
-            args = [
-                "--request-file",
-                str(request_path),
-                "--allowed-repository",
-                self.request.repository,
-                "--approved-host",
-                self.request.host_name,
-                "--allowed-registration-root",
-                self.request.registration_root,
-                "--execution-lane",
-                "operations",
-                "--service-user",
-                "runner-user",
-            ]
-            request_path.write_text(self.request.model_dump_json())
-            with patch(
-                "control_plane.cli_runner_relabel.UrllibMergeTrainGitHubTransport"
-            ) as create:
-                result = CliRunner().invoke(runner_lane_relabel_executor, [*args, "--mutate"])
-                self.assertNotEqual(result.exit_code, 0)
-                create.assert_not_called()
-            request_path.write_text(
-                self.request.model_copy(update={"mutate": False}).model_dump_json()
-            )
-            with (
-                patch(
-                    "control_plane.cli_runner_relabel.UrllibMergeTrainGitHubTransport",
-                    return_value=self.transport,
-                ),
-                patch("control_plane.cli_runner_relabel.GitHubRunnerLaneInventoryReader") as reader,
-            ):
-                reader.return_value.read_runner_lane_inventory.return_value = inventory()
-                result = CliRunner().invoke(
-                    runner_lane_relabel_executor,
-                    args,
-                    env={"GITHUB_TOKEN": "fixture-token"},
-                )
-                self.assertEqual(result.exit_code, 0, result.output)
-                self.assertFalse(self.transport.written)
-
-    def test_cli_mutate_accepts_host_fqdn_and_empty_custom_label_inverse(self) -> None:
-        with TemporaryDirectory() as directory:
-            path = Path(directory) / "request.json"
-            path.write_text(self.request.model_copy(update={"labels": ()}).model_dump_json())
-            with (
-                patch(
-                    "control_plane.cli_runner_relabel.socket.gethostname",
-                    return_value="build-1.local",
-                ),
-                patch("control_plane.cli_runner_relabel.validate_ops_lane_environment") as identity,
-                patch(
-                    "control_plane.cli_runner_relabel.build_refreshing_service_audit_poster",
-                    return_value=self.audit,
-                ),
-                patch(
-                    "control_plane.cli_runner_relabel.UrllibMergeTrainGitHubTransport",
-                    return_value=self.transport,
-                ),
-                patch("control_plane.cli_runner_relabel.GitHubRunnerLaneInventoryReader") as reader,
-            ):
-                reader.return_value.read_runner_lane_inventory.return_value = inventory()
-                result = CliRunner().invoke(
-                    runner_lane_relabel_executor,
-                    [
-                        "--request-file",
-                        str(path),
-                        "--allowed-repository",
-                        self.request.repository,
-                        "--approved-host",
-                        self.request.host_name,
-                        "--allowed-registration-root",
-                        self.request.registration_root + "/./",
-                        "--execution-lane",
-                        "ops",
-                        "--service-user",
-                        "runner-user",
-                        "--service-url",
-                        "https://service.example",
-                        "--mutate",
-                    ],
-                    env={"GITHUB_TOKEN": "fixture-token"},
-                )
-                self.assertEqual(result.exit_code, 0, result.output)
-                identity.assert_called_once_with(service_user="runner-user", execution_lane="ops")
-                self.assertEqual(self.transport.current, ())
-
-
-class RunnerRelabelWorkflowTests(unittest.TestCase):
-    def test_failed_executor_retains_terminal_packet_and_empty_preflight_keeps_fallback(
-        self,
-    ) -> None:
-        # Exercise the committed wrapper, using only disposable fixture executables.
-        workflow = yaml.safe_load(
-            subprocess.check_output(
-                [
-                    "git",
-                    "show",
-                    "HEAD:.github/workflows/runner-lane-registration.yml",
-                ],
-                text=True,
-                cwd=Path(__file__).resolve().parents[1],
-            )
-        )
-        step = next(
-            item
-            for item in workflow["jobs"]["runner-lane-lifecycle"]["steps"]
-            if item.get("id") == "relabel"
-        )
-        for output in (
-            '{"status":"audit_delivery_pending","terminal_audit":{"retained":true}}',
-            "",
-        ):
-            with self.subTest(output=output), TemporaryDirectory() as directory:
-                root = Path(directory)
-                executable = root / "flock"
-                executable.write_text('#!/bin/sh\nprintf "%s" "$FIXTURE_RESULT"\nexit 1\n')
-                executable.chmod(0o700)
-                result = subprocess.run(
-                    ["bash", "-c", step["run"]],
-                    cwd=root,
-                    capture_output=True,
-                    text=True,
-                    env={
-                        "PATH": f"{root}:{os.environ['PATH']}",
-                        "FIXTURE_RESULT": output,
-                        "AUDIT_RECORD_KEY": "fixture/audit",
-                        "TARGET_REPOSITORY": "example/control",
-                        "LANE_NAME": "general-1",
-                        "REGISTRATION_ROOT": "auto",
-                        "RUNNER_REGISTRATION_ALLOWED_ROOT": "/srv/runners/./",
-                        "RUNNER_REGISTRATION_HOST": "build-1",
-                        "RUNNER_REGISTRATION_EXECUTION_LANE": "ops",
-                        "RUNNER_REGISTRATION_SERVICE_USER": "runner-user",
-                        "LAUNCHPLANE_SERVICE_URL": "https://service.example",
-                        "MUTATE_REQUESTED": "true",
-                        "OPERATION": "relabel",
-                        "LABEL_CHANGE": json.dumps(
-                            {
-                                "runner_id": 7,
-                                "expected_custom_labels": ["general"],
-                                "labels": ["general", "candidate"],
-                            }
-                        ),
-                        "GITHUB_OUTPUT": str(root / "output"),
-                    },
-                    timeout=10,
-                )
-                self.assertNotEqual(result.returncode, 0)
-                packet = json.loads((root / "runner-lane-lifecycle-result.json").read_text())
-                self.assertEqual(
-                    packet["status"],
-                    "audit_delivery_pending" if output else "executor_result_unavailable",
-                )
-                if output:
-                    self.assertEqual(packet["terminal_audit"], {"retained": True})
-                else:
-                    self.assertIsNone(packet["write_attempted"])
+    def test_registration_and_retirement_planners_refuse_relabel(self) -> None:
+        for planner in (plan_runner_lane_registration, plan_runner_lane_retirement):
+            with self.subTest(planner=planner.__name__), self.assertRaises(ValueError):
+                planner(policy=self.policy, request=self.request, inventory=inventory())
