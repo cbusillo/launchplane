@@ -97,10 +97,7 @@ def main() -> int:
             or result.get("business_host_frozen") is not False
         ):
             raise ValueError("The receipt does not establish an isolated rehearsal.")
-        if args.mode == "readback" and (
-            result.get("completed") is not True
-            or result.get("observed_state") != result.get("state")
-        ):
+        if args.mode == "readback" and (result.get("completed") is not True):
             print(
                 json.dumps(
                     {

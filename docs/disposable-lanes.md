@@ -1626,7 +1626,11 @@ The candidate artifact must already be registered, immutable, attributable to
 this product's repository, and declare its Odoo version and exact module intent.
 Its version must be newer than `source_odoo_version`; the restored database's
 actual base-module version must agree with that declared source version. The
-existing SQL-only sanitizer runs on the old schema without loading a candidate
+artifact must declare the supported source versions as a comma-separated
+`build_flags.values.sql_copy_source_versions` value. Missing source-major support
+refuses before a source read; this declaration must come from the artifact's
+qualification, not an agent inventing compatibility metadata.
+The existing SQL-only sanitizer runs on the old schema without loading a candidate
 registry. It preserves the sanitized old-version recovery tuple before any
 upgrade. No separate source-version application image is required.
 
@@ -1640,8 +1644,9 @@ actual copied data.
 The source reader must already have its service-recorded `ODOO_UPSTREAM_*` and
 `OPENUPGRADE_*` settings, existing host SSH identity, known-host trust and source
 read access. No command installs a key, changes source trust, grants access,
-freezes the business host or edits its database. Placement uses the production
-lane's already registered remote server, read-only. Local/unregistered placement
+freezes the business host or edits its database. Placement uses the testing
+source reader's already registered remote server, read-only. Only sizing comes
+from production. Local/unregistered placement
 is refused. A missing record or unavailable prerequisite is not authorization to
 infer coordinates from an issue or workstation file.
 
@@ -1691,13 +1696,15 @@ artifact identities and elapsed times are value-free receipts. Provider ids,
 source coordinates and local passwords never reach the client's output.
 
 An uncertain effect stays fenced under its original key. Readback is not replay;
-repeat the original apply only for the provider journal's observation/adoption,
+repeat the original apply only for the provider journal's observation of a completed host receipt,
 never with a new key. An incomplete provider create or partial host operation
 keeps its namespace, phase journal, raw failure custody and storage for diagnosis.
 The route does not guess that absence or a timeout permits another create,
 restore, capture or deletion. Fixed prerequisite codes and the trace identify
 unavailable source, artifact, placement, credentials, state or recovery evidence;
 no provider exception text is returned.
+An interrupted provider create has no automatic adoption path; its partial
+placement remains fenced for diagnosis, with no fresh-key abandonment inferred.
 
 Elapsed times describe this isolated simulation. Real source writer drain,
 public DNS/TLS switching, business integration resumption and the actual

@@ -380,6 +380,8 @@ class OdooPostDeployReadbackFailure(click.ClickException):
 
 
 def _safe_odoo_post_deploy_marker(key: str, value: str) -> bool:
+    if key == "rehearsal_result":
+        return bool(re.fullmatch(r"(?:[a-f0-9]{2}){1,32768}", value))
     if key == WRITER_ACTION_MARKER:
         return value in WRITER_ACTIONS
     if key == RUNTIME_OK_MARKER:

@@ -84,7 +84,8 @@ def save(path,payload):
 
 
 def compose(spec,root,*,image,database):
-    environment={**spec['environment'],'ODOO_DB_NAME':database,'ODOO_VERSION':spec['versions'][image]}
+    version=spec['record']['source_odoo_version'] if database.endswith('_source') else spec['versions'][image]
+    environment={**spec['environment'],'ODOO_DB_NAME':database,'ODOO_VERSION':version}
     environment['LAUNCHPLANE_RUNTIME_IDENTITY_JSON']=json.dumps({'product':spec['record']['product'],'context':spec['record']['rehearsal_id'],'instance':'rehearsal','environment_kind':'rehearsal','deployment_record_id':spec['record']['rehearsal_id'],'artifact_id':spec['artifacts'][image],'source_git_ref':spec['refs'][image],'image_reference':image})
     (root/'compose.yml').write_text(spec['compose'][image])
     os.chmod(root/'compose.yml',0o600)
@@ -197,12 +198,17 @@ def restore_preserved_snapshot(spec,root,containers,source_database,destination)
                 archive.extract(member,path=temporary,filter='data')
         docker('exec','-u','root',containers['script-runner'][0],'mkdir','-p','/volumes/data/filestore/'+destination)
         docker('cp',str(Path(temporary)/source_database)+'/.',containers['script-runner'][0]+':/volumes/data/filestore/'+destination)
+    uid=docker('exec',containers['script-runner'][0],'id','-u').decode().strip()
+    gid=docker('exec',containers['script-runner'][0],'id','-g').decode().strip()
+    if not uid.isdigit() or not gid.isdigit():
+        raise RuntimeError('Unknown copy runner user')
+    docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,'/volumes/data/filestore/'+destination)
     stamp(spec,containers,destination)
 
 
 def copy_runner(spec,containers,database,*,fresh,dump_path=None,sanitize_only=False):
     arguments=['exec','-i']
-    workflow={**spec['workflow'],'ODOO_DB_NAME':database,'ODOO_VERSION':spec['versions'][spec['source_image'] if sanitize_only else spec['target_image']],
+    workflow={**spec['workflow'],'ODOO_DB_NAME':database,'ODOO_VERSION':spec['record']['source_odoo_version'] if sanitize_only else spec['versions'][spec['target_image']],
         'ODOO_FILESTORE_PATH':'/volumes/data/filestore','ENV_OVERRIDE_DISABLE_CRON':'true',
         'ODOO_RESTORE_KEPT_INTEGRATIONS':'','NO_SANITIZE':'false'}
     for key,value in workflow.items():
@@ -233,6 +239,20 @@ def private_health(spec,containers):
     expected=spec['record']['target_artifact']['source_commit']
     program="import json,sys,time,urllib.request\nfor attempt in range(60):\n try:\n  response=urllib.request.urlopen('http://web:8069/launchplane/health',timeout=5); body=json.load(response); identity=body.get('runtime_identity',body.get('launchplane_runtime_identity',{})); assert identity.get('source_git_ref',identity.get('source_revision'))==sys.argv[1]; assert identity.get('instance')=='rehearsal'; assert identity.get('context')==sys.argv[2]; assert identity.get('artifact_id')==sys.argv[3]; break\n except Exception:\n  if attempt==59: raise\n  time.sleep(1)\nresponse=urllib.request.urlopen('http://web:8069/web/login',timeout=5); assert response.status==200\n"
     docker('exec',containers['script-runner'][0],'python3','-c',program,expected,spec['record']['rehearsal_id'],spec['record']['target_artifact']['artifact_id'])
+
+
+def sanitize_capture(spec,containers,database,raw):
+    try:
+        docker('cp',str(raw/'database.dump'),containers['script-runner'][0]+':/tmp/rehearsal.dump')
+        docker('exec','-u','root',containers['script-runner'][0],'chmod','644','/tmp/rehearsal.dump')
+        uid=docker('exec',containers['script-runner'][0],'id','-u').decode().strip()
+        gid=docker('exec',containers['script-runner'][0],'id','-g').decode().strip()
+        if not uid.isdigit() or not gid.isdigit():
+            raise RuntimeError('Unknown copy runner user')
+        docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,'/volumes/data','/volumes/logs','/tmp/rehearsal.dump')
+        copy_runner(spec,containers,database,fresh=True,dump_path='/tmp/rehearsal.dump',sanitize_only=True)
+    finally:
+        docker('exec','-u','root',containers['script-runner'][0],'rm','-f','/tmp/rehearsal.dump')
 
 
 def capture(spec,root,containers,database):
@@ -280,19 +300,12 @@ def capture(spec,root,containers,database):
     spec.setdefault('phase_elapsed',{})['source-capture']=time.monotonic()-started
     docker('exec','-u','root',containers['script-runner'][0],'mkdir','-p','/volumes/data/filestore/'+database)
     docker('cp',str(raw/'filestore')+'/.',containers['script-runner'][0]+':/volumes/data/filestore/'+database)
-    docker('cp',str(raw/'database.dump'),containers['script-runner'][0]+':/tmp/rehearsal.dump')
-    docker('exec','-u','root',containers['script-runner'][0],'chmod','644','/tmp/rehearsal.dump')
-    uid=docker('exec',containers['script-runner'][0],'id','-u').decode().strip()
-    gid=docker('exec',containers['script-runner'][0],'id','-g').decode().strip()
-    if not uid.isdigit() or not gid.isdigit():
-        raise RuntimeError('Unknown copy runner user')
-    docker('exec','-u','root',containers['script-runner'][0],'chown','-R',uid+':'+gid,'/volumes/data','/volumes/logs','/tmp/rehearsal.dump')
     started=time.monotonic()
-    copy_runner(spec,containers,database,fresh=True,dump_path='/tmp/rehearsal.dump',sanitize_only=True)
+    sanitize_capture(spec,containers,database,raw)
     spec['phase_elapsed']['source-sanitization']=time.monotonic()-started
     version=sql(containers,"SELECT latest_version FROM ir_module_module WHERE name='base'",database)
     if version.split('.')[0] != spec['record']['source_odoo_version'].split('.')[0]:
-        raise RuntimeError('Captured source version differs from the selected source artifact')
+        raise RuntimeError('Captured source version differs from the selected source version')
     # Check the dump's attachment set against the copied bytes, so a concurrent
     # source deletion or incomplete rsync cannot be called a consistent capture.
     validation="import hashlib,os,stat,psycopg2;from pathlib import Path\nc=psycopg2.connect(host='database',user=os.environ['ODOO_DB_USER'],password=os.environ['ODOO_DB_PASSWORD'],dbname=os.environ['ODOO_DB_NAME'])\nwith c.cursor() as q:\n q.execute('SELECT store_fname,checksum,file_size FROM ir_attachment WHERE store_fname IS NOT NULL')\n for name,checksum,size in q:\n  assert name==checksum[:2]+'/'+checksum and len(checksum)==40 and all(ch in '0123456789abcdef' for ch in checksum); p=Path('/volumes/data/filestore')/os.environ['ODOO_DB_NAME']/name; assert not p.is_symlink() and not p.parent.is_symlink() and stat.S_ISREG(p.stat().st_mode); assert p.stat().st_size==size; h=hashlib.sha1(); f=p.open('rb')\n  for chunk in iter(lambda:f.read(1048576),b''): h.update(chunk)\n  f.close(); assert h.hexdigest()==checksum\nc.close()\n"
@@ -323,20 +336,23 @@ def main():
             result={'intent_sha256':record['intent_sha256'],'state':record['state'],'copies':copies,
                 'elapsed_seconds':record['elapsed_seconds'],'resources_preserved':True,'public_route':False,
                 'business_host_frozen':False,'completed':False,'raw_source_retained':(root/'raw-source').is_dir()}
-            print('rehearsal_result='+base64.b64encode(json.dumps(result).encode()).decode())
+            print('rehearsal_result='+json.dumps(result).encode().hex())
             return
         result=json.loads(receipt.read_text())
         if result['intent_sha256']!=record['intent_sha256']:
             raise RuntimeError('Another rehearsal owns this receipt')
-        database,image=current({**spec,'record':{**record,'state':result['state']}})
+        states=['planned','prepared','upgraded','switched','verified','retired']
+        historical=states.index(record['state'])>states.index(result['state'])
+        observed_state=record['state'] if historical else result['state']
+        database,image=current({**spec,'record':{**record,'state':observed_state}})
         containers=inspection(spec,database,image)
-        validate_snapshots(spec,root,containers,result['copies'],retired=result['state']=='retired')
-        if result['state']=='retired':
+        validate_snapshots(spec,root,containers,result['copies'],retired=historical or observed_state=='retired')
+        if observed_state=='retired':
             if any(item[1].get('State',{}).get('Running') is not False for item in containers.values()):
                 raise RuntimeError('Rehearsal runtime retirement is not observed')
-        elif result['state'] in {'upgraded','switched'}:
+        elif observed_state in {'upgraded','switched'}:
             private_health(spec,containers)
-        print('rehearsal_result='+base64.b64encode(json.dumps(result).encode()).decode())
+        print('rehearsal_result='+json.dumps(result).encode().hex())
         return
     root.mkdir(mode=0o700,parents=True,exist_ok=True)
     os.chmod(root,0o700)
@@ -434,7 +450,7 @@ def main():
         result={'intent_sha256':record['intent_sha256'],'state':state,'copies':copies,'elapsed_seconds':elapsed,
             'resources_preserved':True,'public_route':False,'business_host_frozen':False}
         save(receipt,result)
-        print('rehearsal_result='+base64.b64encode(json.dumps(result).encode()).decode())
+        print('rehearsal_result='+json.dumps(result).encode().hex())
 
 main()
 """

@@ -231,11 +231,14 @@ def rehearsal_inputs(
         return previous, previous.upgrade_environment, previous.shape_environment
     copy_source, shape = _source_values(store, product, request.source_context)
     new = _artifact(store, request.target_artifact_id)
+    supported_sources = new.build_flags.values.get("sql_copy_source_versions", "").split(",")
     if (
         int(request.source_odoo_version.split(".")[0])
         >= int(artifact_odoo_version(new).split(".")[0])
         or copy_source.get("OPENUPGRADE_TARGET_VERSION", "").split(".")[0]
         != artifact_odoo_version(new).split(".")[0]
+        or request.source_odoo_version.split(".")[0]
+        not in {version.strip().split(".")[0] for version in supported_sources if version.strip()}
     ):
         raise RehearsalRefused(RehearsalPrerequisite.ARTIFACT_UNAVAILABLE)
     profile = store.read_product_profile_record(product)
@@ -244,8 +247,9 @@ def rehearsal_inputs(
         for manifest in (new,)
     ):
         raise RehearsalRefused(RehearsalPrerequisite.ARTIFACT_UNAVAILABLE)
-    prod = next(lane for lane in profile.lanes if lane.instance == "prod")
-    identity = store.read_dokploy_target_id_record(context_name=prod.context, instance_name="prod")
+    identity = store.read_dokploy_target_id_record(
+        context_name=request.source_context, instance_name="testing"
+    )
     host, token = source.read_dokploy_config(control_plane_root=root)
     placement = api.fetch_dokploy_target_payload(
         host=host, token=token, target_type="compose", target_id=identity.target_id
@@ -577,9 +581,12 @@ class OdooRehearsalAdapter:
             + "\nLP_REHEARSAL\n"
         )
         evidence = self.run_script(record, script, checkpoint)
-        result = RehearsalHostResult.model_validate_json(
-            base64.b64decode(evidence["rehearsal_result"], validate=True)
-        ).model_dump(mode="json")
+        try:
+            result = RehearsalHostResult.model_validate_json(
+                bytes.fromhex(evidence["rehearsal_result"])
+            ).model_dump(mode="json")
+        except (KeyError, ValueError):
+            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED) from None
         if (
             result["intent_sha256"] != record.intent_sha256
             or result["public_route"] is not False

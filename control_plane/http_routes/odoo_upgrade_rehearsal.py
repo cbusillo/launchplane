@@ -10,8 +10,10 @@ from fastapi import Depends, Header, Path as PathParameter
 from control_plane.contracts.odoo_upgrade_rehearsal import (
     ODOO_UPGRADE_REHEARSAL_ROUTE as ROUTE,
     OdooUpgradeRehearsalRequest,
+    RehearsalPrerequisite,
     rehearsal_identity,
 )
+from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
@@ -93,6 +95,8 @@ def register_odoo_upgrade_rehearsal_routes(
                 refuse(404, "not_found")
             if body.mode == "apply" and previous.principal != principal:
                 refuse(403, "authorization_denied")
+            if canonical_json_sha256(body.intent()) != previous.intent_sha256:
+                refuse(409, "rehearsal_state_unverified")
             principal = previous.principal
         adapter = OdooRehearsalAdapter(root, record_store, product, body, principal, trace)
         try:
@@ -116,9 +120,19 @@ def register_odoo_upgrade_rehearsal_routes(
                 assert previous is not None
                 record = previous
                 require_unaliased_rehearsal(record_store, record)
-                result = await run_in_worker_thread(
-                    lambda: adapter.host(record, "observe", lambda: None)
-                )
+
+                def observe() -> dict[str, object]:
+                    with record_store.testing_replacement_execution_lock(
+                        record.rehearsal_id
+                    ) as check:
+                        if check is None:
+                            raise RehearsalRefused(RehearsalPrerequisite.RECOVERY_REQUIRED)
+                        fresh = record_store.read_odoo_upgrade_rehearsal(record.rehearsal_id)
+                        if fresh != record:
+                            raise RehearsalRefused(RehearsalPrerequisite.STATE_UNVERIFIED)
+                        return adapter.host(record, "observe", check)
+
+                result = await run_in_worker_thread(observe)
                 result = {
                     **adapter.public(record),
                     "observed_state": result["state"],
