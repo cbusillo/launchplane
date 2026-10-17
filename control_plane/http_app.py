@@ -12336,6 +12336,7 @@ def create_launchplane_fastapi_app(
             token=token,
             recorded_at=utc_now_timestamp(),
             response_trace_id=trace_id,
+            planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
         )
         result: dict[str, object] = {"feedback": feedback_record.model_dump(mode="json")}
         if feedback_record.delivery_status == "failed":

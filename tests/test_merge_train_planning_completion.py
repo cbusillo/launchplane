@@ -1,0 +1,357 @@
+from __future__ import annotations
+
+import copy
+import json
+from typing import Any
+from unittest import TestCase
+from unittest.mock import patch
+from urllib.error import URLError
+
+import click
+
+from control_plane import merge_train_planning_completion as completion
+from control_plane.merge_train_pr_feedback import (
+    MergeTrainPrFeedbackEnvelope,
+    build_merge_train_pr_feedback_record,
+    deliver_merge_train_pr_feedback_record,
+)
+from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
+from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
+from control_plane.merge_train_scheduler import _deliver_controller_feedback
+from tests.test_merge_train_scheduler import _policy_record
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+
+_REPO = "example/product"
+_BOT = 41
+
+
+def _wait(state: str = "clear") -> str:
+    return (
+        "<!-- github-plan:wait "
+        + json.dumps(
+            {
+                "version": 1,
+                "state": state,
+                "evidence": "Reviewed source delivery",
+                "waits": []
+                if state == "clear"
+                else [{"waiting_for": "Client", "ends_when": "Client accepts"}],
+            }
+        )
+        + " -->"
+    )
+
+
+class PlanningProvider:
+    def __init__(self) -> None:
+        self.issue: dict[str, Any] = {
+            "number": 7,
+            "node_id": "issue7",
+            "state": "closed",
+            "state_reason": "completed",
+            "user": {"id": _BOT, "login": "example-bot[bot]"},
+            "body": "<!-- github-plan:managed-provenance -->\n" + _wait(),
+            "labels": [{"name": "plan"}, {"name": "plan:active"}, {"name": "bug"}],
+        }
+        self.comments: list[dict[str, Any]] = []
+        self.blockers: list[dict[str, Any]] = []
+        self.children: list[dict[str, Any]] = []
+        self.writes: list[tuple[str, object]] = []
+        self.fail_labels = False
+        self.config: dict[str, Any] = {}
+        self.project_status = "active"
+        self.drop_project_write = False
+        self.references = [7]
+        self.merged = True
+        self.drop_label_write = False
+
+    def request(self, *, path: str, method: str = "GET", body: Any = None, **_kwargs: Any) -> Any:
+        if path == "/graphql":
+            query = body["query"]
+            if "closingIssuesReferences" in query:
+                return {
+                    "data": {
+                        "repository": {
+                            "defaultBranchRef": {"name": "main"},
+                            "object": {"text": json.dumps(self.config)},
+                            "pullRequest": {
+                                "merged": self.merged,
+                                "baseRefName": "main",
+                                "mergeCommit": {"oid": "landed"},
+                                "closingIssuesReferences": {
+                                    "nodes": [
+                                        {"number": number, "repository": {"nameWithOwner": _REPO}}
+                                        for number in self.references
+                                    ],
+                                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                                },
+                            },
+                        }
+                    }
+                }
+            if "updateProjectV2ItemFieldValue" in query:
+                self.writes.append(("project", body))
+                if not self.drop_project_write:
+                    self.project_status = "done"
+                return {
+                    "data": {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": "item7"}}}
+                }
+            return {
+                "data": {
+                    "user": {
+                        "projectV2": {
+                            "id": "project",
+                            "fields": {
+                                "nodes": [
+                                    {
+                                        "id": "status",
+                                        "name": "Status",
+                                        "options": [{"id": "done", "name": "Done"}],
+                                    }
+                                ],
+                                "pageInfo": {"hasNextPage": False},
+                            },
+                        }
+                    },
+                    "node": {
+                        "projectItems": {
+                            "nodes": [
+                                {
+                                    "id": "item7",
+                                    "project": {"id": "project"},
+                                    "fieldValueByName": {"optionId": self.project_status},
+                                }
+                            ],
+                            "pageInfo": {"hasNextPage": False},
+                        }
+                    },
+                }
+            }
+        if path == "/users/example":
+            return {"type": "User"}
+        if "/comments?" in path:
+            return copy.deepcopy(self.comments)
+        if "/dependencies/blocked_by?" in path:
+            return copy.deepcopy(self.blockers)
+        if "/sub_issues?" in path:
+            return copy.deepcopy(self.children)
+        if method == "GET":
+            return copy.deepcopy(self.issue)
+        self.writes.append((method, path))
+        if self.fail_labels:
+            error = click.ClickException("temporary provider failure")
+            error.__cause__ = URLError("offline")
+            raise error
+        if not self.drop_label_write:
+            if method == "POST":
+                self.issue["labels"].extend({"name": name} for name in body["labels"])
+            elif method == "DELETE":
+                from urllib.parse import unquote
+
+                name = unquote(path.rsplit("/", 1)[-1])
+                self.issue["labels"] = [
+                    label for label in self.issue["labels"] if label["name"] != name
+                ]
+        return None
+
+
+class PlanningCompletionTests(TestCase):
+    def setUp(self) -> None:
+        self.provider = PlanningProvider()
+        self.request = patch.object(
+            completion, "github_api_request", side_effect=self.provider.request
+        )
+        self.request.start()
+        self.addCleanup(self.request.stop)
+        self.comment = patch(
+            "control_plane.merge_train_pr_feedback.upsert_github_issue_comment",
+            return_value={
+                "action": "updated_comment",
+                "comment_id": 3,
+                "comment_url": "https://example.test/comment",
+            },
+        )
+        self.comment_mock = self.comment.start()
+        self.addCleanup(self.comment.stop)
+
+    def record(self) -> MergeTrainPrFeedbackRecord:
+        return build_merge_train_pr_feedback_record(
+            request=MergeTrainPrFeedbackEnvelope(
+                repository=_REPO,
+                pull_request_number=9,
+                event="completed",
+                controller_action="land_batch",
+            ),
+            policy_key="test",
+            policy_sha256="digest",
+            token="fixture",
+            recorded_at="2026-10-01T00:00:00Z",
+            response_trace_id="test",
+            planning_author_ids=(_BOT,),
+        )
+
+    def test_native_completion_cleans_labels_and_persists_readback_without_driver(self) -> None:
+        before = copy.deepcopy(self.provider.issue)
+        record = self.record()
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertEqual(
+            {label["name"] for label in self.provider.issue["labels"]}, {"plan", "plan:done", "bug"}
+        )
+        self.assertEqual(self.provider.issue["state"], before["state"])
+        self.assertEqual(self.provider.issue["body"], before["body"])
+        self.assertTrue(record.planning_reconciliation["ok"])
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_pr_feedback_record(record)
+            saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
+            self.assertEqual(saved.planning_reconciliation, record.planning_reconciliation)
+            self.assertEqual(saved.planning_author_ids, (_BOT,))
+        writes = list(self.provider.writes)
+        retry = deliver_merge_train_pr_feedback_record(
+            record=record, token="fixture", attempted_at="2026-10-01T00:02:00Z"
+        )
+        self.assertEqual(retry.delivery_status, "delivered")
+        self.assertEqual(self.provider.writes, writes)
+
+    def test_scheduler_landing_reconciles_before_persisting_completed_feedback(self) -> None:
+        policy_record = _policy_record(
+            (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        policy = policy_record.policy.policies[0]
+        policy = policy.model_copy(
+            update={
+                "enqueue": policy.enqueue.model_copy(
+                    update={"trusted_automation_github_user_ids": (_BOT,)}
+                )
+            }
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            delivered, failed = _deliver_controller_feedback(
+                record_store=store,
+                policy_record=policy_record,
+                repository_policy=policy,
+                token="fixture",
+                trace_id="scheduler-test",
+                now=lambda: "2026-10-01T00:00:00Z",
+                response={
+                    "result": {
+                        "repository": _REPO,
+                        "base_branch": "main",
+                        "controller_action": "land_batch",
+                        "landing_plan": {
+                            "entries": [{"pull_request_number": 9, "status": "merged"}]
+                        },
+                    },
+                    "records": {},
+                },
+            )
+            self.assertEqual((delivered, failed), (1, 0))
+            record = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
+            self.assertTrue(record.planning_reconciliation["ok"])
+            self.assertEqual(
+                {label["name"] for label in self.provider.issue["labels"]},
+                {"plan", "plan:done", "bug"},
+            )
+
+    def test_configured_status_labels_and_all_stale_statuses_are_reconciled(self) -> None:
+        self.provider.config = {
+            "planning": {
+                "labels": {
+                    "plan": "work",
+                    "done": "work:done",
+                    "active": "work:active",
+                    "blocked": "work:blocked",
+                    "waiting": "work:waiting",
+                    "stale": "work:stale",
+                }
+            }
+        }
+        self.provider.issue["labels"] = [
+            {"name": name}
+            for name in ("work", "work:active", "work:blocked", "work:waiting", "work:stale", "bug")
+        ]
+        self.assertEqual(self.record().delivery_status, "delivered")
+        self.assertEqual(
+            {label["name"] for label in self.provider.issue["labels"]}, {"work", "work:done", "bug"}
+        )
+
+    def test_native_completion_refuses_false_success_then_retries_transient_failure(self) -> None:
+        self.provider.fail_labels = True
+        record = self.record()
+        self.assertEqual(record.delivery_status, "failed")
+        self.assertTrue(record.retryable)
+        self.comment_mock.assert_not_called()
+        self.provider.fail_labels = False
+        retry = deliver_merge_train_pr_feedback_record(
+            record=record, token="fixture", attempted_at="2026-10-01T00:02:00Z"
+        )
+        self.assertEqual(retry.delivery_status, "delivered")
+        self.assertTrue(retry.planning_reconciliation["ok"])
+        self.assertNotIn("plan:active", {label["name"] for label in self.provider.issue["labels"]})
+
+    def test_waits_reporters_and_unfinished_native_prerequisites_are_preserved(self) -> None:
+        original = copy.deepcopy(self.provider.issue)
+        for change in ("open", "reporter", "waiting", "unreviewed", "blocker", "child"):
+            with self.subTest(change=change):
+                self.provider.issue = copy.deepcopy(original)
+                self.provider.comments, self.provider.blockers, self.provider.children = [], [], []
+                if change == "open":
+                    self.provider.issue["state"] = "open"
+                elif change == "reporter":
+                    self.provider.issue["user"]["id"] = 99
+                elif change == "waiting":
+                    self.provider.comments = [{"user": {"id": _BOT}, "body": _wait("waiting")}]
+                elif change == "unreviewed":
+                    self.provider.issue["body"] = "<!-- github-plan:managed-provenance -->"
+                elif change == "blocker":
+                    self.provider.blockers = [{"state": "open"}]
+                else:
+                    self.provider.children = [{"state": "open"}]
+                before = copy.deepcopy(self.provider.issue)
+                record = self.record()
+                self.assertEqual(record.delivery_status, "failed")
+                self.assertEqual(record.retryable, change == "open")
+                self.assertEqual(self.provider.issue, before)
+                self.assertFalse(self.provider.writes)
+
+    def test_foreign_or_quoted_clear_does_not_resolve_a_real_wait(self) -> None:
+        self.provider.issue["body"] = "<!-- github-plan:managed-provenance -->\n" + _wait("waiting")
+        for author, text in (
+            (99, _wait()),
+            (_BOT, "```\n" + _wait() + "\n```"),
+            (_BOT, "<details>\n" + _wait() + "\n</details>"),
+        ):
+            self.provider.comments = [{"user": {"id": author}, "body": text}]
+            self.assertEqual(self.record().delivery_status, "failed")
+        self.provider.comments = [{"user": {"id": _BOT}, "body": _wait()}]
+        self.assertEqual(self.record().delivery_status, "delivered")
+
+    def test_failed_metadata_or_project_readback_is_never_delivered(self) -> None:
+        self.provider.drop_label_write = True
+        self.assertEqual(self.record().delivery_status, "failed")
+        self.provider.drop_label_write = False
+        self.provider.config = {"planning": {"projects": {"default_project": 2}}}
+        self.provider.drop_project_write = True
+        self.assertEqual(self.record().delivery_status, "failed")
+        self.assertEqual(self.provider.project_status, "active")
+        self.provider.drop_project_write = False
+        record = self.record()
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertEqual(self.provider.project_status, "done")
+
+    def test_nonplans_and_no_closing_references_have_no_metadata_writes(self) -> None:
+        self.provider.issue["labels"] = [{"name": "bug"}]
+        self.assertEqual(self.record().delivery_status, "delivered")
+        self.assertFalse(self.provider.writes)
+        self.provider.references = []
+        self.assertEqual(self.record().delivery_status, "delivered")
+        self.assertFalse(self.provider.writes)
+
+    def test_unmerged_change_cannot_drive_metadata(self) -> None:
+        self.provider.merged = False
+        self.assertEqual(self.record().delivery_status, "failed")
+        self.assertFalse(self.provider.writes)

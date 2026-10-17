@@ -15,6 +15,10 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
     merge_train_pr_feedback_marker,
 )
 from control_plane.workflows.launchplane import upsert_github_issue_comment
+from control_plane.merge_train_planning_completion import (
+    PlanningCompletionPending,
+    reconcile_completed_change,
+)
 
 
 class MergeTrainPrFeedbackEnvelope(BaseModel):
@@ -90,6 +94,7 @@ def write_merge_train_pr_feedback_record(
     recorded_at: str,
     response_trace_id: str,
     defer_until: str = "",
+    planning_author_ids: tuple[int, ...] = (),
 ) -> MergeTrainPrFeedbackRecord:
     with store.merge_train_feedback_delivery_lock(
         repository=request.repository, pull_request_number=request.pull_request_number
@@ -102,6 +107,7 @@ def write_merge_train_pr_feedback_record(
             recorded_at=recorded_at,
             response_trace_id=response_trace_id,
             defer_until=defer_until,
+            planning_author_ids=planning_author_ids,
         )
         store.write_merge_train_pr_feedback_record(record)
         return record
@@ -116,6 +122,7 @@ def build_merge_train_pr_feedback_record(
     recorded_at: str,
     response_trace_id: str,
     defer_until: str = "",
+    planning_author_ids: tuple[int, ...] = (),
 ) -> MergeTrainPrFeedbackRecord:
     marker = merge_train_pr_feedback_marker(
         repository=request.repository,
@@ -153,6 +160,7 @@ def build_merge_train_pr_feedback_record(
         controller_action=request.controller_action,
         controller_record_id=request.controller_record_id,
         delivery_status="skipped",
+        planning_author_ids=planning_author_ids,
     )
 
     if defer_until:
@@ -191,6 +199,17 @@ def deliver_merge_train_pr_feedback_record(
     else:
         owner, repo = record.repository.split("/", 1)
         try:
+            # Completion is persisted/retried by this same native feedback path,
+            # including scheduler landings with no surviving workstation driver.
+            if record.event == "completed" and record.planning_author_ids:
+                changes["planning_reconciliation"] = {"ok": False, "status": "incomplete"}
+                changes["planning_reconciliation"] = reconcile_completed_change(
+                    repository=record.repository,
+                    base_branch=record.base_branch,
+                    number=record.pull_request_number,
+                    token=token,
+                    trusted_author_ids=record.planning_author_ids,
+                )
             comment = upsert_github_issue_comment(
                 owner=owner,
                 repo=repo,
@@ -217,6 +236,12 @@ def deliver_merge_train_pr_feedback_record(
                 retryable=retryable,
                 retry_at=retry_at,
                 provider_retry_at=provider_retry_at,
+            )
+        except (KeyError, TypeError, ValueError):
+            changes.update(
+                delivery_status="failed",
+                error_message="Planning completion received malformed provider evidence; owning-agent review required.",
+                retryable=False,
             )
     return record.model_copy(update=changes)
 
@@ -248,7 +273,9 @@ def _delivery_retry(
     error: click.ClickException, *, attempted_at: str, attempts: int
 ) -> tuple[bool, str, str]:
     cause = error.__cause__
-    transient = isinstance(cause, (URLError, OSError))
+    transient = isinstance(cause, (URLError, OSError)) or isinstance(
+        error, PlanningCompletionPending
+    )
     rate_limited = False
     deadlines = [
         _timestamp(attempted_at) + timedelta(seconds=min(60 * 2 ** min(attempts - 1, 4), 900))

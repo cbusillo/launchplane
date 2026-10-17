@@ -504,6 +504,7 @@ def _deliver_controller_feedback(
             recorded_at=now(),
             response_trace_id=trace_id,
             defer_until=backoff,
+            planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
         )
         if feedback_record.delivery_status == "failed":
             failed += 1
