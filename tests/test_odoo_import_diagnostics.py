@@ -16,6 +16,7 @@ from pymysql.constants import CLIENT, CR
 
 from control_plane import odoo_import_diagnostics as diagnostic
 from control_plane import odoo_runtime_reads as reads
+from control_plane.dokploy import api, source as dokploy_source
 from control_plane.odoo_diagnostic_identity import (
     OdooDiagnosticIdentity,
     DIAGNOSTIC_IDENTITY_UNAVAILABLE,
@@ -29,7 +30,7 @@ from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.secrets import RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord, ScalarValue
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
-from control_plane.contracts.runtime_identity import RuntimeIdentity
+from control_plane.contracts.runtime_identity import RuntimeIdentity, RUNTIME_IDENTITY_ENV_KEY
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.http_routes.odoo_runtime import (
     OdooRuntimeReadDependencies,
@@ -172,7 +173,7 @@ class DiagnosticFixture:
                 identity=self.identity,
                 target_id="fixture-target-id",
                 target_name="fixture-target",
-                container_id="fixture-container",
+                container_id="c" * 64,
                 observed_at=STAMP,
             ),
             host="https://provider.invalid",
@@ -199,9 +200,29 @@ class DiagnosticFixture:
 class DiagnosticTests(unittest.TestCase):
     def setUp(self) -> None:
         self.fixture = DiagnosticFixture()
+        self.real_connect_runtime = reads.connect_runtime
+        self.environment = {RUNTIME_IDENTITY_ENV_KEY: self.fixture.identity.model_dump_json()}
+        for name, prefix in diagnostic.SOURCE_PREFIXES.items():
+            for key in (*diagnostic.FIELDS, "password"):
+                env_key = (
+                    config_parameter_secret_env_key(prefix + ".password")
+                    if key == "password"
+                    else config_parameter_runtime_key(prefix + "." + key)
+                )
+                self.environment[env_key] = self.fixture.applied[prefix + "." + key]
+        self.runtime_probe = patch.object(
+            diagnostic,
+            "runtime_grants",
+            side_effect=lambda connection, sources, **kw: {name: "read_only" for name in sources},
+        )
+        self.runtime_mock = self.runtime_probe.start()
+        self.addCleanup(self.runtime_probe.stop)
+        self.cache = patch.dict(diagnostic._FAILED_PROBES, {}, clear=True)
+        self.cache.start()
+        self.addCleanup(self.cache.stop)
         self.patches = [
             patch.object(reads, "connect_runtime", return_value=self.fixture.connection),
-            patch.object(reads, "inspect_runtime_container", return_value={}),
+            patch.object(reads, "inspect_runtime_container", return_value=self.environment),
             patch.object(
                 diagnostic,
                 "read_applied_parameters",
@@ -216,6 +237,14 @@ class DiagnosticTests(unittest.TestCase):
 
     def run_diagnostic(self) -> diagnostic.ImportDiagnosticResult:
         return diagnostic.diagnose_imports(
+            store=self.fixture.store,
+            product=self.fixture.profile.product,
+            control_plane_root=Path("fixture"),
+            database_url=None,
+        )
+
+    def run_runtime_diagnostic(self) -> diagnostic.ImportDiagnosticResult:
+        return diagnostic.diagnose_runtime_source_grants(
             store=self.fixture.store,
             product=self.fixture.profile.product,
             control_plane_root=Path("fixture"),
@@ -244,6 +273,150 @@ class DiagnosticTests(unittest.TestCase):
         ]
         self.assertEqual(writes, [])
 
+    def test_runtime_only_read_needs_no_odoo_identity_or_http_login(self) -> None:
+        self.mocks[0].side_effect = self.real_connect_runtime
+        self.environment["ODOO_DB_NAME"] = "fixture_db"
+        with (
+            patch.object(
+                dokploy_source,
+                "read_dokploy_config",
+                return_value=("https://provider.invalid", "fixture-token"),
+            ),
+            patch.object(
+                api,
+                "fetch_dokploy_target_payload",
+                return_value={
+                    "appName": self.fixture.connection.app_name,
+                    "serverId": self.fixture.connection.server_id,
+                    "name": "fixture-target",
+                },
+            ),
+            patch.object(api, "dokploy_request", return_value=[]),
+            patch.object(
+                api,
+                "select_dokploy_compose_container",
+                return_value={"containerId": self.fixture.connection.evidence.container_id},
+            ),
+            patch.object(
+                reads, "read_diagnostic_identity", side_effect=reads._diagnostic_unavailable()
+            ) as identity,
+            patch.object(reads, "_rpc", side_effect=AssertionError("Odoo login is forbidden")),
+        ):
+            result = self.run_runtime_diagnostic()
+        self.assertEqual(result.runtime, "verified")
+        self.assertTrue(
+            all(source.applied_connection_grants == "read_only" for source in result.sources)
+        )
+        self.assertTrue(
+            all(
+                source.managed_connection_grants == "unknown" and not source.parameters
+                for source in result.sources
+            )
+        )
+        identity.assert_not_called()
+        self.mocks[2].assert_not_called()
+        self.mocks[-1].assert_not_called()
+        self.assertNotIn(PRIVATE, result.model_dump_json())
+
+    def test_runtime_only_grants_ignore_database_name_setting_choice(self) -> None:
+        for prefix in diagnostic.SOURCE_PREFIXES.values():
+            del self.environment[config_parameter_runtime_key(prefix + ".db")]
+        result = self.run_runtime_diagnostic()
+        self.assertTrue(
+            all(source.applied_connection_grants == "read_only" for source in result.sources)
+        )
+
+    def test_runtime_only_refuses_mismatch_and_discards_binding_drift(self) -> None:
+        self.environment[config_parameter_secret_env_key("cm_data.db.password")] = "stale-fixture"
+
+        def run() -> diagnostic.ImportDiagnosticResult:
+            return diagnostic.diagnose_runtime_source_grants(
+                store=self.fixture.store,
+                product=self.fixture.profile.product,
+                control_plane_root=Path("fixture"),
+                database_url=None,
+            )
+
+        result = run()
+        self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
+        self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
+
+        def drift(connection: object, sources: tuple[str, ...], **kwargs: object) -> dict[str, str]:
+            self.fixture.bindings.clear()
+            return {name: "read_only" for name in sources}
+
+        self.runtime_mock.side_effect = drift
+        result = run()
+        self.assertEqual(result.runtime, "unknown")
+        self.assertTrue(
+            all(source.applied_connection_grants == "unknown" for source in result.sources)
+        )
+
+    def test_origin_privileges_are_independent(self) -> None:
+        self.runtime_mock.side_effect = lambda connection, sources, **kw: {
+            name: "unsafe" if name == "cm_data" else "read_only" for name in sources
+        }
+        result = self.run_runtime_diagnostic()
+        self.assertEqual(self.run_diagnostic().sources[0].managed_connection_grants, "read_only")
+        self.assertEqual(result.sources[0].managed_connection_grants, "unknown")
+        self.assertEqual(result.sources[0].applied_connection_grants, "unsafe")
+        self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
+        self.runtime_mock.side_effect = lambda connection, sources, **kw: {
+            name: "unknown" for name in sources
+        }
+        result = self.run_runtime_diagnostic()
+        self.assertTrue(
+            all(source.applied_connection_grants == "unknown" for source in result.sources)
+        )
+        self.assertTrue(
+            all(source.managed_connection_grants == "unknown" for source in result.sources)
+        )
+
+    def test_runtime_never_receives_mismatched_or_unsafe_sources(self) -> None:
+        self.environment[config_parameter_runtime_key("cm_data.db.user")] = "writer"
+        self.environment[config_parameter_secret_env_key("repairshopr.sync_db.password")] = "stale"
+        self.fixture.bindings[2] = self.fixture.bindings[2].model_copy(
+            update={"declared_secret_class": "prod_only"}
+        )
+        result = self.run_runtime_diagnostic()
+        self.assertTrue(
+            all(source.applied_connection_grants == "unknown" for source in result.sources)
+        )
+        self.runtime_mock.assert_not_called()
+
+    def test_runtime_probe_single_flight_cooldown_and_fresh_success(self) -> None:
+        def nested(connection: object, sources: tuple[str, ...], **kw: object) -> dict[str, str]:
+            self.assertTrue(
+                all(
+                    value == "unknown"
+                    for value in diagnostic.runtime_origin_grants(
+                        self.fixture.connection,
+                        diagnostic.import_authority(
+                            self.fixture.store, self.fixture.profile.product
+                        ).sources,
+                        self.environment,
+                    ).values()
+                )
+            )
+            return {name: "unknown" if name == "cm_data" else "read_only" for name in sources}
+
+        self.runtime_mock.side_effect = nested
+        self.run_runtime_diagnostic()
+        self.runtime_mock.side_effect = lambda connection, sources, **kw: {
+            name: "read_only" for name in sources
+        }
+        result = self.run_runtime_diagnostic()
+        self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
+        self.assertEqual(result.sources[1].applied_connection_grants, "read_only")
+        self.assertNotIn("cm_data", self.runtime_mock.call_args.args[1])
+        with patch(
+            "control_plane.odoo_import_diagnostics.time.monotonic", return_value=float("inf")
+        ):
+            result = self.run_runtime_diagnostic()
+        self.assertTrue(
+            all(source.applied_connection_grants == "read_only" for source in result.sources)
+        )
+
     def test_applied_writer_mismatch_does_not_authenticate_as_writer(self) -> None:
         self.fixture.applied["cm_data.db.user"] = "old_writer"
         self.fixture.applied["cm_data.db.password"] = "old_writer_password"
@@ -251,6 +424,7 @@ class DiagnosticTests(unittest.TestCase):
         fields = {item.field: item.agreement for item in result.sources[0].parameters}
         self.assertEqual(fields["user"], "mismatch")
         self.assertEqual(fields["password"], "mismatch")
+        self.assertEqual(result.sources[0].applied_connection_grants, "unknown")
         settings = self.mocks[-1].call_args_list[0].args[0]
         self.assertEqual(settings["password"], PRIVATE)
         self.assertEqual(settings["user"], "fixture_reader")
@@ -329,7 +503,14 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertEqual(self.mocks[-1].call_count, 2)
 
     def test_runtime_and_config_drift_discard_evidence(self) -> None:
-        for kind in ("runtime", "settings", "binding", "container", "applied", "nonsecret_binding"):
+        for kind in (
+            "runtime",
+            "settings",
+            "binding",
+            "container",
+            "applied",
+            "nonsecret_binding",
+        ):
             with self.subTest(kind=kind):
                 fixture = DiagnosticFixture()
                 self.fixture = fixture
@@ -364,9 +545,30 @@ class DiagnosticTests(unittest.TestCase):
                 result = self.run_diagnostic()
                 self.assertEqual(result.runtime, "unknown")
                 self.assertTrue(
-                    all(source.managed_connection_grants == "unknown" for source in result.sources)
+                    all(
+                        source.managed_connection_grants
+                        == source.applied_connection_grants
+                        == "unknown"
+                        for source in result.sources
+                    )
                 )
                 self.mocks[1].side_effect = None
+                self.mocks[1].return_value = self.environment
+
+    def test_binding_drift_during_runtime_read_discards_all_evidence(self) -> None:
+        def drift(connection: object, sources: tuple[str, ...], **kwargs: object) -> dict[str, str]:
+            self.fixture.bindings.clear()
+            return {name: "read_only" for name in sources}
+
+        self.runtime_mock.side_effect = drift
+        result = self.run_runtime_diagnostic()
+        self.assertEqual(result.runtime, "unknown")
+        self.assertTrue(
+            all(
+                source.managed_connection_grants == source.applied_connection_grants == "unknown"
+                for source in result.sources
+            )
+        )
 
     def test_duplicate_binding_missing_version_and_missing_parameter(self) -> None:
         self.fixture.bindings.append(
@@ -692,6 +894,12 @@ class GrantTests(unittest.TestCase):
 
 class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
     async def test_exact_testing_route_auth_and_no_overrides(self) -> None:
+        await self.exercise_read(runtime_only=False)
+
+    async def test_runtime_only_route_auth_and_no_overrides(self) -> None:
+        await self.exercise_read(runtime_only=True)
+
+    async def exercise_read(self, *, runtime_only: bool) -> None:
         fixture = DiagnosticFixture()
         allowed = MagicMock(return_value=True)
 
@@ -719,8 +927,11 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
         path = (
             f"/v1/products/{fixture.profile.product}/environments/testing/odoo-import-diagnostics"
         )
+        if runtime_only:
+            path = path.replace("odoo-import-diagnostics", "odoo-source-grants")
+        backend = "diagnose_runtime_source_grants" if runtime_only else "diagnose_imports"
         with patch(
-            "control_plane.http_routes.odoo_runtime.diagnose_imports",
+            "control_plane.http_routes.odoo_runtime." + backend,
             return_value=diagnostic.unknown_result(),
         ) as execute:
             response = await request(app, "GET", path)
@@ -728,11 +939,14 @@ class DiagnosticHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(response.headers["cache-control"], "no-store")
             self.assertEqual(allowed.call_args.kwargs["product"], fixture.profile.product)
             self.assertNotIn(PRIVATE, response.text)
-            execute.side_effect = reads._diagnostic_unavailable()
-            unavailable = await request(app, "GET", path)
-            self.assertEqual(unavailable.status_code, 503, unavailable.text)
-            self.assertEqual(unavailable.json()["detail"]["code"], DIAGNOSTIC_IDENTITY_UNAVAILABLE)
-            self.assertNotIn(PRIVATE, unavailable.text)
+            if not runtime_only:
+                execute.side_effect = reads._diagnostic_unavailable()
+                unavailable = await request(app, "GET", path)
+                self.assertEqual(unavailable.status_code, 503, unavailable.text)
+                self.assertEqual(
+                    unavailable.json()["detail"]["code"], DIAGNOSTIC_IDENTITY_UNAVAILABLE
+                )
+                self.assertNotIn(PRIVATE, unavailable.text)
             execute.side_effect = None
             execute.reset_mock()
             for bad_path in (
