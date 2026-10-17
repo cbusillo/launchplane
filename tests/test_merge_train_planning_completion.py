@@ -413,6 +413,60 @@ class PlanningCompletionTests(TestCase):
             self.assertFalse(self.provider.writes)
             self.comment_mock.assert_not_called()
 
+    def test_changed_policy_recovery_queues_verified_landing_only_in_mutate_mode(self) -> None:
+        policy = _policy_record(
+            (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        ).policy.policies[0]
+        policy = policy.model_copy(
+            update={
+                "enqueue": policy.enqueue.model_copy(
+                    update={"trusted_automation_github_user_ids": (_BOT,)}
+                )
+            }
+        )
+        _, record = _records((_entry(9, 1),), repository=_REPO)
+        record = record.model_copy(
+            update={
+                "landing_plan": record.landing_plan.model_copy(
+                    update={
+                        "entries": tuple(
+                            entry.model_copy(
+                                update={"status": "merged", "merge_commit_sha": "landed"}
+                            )
+                            for entry in record.landing_plan.entries
+                        )
+                    }
+                )
+            }
+        )
+        for mutate in (False, True):
+            with self.subTest(mutate=mutate), TemporaryDirectory() as directory:
+                store = FilesystemRecordStore(Path(directory))
+                client, lease = Mock(), Mock()
+                client.pull_request_is_merged.return_value = "landed"
+                client.branch_contains_commit.return_value = True
+                lease.record.step_payload = {}
+                with patch.object(
+                    controller, "stack_collapse_records_for_completed_landing", return_value=()
+                ):
+                    controller._reconcile_completed_landing_after_policy_change(
+                        request=controller.MergeTrainControllerRunOnceEnvelope(
+                            repository=_REPO, mutate=mutate
+                        ),
+                        repository_policy=policy,
+                        trace_id="changed-policy",
+                        recorded_at=record.updated_at,
+                        github_client=client,
+                        stack_collapse_store=store,
+                        landed_record=record,
+                        lease=lease,
+                    )
+                self.assertEqual(
+                    bool(store.list_merge_train_pr_feedback_records(repository=_REPO)), mutate
+                )
+                self.assertFalse(self.provider.writes)
+                self.comment_mock.assert_not_called()
+
     def test_configured_status_labels_and_all_stale_statuses_are_reconciled(self) -> None:
         self.provider.config = {
             "planning": {
