@@ -340,9 +340,15 @@ class TestingRebuildTests(unittest.TestCase):
         self.provider.bad_public = True
         original_switch = self.provider.switch
 
-        def switch(*args: object, **kwargs: object) -> None:
-            self.provider.pending_switch = args[2] == self.plan.old
-            original_switch(*args, **kwargs)
+        def switch(
+            plan: TestingRebuildPlan,
+            previous: TestingCopy,
+            desired: TestingCopy,
+            *,
+            reconcile_only: bool,
+        ) -> None:
+            self.provider.pending_switch = desired == self.plan.old
+            original_switch(plan, previous, desired, reconcile_only=reconcile_only)
 
         with patch.object(self.provider, "switch", side_effect=switch):
             for _ in range(2):
