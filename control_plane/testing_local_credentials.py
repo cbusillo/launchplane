@@ -259,6 +259,7 @@ class CredentialOverlap(BaseModel):
     production_key: str
     production_product: str
     # The testing binding's recorded sharing decision; set only for an external key.
+    # Only a read-only source may stay on testing; other kinds are shown but still fail.
     sharing_kind: SecretSharingKind | None = None
 
 
@@ -377,7 +378,7 @@ def audit_testing_credentials(
                             )
             report.status = (
                 "overlap"
-                if any(overlap.sharing_kind is None for overlap in report.overlaps)
+                if any(overlap.sharing_kind != "read_only_source" for overlap in report.overlaps)
                 else "unavailable"
                 if report.missing_keys
                 else "pass"

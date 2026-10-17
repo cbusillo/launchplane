@@ -95,10 +95,11 @@ Missing local credentials, decryption failure
 and ambiguous ownership are `unavailable`, never a pass. `no_production` explicitly
 means there was no production lane to compare. The testing side is what the lane
 is delivered: a key in its `retired_provider_keys` is not compared. Overlaps on
-external keys are reported too. An overlap whose testing binding records a sharing
-decision under the existing sharing contract carries that decision's
-`sharing_kind` and does not fail the lane; every other overlap, and any overlap on
-a local credential, is `overlap`. Never replace an external key with a random
+external keys are reported too, with the testing binding's recorded
+`sharing_kind` when it has one. Only a `read_only_source` decision lets an
+external key stay on testing without failing the lane; every other overlap,
+including other sharing kinds and any overlap on a local credential, is
+`overlap`. Never replace an external key with a random
 local password; remove it from testing with `retired_provider_keys`, give testing
 its own provider-issued test key, or record a reviewed sharing decision. This audit
 covers Launchplane's managed runtime store, not provider-only or unrecorded keys,

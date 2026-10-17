@@ -206,6 +206,24 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             actor="fixture",
             source_label="test",
         )
+        # A decision that does not record read-only access stays a failing overlap.
+        store_testing_key(
+            {
+                "secret_class": "shared_safe",
+                "sharing_reason": {
+                    "kind": "site_shared",
+                    "reason": "Shared on purpose",
+                    "evidence": "Fixture token can write",
+                },
+            }
+        )
+        lane = (await self.audit()).json()["lanes"][0]
+        self.assertEqual(lane["status"], "overlap")
+        self.assertEqual(
+            [(item["testing_key"], item["sharing_kind"]) for item in lane["overlaps"]],
+            [("SOURCE_TOKEN", "site_shared")],
+        )
+
         store_testing_key(
             {
                 "secret_class": "shared_safe",
