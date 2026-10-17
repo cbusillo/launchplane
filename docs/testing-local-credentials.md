@@ -74,8 +74,12 @@ hold or redeploy the old target to bypass a partial activation.
 An uncertain apply is retried only with its original key and intent; never use a
 new key to hide an uncertain result. A deliberate later rotation needs a new
 review and key. This updates encrypted bindings only: **do not sync the new DB
-password into a running old database**. For replacement, continue the supported
-independent resource/bootstrap and sanitized-copy procedure. Never reset a
+password into a running old database**. Until the lane is replaced, an ordinary
+Odoo testing deploy onto its retained data refuses before any provider write with
+`deploy_blocked.retained_database_credential_changed` when the stored
+`ODOO_DB_PASSWORD` differs from the running target's; `path-check --path testing`
+then reports it as the blocked `testing_deploy` step. For replacement, continue
+the supported independent resource/bootstrap and sanitized-copy procedure. Never reset a
 restored person's password to make an admin/bootstrap password work.
 
 ## All-product audit
