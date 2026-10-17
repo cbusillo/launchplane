@@ -1,6 +1,7 @@
 """Compile an admitted Odoo copy without changing the serving lane's records."""
 
 from dataclasses import dataclass, field
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -19,6 +20,10 @@ from control_plane.contracts.odoo_testing_source import NativeOdooTestingSource
 from control_plane.contracts.odoo_runtime_environment import merge_required_odoo_addons_path
 from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.testing_candidate import TestingCandidateAllocation
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.odoo_testing_source import NativeOdooSourceAuthority
 from control_plane.contracts.testing_candidate_application import TestingCandidateApplicationPlan
 from control_plane.dokploy import compose, post_deploy
 from control_plane.dokploy.source import DokployTargetDefinition
@@ -270,22 +275,18 @@ def candidate_runtime_inputs(
         include_global=True,
         records=(),
     )
-    authority_binding = canonical_json_sha256(
-        {
-            "profile": profile.model_dump(mode="json"),
-            "target": target.model_dump(mode="json"),
-            "runtime": [
-                item.model_dump(mode="json")
-                for item in store.list_runtime_environment_records()
-                if runtime_selection.includes(item)
-            ],
-            "credentials": credential_binding,
-            "native": authority.model_dump(mode="json") if authority is not None else None,
-            "upstream": upstream,
-            "overrides": overrides.model_dump(
-                mode="json", exclude={"last_apply", "updated_at", "source_label"}
-            ),
-        }
+    authority_binding = candidate_authority_sha256(
+        profile=profile,
+        target=target,
+        runtime_records=(
+            item
+            for item in store.list_runtime_environment_records()
+            if runtime_selection.includes(item)
+        ),
+        credential_binding=credential_binding,
+        native=authority,
+        upstream=upstream,
+        overrides=overrides,
     )
     image_reference = f"{artifact.image.repository}@{artifact.image.digest}"
     identity = RuntimeIdentity(
@@ -368,4 +369,35 @@ def candidate_runtime_inputs(
         workflow_environment=workflow.inline_environment,
         required_workflow_keys=workflow.required_container_environment_keys,
         native_source=native,
+    )
+
+
+def candidate_authority_sha256(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    target: DokployTargetRecord,
+    runtime_records: Iterable[RuntimeEnvironmentRecord],
+    credential_binding: str,
+    native: NativeOdooSourceAuthority | None,
+    upstream: dict[str, str],
+    overrides: OdooInstanceOverrideRecord,
+) -> str:
+    """One input binding for private preparation and atomic serving publication."""
+    return canonical_json_sha256(
+        {
+            "profile": profile.model_dump(mode="json"),
+            "target": target.model_dump(mode="json"),
+            "runtime": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    runtime_records, key=lambda item: (item.scope, item.context, item.instance)
+                )
+            ],
+            "credentials": credential_binding,
+            "native": native.model_dump(mode="json") if native is not None else None,
+            "upstream": upstream,
+            "overrides": overrides.model_dump(
+                mode="json", exclude={"last_apply", "updated_at", "source_label"}
+            ),
+        }
     )

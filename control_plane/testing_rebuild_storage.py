@@ -18,7 +18,11 @@ class RebuildRecordStore(Protocol):
     def read_idempotency_record(
         self, *, scope: str, route_path: str, idempotency_key: str
     ) -> LaunchplaneIdempotencyRecord | None: ...
-    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object: ...
+    def compare_and_write_testing_rebuild_checkpoint(
+        self,
+        expected: TestingRebuildRecord | None,
+        replacement: LaunchplaneIdempotencyRecord,
+    ) -> None: ...
 
 
 class RecordTestingRebuildStore:
@@ -58,34 +62,7 @@ class RecordTestingRebuildStore:
             current = self.load(record.plan)
         except FileNotFoundError:
             current = None
-        if current is not None and (
-            current.plan != record.plan or current.began_at != record.began_at
-        ):
-            raise ValueError("Cannot replace a rebuild's original operation or plan.")
-        if current is not None:
-            if current.step in {"complete", "failed"}:
-                if record != current:
-                    raise ValueError("A terminal rebuild receipt cannot be replaced.")
-                return
-            for flag in ("publication_started", "retirement_started", "rollback_started"):
-                if getattr(current, flag) and not getattr(record, flag):
-                    raise ValueError("A rebuild cannot forget an effect intent.")
-            steps = (
-                "preparing",
-                "prepared",
-                "switching",
-                "publishing",
-                "retiring",
-                "complete",
-                "rolling_back",
-                "failed",
-            )
-            if steps.index(record.step) < steps.index(current.step):
-                raise ValueError("A rebuild checkpoint cannot regress.")
-            if current.retirement_recovery is not None and (
-                record.retirement_recovery != current.retirement_recovery
-            ):
-                raise ValueError("A rebuild cannot replace its retirement recovery proof.")
+        require_rebuild_successor(current, record)
         key = canonical_json_sha256(
             {
                 "product": record.plan.product,
@@ -93,7 +70,8 @@ class RecordTestingRebuildStore:
                 "operation": record.plan.operation_id,
             }
         )
-        self.store.write_idempotency_record(
+        self.store.compare_and_write_testing_rebuild_checkpoint(
+            current,
             LaunchplaneIdempotencyRecord(
                 record_id=build_launchplane_mutation_reservation_id(
                     scope=REBUILD_CHECKPOINT_SCOPE,
@@ -110,5 +88,37 @@ class RecordTestingRebuildStore:
                 response_trace_id="testing-rebuild:" + record.plan.operation_id,
                 recorded_at=record.updated_at.isoformat(),
                 response_payload=record.model_dump(mode="json"),
-            )
+            ),
         )
+
+
+def require_rebuild_successor(
+    current: TestingRebuildRecord | None, record: TestingRebuildRecord
+) -> None:
+    """Check monotonic evidence before and within the checkpoint transaction."""
+    if current is not None and (current.plan != record.plan or current.began_at != record.began_at):
+        raise ValueError("Cannot replace a rebuild's original operation or plan.")
+    if current is not None:
+        if current.step in {"complete", "failed"}:
+            if record != current:
+                raise ValueError("A terminal rebuild receipt cannot be replaced.")
+            return
+        for flag in ("publication_started", "retirement_started", "rollback_started"):
+            if getattr(current, flag) and not getattr(record, flag):
+                raise ValueError("A rebuild cannot forget an effect intent.")
+        steps = (
+            "preparing",
+            "prepared",
+            "switching",
+            "publishing",
+            "retiring",
+            "complete",
+            "rolling_back",
+            "failed",
+        )
+        if steps.index(record.step) < steps.index(current.step):
+            raise ValueError("A rebuild checkpoint cannot regress.")
+        if current.retirement_recovery is not None and (
+            record.retirement_recovery != current.retirement_recovery
+        ):
+            raise ValueError("A rebuild cannot replace its retirement recovery proof.")

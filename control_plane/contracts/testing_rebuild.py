@@ -50,11 +50,14 @@ class TestingRebuildPlan(FrozenRecord):
             raise ValueError("A restore requires its managed source reference; empty does not.")
         for copy in (self.old, self.new):
             identity = copy.runtime_identity
-            if (identity.product, identity.context, identity.instance) != (
-                self.product,
-                self.context,
-                self.instance,
-            ):
+            # Older managed copies did not install a product field or digest.
+            # Keep their observed identity intact; the caller still proves lane
+            # ownership from managed records. A new copy must be fully explicit.
+            allowed_products = {self.product, ""} if copy is self.old else {self.product}
+            if identity.product not in allowed_products or (
+                identity.context,
+                identity.instance,
+            ) != (self.context, self.instance):
                 raise ValueError("Both copies must belong to the same testing lane.")
         for field in ("copy_id", "target_id", "private_url", "resource_binding"):
             if getattr(self.old, field) == getattr(self.new, field):

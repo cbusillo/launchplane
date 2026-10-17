@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.testing_rebuild import (
@@ -216,6 +217,67 @@ class TestingRebuildTests(unittest.TestCase):
         return execute_testing_rebuild(
             self.plan, self.store, self.provider, clock=lambda: self.provider.now
         )
+
+    def test_managed_legacy_predecessor_keeps_its_observed_identity(self) -> None:
+        old = self.plan.old.model_copy(
+            update={
+                "runtime_identity": self.plan.old.runtime_identity.model_copy(
+                    update={"product": "", "image_digest": ""}
+                )
+            }
+        )
+        plan = TestingRebuildPlan.model_validate(
+            {**self.plan.model_dump(), "old": old.model_dump()}
+        )
+        self.assertEqual(plan.old.runtime_identity, old.runtime_identity)
+        for foreign in ("another-product",):
+            with self.assertRaises(ValueError):
+                TestingRebuildPlan.model_validate(
+                    {
+                        **plan.model_dump(),
+                        "old": {
+                            **old.model_dump(),
+                            "runtime_identity": {
+                                **old.runtime_identity.model_dump(),
+                                "product": foreign,
+                            },
+                        },
+                    }
+                )
+        with self.assertRaises(ValueError):
+            TestingRebuildPlan.model_validate(
+                {
+                    **plan.model_dump(),
+                    "new": {
+                        **plan.new.model_dump(),
+                        "runtime_identity": {
+                            **plan.new.runtime_identity.model_dump(),
+                            "product": "",
+                        },
+                    },
+                }
+            )
+
+    def test_checkpoint_compare_and_write_refuses_a_stale_writer(self) -> None:
+        record = TestingRebuildRecord(
+            plan=self.plan, began_at=self.provider.now, updated_at=self.provider.now
+        )
+        self.store.save(record)
+        original = self.records.read_idempotency_record
+        stale_reads = 0
+
+        def read_with_race(**kwargs: str) -> LaunchplaneIdempotencyRecord | None:
+            nonlocal stale_reads
+            row = original(**kwargs)
+            if not stale_reads:
+                stale_reads += 1
+                self.store.save(record.model_copy(update={"publication_started": True}))
+            return row
+
+        with patch.object(self.records, "read_idempotency_record", side_effect=read_with_race):
+            with self.assertRaises(ValueError):
+                self.store.save(record)
+        self.assertTrue(self.store.load(self.plan).publication_started)
 
     def test_rebuild_and_both_restore_sources_keep_the_address(self) -> None:
         for source in ("empty", "production", "upstream"):
