@@ -140,6 +140,91 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(lane["overlaps"])
         self.assertEqual(set(lane["generated_keys"]), set(lane["local_keys"]))
 
+    async def test_external_overlap_fails_until_retired_or_recorded_as_shared(self) -> None:
+        self.assertEqual((await self.post(self.payload)).status_code, 202)
+        response = await self.post({**self.payload, "mode": "apply"}, "local-first")
+        self.assertEqual(response.status_code, 202, response.text)
+
+        def store_testing_key(secret: dict[str, Any]) -> None:
+            for instance in ("prod", "testing"):
+                apply_product_config_bundle(
+                    record_store=self.store,
+                    payload={
+                        "product": "example-site",
+                        "context": "example-site",
+                        "instance": instance,
+                        "secrets": [
+                            {
+                                "binding_key": "SOURCE_TOKEN",
+                                "value": "production-external-fixture",
+                                **(secret if instance == "testing" else {}),
+                            }
+                        ],
+                    },
+                    mode="apply",
+                    actor="fixture",
+                    source_label="test",
+                )
+
+        store_testing_key({})
+        lane = (await self.audit()).json()["lanes"][0]
+        self.assertEqual(lane["status"], "overlap")
+        self.assertEqual(
+            [(item["testing_key"], item["sharing_kind"]) for item in lane["overlaps"]],
+            [("SOURCE_TOKEN", None)],
+        )
+
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "schema_version": 2,
+                "product": "example-site",
+                "context": "example-site",
+                "instance": "testing",
+                "runtime_env": {
+                    "env": {"SITE_MODE": "testing"},
+                    "retired_provider_keys": ["SOURCE_TOKEN"],
+                },
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        lane = (await self.audit()).json()["lanes"][0]
+        self.assertEqual((lane["status"], lane["overlaps"]), ("pass", []))
+
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "schema_version": 2,
+                "product": "example-site",
+                "context": "example-site",
+                "instance": "testing",
+                "runtime_env": {"retired_provider_keys": []},
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        store_testing_key(
+            {
+                "secret_class": "shared_safe",
+                "sharing_reason": {
+                    "kind": "read_only_source",
+                    "reason": "Read-only integration",
+                    "evidence": "Fixture source has read-only permissions",
+                },
+            }
+        )
+        report = await self.audit()
+        lane = report.json()["lanes"][0]
+        self.assertEqual(lane["status"], "pass")
+        self.assertEqual(
+            [(item["testing_key"], item["sharing_kind"]) for item in lane["overlaps"]],
+            [("SOURCE_TOKEN", "read_only_source")],
+        )
+        self.assertNotIn("production-external-fixture", report.text)
+
     async def test_missing_or_undecryptable_credentials_are_unavailable(self) -> None:
         report = await self.audit()
         self.assertEqual(report.json()["lanes"][0]["status"], "unavailable")
