@@ -6,7 +6,11 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+    DokployTargetType,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy_target_comparison import require_provider_target_expectation
 from control_plane.dokploy.target_source_setup import (
@@ -29,6 +33,7 @@ from control_plane.dokploy.api import JsonObject
 PROJECT_CREATE_PATH = "/api/project.create"
 ENVIRONMENT_CREATE_PATH = "/api/environment.create"
 COMPOSE_CREATE_PATH = "/api/compose.create"
+APPLICATION_CREATE_PATH = "/api/application.create"
 
 
 class DokployTargetAdoptionRecordStore(ProductAuthorityBundleStore, Protocol):
@@ -332,6 +337,7 @@ def adopt_dokploy_target(
     fetch_target_payload: FetchDokployTargetPayload,
     required_context_owner: tuple[str, str] | None = None,
     expected_product_profile: LaunchplaneProductProfileRecord | None = None,
+    policies: DokployTargetPolicies | None = None,
 ) -> DokployTargetAdoptionResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -384,6 +390,7 @@ def adopt_dokploy_target(
         healthcheck_path=resolved_healthcheck_path,
         healthcheck_timeout_seconds=_int_field(provider_payload, "healthcheckTimeoutSeconds"),
         domains=domains,
+        policies=policies or DokployTargetPolicies(),
         updated_at=recorded_at,
         source_label=source_label.strip() or "cli:dokploy-targets:adopt",
     )
@@ -470,6 +477,8 @@ def create_dokploy_application_target(
     apply: bool = False,
     mutate_provider: MutateDokployPayload,
     fetch_target_payload: FetchDokployTargetPayload,
+    required_context_owner: tuple[str, str] | None = None,
+    policies: DokployTargetPolicies | None = None,
 ) -> DokployTargetCreateResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -595,9 +604,7 @@ def create_dokploy_application_target(
         application_payload["description"] = application_description.strip()
     if server_id.strip():
         application_payload["serverId"] = server_id.strip()
-    created_application = mutate_provider(
-        host, token, "/api/application.create", application_payload
-    )
+    created_application = mutate_provider(host, token, APPLICATION_CREATE_PATH, application_payload)
     application_id = _extract_provider_id(created_application, "applicationId", "application")
 
     adoption = adopt_dokploy_target(
@@ -619,6 +626,8 @@ def create_dokploy_application_target(
         updated_at=updated_at,
         apply=True,
         fetch_target_payload=fetch_target_payload,
+        required_context_owner=required_context_owner,
+        policies=policies,
     )
     return DokployTargetCreateResult(
         applied=True,
@@ -1043,7 +1052,7 @@ def _planned_provider_requests(
         application_payload["description"] = application_description.strip()
     if server_id.strip():
         application_payload["serverId"] = server_id.strip()
-    requests.append({"path": "/api/application.create", "payload": application_payload})
+    requests.append({"path": APPLICATION_CREATE_PATH, "payload": application_payload})
     return tuple(requests)
 
 
