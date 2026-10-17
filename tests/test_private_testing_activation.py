@@ -85,9 +85,7 @@ class PrivateTestingActivationTests(unittest.TestCase):
             **self.fixture.payload,
             "source_commit": self.commit,
             "source_path": "compose.runtime.yml",
-            "certificate_root": "/srv/testing-certificates",
             "host_review": "fixture exact private host and port exclusion review",
-            "custody_review": "fixture Owner-only certificate and key custody review",
             "reason": "fixture install",
         }
         self.reader = self.enterContext(
@@ -155,12 +153,15 @@ class PrivateTestingActivationTests(unittest.TestCase):
         self.assertEqual(self.fixture.placement, self.before)
         self.assertFalse(self.calls)
         desired = json.loads(plan.intent["after"]["composeFile"])
-        self.assertEqual(desired["services"]["bridge"], self.template["services"]["bridge"])
+        runtime = desired["services"]["bridge"]
+        self.assertEqual(runtime.pop("ports")[0]["host_ip"], self.payload["private_ip"])
+        self.assertEqual(runtime, self.template["services"]["bridge"])
+        self.assertEqual(set(desired["services"]), set(self.template["services"]))
+        self.assertNotIn("secrets", desired)
         self.assertEqual(self.prepare().reconciliation_key(), plan.reconciliation_key())
         for field, value in (
             ("host_review", "changed"),
-            ("custody_review", "changed"),
-            ("certificate_sha256", "f" * 64),
+            ("endpoint_url", "https://changed.example.test/health"),
         ):
             with self.subTest(field=field):
                 self.assertNotEqual(
@@ -309,7 +310,7 @@ class PrivateTestingActivationTests(unittest.TestCase):
                 self.prepare()
         self.assertFalse(self.calls)
 
-    def test_merged_proxy_interpolation_refuses_before_source_installation(self) -> None:
+    def test_merged_upstream_interpolation_refuses_before_source_installation(self) -> None:
         def interpolated_overlay(*args: Any, **kwargs: Any) -> dict[str, Any]:
             overlay = cast(dict[str, Any], transport_overlay(*args, **kwargs))
             service = next(iter(overlay["services"].values()))
@@ -468,10 +469,9 @@ class PrivateTestingActivationTests(unittest.TestCase):
         match = re.match(r"\$\{([A-Z_]+)", expression)
         assert match is not None
         self.assertEqual(environment[match.group(1)], plan.intent["image"])
-        self.assertEqual(
-            self.template["services"][service],
-            json.loads(str(self.fixture.placement["composeFile"]))["services"][service],
-        )
+        actual = json.loads(str(self.fixture.placement["composeFile"]))["services"][service]
+        self.assertEqual(actual.pop("ports")[0]["target"], self.fixture.profile.runtime_port)
+        self.assertEqual(self.template["services"][service], actual)
 
     def test_monitoring_profile_edits_preserve_original_recovery_refresh_and_removal(self) -> None:
         plan = self.prepare()
@@ -533,7 +533,7 @@ class PrivateTestingActivationTests(unittest.TestCase):
             {"private_ip": "10.77.0.10"},
             {"listener_port": 9553},
             {"endpoint_key": "foreign"},
-            {"ca_bundle_sha256": "f" * 64},
+            {"endpoint_url": "https://other.example.test/health"},
         ):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 self.prepare(operation="remove", original_activation_key="install", **change)

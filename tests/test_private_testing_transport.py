@@ -2,9 +2,6 @@ import asyncio
 from copy import deepcopy
 import json
 import os
-import shutil
-import subprocess
-import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -30,7 +27,6 @@ from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.private_testing_transport import (
     ROUTE,
     PrivateTestingTransportRequest,
-    nginx_entrypoint,
     plan_private_testing_transport,
 )
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
@@ -40,38 +36,6 @@ from tests.support.http import request as http_request
 from tests.support.auth import scoped_agent_transport
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import sqlite_database_url
-
-
-class PrivateTestingEntrypointTests(unittest.TestCase):
-    @unittest.skipUnless(
-        Path("/bin/sh").is_file() and shutil.which("base64", path=os.defpath),
-        "POSIX shell/base64 bootstrap tools are unavailable on this test platform",
-    )
-    def test_entrypoint_materializes_its_own_file_and_never_interprets_payload(self) -> None:
-        with TemporaryDirectory() as directory:
-            root = Path(directory)
-            marker = root / "must-not-execute"
-            payload = {"literal": f"$(touch {marker}) `touch {marker}` $runtime_backend\n'quoted'"}
-            stub = root / "fixture program.py"
-            stub.write_text(
-                "import json, sys\nfrom pathlib import Path\n"
-                "source = Path(sys.argv[sys.argv.index('-c') + 1])\n"
-                "print(json.dumps(json.loads(source.read_text())))\n"
-            )
-            result = subprocess.run(
-                nginx_entrypoint(
-                    json.dumps(payload),
-                    configuration_file=str(root / "own generated config"),
-                    nginx_binary=sys.executable,
-                    nginx_arguments=(str(stub),),
-                ),
-                env={"PATH": os.defpath},
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            self.assertEqual(json.loads(result.stdout), payload)
-            self.assertFalse(marker.exists())
 
 
 class PrivateTestingTransportTests(unittest.TestCase):
@@ -117,12 +81,7 @@ class PrivateTestingTransportTests(unittest.TestCase):
             "private_ip": "10.77.0.9",
             "listener_port": 9443,
             "runtime_service": "bridge",
-            "nginx_image": "nginx@sha256:" + "a" * 64,
-            "ca_bundle_sha256": "b" * 64,
-            "certificate_sha256": "c" * 64,
-            "monitor_ca_bundle_path": "/run/private-trust/ca-bundle.pem",
-            "receiver_ca_bundle_path": "/Users/fixture/private-trust/ca-bundle.pem",
-            "trust_review": "fixture purpose-scoped private issuer review",
+            "endpoint_url": "https://bridge.example.test/health",
         }
         self.compose: dict[str, Any] = {
             "services": {
@@ -185,13 +144,49 @@ class PrivateTestingTransportTests(unittest.TestCase):
             ),
         )
 
-    def test_proxy_material_tampering_cannot_be_adopted_as_provider_metadata(self) -> None:
+    def test_edge_tls_needs_no_sidecar_certificate_or_private_key(self) -> None:
+        self.payload = {
+            "context": "example-site",
+            "endpoint_key": "testing-bridge",
+            "endpoint_url": "https://bridge.example.test/health",
+            "private_ip": "10.77.0.9",
+            "listener_port": 18787,
+            "runtime_service": "bridge",
+        }
+        result = self.plan()
+        self.assertEqual(result["endpoint_proposal"]["url"], self.payload["endpoint_url"])
+        self.assertEqual(result["server_url"], "wss://bridge.example.test/agent-session/connect")
+        self.assertEqual(set(result["overlay"]["services"]), {"bridge"})
+        self.assertNotIn("secrets", result["overlay"])
+        self.assertEqual(
+            result["overlay"]["services"]["bridge"],
+            {
+                "ports": [
+                    {
+                        "host_ip": "10.77.0.9",
+                        "published": "18787",
+                        "target": 8787,
+                        "protocol": "tcp",
+                    }
+                ]
+            },
+        )
+        endpoint = PrivateHealthEndpointRecord.model_validate(
+            {
+                **result["endpoint_proposal"],
+                "updated_at": self.profile.updated_at,
+            }
+        )
+        self.assertFalse(endpoint.tls_ca_pem)
+
+    def install_overlay(self, overlay: dict[str, Any]) -> None:
+        for name, fields in overlay["services"].items():
+            self.compose["services"][name].update(deepcopy(fields))
+
+    def test_upstream_bind_tampering_is_refused(self) -> None:
         planned = self.plan()
-        for section, additions in planned["overlay"].items():
-            self.compose.setdefault(section, {}).update(deepcopy(additions))
-        service_name = next(iter(planned["overlay"]["services"]))
-        labels = self.compose["services"][service_name]["labels"]
-        labels[next(iter(labels))] = "tampered"
+        self.install_overlay(planned["overlay"])
+        self.compose["services"]["bridge"]["ports"][0]["host_ip"] = "0.0.0.0"
         with self.assertRaises(ValueError):
             self.plan(mode="readback", expected_plan_sha256=planned["plan_sha256"])
 
@@ -213,8 +208,7 @@ class PrivateTestingTransportTests(unittest.TestCase):
         )
         self.assertEqual(self.plan()["plan_sha256"], result["plan_sha256"])
         # Simulate a separately authorized provider activation, not an apply API.
-        for section, additions in result["overlay"].items():
-            self.compose.setdefault(section, {}).update(additions)
+        self.install_overlay(result["overlay"])
         readback = self.plan(mode="readback", expected_plan_sha256=result["plan_sha256"])
         self.assertTrue(readback["configuration_matches"])
         self.assertFalse(readback["certificate_verified"])
@@ -233,11 +227,11 @@ class PrivateTestingTransportTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.plan(mode="readback", expected_plan_sha256=original["plan_sha256"])
         overlay = original["overlay"]
-        self.compose["services"].update(overlay["services"])
+        self.install_overlay(overlay)
+        self.compose["services"]["bridge"]["ports"][0]["target"] += 1
         with self.assertRaises(ValueError):
             self.plan(mode="readback", expected_plan_sha256=original["plan_sha256"])
-        for section, additions in overlay.items():
-            self.compose.setdefault(section, {}).update(additions)
+        self.install_overlay(overlay)
         self.compose["services"]["bridge"]["image"] = "fixture@sha256:" + "e" * 64
         with self.assertRaises(ValueError):
             self.plan(mode="readback", expected_plan_sha256=original["plan_sha256"])
@@ -276,8 +270,10 @@ class PrivateTestingTransportTests(unittest.TestCase):
             {"private_ip": "100.64.0.1"},
             {"private_ip": "192.0.2.1"},
             {"runtime_service": "bridge;evil"},
-            {"monitor_ca_bundle_path": "/run/../production.pem"},
-            {"nginx_image": "nginx:latest"},
+            {"endpoint_url": "http://bridge.example.test/health"},
+            {"endpoint_url": "https://8.8.8.8/health"},
+            {"endpoint_url": "https://bridge.example.test/admin"},
+            {"endpoint_url": "https://user:password@bridge.example.test/health"},
             {"mode": "apply"},
         ):
             with self.subTest(changes=changes), self.assertRaises(ValidationError):
@@ -317,8 +313,7 @@ class PrivateTestingTransportTests(unittest.TestCase):
 
     def test_installed_listener_can_be_rereviewed_after_runtime_redeploy(self) -> None:
         original = self.plan()
-        for section, additions in original["overlay"].items():
-            self.compose.setdefault(section, {}).update(additions)
+        self.install_overlay(original["overlay"])
         self.compose["services"]["bridge"]["image"] = "fixture@sha256:" + "f" * 64
         target = self.store.read_dokploy_target_record(
             context_name="example-site", instance_name="testing"

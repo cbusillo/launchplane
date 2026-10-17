@@ -1,15 +1,14 @@
-"""Inert preparation of a lane-local Nginx HTTPS/WSS listener.
+"""Inert preparation of a private HTTP upstream for an existing TLS edge.
 
 This module reads current target evidence. It never installs trust, reads a key,
 changes Compose, creates an endpoint record, or deploys a workload.
 """
 
 from copy import deepcopy
-import base64
-from ipaddress import IPv4Address, IPv4Network
-from pathlib import Path, PurePosixPath
-import shlex
+from ipaddress import IPv4Address
+from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -18,6 +17,7 @@ from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.dokploy import api, compose, source
 from control_plane.generic_web_testing_exclusion import _bind
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.outbound_http import is_rfc1918_address, private_url_error
 
 ROUTE = "/v1/products/{product}/private-testing-transport/plan"
 PRODUCT_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
@@ -32,30 +32,23 @@ class PrivateTestingTransportIntent(BaseModel):
     private_ip: IPv4Address
     listener_port: int = Field(ge=1024, le=65535)
     runtime_service: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,62}$")
-    nginx_image: str = Field(pattern=r"^[a-z0-9][a-z0-9./:_-]+@sha256:[a-f0-9]{64}$")
-    ca_bundle_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    certificate_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
-    monitor_ca_bundle_path: str
-    receiver_ca_bundle_path: str
-    trust_review: str = Field(min_length=1, max_length=1000)
+    endpoint_url: str
 
     @field_validator("private_ip")
     @classmethod
     def _private_address(cls, value: IPv4Address) -> IPv4Address:
-        # is_private also includes non-routable documentation and loopback space.
-        if not any(
-            value in IPv4Network(network)
-            for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
-        ):
-            raise ValueError("Listener requires a private RFC1918 address.")
+        if not is_rfc1918_address(value):
+            raise ValueError("Upstream bind requires a private RFC1918 address.")
         return value
 
-    @field_validator("monitor_ca_bundle_path", "receiver_ca_bundle_path")
+    @field_validator("endpoint_url")
     @classmethod
-    def _bundle_path(cls, value: str) -> str:
-        path = PurePosixPath(value)
-        if not path.is_absolute() or ".." in path.parts or any(c in value for c in "\r\n\x00"):
-            raise ValueError("CA bundle requires an absolute non-traversing path.")
+    def _endpoint(cls, value: str) -> str:
+        if private_url_error(value):
+            raise ValueError("Edge endpoint must allow only private destinations.")
+        parsed = urlsplit(value)
+        if parsed.scheme != "https" or parsed.path != "/health" or parsed.query or parsed.fragment:
+            raise ValueError("Edge endpoint requires HTTPS /health without query or fragment.")
         return value
 
 
@@ -68,115 +61,29 @@ class PrivateTestingTransportRequest(PrivateTestingTransportIntent):
     expected_plan_sha256: str = Field(default="", pattern=r"^(?:[a-f0-9]{64})?$")
 
 
-def nginx_configuration(
-    *,
-    service: str,
-    runtime_port: int,
-    listen: str = "8443",
-    certificate_file: str = "/run/secrets/private_tls_certificate",
-    key_file: str = "/run/secrets/private_tls_key",
-    pid_file: str = "/tmp/nginx.pid",
-) -> str:
-    """Preserve URI and authorization through precisely two routes."""
-    return f"""pid {pid_file};
-error_log /dev/stderr warn;
-events {{}}
-http {{
-    access_log off;
-    resolver 127.0.0.11 ipv6=off valid=5s;
-    server {{
-        listen {listen} ssl;
-        ssl_certificate {certificate_file};
-        ssl_certificate_key {key_file};
-        ssl_protocols TLSv1.2 TLSv1.3;
-        set $runtime_backend {service}:{runtime_port};
-        location = /health {{
-            proxy_pass http://$runtime_backend;
-        }}
-        location = /agent-session/connect {{
-            proxy_pass http://$runtime_backend;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade $http_upgrade;
-            proxy_set_header Connection "upgrade";
-            proxy_read_timeout 3600s;
-        }}
-        location / {{ return 404; }}
-    }}
-}}
-"""
-
-
 def _object(value: object) -> dict[str, object]:
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise PrivateTestingTransportRefused("Compose evidence must be a complete object.")
     return value
 
 
-def nginx_entrypoint(
-    configuration: str,
-    *,
-    configuration_file: str = "/tmp/private-tls-nginx.conf",
-    nginx_binary: str = "nginx",
-    nginx_arguments: tuple[str, ...] = (),
-) -> list[str]:
-    """Materialize generated config on the proxy's own tmpfs, then replace the shell.
-
-    Inline Compose configs cannot be injected into a read-only service. Encoding
-    also keeps Nginx variables out of Compose and shell interpolation.
-    """
-    encoded = base64.b64encode(configuration.encode()).decode("ascii")
-    command = shlex.join(
-        [nginx_binary, *nginx_arguments, "-c", configuration_file, "-g", "daemon off;"]
-    )
-    return [
-        "/bin/sh",
-        "-ec",
-        f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(configuration_file)}\nexec {command}",
-    ]
-
-
 def transport_overlay(
-    request: PrivateTestingTransportIntent, *, namespace: str, runtime_port: int
+    request: PrivateTestingTransportIntent, *, runtime_port: int
 ) -> dict[str, object]:
+    """Publish the existing runtime on one private interface; TLS stays at the edge."""
     return {
         "services": {
-            namespace: {
-                "image": request.nginx_image,
-                "user": "65534:65534",
-                "restart": "unless-stopped",
-                "labels": {
-                    "org.launchplane.private-tls-material": canonical_json_sha256(
-                        {
-                            "certificate": request.certificate_sha256,
-                            "ca": request.ca_bundle_sha256,
-                        }
-                    )
-                },
-                "entrypoint": nginx_entrypoint(
-                    nginx_configuration(service=request.runtime_service, runtime_port=runtime_port)
-                ),
-                "read_only": True,
-                "cap_drop": ["ALL"],
-                "security_opt": ["no-new-privileges:true"],
-                "tmpfs": ["/tmp", "/var/cache/nginx"],
+            request.runtime_service: {
                 "ports": [
                     {
                         "host_ip": str(request.private_ip),
                         "published": str(request.listener_port),
-                        "target": 8443,
+                        "target": runtime_port,
                         "protocol": "tcp",
                     }
-                ],
-                "secrets": [
-                    {"source": namespace + "-certificate", "target": "private_tls_certificate"},
-                    {"source": namespace + "-key", "target": "private_tls_key"},
-                ],
+                ]
             }
-        },
-        "secrets": {
-            namespace + "-certificate": {"file": f"./{namespace}/server.crt"},
-            namespace + "-key": {"file": f"./{namespace}/server.key"},
-        },
+        }
     }
 
 
@@ -184,24 +91,16 @@ def _baseline(
     current: dict[str, object], overlay: dict[str, object], *, readback: bool
 ) -> dict[str, object]:
     baseline = deepcopy(current)
-    # An exact installed overlay can be re-reviewed after a baseline redeploy.
-    # Partial or modified additions are never adopted by a fresh dry run.
-    installed = readback or any(
-        name in _object(current.get(section, {}))
-        for section, additions in overlay.items()
-        for name in _object(additions)
-    )
-    for section, additions in overlay.items():
-        actual = _object(baseline.get(section, {}))
-        for name, expected in _object(additions).items():
-            if installed:
-                if actual.get(name) != expected:
-                    raise PrivateTestingTransportRefused("Private listener readback differs.")
-                del actual[name]
-        if actual:
-            baseline[section] = actual
-        else:
-            baseline.pop(section, None)
+    services = _object(baseline.get("services"))
+    for name, additions in _object(overlay["services"]).items():
+        service = _object(services.get(name))
+        expected_ports = _object(additions)["ports"]
+        if "ports" in service:
+            if service["ports"] != expected_ports:
+                raise PrivateTestingTransportRefused("Private upstream readback differs.")
+            del service["ports"]
+        elif readback:
+            raise PrivateTestingTransportRefused("Private upstream is absent.")
     return baseline
 
 
@@ -341,13 +240,7 @@ def plan_private_testing_transport(
     rendered = compose.fetch_dokploy_converted_compose_file(
         host=host, token=token, compose_id=target_id.target_id
     )
-    namespace = (
-        "lp-private-tls-"
-        + canonical_json_sha256(
-            {"product": product, "context": request.context, "instance": request.instance}
-        )[:16]
-    )
-    overlay = transport_overlay(request, namespace=namespace, runtime_port=profile.runtime_port)
+    overlay = transport_overlay(request, runtime_port=profile.runtime_port)
     try:
         current = _object(yaml.safe_load(rendered))
     except yaml.YAMLError as error:
@@ -389,7 +282,6 @@ def plan_private_testing_transport(
         request.mode == "readback" and not request.expected_plan_sha256
     ):
         raise PrivateTestingTransportRefused("Private listener review is absent or stale.")
-    authority = f"{request.private_ip}:{request.listener_port}"
     return {
         "product": product,
         "context": request.context,
@@ -408,26 +300,22 @@ def plan_private_testing_transport(
             "product": product,
             "context": request.context,
             "instance": request.instance,
-            "url": f"https://{authority}/health",
+            "url": request.endpoint_url,
         },
-        "server_url": f"wss://{authority}/agent-session/connect",
-        "trust": {
-            "issuer_intent": "private",
-            "required_ip_san": str(request.private_ip),
-            "ca_bundle_sha256": request.ca_bundle_sha256,
-            "certificate_sha256": request.certificate_sha256,
-            "monitor_trust_scope": "process",
-            "monitor_requires_existing_roots": True,
-            "monitor_environment_intent": {"SSL_CERT_FILE": request.monitor_ca_bundle_path},
-            "receiver_environment_intent": {"SSL_CERT_FILE": request.receiver_ca_bundle_path},
-            "review": request.trust_review,
-        },
+        "server_url": edge_server_url(request.endpoint_url),
+        "tls_termination": "edge",
         "activation_prerequisites": [
             "separately_authorized_testing_activation",
             "fresh_host_bind_and_port_exclusion",
             "private_network_reachability_and_no_public_forwarding",
-            "owner_qualified_certificate_key_and_ca_bundle_custody",
+            "edge_certificate_hostname_and_chain",
+            "edge_private_access_and_testing_only_upstream",
             "reviewed_original_operation_and_readback",
             "live_https_and_authenticated_wss",
         ],
     }
+
+
+def edge_server_url(endpoint_url: str) -> str:
+    parsed = urlsplit(endpoint_url)
+    return urlunsplit(("wss", parsed.netloc, "/agent-session/connect", "", ""))

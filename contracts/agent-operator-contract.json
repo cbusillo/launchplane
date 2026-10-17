@@ -69,11 +69,9 @@
         ],
         "reviewed_evidence": [
           "expected_plan_sha256",
-          "host_review",
-          "custody_review",
-          "trust_review"
+          "host_review"
         ],
-        "schema_fingerprint_sha256": "47f44b2de14827c949b24278aab35d5a8e521d46e0527d256d71d19c735727eb",
+        "schema_fingerprint_sha256": "8595c6f3b9d86f0de87b2d9bcfaa6fbbfbf45974fd635357d80d1b9fe19ce2be",
         "supported_surfaces": [
           "service_api",
           "local_cli"
@@ -162,7 +160,7 @@
         "reviewed_evidence": [
           "expected_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "b59a6d26286942e115d88b89debcc82e3bf198c393df7a6a682d9c6b63835027",
+        "schema_fingerprint_sha256": "2603c2c987506ba6dbce6765ec4793afe0227ecebc1c6b14e926c837e071f81e",
         "supported_surfaces": [
           "service_api",
           "local_cli"
@@ -808,8 +806,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "ab2bd305b9cd332debfaaa54cd4f0fb82ae2e05e"
+    "source_commit_sha": "2ef4aa36b2d734c93ed97fed5415b4cba6ba7ef9"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "7386fdf5409eb891d89f6b11a1613e6c4ff3c529aa7a0273730e81f1688d40e5"
+  "semantic_digest_sha256": "11158fa576ee953d3059ac7cba7000debd8423513d84b18cafd1cc36df03ba67"
 }

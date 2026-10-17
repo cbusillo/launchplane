@@ -4,7 +4,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from http.client import HTTPConnection, HTTPSConnection
-from ipaddress import IPv4Address, IPv6Address, ip_address
+from ipaddress import IPv4Address, IPv4Network, IPv6Address, ip_address
 from time import monotonic
 from typing import Literal, Protocol, cast
 from urllib.parse import SplitResult, urljoin, urlsplit, urlunsplit
@@ -175,16 +175,57 @@ def public_url_error(url: str) -> PublicUrlError | Literal[""]:
     return ""
 
 
+def is_rfc1918_address(address: IPv4Address | IPv6Address) -> bool:
+    return isinstance(address, IPv4Address) and any(
+        address in network for network in _RFC1918_NETWORKS
+    )
+
+
+_RFC1918_NETWORKS = tuple(
+    IPv4Network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+)
+
+
+def private_url_error(url: str) -> Literal["invalid_url", "public_url", ""]:
+    """Validate stored syntax; DNS authority is checked afresh on each request."""
+    try:
+        _parsed, hostname, _port = _parse_http_url(url)
+    except ValueError:
+        return "invalid_url"
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return ""
+    return "" if is_rfc1918_address(address) else "public_url"
+
+
 def resolve_public_http_destination(
     url: str,
     *,
     resolver: AddressResolver | None = None,
 ) -> PublicHttpDestination:
-    structural_error = public_url_error(url)
+    return _resolve_http_destination(url, resolver=resolver, private=False)
+
+
+def resolve_private_http_destination(
+    url: str,
+    *,
+    resolver: AddressResolver | None = None,
+) -> PublicHttpDestination:
+    return _resolve_http_destination(url, resolver=resolver, private=True)
+
+
+def _resolve_http_destination(
+    url: str,
+    *,
+    resolver: AddressResolver | None,
+    private: bool,
+) -> PublicHttpDestination:
+    structural_error = private_url_error(url) if private else public_url_error(url)
     if structural_error:
         raise PublicHttpDestinationError(
-            structural_error,
-            f"Public HTTP destination is not allowed: {structural_error}.",
+            "private_url" if structural_error == "public_url" else structural_error,
+            f"HTTP destination is not allowed: {structural_error}.",
         )
     parsed, hostname, port = _parse_http_url(url)
     resolve = resolver or _system_address_resolver
@@ -221,14 +262,16 @@ def resolve_public_http_destination(
                 "dns_failure",
                 "Public HTTP destination resolved to an invalid IP address.",
             ) from error
-        if not _is_public_address(resolved_ip):
+        if not (is_rfc1918_address(resolved_ip) if private else _is_public_address(resolved_ip)):
             raise PublicHttpDestinationError(
                 "private_url",
-                (
-                    "Public HTTP destination DNS answers include a non-public address; "
-                    "mixed public/private answer sets are rejected."
-                ),
+                "HTTP destination DNS answers include an address outside the allowed network scope.",
             )
+        if (family == socket.AF_INET) != isinstance(resolved_ip, IPv4Address):
+            raise PublicHttpDestinationError("dns_failure", "DNS address family disagrees with IP.")
+        socket_address = (
+            (str(resolved_ip), port) if family == socket.AF_INET else (str(resolved_ip), port, 0, 0)
+        )
         address_key = (family, socket_type, protocol, socket_address)
         if address_key in seen_addresses:
             continue
@@ -366,6 +409,7 @@ def request_private_http(
     max_redirects: int = 10,
     max_response_body_bytes: int = 256 * 1024,
     connection_factory: PublicHttpConnectionFactory | None = None,
+    resolver: AddressResolver | None = None,
     ssl_context: ssl.SSLContext | None = None,
 ) -> PublicHttpResponse:
     if timeout_seconds <= 0:
@@ -387,17 +431,7 @@ def request_private_http(
     redirect_count = 0
 
     while True:
-        parsed, hostname, port = _parse_http_url(current_url)
-        scheme = cast(Literal["http", "https"], parsed.scheme.lower())
-        path = parsed.path or "/"
-        destination = PublicHttpDestination(
-            url=urlunsplit((scheme, parsed.netloc, path, parsed.query, "")),
-            scheme=scheme,
-            hostname=hostname,
-            port=port,
-            request_target=urlunsplit(("", "", path, parsed.query, "")),
-            addresses=(),
-        )
+        destination = resolve_private_http_destination(current_url, resolver=resolver)
         connection = open_connection(destination, _remaining_seconds(deadline))
         response: _HttpResponse | None = None
         try:
@@ -784,18 +818,15 @@ def _private_http_connection(
     timeout_seconds: float,
     ssl_context: ssl.SSLContext | None = None,
 ) -> _HttpConnection:
-    if destination.scheme == "https" and ssl_context is not None:
-        return cast(
-            _HttpConnection,
-            HTTPSConnection(
-                destination.hostname, destination.port, timeout=timeout_seconds, context=ssl_context
-            ),
+    connection: HTTPConnection
+    if destination.scheme == "https":
+        connection = HTTPSConnection(
+            destination.hostname, destination.port, timeout=timeout_seconds, context=ssl_context
         )
-    connection_type = HTTPSConnection if destination.scheme == "https" else HTTPConnection
-    return cast(
-        _HttpConnection,
-        connection_type(destination.hostname, destination.port, timeout=timeout_seconds),
-    )
+    else:
+        connection = HTTPConnection(destination.hostname, destination.port, timeout=timeout_seconds)
+    setattr(connection, "_create_connection", _ValidatedAddressConnector(destination.addresses))
+    return cast(_HttpConnection, connection)
 
 
 def _remaining_seconds(deadline: float) -> float:

@@ -696,7 +696,10 @@ an ORM column/table or remains only in the evidence payload.
   validation, and cross-scope endpoint-key conflict protection. The service
   reads them through
   `GET /v1/private-health-endpoints/records` with
-  `private_health_endpoint.read`. The stored URL must be private/internal;
+  `private_health_endpoint.read`. The stored URL may use a DNS hostname or an RFC1918 IPv4 literal;
+  each probe requires exclusively RFC1918 resolution and pins the connection to
+  the validated addresses, preserving TLS hostname verification. See
+  [private transport](private-testing-transport.md).
   product profiles reference it by `private_endpoint_key` and do not own the
   mutable URL value.
 - Runtime environment: modeled fields are `scope`, `context`, `instance`, and
