@@ -495,18 +495,23 @@ class GitHubHandoffTests(unittest.TestCase):
             merged_base_sha=base,
             requested_at=datetime.now(timezone.utc),
         )
-        for recorded, unchanged, expected in (
-            (True, True, "ready"),
-            (True, False, "stale"),
-            (False, True, "stale"),
+        hunk = "@@ -10,3 +10,3 @@ def run():\n context\n-old\n+new"
+        # Base edits earlier in the same file move the hunk; the change is the same.
+        moved = "@@ -14,3 +14,3 @@ def run():\n context\n-old\n+new"
+        for recorded, after, expected in (
+            (True, hunk, "ready"),
+            (True, moved, "ready"),
+            (True, "@@ -14,3 +14,3 @@ def run():\n edited\n-old\n+new", "stale"),
+            (True, "-different\n+patch", "stale"),
+            (False, hunk, "stale"),
         ):
             transport = RecordingMergeTrainGitHubTransport(
                 responses=(
                     [_comment(user={"id": 20, "login": "example"})],
                     {"sha": refreshed, "parents": [{"sha": HEAD}, {"sha": base}]},
                     {"status": "identical"},
-                    _change(),
-                    _change(patch_text="-different\n+patch") if not unchanged else _change(),
+                    _change(patch_text=hunk),
+                    _change(patch_text=after),
                 )
             )
             store = SimpleNamespace(

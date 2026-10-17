@@ -166,6 +166,10 @@ class DependencyRefreshTests(unittest.TestCase):
     def test_refresh_that_changes_the_dependency_delta_requires_review(self) -> None:
         cases: tuple[tuple[object, object], ...] = (
             (_change(), _change(patch_text="extra code")),
+            (
+                _change(patch_text="@@ -1,1 +1,1 @@\n-old\n+new"),
+                _change(patch_text="@@ -4,1 +4,1 @@\n-old\n+new"),
+            ),
             (_change(), _change(patch_text=None)),
             (_change(), {"files": []}),
         )
