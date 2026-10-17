@@ -90,10 +90,13 @@ def configure_empty_compose_source(
     compose_path: str,
     fetch_target_payload: FetchTarget,
     mutate_provider: MutateProvider,
+    before_update: Callable[[JsonObject], None] | None = None,
 ) -> JsonObject:
     validate_compose_source_inputs(branch, compose_path)
     before = fetch_target_payload(host, token, "compose", compose_id)
     require_empty_compose_source(before, compose_id)
+    if before_update is not None:
+        before_update(before)
     try:
         mutate_provider(
             host,
