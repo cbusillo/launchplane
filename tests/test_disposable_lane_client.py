@@ -29,6 +29,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         qualification: str | None = None,
         data: str = "unknown",
         production_resources: str = "unknown",
+        lifetime_seconds: int | None = None,
     ) -> tuple[int, str, Mock]:
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/collect-disposable-lane.py")
@@ -114,6 +115,8 @@ class DisposableLaneClientTests(unittest.TestCase):
                     "--isolation-evidence",
                     "private-evidence",
                 ]
+            if lifetime_seconds is not None:
+                arguments += ["--lifetime-seconds", str(lifetime_seconds)]
             output = io.StringIO()
             with (
                 patch("sys.argv", arguments),
@@ -144,6 +147,17 @@ class DisposableLaneClientTests(unittest.TestCase):
         self.assertEqual(status, 0, output)
         request.assert_called_once()
         self.assertEqual(request.call_args.kwargs["body"]["mode"], "clear")
+
+    def test_observation_lifetime_uses_the_service_contract_limit(self) -> None:
+        from control_plane.contracts.disposable_lane import MAX_DISPOSABLE_LANE_SAFETY_SECONDS
+
+        lifetime = MAX_DISPOSABLE_LANE_SAFETY_SECONDS
+        status, output, request = self.call_client(lifetime_seconds=lifetime)
+        self.assertEqual(status, 0, output)
+        self.assertEqual(request.call_args.kwargs["body"]["lifetime_seconds"], lifetime)
+        status, output, request = self.call_client(lifetime_seconds=lifetime + 1)
+        self.assertEqual(status, 1, output)
+        request.assert_called_once()
 
     def test_qualified_resource_facts_are_reported_without_private_evidence(self) -> None:
         for data, resources in (("reproducible", "isolated"), ("only_copy", "shared")):

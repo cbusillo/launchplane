@@ -1497,6 +1497,7 @@ def reconcile_preview_target(
 
     held = held_preview_reservations(record_store, product=profile.product)
     recovery: list[dict[str, object]] = []
+    retained_intent_invalid = False
     for reservation in held[:100]:
         classified = classify_preview_reservation(reservation, profile=profile, store=record_store)
         try:
@@ -1504,6 +1505,12 @@ def reconcile_preview_target(
         except ValueError:
             # Unknown legacy intent is visible even when no PR can be bound to it.
             recovery.append(classified)
+            if (
+                classified.get("target_pull_request_number") == pull_request_number
+                and isinstance(record_store, PostgresRecordStore)
+                and record_store.read_original_mutation_intent(reservation)
+            ):
+                retained_intent_invalid = True
             continue
         if original.issued_plan.plan_request.pr_number != pull_request_number:
             continue
@@ -1628,6 +1635,11 @@ def reconcile_preview_target(
             return _hold_preview_destroy(plan, previous, failed_attempts)
     count_failure = True
     try:
+        if cleanup and retained_intent_invalid:
+            raise ProductReconcileError(
+                "Preview cleanup held: retained original intent no longer validates.",
+                code="preview_cleanup_original_intent_binding_unknown",
+            )
         if not odoo:
             outcome = _run_generic_web_preview_operation(
                 record_store=record_store,

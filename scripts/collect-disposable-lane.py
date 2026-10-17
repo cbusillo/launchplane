@@ -27,6 +27,7 @@ def main() -> int:
     for field in ("product", "context", "instance"):
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--preview-id", default="")
+    parser.add_argument("--lifetime-seconds", type=int)
     parser.add_argument("--usage", choices=("unknown", "unused", "in_use"), default="unknown")
     parser.add_argument(
         "--data", choices=("unknown", "reproducible", "only_copy"), default="unknown"
@@ -88,6 +89,11 @@ def main() -> int:
                     **payload.model_dump(),
                     "mode": args.mode,
                     "expected_binding_sha256": digest,
+                    **(
+                        {"lifetime_seconds": args.lifetime_seconds}
+                        if args.lifetime_seconds is not None
+                        else {}
+                    ),
                     **(
                         {
                             "usage": args.usage,

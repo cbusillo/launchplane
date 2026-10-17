@@ -672,6 +672,36 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
                 self.assertEqual(self.store.list_preview_records()[0].state, "active")
                 self.assertTrue(held_preview_reservations(self.store, product=self.profile.product))
 
+    def test_cleanup_names_invalid_retained_intent_without_spending_retry_budget(self) -> None:
+        self.prepare_cleanup()
+        with self.store._session_factory() as session:
+            row = session.scalar(
+                select(LaunchplaneIdempotencyRow).where(
+                    LaunchplaneIdempotencyRow.route_path == ORIGINAL_MUTATION_INTENT_ROUTE,
+                    LaunchplaneIdempotencyRow.idempotency_key == self.reservation.record_id,
+                )
+            )
+            assert row is not None
+            receipt = LaunchplaneIdempotencyRecord.model_validate(row.payload)
+            intent = self.store.read_original_mutation_intent(self.reservation)
+            changed = receipt.model_copy(
+                update={
+                    "response_payload": {
+                        **receipt.response_payload,
+                        "original_intent": {**intent, "product": "different"},
+                    }
+                }
+            )
+            self.store._sync_idempotency_row(row, changed)
+            session.commit()
+        result = self.cleanup()
+        self.assertEqual(result.plan["reason"], "preview_cleanup_original_intent_binding_unknown")
+        self.assertTrue(result.plan["held"])
+        self.assertFalse(result.error)
+        self.assertFalse(self.provider.applied)
+        self.assertFalse(result.plan["destroy_failed_attempts"])
+        self.assertTrue(held_preview_reservations(self.store, product=self.profile.product))
+
     def test_disposable_cleanup_preserves_active_executor_and_unknown_provider_work(self) -> None:
         self.remove_original_intent()
         self.prepare_cleanup()

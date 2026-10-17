@@ -212,6 +212,8 @@ The existing client supports `record` with `--preview-id`, `--usage`, `--data`,
 `--production-resources` and the `--usage-evidence`, `--data-evidence`,
 `--isolation-evidence` references. Each observation remains bound
 with required evidence references, the current binding and the existing expiry.
+Use `--lifetime-seconds` for a slower queue, within the service's existing
+fifteen-minute cap; expiry still requires fresh facts before another effect.
 Unknown facts stay unknown. Existing protected reports cannot be overwritten by
 an unverified safe assertion. This supplies scheduled preview cleanup's facts
 through the existing service API, without direct record edits.
