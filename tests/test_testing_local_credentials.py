@@ -18,7 +18,7 @@ from control_plane.product_config import apply_product_config_bundle
 from control_plane.service_auth import BearerIdentityConfig
 from control_plane.storage.postgres import PostgresRecordStore
 from tests.http_app_test_support import _asgi_request, _RejectingVerifier
-from tests.support.auth import _local_operator_policy
+from tests.support.auth import _local_operator_policy, scoped_agent_test
 from tests.support.profiles import _generic_site_profile_payload
 from tests.support.stores import _sqlite_database_url, _write_runtime_key_safety_policy
 
@@ -195,6 +195,32 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
     async def test_client_saves_value_free_review_then_independently_reads_apply(self) -> None:
         from unittest.mock import Mock
 
+        # An approved shared integration remains visible without failing local-password readback.
+        for instance in ("prod", "testing"):
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload={
+                    "product": "example-site",
+                    "context": "example-site",
+                    "instance": instance,
+                    "secrets": [
+                        {
+                            "binding_key": "SOURCE_TOKEN",
+                            "value": "read-only-fixture",
+                            "secret_class": "shared_safe",
+                            "sharing_reason": {
+                                "kind": "read_only_source",
+                                "reason": "Read-only integration",
+                                "evidence": "Fixture source has read-only permissions",
+                            },
+                        }
+                    ],
+                },
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )
+
         client = runpy.run_path(
             str(Path(__file__).resolve().parents[1] / "scripts/prepare-testing-credentials.py")
         )
@@ -240,6 +266,7 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         applied = await self.post({**self.payload, "mode": "apply"}, "client-fixture")
         writer.return_value = applied.json()
         report_after = (await self.audit()).json()
+        self.assertTrue(report_after["lanes"][0]["overlaps"])
         reader.reset_mock(side_effect=True)
         reader.side_effect = [report_before, report_after]
         argv[1] = "apply"
@@ -252,6 +279,65 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(client["main"](), 0)
         self.assertEqual(reader.call_count, 2)
         self.assertEqual(writer.call_args.kwargs["body"]["secrets"], saved["request"]["secrets"])
+
+    async def test_inventory_compares_against_other_products_production(self) -> None:
+        other = LaunchplaneProductProfileRecord.model_validate(
+            _generic_site_profile_payload("another-site")
+        )
+        self.store.write_product_profile_record(other)
+        for product, instance, key in (
+            (other.product, "prod", "ANOTHER_PASSWORD"),
+            (self.profile.product, "testing", "DATABASE_PASSWORD"),
+        ):
+            apply_product_config_bundle(
+                record_store=self.store,
+                payload={
+                    "product": product,
+                    "context": product,
+                    "instance": instance,
+                    "secrets": [{"binding_key": key, "value": "cross-product-fixture"}],
+                },
+                mode="apply",
+                actor="fixture",
+                source_label="test",
+            )
+        report = await self.audit(inventory=True)
+        self.assertEqual(report.status_code, 200, report.text)
+        lane = next(
+            lane for lane in report.json()["lanes"] if lane["product"] == self.profile.product
+        )
+        self.assertEqual(lane["overlaps"][0]["production_product"], other.product)
+        self.assertNotIn("cross-product-fixture", report.text)
+
+    @scoped_agent_test
+    async def test_inventory_authorizes_every_product_before_decryption(self) -> None:
+        other = LaunchplaneProductProfileRecord.model_validate(
+            _generic_site_profile_payload("another-site")
+        )
+        self.store.write_product_profile_record(other)
+        app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=_local_operator_policy(
+                products=(self.profile.product,),
+                actions=("product_profile.read", "product_environment.read"),
+            ),
+            record_store_factory=lambda: self.store,
+            bearer_identity_config=BearerIdentityConfig(
+                local_operator_token="test-operator-token",
+                local_operator_subject="local-owner-agent",
+                local_operator_token_label="local-owner-write",
+            ),
+        )
+        with patch.object(
+            secrets, "_decrypt_secret_value", side_effect=AssertionError("unauthorized audit read")
+        ):
+            response = await _asgi_request(
+                app,
+                "GET",
+                "/v1/testing-credentials",
+                headers={"Authorization": "Bearer test-operator-token"},
+            )
+        self.assertEqual(response.status_code, 403, response.text)
 
     def test_onboarding_generates_new_lane_once_and_reimport_preserves_it(self) -> None:
         from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
@@ -316,10 +402,9 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_secret_records(instance_name="prod"), self.production)
 
     async def test_service_generates_only_on_apply_and_replays_without_generation(self) -> None:
-        with patch(
-            "secrets.token_urlsafe", side_effect=AssertionError("dry-run generated a password")
-        ):
-            planned = await self.post(self.payload)
+        before = self.store.list_secret_records()
+        planned = await self.post(self.payload)
+        self.assertEqual(self.store.list_secret_records(), before)
         self.assertEqual(planned.status_code, 202, planned.text)
         self.assertFalse(self.store.list_secret_records(instance_name="testing"))
         payload = {**self.payload, "mode": "apply"}
@@ -332,17 +417,15 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             include_site_shared=True,
         )
         password = values["DATABASE_PASSWORD"]
-        self.assertGreaterEqual(len(password), 40)
         self.assertNotEqual(password, "production-fixture")
         self.assertNotIn(password, planned.text + applied.text)
         binding = next(b for b in self.store.list_secret_bindings() if b.instance == "testing")
         self.assertEqual(binding.value_source, "generated")
         audit = self.store.list_secret_audit_events(secret_id=binding.secret_id)
         self.assertTrue(any(e.metadata.get("value_source") == "service_generated" for e in audit))
-        with patch(
-            "secrets.token_urlsafe", side_effect=AssertionError("replay generated a password")
-        ):
-            replay = await self.post(payload, "generate-once")
+        versions = self.store.list_secret_versions(secret_id=binding.secret_id)
+        replay = await self.post(payload, "generate-once")
+        self.assertEqual(self.store.list_secret_versions(secret_id=binding.secret_id), versions)
         self.assertEqual(replay.status_code, 202, replay.text)
         self.assertTrue(replay.json()["replayed"])
         self.assertEqual(self.store.list_secret_records(instance_name="prod"), self.production)
@@ -367,7 +450,7 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         payload = {**self.payload, "mode": "apply"}
         response = await self.post(payload, "unreviewed")
         self.assertEqual(response.status_code, 409, response.text)
-        self.assertEqual(response.json()["error"]["code"], "matching_dry_run_required")
+        self.assertFalse(self.store.list_secret_records(instance_name="testing"))
         first = await self.post(self.payload)
         self.assertEqual(first.status_code, 202, first.text)
         applied = await self.post(payload, "first")

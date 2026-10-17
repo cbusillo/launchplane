@@ -12,9 +12,22 @@ from urllib.parse import quote
 
 from control_plane.product_config_http import ProductConfigApplyResponse
 from control_plane.testing_local_credentials import (
+    TestingCredentialAudit,
     TestingCredentialAuditResponse,
     TestingCredentialInventoryResponse,
 )
+
+
+def local_readback_passes(lane: TestingCredentialAudit) -> bool:
+    return (
+        bool(lane.local_keys)
+        and set(lane.local_keys) == set(lane.generated_keys)
+        and (
+            lane.status in {"pass", "no_production", "overlap"}
+            and not lane.missing_keys
+            and not any(overlap.testing_key in lane.local_keys for overlap in lane.overlaps)
+        )
+    )
 
 
 def main() -> int:
@@ -54,6 +67,7 @@ def main() -> int:
     if not settings["token"]:
         parser.error("The existing operator credential is unavailable.")
     submitted = False
+    accepted = False
     trace = ""
     try:
 
@@ -81,16 +95,13 @@ def main() -> int:
         trace = transport["public_trace_id"](report.trace_id)
         if args.mode == "audit":
             print(report.model_dump_json())
-            return 1 if any(lane.status == "unavailable" for lane in report.lanes) else 0
+            return (
+                1 if any(lane.status in {"unavailable", "overlap"} for lane in report.lanes) else 0
+            )
         lane = next(lane for lane in report.lanes if lane.context == args.context)
         if args.mode == "readback":
-            print(lane.model_dump_json())
-            return (
-                0
-                if set(lane.local_keys) == set(lane.generated_keys)
-                and lane.status in {"pass", "no_production"}
-                else 1
-            )
+            print(json.dumps({"trace_id": trace, **lane.model_dump(mode="json")}))
+            return 0 if local_readback_passes(lane) else 1
         payload: dict[str, object] = {
             "product": args.product,
             "context": args.context,
@@ -130,14 +141,18 @@ def main() -> int:
         receipt = ProductConfigApplyResponse.model_validate(result)
         trace = transport["public_trace_id"](receipt.trace_id)
         if (
-            receipt.result.product,
-            receipt.result.context,
-            receipt.result.instance,
-            receipt.result.mode,
-        ) != (args.product, args.context, "testing", args.mode) or any(
-            secret.value_source != "generated" for secret in receipt.result.secrets
+            (
+                receipt.result.product,
+                receipt.result.context,
+                receipt.result.instance,
+                receipt.result.mode,
+            )
+            != (args.product, args.context, "testing", args.mode)
+            or {secret.binding_key for secret in receipt.result.secrets} != set(lane.local_keys)
+            or any(secret.value_source != "generated" for secret in receipt.result.secrets)
         ):
             raise ValueError("Unexpected credential receipt.")
+        accepted = submitted
         if args.mode == "dry-run":
             assert evidence is not None
             with os.fdopen(
@@ -146,10 +161,7 @@ def main() -> int:
                 json.dump({"request": payload, "response": receipt.model_dump(mode="json")}, output)
         else:
             lane = next(lane for lane in read().lanes if lane.context == args.context)
-            if set(lane.local_keys) != set(lane.generated_keys) or lane.status not in {
-                "pass",
-                "no_production",
-            }:
+            if not local_readback_passes(lane):
                 raise ValueError("Independent readback is unavailable or overlapping.")
         print(
             json.dumps(
@@ -160,12 +172,13 @@ def main() -> int:
                     "keys": lane.local_keys,
                     "production_modified": False,
                     "runtime_synced": False,
+                    "audit_status": lane.status,
                 }
             )
         )
         return 0
     except urllib.error.HTTPError as error:
-        if not submitted or error.code < 500:
+        if not accepted and (not submitted or error.code < 500):
             transport["emit_http_error_payload"](
                 operation="testing-credentials", request={"mode": args.mode}, exc=error
             )
@@ -174,7 +187,14 @@ def main() -> int:
         pass
     print(
         json.dumps(
-            {"status": "outcome_unknown" if submitted else "unverified", "trace_id": trace or None}
+            {
+                "status": "accepted_unverified"
+                if accepted
+                else "outcome_unknown"
+                if submitted
+                else "unverified",
+                "trace_id": trace or None,
+            }
         )
     )
     return 1

@@ -132,6 +132,7 @@ class ComposeQualificationTests(unittest.TestCase):
 class ActivationTests(unittest.TestCase):
     database_url = ""
     private_product = True
+    local_credential_fixture = False
 
     def setUp(self) -> None:
         self.preparation = preparation.SeparationResourceTests()
@@ -162,6 +163,30 @@ class ActivationTests(unittest.TestCase):
             self.caller_scope(),
         )
         self.seed_runtime_fixture()
+        if self.local_credential_fixture:
+            from control_plane.contracts.product_profile_record import (
+                ProductSecretConfigRequirement,
+            )
+
+            local_profile = self.store.read_product_profile_record(self.product)
+            local_profile = local_profile.model_copy(
+                update={
+                    "expected_config": local_profile.expected_config.model_copy(
+                        update={
+                            "managed_secret_bindings": (
+                                ProductSecretConfigRequirement(
+                                    binding_key="DB_PASSWORD",
+                                    context=self.context,
+                                    instance="testing",
+                                    testing_local_credential=True,
+                                ),
+                            )
+                        }
+                    )
+                }
+            )
+            self.store.write_product_profile_record(local_profile)
+
         binding, _ = preparation_binding(
             self.store, fixture.product, fixture.context, fixture.actor, fixture.root
         )
@@ -446,6 +471,56 @@ class ActivationTests(unittest.TestCase):
             response_trace_id="launchplane_req_fixture",
             adapter=self.adapter,
         )
+
+    def test_generated_local_credentials_reach_recipient_and_survive_replay(self) -> None:
+        from control_plane import secrets
+        import os
+
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "activation-fixture-root"},
+            )
+        )
+        from control_plane.testing_activation import preparation_resources
+
+        local = ActivationTests()
+        local.local_credential_fixture = True
+        local.setUp()
+        self.addCleanup(local.doCleanups)
+
+        def current_values(store: Any, root: Any, record: Any, resources: Any) -> dict[str, str]:
+            values = local.values(store, root, record, resources)
+            secret = store.read_secret_record("testing-password")
+            if secret.current_version_id != "testing-version":
+                version = store.read_secret_version(secret.current_version_id)
+                values["DB_PASSWORD"] = secrets._decrypt_secret_value(
+                    version.ciphertext, version.key_id
+                )
+            return values
+
+        local.enterContext(
+            patch("control_plane.testing_activation.runtime_values", side_effect=current_values)
+        )
+        planned = local.adapter.current()
+        local.adapter.request = local.request.model_copy(
+            update={"reviewed_plan_sha256": planned.plan_sha256}
+        )
+        result = local.run_activation()
+        local.assertEqual(result.response_status_code, 202, result.response_payload)
+        current = local.adapter.current()
+        local.adapter.require_unchanged(current)
+        local.adapter.verify_provider(current)
+        password = current_values(
+            local.store,
+            local.root,
+            current,
+            preparation_resources(local.store, local.product, local.request, local.scope)[0],
+        )["DB_PASSWORD"]
+        local.assertNotEqual(password, "safe-test-password")
+        versions = local.store.list_secret_versions(secret_id="testing-password")
+        local.assertEqual(local.run_activation().response_status_code, 202)
+        local.assertEqual(local.store.list_secret_versions(secret_id="testing-password"), versions)
 
     def test_activation_and_original_key_replay_preserve_production_old_target_hold_and_fence(
         self,

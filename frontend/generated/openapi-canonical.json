@@ -4754,6 +4754,10 @@
             "title": "Production Key",
             "type": "string"
           },
+          "production_product": {
+            "title": "Production Product",
+            "type": "string"
+          },
           "testing_key": {
             "title": "Testing Key",
             "type": "string"
@@ -4762,7 +4766,8 @@
         "required": [
           "testing_key",
           "production_context",
-          "production_key"
+          "production_key",
+          "production_product"
         ],
         "title": "CredentialOverlap",
         "type": "object"

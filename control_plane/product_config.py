@@ -1089,8 +1089,21 @@ def _plan_product_config_secret_write(
         )
     )
     created_at = existing_record.created_at if existing_record is not None else now
+    existing_generated_binding = (
+        _existing_generated_binding(
+            record_store,
+            secret_id=secret_id,
+            binding_key=binding_key,
+            context=context_name,
+            instance=instance_name,
+        )
+        if value_source == "generated"
+        else None
+    )
     binding = SecretBinding(
-        binding_id=control_plane_secrets.expected_secret_binding_id(
+        binding_id=existing_generated_binding.binding_id
+        if existing_generated_binding
+        else control_plane_secrets.expected_secret_binding_id(
             secret_id=secret_id,
             binding_key=binding_key,
         ),
@@ -1102,7 +1115,9 @@ def _plan_product_config_secret_write(
         declared_secret_class=declared_secret_class,
         value_source=value_source,
         sharing_reason=sharing_reason,
-        created_at=created_at,
+        created_at=existing_generated_binding.created_at
+        if existing_generated_binding
+        else created_at,
         updated_at=now,
     )
     action = "created" if existing_record is None else "rotated"
@@ -1249,6 +1264,16 @@ def _planned_runtime_secret_bindings(
             binding_key=str(secret["binding_key"]),
         )
         existing_binding = existing_bindings.get(binding_id)
+        if secret.get("generate") == "testing_local":
+            existing_binding = _existing_generated_binding(
+                record_store,
+                secret_id=secret_id,
+                binding_key=str(secret["binding_key"]),
+                context=str(secret["context"]),
+                instance=str(secret["instance"]),
+            )
+            if existing_binding is not None:
+                binding_id = existing_binding.binding_id
         now = utc_now_timestamp()
         planned_bindings.append(
             SecretBinding(
@@ -1280,6 +1305,31 @@ def _planned_runtime_secret_bindings(
         in planned_routes
     )
     return (*planned_bindings, *configured_existing_bindings)
+
+
+def _existing_generated_binding(
+    record_store: control_plane_secrets.SecretWriteStore,
+    *,
+    secret_id: str,
+    binding_key: str,
+    context: str,
+    instance: str,
+) -> SecretBinding | None:
+    candidates = [
+        binding
+        for binding in record_store.list_secret_bindings(
+            integration="runtime_environment",
+            context_name=context,
+            instance_name=instance,
+            limit=None,
+        )
+        if binding.secret_id == secret_id
+        and binding.binding_key == binding_key
+        and binding.status == "configured"
+    ]
+    if len(candidates) > 1:
+        raise ProductConfigError("Generated testing credential binding is ambiguous.")
+    return candidates[0] if candidates else None
 
 
 def _retire_disabled_runtime_secret_placeholders(

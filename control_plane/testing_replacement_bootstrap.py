@@ -705,6 +705,7 @@ class TestingReplacementBootstrapAdapter:
                 self.request.context,
                 actor="service:testing-bootstrap",
                 generation=generation.operation_id,
+                only_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
             )
             self.store.write_product_public_hosts_bundle(
                 ProductAuthorityBundle(

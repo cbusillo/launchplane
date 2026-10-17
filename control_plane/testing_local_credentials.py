@@ -146,6 +146,7 @@ def generation_bundle(
     *,
     actor: str,
     generation: str,
+    only_keys: frozenset[str] | None = None,
 ) -> ProductAuthorityBundle:
     """A lifecycle's own atomic bundle carries fresh values, never a side write."""
     from control_plane.product_config import (
@@ -156,6 +157,8 @@ def generation_bundle(
     import secrets as random_secrets
 
     entries = generation_entries(store, profile, context)
+    if only_keys is not None:
+        entries = [entry for entry in entries if entry["binding_key"] in only_keys]
     if not entries:
         return ProductAuthorityBundle()
     normalized = normalize_product_config_payload(
@@ -216,8 +219,11 @@ def with_generated_credentials(
     *,
     actor: str,
     generation: str,
+    only_keys: frozenset[str] | None = None,
 ) -> ProductAuthorityBundle:
-    generated = generation_bundle(store, profile, context, actor=actor, generation=generation)
+    generated = generation_bundle(
+        store, profile, context, actor=actor, generation=generation, only_keys=only_keys
+    )
     keys = {binding.binding_key for binding in generated.secret_bindings}
     return bundle.model_copy(
         update={
@@ -250,6 +256,7 @@ class CredentialOverlap(BaseModel):
     testing_key: str
     production_context: str
     production_key: str
+    production_product: str
 
 
 class TestingCredentialAudit(BaseModel):
@@ -282,11 +289,21 @@ class TestingCredentialInventoryResponse(BaseModel):
 
 
 def audit_testing_credentials(
-    store: TestingCredentialStore, product: str
+    store: TestingCredentialStore,
+    product: str,
+    *,
+    profile_snapshot: LaunchplaneProductProfileRecord | None = None,
+    production_profiles: tuple[LaunchplaneProductProfileRecord, ...] | None = None,
 ) -> list[TestingCredentialAudit]:
     profiles = store.list_product_profile_records()
-    profile = next(item for item in profiles if item.product == product)
-    production = [lane for lane in profile.lanes if lane.instance == "prod"]
+    profile = profile_snapshot or next(item for item in profiles if item.product == product)
+    source_profiles = production_profiles if production_profiles is not None else (profile,)
+    production = [
+        (source_profile, lane)
+        for source_profile in source_profiles
+        for lane in source_profile.lanes
+        if lane.instance == "prod"
+    ]
     result: list[TestingCredentialAudit] = []
     for lane in profile.lanes:
         if lane.instance != "testing":
@@ -300,10 +317,15 @@ def audit_testing_credentials(
         )
         result.append(report)
         try:
+            current = {item.product: item for item in store.list_product_profile_records()}
+            if current.get(product) != profile or any(
+                current.get(source.product) != source for source in source_profiles
+            ):
+                raise ValueError("Credential audit product ownership changed.")
             require_product_lanes(
                 store,
                 product=product,
-                routes=((lane.context, "testing"), *((p.context, "prod") for p in production)),
+                routes=((lane.context, "testing"),),
             )
             bindings = site_delivered_secret_bindings_from_store(
                 record_store=store, context_name=lane.context, instance_name="testing"
@@ -319,11 +341,15 @@ def audit_testing_credentials(
                 str(entry["binding_key"]): str(entry["name"])
                 for entry in generation_entries(store, profile, lane.context)
             }
-            for source in production:
-                source_values = _lane_values(store, product, source.context, "prod")
-                report.missing_keys.extend(
-                    f"prod:{key}" for key in sorted(local_keys.difference(source_values))
+            for source_profile, source in production:
+                require_product_lanes(
+                    store, product=source_profile.product, routes=((source.context, "prod"),)
                 )
+                source_values = _lane_values(store, product, source.context, "prod")
+                if source_profile.product == product:
+                    report.missing_keys.extend(
+                        f"prod:{key}" for key in sorted(local_keys.difference(source_values))
+                    )
                 for key, value in testing_values.items():
                     for source_key, source_value in source_values.items():
                         if (
@@ -336,6 +362,7 @@ def audit_testing_credentials(
                                     testing_key=key,
                                     production_context=source.context,
                                     production_key=source_key,
+                                    production_product=source_profile.product,
                                 )
                             )
             report.status = (

@@ -12,17 +12,18 @@ from control_plane.testing_local_credentials import (
     audit_testing_credentials,
     TestingCredentialInventoryResponse,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 
 
 def register_testing_credential_routes(
     app: ApiRouteRegistrar, *, dependencies: ReadRouteDependencies
 ) -> None:
-    def read(
+    def authorize(
         product: str,
         response: Response,
         identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
         record_store: Annotated[object, Depends(dependencies.get_record_store)],
-    ) -> TestingCredentialAuditResponse:
+    ) -> LaunchplaneProductProfileRecord:
         trace = dependencies.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
         store = cast(TestingCredentialStore, record_store)
@@ -67,8 +68,21 @@ def register_testing_credential_routes(
                     code="authorization_denied",
                     message="The caller cannot audit every product lane.",
                 )
+        return profile
+
+    def read(
+        product: str,
+        response: Response,
+        identity: Annotated[LaunchplaneIdentity, Depends(dependencies.read_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+    ) -> TestingCredentialAuditResponse:
+        profile = authorize(product, response, identity, record_store)
         return TestingCredentialAuditResponse(
-            trace_id=trace, product=product, lanes=audit_testing_credentials(store, product)
+            trace_id=dependencies.next_trace_id(),
+            product=product,
+            lanes=audit_testing_credentials(
+                cast(TestingCredentialStore, record_store), product, profile_snapshot=profile
+            ),
         )
 
     app.add_api_route(
@@ -90,12 +104,27 @@ def register_testing_credential_routes(
     ) -> TestingCredentialInventoryResponse:
         store = cast(TestingCredentialStore, record_store)
         profiles = store.list_product_profile_records()
-        reports = [read(profile.product, response, identity, record_store) for profile in profiles]
+        for profile in profiles:
+            authorize(profile.product, response, identity, record_store)
+        lanes = [
+            lane
+            for profile in profiles
+            for lane in audit_testing_credentials(
+                store, profile.product, profile_snapshot=profile, production_profiles=profiles
+            )
+        ]
+        if store.list_product_profile_records() != profiles:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=dependencies.next_trace_id(),
+                code="credential_audit_changed",
+                message="Product inventory changed during the credential audit.",
+            )
         # Reading every stored product is complete or refuses; no silently filtered inventory.
         return TestingCredentialInventoryResponse(
             trace_id=dependencies.next_trace_id(),
             products=sorted(profile.product for profile in profiles),
-            lanes=[lane for report in reports for lane in report.lanes],
+            lanes=lanes,
         )
 
     app.add_api_route(

@@ -11386,9 +11386,33 @@ class PostgresRecordStore(HumanSessionStore):
                     "published",
                     "qualified_at",
                     "published_target",
+                    "generated_configuration_sha256",
                 }
                 if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
                     raise ValueError("Testing activation identities are immutable.")
+                if (
+                    previous.generated_configuration_sha256 != record.generated_configuration_sha256
+                    and (
+                        previous.generated_configuration_sha256
+                        or not record.generated_configuration_sha256
+                        or previous.published
+                        or previous.configuration_version != 3
+                        or bundle is None
+                        or not bundle.secret_records
+                        or any(
+                            (secret.scope, secret.context, secret.instance)
+                            != ("context_instance", record.context, "testing")
+                            for secret in bundle.secret_records
+                        )
+                        or any(
+                            binding.value_source != "generated"
+                            for binding in bundle.secret_bindings
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "Generated activation credentials require their one-time atomic bundle."
+                    )
                 for key in (
                     "project_id",
                     "environment_id",

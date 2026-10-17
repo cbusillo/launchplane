@@ -19,8 +19,11 @@ name a worker/service secret store.
 
 New testing lanes generate these credentials in the onboarding authority bundle.
 Reimporting an existing lane preserves them. Odoo fresh-generation bootstrap and
-generic-web testing replacement publication generate fresh values in their own
-atomic record bundles, before application deployment. Interrupted/replayed
+generic-web testing replacement preparation generate fresh values in their own
+atomic record bundles, before provider configuration or application deployment.
+Generic-web custody records the resulting metadata digest atomically, so a
+configuration retry reuses the generated values. Odoo fresh-copy bootstrap
+generates only its three driver-owned keys; omitted extra settings stay omitted. Interrupted/replayed
 publication reuses the committed lane records. Ordinary code updates do not
 rotate passwords, and no existing database role or person's login is reset here.
 Provider delivery and the supported sanitized-copy runner remain responsible for
@@ -30,7 +33,7 @@ use, isolation, source and custody protections remain required.
 ## Existing lanes: plan, apply, read back
 
 Deploy compatible API and workers before using this path. From a task checkout,
-use the installed operator helper for its configured transport and identity:
+use the installed admin helper for its configured transport and identity:
 
 ```bash
 uv run python scripts/prepare-testing-credentials.py dry-run \
@@ -50,8 +53,18 @@ in `runtime_environment`. A shared source is shadowed by a new testing record,
 never rotated. Source provenance is `generated`; audit metadata records
 `value_source: service_generated` and, for lifecycle writes, the generation.
 
-Apply independently reads the audit back. Run `readback --product <product>
---context <testing-context> --operator-helper <helper>` separately as well.
+Apply independently reads local-credential separation and provenance back. Run
+this separately as well:
+
+```bash
+uv run python scripts/prepare-testing-credentials.py readback \
+  --product <product> --context <testing-context> --operator-helper <helper>
+```
+
+An approved shared integration stays visible in the audit while local readback
+can pass. Audit exits nonzero for overlap or unavailable coverage. A confirmed
+apply whose readback fails reports `accepted_unverified`; retry only its
+original key and intent after inspecting the failed readback.
 An uncertain apply is retried only with its original key and intent; never use a
 new key to hide an uncertain result. A deliberate later rotation needs a new
 review and key. This updates encrypted bindings only: **do not sync the new DB
@@ -66,7 +79,8 @@ restored person's password to make an admin/bootstrap password work.
 `GET /v1/products/{product}/testing-credentials` readback. Every stored product
 and testing lane is included; missing lane read authority refuses the inventory
 instead of silently filtering it. It compares managed runtime values inside the
-service, including cross-key matches with each production lane of that product.
+service, including cross-key matches against every product's production lanes.
+The product-specific readback compares against that product's own production lanes.
 Only product, context, key and binding names, generated provenance and coverage
 status leave the service. No plaintext, ciphertext or value fingerprint is returned.
 
