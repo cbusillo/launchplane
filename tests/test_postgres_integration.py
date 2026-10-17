@@ -10298,6 +10298,21 @@ class RealPostgresServiceTokenRetirementTests(unittest.TestCase):
 
 
 class RealPostgresTestingReplacementRecoveryTests(unittest.TestCase):
+    def test_terminal_completion_wakes_reconciliation_atomically_on_postgres(self) -> None:
+        from tests.test_product_reconcile import ProductReconcileCompletionTests
+
+        for scenario in (
+            "test_completion_publishes_testing_feedback_without_an_event_or_sweep",
+            "test_completion_and_reconcile_request_commit_together",
+            "test_completion_during_another_reconcile_keeps_its_followup_pending",
+        ):
+            with self.subTest(scenario=scenario), _head_postgres_database() as url:
+                fixture = ProductReconcileCompletionTests(scenario)
+                with patch("tests.test_product_reconcile.sqlite_database_url", return_value=url):
+                    result = unittest.TestResult()
+                    fixture.run(result)
+                self.assertTrue(result.wasSuccessful(), (result.failures, result.errors))
+
     def test_initial_resources_use_existing_creation_replay_and_readback(self) -> None:
         self._fresh_resource_preparation_case("normal", initial_generation=True)
 
