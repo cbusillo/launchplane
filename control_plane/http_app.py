@@ -23208,6 +23208,20 @@ def create_launchplane_fastapi_app(
             else native_routes.native_driver_route_alternate_authz_action(apply_ingress_route)
         )
         instance_name = route_request.instance.strip()
+        # The audit permission reaches only the guarded exact-instance no-op
+        # below. General provider mutation still requires ingress_route.apply.
+        if (
+            instance_name
+            and route_request.ingress.mode == "apply"
+            and not resolved_authz_policy_runtime.allows(
+                identity=identity,
+                action=authz_action,
+                product=route_request.product,
+                context=route_request.context,
+                target=AuthorizationTarget(scope="instance", instances=(instance_name,)),
+            )
+        ):
+            authz_action = "ingress_route.audit"
         if not resolved_authz_policy_runtime.allows(
             identity=identity,
             action=authz_action,

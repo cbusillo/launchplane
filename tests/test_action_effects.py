@@ -60,7 +60,7 @@ def reader_policy(*, product: str = "") -> LaunchplaneAuthzPolicy:
 
 
 class ActionEffectTests(unittest.TestCase):
-    def test_authenticated_director_reads_and_plans_without_any_grant(self) -> None:
+    def test_authenticated_director_standing_effects_without_any_grant(self) -> None:
         policy = LaunchplaneAuthzPolicy(schema_version=3)
         for transport in ("local_operator", "terminal_agent"):
             config = BearerIdentityConfig.model_validate(
@@ -83,7 +83,7 @@ class ActionEffectTests(unittest.TestCase):
                             target=AuthorizationTarget(scope="instance", instances=("testing",)),
                             inherit_agent_read_role=True,
                         ),
-                        effect in {"read", "plan"},
+                        effect in {"read", "plan", "projection_sync"},
                     )
             # Metadata used by a credential-copy request is explicitly gated.
             self.assertFalse(

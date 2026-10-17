@@ -30,6 +30,7 @@ _NON_DESCRIPTOR_INSTANCE_SCOPED_AUTHZ_ACTIONS = frozenset(
         "every_code_feedback_resume.execute",
         "generic_web_deploy_recovery_provider_evidence.read",
         "inventory.read",
+        "ingress_route.audit",
         "product_profile.health_monitoring.apply",
         "product_profile.health_monitoring.plan",
         "product_profile.prelaunch_rebuild.apply",
