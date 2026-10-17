@@ -94,11 +94,15 @@ test("directory reasons follow missing private identity and expired observed pla
   const testing = product.environments.find(lane => lane.environment === "testing")!;
   testing.topology.desired.public_website = "none";
   testing.topology.provider_recorded.authority_status = "missing";
+  testing.topology.provider_recorded.trust_state = "missing";
+  testing.topology.provider_recorded.provenance.freshness_status = "missing";
   testing.topology.provider_recorded.provenance.detail = "No public route record exists for this private product.";
   testing.topology.provider_recorded.placement.trust_state = "recorded";
   testing.topology.trust_state = "missing";
   testing.topology.warnings = [];
   testing.topology.observed.placement.runtime_identity_status = "unchecked";
+  testing.topology.observed.placement.trust_state = "missing";
+  testing.topology.observed.placement.provenance.freshness_status = "missing";
   testing.topology.observed.placement.runtime_identity_detail = "The private runtime has no identity observation.";
   const production = product.environments.find(lane => lane.environment === "prod")!;
   const topology = production.topology;

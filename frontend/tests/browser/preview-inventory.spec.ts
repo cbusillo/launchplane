@@ -99,12 +99,18 @@ for (const state of cases) {
     if (state.scan === "empty") {
       await expect(detail).toContainText(expected.detail);
       await page.screenshot({ path: `../tmp/browser-smoke/preview-scanned-empty-${testInfo.project.name}.png`, fullPage: true });
-      const expiredHeadline = previewInventoryPresentation(expireProductEvidence(product, now + 60_001).preview).headline;
+      const expiredPresentation = previewInventoryPresentation(expireProductEvidence(product, now + 60_001).preview);
+      const recordedPresentation = previewInventoryPresentation({ ...product.preview, trust_state: "recorded" });
+      // An expired scan must explain its historical counts differently from an
+      // unverified recorded scan; intentional copy changes remain free to pass.
+      expect(expiredPresentation.detail).not.toEqual(recordedPresentation.detail);
+      const expiredHeadline = expiredPresentation.headline;
       await page.clock.fastForward(60_001);
       await expect(detail.getByRole("heading")).toHaveText(expiredHeadline);
       await expect(summary.locator("strong")).toHaveText(expiredHeadline);
       await page.getByRole("link", { name: "Launchplane home", exact: true }).first().click();
       await expect(page.locator(".directory-preview > strong")).toHaveText(expiredHeadline);
+      await expect(page.locator(".directory-preview")).toContainText(expiredPresentation.detail);
     }
     if (state.scan === "nonempty") {
       await expect(detail).toContainText(expected.detail);
