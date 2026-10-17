@@ -18320,7 +18320,6 @@ def create_launchplane_fastapi_app(
             onboarding_result, authority_bundle = plan_product_onboarding_authority_bundle(
                 record_store=database_store,
                 manifest=onboarding_manifest,
-                generate_testing_credentials=onboarding_request.mode == "apply",
             )
         except ValueError as error:
             raise _launchplane_http_error(

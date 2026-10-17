@@ -269,6 +269,7 @@ class TestingCredentialAudit(BaseModel):
     local_binding_names: dict[str, str] = {}
     generated_keys: list[str] = []
     missing_keys: list[str] = []
+    production_keys: dict[str, list[str]] = {}
     overlaps: list[CredentialOverlap] = []
 
 
@@ -346,10 +347,9 @@ def audit_testing_credentials(
                     store, product=source_profile.product, routes=((source.context, "prod"),)
                 )
                 source_values = _lane_values(store, product, source.context, "prod")
-                if source_profile.product == product:
-                    report.missing_keys.extend(
-                        f"prod:{key}" for key in sorted(local_keys.difference(source_values))
-                    )
+                report.production_keys[f"{source_profile.product}/{source.context}/prod"] = sorted(
+                    source_values
+                )
                 for key, value in testing_values.items():
                     for source_key, source_value in source_values.items():
                         if (

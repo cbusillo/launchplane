@@ -280,6 +280,43 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reader.call_count, 2)
         self.assertEqual(writer.call_args.kwargs["body"]["secrets"], saved["request"]["secrets"])
 
+    async def test_testing_only_local_key_needs_no_same_named_production_key(self) -> None:
+        from control_plane.contracts.product_profile_record import ProductSecretConfigRequirement
+
+        requirement = ProductSecretConfigRequirement(
+            binding_key="TESTING_SIGNING_SECRET",
+            context="example-site",
+            instance="testing",
+            testing_local_credential=True,
+        )
+        self.profile = self.profile.model_copy(
+            update={
+                "expected_config": self.profile.expected_config.model_copy(
+                    update={"managed_secret_bindings": (requirement,)}
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        payload = {
+            **self.payload,
+            "secrets": [
+                {
+                    "binding_key": requirement.binding_key,
+                    "generate": "testing_local",
+                    "secret_class": "testing",
+                }
+            ],
+        }
+        self.assertEqual((await self.post(payload)).status_code, 202)
+        applied = await self.post({**payload, "mode": "apply"}, "testing-only-local")
+        self.assertEqual(applied.status_code, 202, applied.text)
+        report = (await self.audit()).json()["lanes"][0]
+        self.assertEqual(report["status"], "pass")
+        self.assertFalse(report["missing_keys"])
+        self.assertEqual(
+            report["production_keys"]["example-site/example-site/prod"], ["DATABASE_PASSWORD"]
+        )
+
     async def test_inventory_compares_against_other_products_production(self) -> None:
         other = LaunchplaneProductProfileRecord.model_validate(
             _generic_site_profile_payload("another-site")
@@ -339,7 +376,7 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(response.status_code, 403, response.text)
 
-    def test_onboarding_generates_new_lane_once_and_reimport_preserves_it(self) -> None:
+    def test_onboarding_import_preserves_existing_lane_credentials(self) -> None:
         from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
         from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
         from tests.test_product_onboarding import _manifest_payload
@@ -348,12 +385,29 @@ class TestingLocalCredentialsTests(unittest.IsolatedAsyncioTestCase):
         payload["expected_config"]["managed_secret_bindings"].append(
             {"binding_key": "DATABASE_PASSWORD", "testing_local_credential": True}
         )
+        apply_product_config_bundle(
+            record_store=self.store,
+            payload={
+                "product": self.profile.product,
+                "context": "example-site-testing",
+                "instance": "testing",
+                "secrets": [
+                    {"binding_key": "DATABASE_PASSWORD", "value": "retained-import-password"}
+                ],
+            },
+            mode="apply",
+            actor="fixture",
+            source_label="test",
+        )
+        before = self.store.list_secret_records(
+            context_name="example-site-testing", instance_name="testing"
+        )
         manifest = ProductOnboardingManifest.model_validate(payload)
         apply_product_onboarding_manifest(record_store=self.store, manifest=manifest)
         records = self.store.list_secret_records(
             context_name="example-site-testing", instance_name="testing"
         )
-        self.assertTrue(records)
+        self.assertEqual(records, before)
         self.assertTrue(all(record.scope == "context_instance" for record in records))
         apply_product_onboarding_manifest(record_store=self.store, manifest=manifest)
         self.assertEqual(

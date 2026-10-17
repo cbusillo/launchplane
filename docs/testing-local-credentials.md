@@ -17,9 +17,9 @@ catalog or a new authorization grant. External credentials retain their existing
 input path. A local requirement cannot also request Client credential input or
 name a worker/service secret store.
 
-New testing lanes generate these credentials in the onboarding authority bundle.
-Reimporting an existing lane preserves them. Odoo fresh-generation bootstrap and
-generic-web testing replacement preparation generate fresh values in their own
+Onboarding imports existing provider targets and preserves their credentials.
+Actual independent-recipient creation owns generation: Odoo fresh-generation
+bootstrap and generic-web testing replacement preparation generate values in their own
 atomic record bundles, before provider configuration or application deployment.
 Generic-web custody records the resulting metadata digest atomically, so a
 configuration retry reuses the generated values. Odoo fresh-copy bootstrap
@@ -65,6 +65,12 @@ An approved shared integration stays visible in the audit while local readback
 can pass. Audit exits nonzero for overlap or unavailable coverage. A confirmed
 apply whose readback fails reports `accepted_unverified`; retry only its
 original key and intent after inspecting the failed readback.
+An interrupted generic-web activation retains its original key, placement and
+staff hold. Its prepared lane credential intent is for the new recipient; the
+retained old target stays excluded. Use original-key readback/resumption; this
+path has no abandonment or old-target reactivation operation. Never lift its
+hold or redeploy the old target to bypass a partial activation.
+
 An uncertain apply is retried only with its original key and intent; never use a
 new key to hide an uncertain result. A deliberate later rotation needs a new
 review and key. This updates encrypted bindings only: **do not sync the new DB
@@ -81,10 +87,11 @@ and testing lane is included; missing lane read authority refuses the inventory
 instead of silently filtering it. It compares managed runtime values inside the
 service, including cross-key matches against every product's production lanes.
 The product-specific readback compares against that product's own production lanes.
-Only product, context, key and binding names, generated provenance and coverage
+Only product, context, key and binding names (including the production keys
+actually compared), generated provenance and coverage
 status leave the service. No plaintext, ciphertext or value fingerprint is returned.
 
-Missing local credentials, missing production counterparts, decryption failure
+Missing local credentials, decryption failure
 and ambiguous ownership are `unavailable`, never a pass. `no_production` explicitly
 means there was no production lane to compare. Overlaps on external keys are
 reported too; an intentionally shared read-only integration is reviewed under its

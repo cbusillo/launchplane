@@ -50547,6 +50547,17 @@
             "title": "Product",
             "type": "string"
           },
+          "production_keys": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "default": {},
+            "title": "Production Keys",
+            "type": "object"
+          },
           "status": {
             "enum": [
               "pass",

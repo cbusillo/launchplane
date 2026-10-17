@@ -486,6 +486,12 @@ class ActivationTests(unittest.TestCase):
 
         local = ActivationTests()
         local.local_credential_fixture = True
+        if self.database_url:
+            from tests.test_postgres_integration import _head_postgres_database
+
+            database = _head_postgres_database()
+            local.database_url = database.__enter__()
+            self.addCleanup(database.__exit__, None, None, None)
         local.setUp()
         self.addCleanup(local.doCleanups)
 
@@ -506,8 +512,59 @@ class ActivationTests(unittest.TestCase):
         local.adapter.request = local.request.model_copy(
             update={"reviewed_plan_sha256": planned.plan_sha256}
         )
+        old_target = local.store.read_dokploy_target_record(
+            context_name=local.context, instance_name="testing"
+        )
+
+        def fail_configuration(**kwargs: Any) -> Any:
+            if kwargs.get("path") == "/api/compose.update":
+                raise RuntimeError("fixture interrupted configuration")
+            return local.provider(**kwargs)
+
+        with patch(
+            "control_plane.testing_activation.api.dokploy_request", side_effect=fail_configuration
+        ):
+            interrupted = local.run_activation()
+        local.assertEqual(interrupted.response_status_code, 409)
+        prepared = local.adapter.current()
+        local.assertTrue(prepared.generated_configuration_sha256)
+        local.assertEqual(
+            local.store.read_dokploy_target_record(
+                context_name=local.context, instance_name="testing"
+            ),
+            old_target,
+        )
+        from control_plane.testing_lane_hold import TestingHoldApplyRequest
+        from control_plane.testing_activation import require_activation_hold_lift
+
+        with local.assertRaises(TestingActivationRefusal):
+            require_activation_hold_lift(
+                local.store,
+                TestingHoldApplyRequest(
+                    product=local.product,
+                    context=local.context,
+                    instance="testing",
+                    purpose="isolation_staging",
+                    hold=False,
+                    reason="fixture continuation",
+                    activation_plan_sha256=prepared.plan_sha256,
+                ),
+                local.actor,
+                local.root,
+            )
+        with local.assertRaises(ValueError):
+            local.store.write_testing_activation(
+                expected=prepared.model_dump(mode="json"),
+                replacement=prepared.model_copy(
+                    update={"generated_configuration_sha256": "0" * 64}
+                ).model_dump(mode="json"),
+            )
+        prepared_versions = local.store.list_secret_versions(secret_id="testing-password")
         result = local.run_activation()
         local.assertEqual(result.response_status_code, 202, result.response_payload)
+        local.assertEqual(
+            local.store.list_secret_versions(secret_id="testing-password"), prepared_versions
+        )
         current = local.adapter.current()
         local.adapter.require_unchanged(current)
         local.adapter.verify_provider(current)
