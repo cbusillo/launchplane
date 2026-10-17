@@ -27,6 +27,7 @@ from control_plane.odoo_testing_native_source import (
     recorded_native_testing_capture,
 )
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
+from control_plane.odoo_secret_references import ConfigParameterSecretReferenceError
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -1685,12 +1686,24 @@ def build_odoo_stable_target_replacement_plan(
             )
         except control_plane_live_target_runtime.LiveTargetRuntimeError as error:
             block("live_runtime_keys_invalid", str(error))
-        except click.ClickException:
-            block(
-                "compose_or_override_render_failed",
-                "Launchplane could not render the replacement compose or Odoo instance override payload. "
-                "Review the image, domains and deploy-phase overrides before replacement.",
-            )
+        except click.ClickException as error:
+            reference_error = error.__cause__
+            if isinstance(reference_error, ConfigParameterSecretReferenceError):
+                # Name the settings whose secret pointers stop the render, never values.
+                block(
+                    "config_parameter_secret_reference_disagrees"
+                    if reference_error.disagrees
+                    else "compose_or_override_render_failed",
+                    "The lane's secret-backed setting overrides cannot be delivered as stored: "
+                    + ", ".join(reference_error.env_keys),
+                    reference_error.env_keys,
+                )
+            else:
+                block(
+                    "compose_or_override_render_failed",
+                    "Launchplane could not render the replacement compose or Odoo instance override payload. "
+                    "Review the image, domains and deploy-phase overrides before replacement.",
+                )
     elif isinstance(target_record, DokployTargetRecord):
         try:
             approval_issue_url = _assert_prelaunch_rebuild_policy_allows_request(

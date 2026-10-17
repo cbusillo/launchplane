@@ -1265,6 +1265,10 @@ PLAN_BLOCKER_DESCRIPTIONS: dict[str, str] = {
     "compose_or_override_render_failed": (
         "Launchplane could not render the replacement compose file or setting overrides."
     ),
+    "config_parameter_secret_reference_disagrees": (
+        "The lane's secret-backed setting overrides point at a different binding than the "
+        "lane delivers. Review and apply the lane's odoo-secret-references/reconcile plan."
+    ),
     "current_artifact_changed": ("The lane's current artifact changed after the readiness check."),
     "artifact_manifest_missing": "Launchplane has no manifest for the deploy's artifact.",
     "artifact_repository_mismatch": (

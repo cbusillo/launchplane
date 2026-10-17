@@ -30,6 +30,20 @@ class SecretReferenceStore(SiteSecretDeliveryStore, Protocol):
     pass
 
 
+class ConfigParameterSecretReferenceError(ValueError):
+    """A secret-backed config parameter cannot be delivered as stored.
+
+    ``env_keys`` names the parameters' lane env keys, never a binding id or value.
+    ``disagrees`` means each reference resolves but points somewhere other than
+    what the lane delivers, which the reconcile route corrects.
+    """
+
+    def __init__(self, message: str, *, env_keys: tuple[str, ...], disagrees: bool = False):
+        super().__init__(message)
+        self.env_keys = env_keys
+        self.disagrees = disagrees
+
+
 @dataclass(frozen=True)
 class SecretReferenceAuthority:
     metadata: SecretDeliverySetExpectation
@@ -130,6 +144,7 @@ def selected_config_parameter_bindings(
         if parameter is None or parameter.value.source != "secret_binding":
             raise ValueError("An existing secret-backed config parameter is required.")
         env_key = config_parameter_secret_env_key(key)
+        env_keys = (env_key,)
         source = bindings.get(parameter.value.secret_binding_id)
         destination = delivered.get(env_key)
         for binding in (source, destination):
@@ -145,8 +160,9 @@ def selected_config_parameter_bindings(
                 or (secret.context, secret.instance) != (binding.context, binding.instance)
                 or (secret.scope == "context") != (not binding.instance)
             ):
-                raise ValueError(
-                    "A configured lane-scoped reference and delivered binding are required."
+                raise ConfigParameterSecretReferenceError(
+                    "A configured lane-scoped reference and delivered binding are required.",
+                    env_keys=env_keys,
                 )
         # Delivery has deterministic tie breaking. A repair must not endorse competing
         # bindings at one scope, or multiple active env bindings for the same secret.
@@ -167,9 +183,14 @@ def selected_config_parameter_bindings(
                     )
                     != 1
                 ):
-                    raise ValueError("Ambiguous lane secret bindings require separate correction.")
+                    raise ConfigParameterSecretReferenceError(
+                        "Ambiguous lane secret bindings require separate correction.",
+                        env_keys=env_keys,
+                    )
         if any(len(items) > 1 for items in candidates.values()):
-            raise ValueError("Ambiguous lane secret bindings require separate correction.")
+            raise ConfigParameterSecretReferenceError(
+                "Ambiguous lane secret bindings require separate correction.", env_keys=env_keys
+            )
         assert destination is not None
         selected[key] = destination
     return selected
@@ -284,12 +305,18 @@ def require_config_parameter_secret_agreement(
     selected = selected_config_parameter_bindings(
         record, read_secret_reference_authority(store, record), keys
     )
-    if any(
-        item.value.secret_binding_id != selected[item.key].binding_id
-        for item in record.config_parameters
-        if item.key in selected
-    ):
-        raise ValueError(
+    disagreeing = tuple(
+        sorted(
+            config_parameter_secret_env_key(item.key)
+            for item in record.config_parameters
+            if item.key in selected
+            and item.value.secret_binding_id != selected[item.key].binding_id
+        )
+    )
+    if disagreeing:
+        raise ConfigParameterSecretReferenceError(
             "Config-parameter secret references disagree with lane delivery. "
-            "Review the lane's odoo-secret-references/reconcile plan and correct its metadata first."
+            "Review the lane's odoo-secret-references/reconcile plan and correct its metadata first.",
+            env_keys=disagreeing,
+            disagrees=True,
         )

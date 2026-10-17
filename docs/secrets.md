@@ -157,6 +157,28 @@ resolver qualifies the read-only testing binding and delivers that binding's
 value directly. Its transient payload must match that exact qualified source
 and preview; it cannot waive agreement for a stored lane override.
 
+When a lane's references disagree, its replacement plan is blocked with
+`config_parameter_secret_reference_disagrees`, and the plan's blocker keys, the
+failed deploy's `error_detail_keys` and `path-check` name the affected
+`ODOO_OVERRIDE_SECRET__CONFIG_PARAM__*` keys. A reference that cannot resolve
+at all keeps `compose_or_override_render_failed`, with the same key names.
+
+From a terminal, run the correction through the installed operator helper:
+
+```bash
+uv run python scripts/reconcile-odoo-secret-references.py read \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --environment <environment>
+uv run python scripts/reconcile-odoo-secret-references.py dry-run <same arguments> \
+  --evidence-file <new-private-review-file>
+uv run python scripts/reconcile-odoo-secret-references.py apply <same arguments> \
+  --evidence-file <same-review-file> --reviewed-dry-run
+```
+
+Dry-run saves the value-free review outside the repository. Apply sends that
+review's keys and digest with the lane confirmation, then reads the plan again
+and passes only when every entry is `already_agrees`.
+
 Use the service route
 `/v1/products/{product}/environments/{environment}/odoo-secret-references/reconcile`:
 
