@@ -7,6 +7,8 @@ from control_plane.contracts.idempotency_record import (
     build_launchplane_mutation_reservation_id,
 )
 from control_plane.contracts.testing_rebuild import TestingRebuildRecord
+from control_plane.contracts.testing_rebuild import TestingRebuildPlan
+from control_plane.contracts.canonical_json import canonical_json_sha256
 
 REBUILD_CHECKPOINT_SCOPE = "launchplane:testing-rebuild-checkpoint:v1"
 REBUILD_CHECKPOINT_ROUTE = "service:testing-rebuild-checkpoint"
@@ -30,42 +32,53 @@ class RecordTestingRebuildStore:
     def __init__(self, store: RebuildRecordStore) -> None:
         self.store = store
 
-    def load(self, operation_id: str) -> TestingRebuildRecord:
+    def load(self, plan: TestingRebuildPlan) -> TestingRebuildRecord:
+        key = canonical_json_sha256(
+            {"product": plan.product, "context": plan.context, "operation": plan.operation_id}
+        )
         row = self.store.read_idempotency_record(
             scope=REBUILD_CHECKPOINT_SCOPE,
             route_path=REBUILD_CHECKPOINT_ROUTE,
-            idempotency_key=operation_id,
+            idempotency_key=key,
         )
         if row is None:
-            raise FileNotFoundError(operation_id)
+            raise FileNotFoundError(plan.operation_id)
         record = TestingRebuildRecord.model_validate(row.response_payload)
-        if (
-            record.plan.operation_id != operation_id
-            or row.request_fingerprint != record.plan.digest
-        ):
+        if (record.plan.product, record.plan.context, record.plan.operation_id) != (
+            plan.product,
+            plan.context,
+            plan.operation_id,
+        ) or row.request_fingerprint != record.plan.digest:
             raise ValueError("The stored rebuild checkpoint has a different operation binding.")
         return record
 
     def save(self, record: TestingRebuildRecord) -> None:
         record = TestingRebuildRecord.model_validate(record.model_dump())
         try:
-            current = self.load(record.plan.operation_id)
+            current = self.load(record.plan)
         except FileNotFoundError:
             current = None
         if current is not None and (
             current.plan != record.plan or current.began_at != record.began_at
         ):
             raise ValueError("Cannot replace a rebuild's original operation or plan.")
+        key = canonical_json_sha256(
+            {
+                "product": record.plan.product,
+                "context": record.plan.context,
+                "operation": record.plan.operation_id,
+            }
+        )
         self.store.write_idempotency_record(
             LaunchplaneIdempotencyRecord(
                 record_id=build_launchplane_mutation_reservation_id(
                     scope=REBUILD_CHECKPOINT_SCOPE,
                     route_path=REBUILD_CHECKPOINT_ROUTE,
-                    idempotency_key=record.plan.operation_id,
+                    idempotency_key=key,
                 ),
                 scope=REBUILD_CHECKPOINT_SCOPE,
                 route_path=REBUILD_CHECKPOINT_ROUTE,
-                idempotency_key=record.plan.operation_id,
+                idempotency_key=key,
                 request_fingerprint=record.plan.digest,
                 created_at=record.began_at.isoformat(),
                 updated_at=record.updated_at.isoformat(),

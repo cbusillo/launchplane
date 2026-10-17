@@ -31,7 +31,10 @@ connections before candidate startup. Fresh private health and exact runtime
 identity precede switching the existing route. Applied/public health and identity
 at the original address precede metadata adoption and old-copy retirement.
 Retirement drains/stops the old runtime and preserves its storage and custody;
-physical deletion is outside this operation.
+physical deletion is outside this operation. Public probe URLs must use the
+stable lane origin. Missing, stale, unverified or skipped evidence preserves the
+intent for observation; only a fresh verified failure or identity mismatch
+starts automatic rollback.
 
 Failed preparation or private readiness leaves the old copy serving. Failed
 public verification, including immediately before metadata adoption or before
@@ -40,9 +43,11 @@ the original copy at the same address and restores its original metadata before
 reporting failure. Publication is a DB-only atomic compare/write/readback under
 the original operation and authority-writer lock. An unavailable publication
 outcome cannot be replaced with an assertion that the old metadata still wins.
+The checkpoint retains whether forward publication started and passes that fact
+to inverse publication, including after a lost commit reply.
 
 `testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
-payloads. The envelope is completed checkpoint evidence, while the payload keeps
+payloads, scoped by product, context and operation key. The envelope is completed checkpoint evidence, while the payload keeps
 the actual rebuild stage. It is not an execution lease or a replacement for a
 durable provider fence. The adapter must hold the existing lane/worker lease and
 recheck authorization, holds/use, custody and production isolation before effects.
@@ -53,12 +58,23 @@ retry.
 
 After an interrupted route switch, read actual applied authority and public
 identity; never issue a second switch merely because its acknowledgement was
-lost. After an interrupted stop, preserve the retirement intent: the old copy
+lost. Resumption calls the adapter in reconciliation mode, which can redispatch
+only with the original provider fence's explicit proof that the effect was
+never dispatched and is safe to run. After an interrupted stop, preserve the retirement intent: the old copy
 may already be stopped, so it cannot be advertised as a healthy rollback target.
+The supported exception requires an original stop proven terminal and never
+dispatched, plus fresh private readiness for the old copy. The checkpoint keeps
+that recovery proof before moving back; pending, dispatched and unknown stops
+cannot use this path. A refusal propagates before any inverse action.
 An interrupted preparation retains its candidate, copy receipt and original key.
 Use a compatible controller/adapter for continuation and preserve unresolved
 provider effects, rather than deleting checkpoints or replaying a legacy
-bootstrap against that copy.
+bootstrap against that copy. Terminal checkpoint reads return their historical
+receipt even after a later rebuild moves the lane. They do not reacquire a
+mutation lease or claim current live health; the service caller still authorizes
+the read. Worker/HTTP integration in [#3968](https://github.com/cbusillo/launchplane/issues/3968)
+must supply cancellation/abandonment for failed preparation with retained
+candidate custody before this component is activated as a rebuild control.
 
 ## Repair usage rule
 

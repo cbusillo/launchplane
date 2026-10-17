@@ -4,6 +4,7 @@ from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
 from typing import Protocol
+from urllib.parse import urlsplit
 
 from control_plane.contracts.testing_rebuild import (
     TestingCopy,
@@ -21,7 +22,7 @@ from control_plane.traffic_switch import (
 
 
 class TestingRebuildStore(Protocol):
-    def load(self, operation_id: str) -> TestingRebuildRecord: ...
+    def load(self, plan: TestingRebuildPlan) -> TestingRebuildRecord: ...
     def save(self, record: TestingRebuildRecord) -> None: ...
 
 
@@ -44,22 +45,47 @@ class TestingRebuildProvider(Protocol):
         ...
 
     def readiness(self, plan: TestingRebuildPlan) -> TestingCopyReadiness: ...
-    def switch(self, plan: TestingRebuildPlan, previous: TestingCopy, desired: TestingCopy) -> None:
-        """Compare-and-switch the existing route; reconcile unknown effects in the runner."""
+    def switch(
+        self,
+        plan: TestingRebuildPlan,
+        previous: TestingCopy,
+        desired: TestingCopy,
+        *,
+        reconcile_only: bool,
+    ) -> None:
+        """Compare-and-switch, or observe the original fenced effect on resumption.
+
+        Reconciliation never dispatches again unless the existing provider fence
+        proves that original effect was not dispatched and is safe to run.
+        """
         ...
 
-    def publish(self, plan: TestingRebuildPlan, desired: TestingCopy) -> None:
+    def publish(
+        self, plan: TestingRebuildPlan, desired: TestingCopy, *, forward_started: bool
+    ) -> None:
         """DB-only atomic CAS/adoption with readback, preserving the lane address.
 
         Only the original or candidate snapshot from this operation may be
         selected, under its current lease and the authority-writer lock. Read
         the prior transaction outcome before an inverse; an unavailable outcome
         refuses. This method sends no provider command and rotates no secret.
+        ``forward_started`` records whether forward publication may have run;
+        an inverse with False must verify the original snapshot is unchanged.
         """
         ...
 
     def retire_old(self, plan: TestingRebuildPlan) -> None:
         """Drain/stop the old copy idempotently; retain its storage and custody."""
+        ...
+
+    def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+        """Return fresh old-copy health only after excluding the original stop.
+
+        The original provider fence must prove the stop was never dispatched,
+        is terminal and cannot execute later. Pending, dispatched or unknown
+        outcomes return None, even when the old copy currently appears running.
+        This is read-only recovery, never a retry of a denied stop.
+        """
         ...
 
 
@@ -75,12 +101,45 @@ def _route(
     )
 
 
+class TestingRebuildObservationUnavailable(ValueError):
+    """Evidence is missing or stale; preserve intent and observe again."""
+
+
+class TestingRebuildHealthFailure(ValueError):
+    """A fresh, verified stable-address probe failed or served the wrong copy."""
+
+
 def _serving(
     observation: TestingRouteObservation,
     plan: TestingRebuildPlan,
     copy: TestingCopy,
     now: datetime,
 ) -> None:
+    _route(observation, plan, copy)
+    require_fresh_readiness(
+        observed_at=observation.observed_at,
+        now=now,
+        actual=copy.runtime_identity,
+        expected=copy.runtime_identity,
+    )
+    health = observation.public_health
+    if health is None or not health.verified or health.status == "skipped":
+        raise TestingRebuildObservationUnavailable("Public health evidence is unavailable.")
+    origin = urlsplit(plan.base_url)
+    if not health.urls or any(
+        (urlsplit(url).scheme, urlsplit(url).hostname, urlsplit(url).port or 443)
+        != (origin.scheme, origin.hostname, origin.port or 443)
+        for url in health.urls
+    ):
+        raise TestingRebuildObservationUnavailable(
+            "Public health must be measured at the stable address."
+        )
+    if health.status == "fail" or health.observed_runtime_identity != copy.runtime_identity:
+        if health.status != "fail" and health.observed_runtime_identity is None:
+            raise TestingRebuildObservationUnavailable(
+                "The public runtime identity is unavailable."
+            )
+        raise TestingRebuildHealthFailure("The stable testing address failed its candidate check.")
     require_serving_route(
         observation,
         route_id=plan.route_id,
@@ -88,12 +147,6 @@ def _serving(
         target_url=copy.private_url,
         slot_id=copy.copy_id,
         identity=copy.runtime_identity,
-    )
-    require_fresh_readiness(
-        observed_at=observation.observed_at,
-        now=now,
-        actual=copy.runtime_identity,
-        expected=copy.runtime_identity,
     )
 
 
@@ -111,10 +164,21 @@ def execute_testing_rebuild(
     with that intent intact, with no fallback or automatic retry.
     """
     plan = TestingRebuildPlan.model_validate(plan.model_dump())
+    # Terminal records are historical receipts. A later rebuild or incident
+    # cannot change their outcome; HTTP authentication still belongs to caller.
+    try:
+        prior = store.load(plan)
+    except FileNotFoundError:
+        pass
+    else:
+        if prior.plan != plan:
+            raise ValueError("Use the original rebuild plan and operation key.")
+        if prior.step in {"complete", "failed"}:
+            return prior
     with provider.exclusive(plan):
         provider.guard(plan)
         try:
-            record = store.load(plan.operation_id)
+            record = store.load(plan)
         except FileNotFoundError:
             _route(provider.current_route(plan), plan, plan.old)
             record = TestingRebuildRecord(plan=plan, began_at=clock(), updated_at=clock())
@@ -131,12 +195,6 @@ def execute_testing_rebuild(
             store.save(record)
 
         if record.step in {"complete", "failed"}:
-            copy = plan.new if record.step == "complete" else plan.old
-            observation = provider.current_route(plan)
-            if record.step == "complete":
-                _serving(observation, plan, copy, clock())
-            else:
-                _route(observation, plan, copy)
             return record
 
         if record.step == "preparing":
@@ -168,16 +226,17 @@ def execute_testing_rebuild(
                     actual=readiness.runtime_identity,
                     expected=plan.new.runtime_identity,
                 )
+                resuming = record.step == "switching"
                 save(step="switching", readiness=readiness)
                 provider.guard(plan)
-                provider.switch(plan, plan.old, plan.new)
+                provider.switch(plan, plan.old, plan.new, reconcile_only=resuming)
                 observation = provider.current_route(plan)
             elif record.step != "switching":
                 raise ValueError("Traffic moved before the persisted switch intent.")
             _route(observation, plan, plan.new)
             try:
                 _serving(observation, plan, plan.new, clock())
-            except ValueError:
+            except TestingRebuildHealthFailure:
                 save(step="rolling_back", error="candidate_public_health_failed", route=observation)
             else:
                 save(step="publishing", route=observation)
@@ -188,10 +247,11 @@ def execute_testing_rebuild(
             _route(observation, plan, plan.new)
             try:
                 _serving(observation, plan, plan.new, clock())
-            except ValueError:
+            except TestingRebuildHealthFailure:
                 save(step="rolling_back", error="candidate_public_health_failed", route=observation)
             else:
-                provider.publish(plan, plan.new)
+                save(publication_started=True)
+                provider.publish(plan, plan.new, forward_started=True)
                 save(step="retiring", route=observation)
 
         if record.step == "retiring":
@@ -200,11 +260,21 @@ def execute_testing_rebuild(
             _route(observation, plan, plan.new)
             try:
                 _serving(observation, plan, plan.new, clock())
-            except ValueError:
+            except TestingRebuildHealthFailure:
                 if record.retirement_started:
-                    # An interrupted stop may already have drained the old copy.
-                    # It cannot be offered as a healthy rollback destination.
-                    raise
+                    recovery = provider.unstarted_retirement(plan)
+                    if recovery is None or (recovery.copy_id, recovery.host) != (
+                        plan.old.copy_id,
+                        plan.host,
+                    ):
+                        raise
+                    require_fresh_readiness(
+                        observed_at=recovery.observed_at,
+                        now=clock(),
+                        actual=recovery.runtime_identity,
+                        expected=plan.old.runtime_identity,
+                    )
+                    save(retirement_recovery=recovery)
                 save(step="rolling_back", error="candidate_public_health_failed", route=observation)
 
         if record.step == "rolling_back":
@@ -212,11 +282,13 @@ def execute_testing_rebuild(
             observation = provider.current_route(plan)
             if observation.slot_id == plan.new.copy_id:
                 _route(observation, plan, plan.new)
-                provider.switch(plan, plan.new, plan.old)
+                resuming = record.rollback_started
+                save(rollback_started=True)
+                provider.switch(plan, plan.new, plan.old, reconcile_only=resuming)
                 observation = provider.current_route(plan)
             _serving(observation, plan, plan.old, clock())
             provider.guard(plan)
-            provider.publish(plan, plan.old)
+            provider.publish(plan, plan.old, forward_started=record.publication_started)
             save(step="failed", route=observation, ended_at=clock())
             return record
 

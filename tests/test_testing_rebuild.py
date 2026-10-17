@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.runtime_identity import RuntimeIdentity
@@ -63,6 +64,13 @@ class TestingProvider:
         self.serving = plan.old
         self.published = plan.old
         self.base_url = plan.base_url
+        self.route_id = plan.route_id
+        self.host = plan.host
+        self.publish_flags: list[bool] = []
+        self.pending_switch = False
+        self.refuse_stop = False
+        self.stop_refused_before_dispatch = False
+        self.lose_stop_reply = False
         self.old_running = True
         self.actions: list[str] = []
         self.fail_prepare = False
@@ -93,8 +101,8 @@ class TestingProvider:
             if self.fail_after_publication and self.published == plan.new:
                 self.bad_public = True
         return TestingRouteObservation(
-            route_id=plan.route_id,
-            host="foreign.invalid" if self.foreign_host else plan.host,
+            route_id=self.route_id,
+            host="foreign.invalid" if self.foreign_host else self.host,
             target_url=self.serving.private_url,
             slot_id=self.serving.copy_id,
             applied=True,
@@ -102,7 +110,7 @@ class TestingProvider:
             observed_at=self.now,
             public_health=HealthcheckEvidence(
                 verified=True,
-                urls=(plan.base_url + "/launchplane/health",),
+                urls=(self.base_url + "/launchplane/health",),
                 timeout_seconds=10,
                 status="fail" if self.bad_public and self.serving == plan.new else "pass",
                 observed_runtime_identity=self.serving.runtime_identity,
@@ -137,18 +145,32 @@ class TestingProvider:
             evidence_id="private-health",
         )
 
-    def switch(self, plan: TestingRebuildPlan, previous: TestingCopy, desired: TestingCopy) -> None:
+    def switch(
+        self,
+        plan: TestingRebuildPlan,
+        previous: TestingCopy,
+        desired: TestingCopy,
+        *,
+        reconcile_only: bool,
+    ) -> None:
         if self.serving != previous:
             raise ValueError("fixture route compare-and-switch conflict")
+        if self.pending_switch and reconcile_only:
+            raise TimeoutError("fixture switch still in flight")
         self.actions.append("switch:" + desired.copy_id)
+        if self.pending_switch:
+            raise TimeoutError("fixture switch in flight")
         self.serving = desired
         if self.lose_switch_reply:
             self.lose_switch_reply = False
             raise TimeoutError("fixture lost switch reply")
 
-    def publish(self, plan: TestingRebuildPlan, desired: TestingCopy) -> None:
+    def publish(
+        self, plan: TestingRebuildPlan, desired: TestingCopy, *, forward_started: bool
+    ) -> None:
         if self.serving != desired or (desired == plan.new and self.bad_public):
             raise AssertionError("Only a publicly healthy copy may become authoritative.")
+        self.publish_flags.append(forward_started)
         self.actions.append("publish:" + desired.copy_id)
         self.published = desired
         if self.lose_publish_reply:
@@ -158,8 +180,25 @@ class TestingProvider:
     def retire_old(self, plan: TestingRebuildPlan) -> None:
         if self.serving != plan.new or self.published != plan.new or self.bad_public:
             raise AssertionError("Retirement requires a healthy authoritative successor.")
+        if self.refuse_stop:
+            self.stop_refused_before_dispatch = True
+            raise PermissionError("fixture stop refused before dispatch")
         self.actions.append("retire")
         self.old_running = False
+        if self.lose_stop_reply:
+            raise TimeoutError("fixture stop reply lost")
+
+    def unstarted_retirement(self, plan: TestingRebuildPlan) -> TestingCopyReadiness | None:
+        if not self.stop_refused_before_dispatch or not self.old_running:
+            return None
+        return TestingCopyReadiness(
+            copy_id=plan.old.copy_id,
+            host=self.host,
+            observed_at=self.now,
+            runtime_identity=plan.old.runtime_identity,
+            healthy=True,
+            evidence_id="original-stop-proven-undispatched",
+        )
 
 
 class TestingRebuildTests(unittest.TestCase):
@@ -185,7 +224,6 @@ class TestingRebuildTests(unittest.TestCase):
                 self.provider = TestingProvider(self.plan)
                 result = self.run_rebuild()
                 self.assertEqual(result.step, "complete")
-                self.assertEqual(self.provider.base_url, self.plan.base_url)
                 self.assertEqual(self.provider.serving, self.plan.new)
                 self.assertFalse(self.provider.old_running)
                 self.assertLess(
@@ -219,6 +257,7 @@ class TestingRebuildTests(unittest.TestCase):
         self.assertEqual(self.provider.published, self.plan.old)
         self.assertTrue(self.provider.old_running)
         self.assertNotIn("retire", self.provider.actions)
+        self.assertEqual(self.provider.publish_flags, [False])
 
     def test_health_failure_before_publication_restores_old_serving_and_metadata(self) -> None:
         self.provider.fail_second_public_probe = True
@@ -229,6 +268,105 @@ class TestingRebuildTests(unittest.TestCase):
         self.assertTrue(self.provider.old_running)
         self.assertNotIn("retire", self.provider.actions)
 
+    def test_missing_stale_or_wrong_address_public_evidence_never_proves_failure_or_success(
+        self,
+    ) -> None:
+        for failure in (
+            "missing",
+            "unverified",
+            "skipped",
+            "stale",
+            "future",
+            "private-url",
+            "missing-identity",
+        ):
+            with self.subTest(failure=failure):
+                self.plan = rebuild_plan().model_copy(update={"operation_id": failure})
+                self.provider = TestingProvider(self.plan)
+                original = self.provider.current_route
+
+                def uncertain(plan: TestingRebuildPlan) -> TestingRouteObservation:
+                    observed = original(plan)
+                    if observed.slot_id != plan.new.copy_id:
+                        return observed
+                    health = observed.public_health
+                    assert health is not None
+                    if failure == "missing":
+                        return observed.model_copy(update={"public_health": None})
+                    if failure in {"stale", "future"}:
+                        return observed.model_copy(
+                            update={
+                                "observed_at": self.provider.now
+                                + (
+                                    timedelta(minutes=5)
+                                    if failure == "future"
+                                    else -timedelta(minutes=5)
+                                )
+                            }
+                        )
+                    updates: dict[str, dict[str, object]] = {
+                        "unverified": {"verified": False},
+                        "skipped": {"status": "skipped"},
+                        "private-url": {"urls": (plan.new.private_url + "/health",)},
+                        "missing-identity": {"observed_runtime_identity": None},
+                    }
+                    return observed.model_copy(
+                        update={"public_health": health.model_copy(update=updates[failure])}
+                    )
+
+                with patch.object(self.provider, "current_route", side_effect=uncertain):
+                    with self.assertRaises(ValueError):
+                        self.run_rebuild()
+                self.assertEqual(self.store.load(self.plan).step, "switching")
+                self.assertNotIn("switch:old", self.provider.actions)
+                self.assertNotIn("publish:new", self.provider.actions)
+                self.assertNotIn("retire", self.provider.actions)
+                self.assertTrue(self.provider.old_running)
+                self.assertEqual(self.run_rebuild().step, "complete")
+
+    def test_pending_switch_is_observed_without_second_dispatch(self) -> None:
+        self.provider.pending_switch = True
+        for _ in range(2):
+            with self.assertRaises(TimeoutError):
+                self.run_rebuild()
+        self.assertEqual(self.provider.actions.count("switch:new"), 1)
+        self.assertEqual(self.store.load(self.plan).step, "switching")
+        self.assertTrue(self.provider.old_running)
+        self.provider.serving = self.plan.new
+        self.provider.pending_switch = False
+        self.assertEqual(self.run_rebuild().step, "complete")
+
+    def test_stable_address_change_is_refused_against_existing_route_observation(self) -> None:
+        self.plan = self.plan.model_copy(update={"base_url": "https://another.invalid"})
+        with self.assertRaises(ValueError):
+            self.run_rebuild()
+        self.assertFalse(self.provider.actions)
+
+    def test_retirement_refusal_has_a_proven_undispatched_recovery_path(self) -> None:
+        self.provider.refuse_stop = True
+        with self.assertRaises(PermissionError):
+            self.run_rebuild()
+        self.assertTrue(self.store.load(self.plan).retirement_started)
+        self.assertNotIn("switch:old", self.provider.actions)
+        self.provider.bad_public = True
+        result = self.run_rebuild()
+        self.assertEqual(result.step, "failed")
+        self.assertIsNotNone(result.retirement_recovery)
+        self.assertEqual(self.provider.serving, self.plan.old)
+        self.assertTrue(self.provider.old_running)
+        self.assertNotIn("retire", self.provider.actions)
+
+    def test_unknown_stop_cannot_rollback_even_if_candidate_now_unhealthy(self) -> None:
+        self.provider.lose_stop_reply = True
+        with self.assertRaises(TimeoutError):
+            self.run_rebuild()
+        self.provider.bad_public = True
+        with self.assertRaises(ValueError):
+            self.run_rebuild()
+        self.assertEqual(self.store.load(self.plan).step, "retiring")
+        self.assertNotIn("switch:old", self.provider.actions)
+        self.assertFalse(self.provider.old_running)
+
     def test_health_failure_before_old_stop_restores_old_route_and_metadata(self) -> None:
         self.provider.fail_after_publication = True
         self.assertEqual(self.run_rebuild().step, "failed")
@@ -236,6 +374,59 @@ class TestingRebuildTests(unittest.TestCase):
         self.assertEqual(self.provider.published, self.plan.old)
         self.assertTrue(self.provider.old_running)
         self.assertNotIn("retire", self.provider.actions)
+
+    def test_uncertain_publication_outcome_must_be_resolved_before_inverse_metadata(self) -> None:
+        self.provider.lose_publish_reply = True
+        with self.assertRaises(TimeoutError):
+            self.run_rebuild()
+        self.assertTrue(self.store.load(self.plan).publication_started)
+        self.provider.bad_public = True
+
+        def unresolved(
+            plan: TestingRebuildPlan, desired: TestingCopy, *, forward_started: bool
+        ) -> None:
+            self.assertTrue(forward_started)
+            raise TimeoutError("fixture original publication outcome unavailable")
+
+        with patch.object(self.provider, "publish", side_effect=unresolved):
+            with self.assertRaises(TimeoutError):
+                self.run_rebuild()
+        self.assertEqual(self.store.load(self.plan).step, "rolling_back")
+        self.assertEqual(self.provider.serving, self.plan.old)
+        self.assertEqual(self.provider.published, self.plan.new)
+        self.assertTrue(self.provider.old_running)
+        self.assertEqual(self.run_rebuild().step, "failed")
+        self.assertEqual(self.provider.publish_flags, [True, True])
+        self.assertNotIn("retire", self.provider.actions)
+
+    def test_operation_key_is_scoped_to_its_testing_lane(self) -> None:
+        first = self.run_rebuild()
+        other_context = "another-context"
+        self.plan = TestingRebuildPlan.model_validate(
+            {
+                **self.plan.model_dump(),
+                "context": other_context,
+                "old": self.plan.old.model_copy(
+                    update={
+                        "runtime_identity": self.plan.old.runtime_identity.model_copy(
+                            update={"context": other_context}
+                        )
+                    }
+                ),
+                "new": self.plan.new.model_copy(
+                    update={
+                        "runtime_identity": self.plan.new.runtime_identity.model_copy(
+                            update={"context": other_context}
+                        )
+                    }
+                ),
+            }
+        )
+        self.provider = TestingProvider(self.plan)
+        second = self.run_rebuild()
+        self.assertEqual(second.step, "complete")
+        self.assertEqual(self.store.load(first.plan), first)
+        self.assertEqual(self.store.load(second.plan), second)
 
     def test_a_second_rebuild_reuses_the_same_address_and_route(self) -> None:
         first = self.run_rebuild()
@@ -260,11 +451,11 @@ class TestingRebuildTests(unittest.TestCase):
                 "new": next_copy,
             }
         )
-        self.provider = TestingProvider(self.plan)
+        self.provider.old_running = True
         second = self.run_rebuild()
         self.assertEqual(second.step, "complete")
-        self.assertEqual(first.plan.base_url, second.plan.base_url)
-        self.assertEqual(first.plan.route_id, second.plan.route_id)
+        self.assertEqual(self.store.load(first.plan), first)
+        self.assertEqual(execute_testing_rebuild(first.plan, self.store, self.provider), first)
         self.assertEqual(self.provider.serving, next_copy)
 
     def test_lost_publication_reply_then_bad_health_restores_both_original_authorities(
@@ -284,7 +475,7 @@ class TestingRebuildTests(unittest.TestCase):
         self.provider.lose_switch_reply = True
         with self.assertRaises(TimeoutError):
             self.run_rebuild()
-        self.assertEqual(self.store.load(self.plan.operation_id).step, "switching")
+        self.assertEqual(self.store.load(self.plan).step, "switching")
         self.assertTrue(self.provider.old_running)
         self.records = PostgresRecordStore(database_url=self.database_url)
         self.store = RecordTestingRebuildStore(self.records)
@@ -296,7 +487,7 @@ class TestingRebuildTests(unittest.TestCase):
         self.provider.lose_publish_reply = True
         with self.assertRaises(TimeoutError):
             self.run_rebuild()
-        self.assertEqual(self.store.load(self.plan.operation_id).step, "publishing")
+        self.assertEqual(self.store.load(self.plan).step, "publishing")
         self.assertTrue(self.provider.old_running)
         self.assertEqual(self.run_rebuild().step, "complete")
         self.assertEqual(self.provider.actions.count("prepare"), 1)
@@ -306,7 +497,7 @@ class TestingRebuildTests(unittest.TestCase):
         self.provider.deny_retirement = True
         with self.assertRaisesRegex(PermissionError, "authorization_denied"):
             self.run_rebuild()
-        self.assertEqual(self.store.load(self.plan.operation_id).step, "retiring")
+        self.assertEqual(self.store.load(self.plan).step, "retiring")
         self.assertTrue(self.provider.old_running)
         self.assertNotIn("retire", self.provider.actions)
         self.assertNotIn("switch:old", self.provider.actions)
@@ -321,11 +512,11 @@ class TestingRebuildTests(unittest.TestCase):
         self.provider.fail_readiness = True
         with self.assertRaises(ValueError):
             self.run_rebuild()
-        original = self.store.load(self.plan.operation_id)
+        original = self.store.load(self.plan)
         self.plan = self.plan.model_copy(update={"base_url": "https://different.invalid"})
         with self.assertRaises(ValueError):
             self.run_rebuild()
-        self.assertEqual(self.store.load(self.plan.operation_id), original)
+        self.assertEqual(self.store.load(self.plan), original)
         with self.assertRaises(ValueError):
             self.store.save(original.model_copy(update={"plan": self.plan}))
 

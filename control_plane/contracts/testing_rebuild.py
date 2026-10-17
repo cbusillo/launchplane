@@ -128,10 +128,23 @@ class TestingRebuildRecord(FrozenRecord):
     readiness: TestingCopyReadiness | None = None
     route: TestingRouteObservation | None = None
     retirement_started: bool = False
+    publication_started: bool = False
+    rollback_started: bool = False
+    retirement_recovery: TestingCopyReadiness | None = None
     error: Literal["", "candidate_public_health_failed"] = ""
 
     @model_validator(mode="after")
     def validate_checkpoint(self) -> Self:
+        if self.retirement_recovery is not None and (
+            not self.retirement_started
+            or (
+                self.retirement_recovery.copy_id,
+                self.retirement_recovery.host,
+                self.retirement_recovery.runtime_identity,
+            )
+            != (self.plan.old.copy_id, self.plan.host, self.plan.old.runtime_identity)
+        ):
+            raise ValueError("Retirement recovery requires proof for this operation's old copy.")
         for stamp in (self.began_at, self.updated_at, self.ended_at):
             if stamp is not None and stamp.utcoffset() is None:
                 raise ValueError("Rebuild checkpoints require timezone-aware timestamps.")
