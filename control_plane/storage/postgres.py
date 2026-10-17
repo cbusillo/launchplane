@@ -10284,11 +10284,11 @@ class PostgresRecordStore(HumanSessionStore):
             if row is not None:
                 previous = self._read_payload(model_type=DisposableLaneSafety, payload=row.payload)
                 if not collect_facts and (
-                    (previous.usage == "in_use" and record.usage == "unknown")
+                    (previous.usage == "in_use" and record.usage != "in_use")
                     or (previous.data == "only_copy" and record.data != "only_copy")
                     or (
                         previous.production_resources == "shared"
-                        and record.production_resources == "unknown"
+                        and record.production_resources != "shared"
                     )
                 ):
                     return False
