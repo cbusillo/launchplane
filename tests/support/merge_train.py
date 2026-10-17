@@ -43,6 +43,7 @@ from control_plane.merge_train import (
 )
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
+    MergeTrainGitHubTransport,
     LegacyMergeTrainEffectExecutor,
     MergeTrainGitHubError,
     MergeTrainGitHubStaleHeadError,
@@ -69,6 +70,20 @@ def planned_stack_merge_tree(parent_sha: str, child_sha: str) -> str:
     return f"tree:{parent_sha}:{child_sha}"
 
 
+class _LegacyCandidateTransport:
+    """These fixtures model original-PR plans with no generated candidate PR."""
+
+    def __init__(self, transport: object) -> None:
+        self.transport = transport
+
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
+        if method == "GET" and "/pulls?state=all&head=" in path:
+            return []
+        return cast(MergeTrainGitHubTransport, self.transport).request(
+            method=method, path=path, body=body
+        )
+
+
 class _FakeMergeTrainGitHubClient:
     land_batch_candidate_calls = 0
     cleanup_batch_candidate_ref_calls = 0
@@ -81,7 +96,7 @@ class _FakeMergeTrainGitHubClient:
         branch_refresh_recorder: object | None = None,
         branch_refresh_store: object | None = None,
     ) -> None:
-        self.transport = transport
+        self.transport: MergeTrainGitHubTransport = _LegacyCandidateTransport(transport)
         self.branch_refresh_recorder = branch_refresh_recorder
         self._branch_refresh_store = branch_refresh_store
         self._snapshot_policy = None
@@ -168,6 +183,11 @@ class _FakeMergeTrainGitHubClient:
         return candidate.model_copy(
             update={"candidate_sha": "candidate-built", "status": "ready_for_checks"}
         )
+
+    def read_candidate_check_failures(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> CandidateCheckFailures:
+        return CandidateCheckFailures(checks=())
 
     def probe_batch_entry_conflicts(
         self,

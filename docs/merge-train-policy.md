@@ -678,8 +678,12 @@ unknown evidence never counts as passing. The next fresh snapshot reconsiders
 them at their original age, without a label change. If nothing is ready, the
 controller retains its normal current-head wait or refresh action. Client
 feature grouping, stack discovery, individual-landing boundaries and batch caps
-still apply. Selected heads still require normal branch refresh, candidate
-checks and fresh landing admission. This readiness filter does not rebuild
+still apply. Selected heads still require candidate checks and fresh landing
+admission.
+Source heads stay unchanged when a merge-method candidate can land through
+its generated PR, including a candidate containing only one eligible PR.
+Original-PR landings retain their normal branch-refresh requirement. This
+readiness filter does not rebuild
 recorded active candidates or change failed-candidate recovery lineage.
 
 While Launchplane runs a release its Client accepted, the repositories that
@@ -828,9 +832,13 @@ This section documents the current GitHub adapter. Other source-control
 providers must implement the same Launchplane-owned landing contract behind a
 provider adapter.
 
-After a multi-entry candidate passes, repositories configured for `merge` use a
-Launchplane-created batch pull request whose head is that exact candidate. Its
-body identifies every constituent PR and reviewed head, and its
+After a candidate passes, repositories configured for `merge` use a
+Launchplane-created batch pull request whose head is that exact candidate,
+including when it contains only one eligible PR. No constituent branch update
+or constituent CI rerun is requested. Candidate workflows use the reserved
+`launchplane-candidate` runners as described in [testing style](style/testing.md).
+Changes requiring individual CODEOWNERS landing and the proved head-check reuse
+shortcut retain their original-PR path. The generated PR body identifies every constituent PR and reviewed head, and its
 `Owner test notes` section (the older heading every pinned CI action accepts)
 carries each constituent's own notes under a
 `### #<number> <title>` subheading, read when the batch PR is created. Headings
@@ -859,11 +867,14 @@ identity before waiting on checks, so a pending or failed check cannot hide a
 new source head. A manually closed batch PR is not automatically reopened.
 A candidate that failed on check evidence follows the recovery rules under
 `candidate_failed` below and [blocker isolation](#blocker-isolation). A closed
-multi-entry batch PR is never reopened. Every replacement receives its own
-checks and normal landing admission.
+generated batch PR is never reopened, including for a singleton. Every
+replacement receives its own checks and normal landing admission.
 
-The landing plan binds `candidate_pull_request_number` into its immutable
-digest. The controller evaluates every constituent before appending the first
+The landing-plan contract permits one or more merge-method entries with
+`candidate_pull_request_number` bound into its immutable digest. The generated
+PR must be distinct from every constituent. Fresh landing admission also refuses
+a generated-PR plan if any member now requires individual CODEOWNERS landing.
+The controller evaluates every constituent before appending the first
 admission, so an unready later member does not grow rejected-prefix records on
 every pass. Every constituent receives fresh admission against the same unchanged
 base before one SHA-guarded provider merge of the batch PR. The controller's
@@ -875,10 +886,10 @@ retries absorb brief delays within the landing pass. A successful merge response
 alone does not finish the batch. A resumed pass observes the same batch PR and reconciles
 the original admissions without issuing another merge.
 
-Single-entry candidates and existing landing plans continue to land original
-pull requests through the configured `merge_method`. Multi-entry squash and
-rebase policies retain that path; the service does not reinterpret their merge
-method to obtain ancestry-based batch completion. Before creating a landing
+Existing landing plans without a generated-PR binding, individually owned
+changes, proved head-check reuse and squash/rebase policies continue to land
+original pull requests through the configured `merge_method`; the service does
+not reinterpret their merge method to obtain ancestry-based batch completion. Before creating a landing
 plan, the controller revalidates that
 the passed candidate still matches the live eligible queue, PR head SHAs, and
 base SHA. Drift supersedes the active passed-candidate record and resumes normal
@@ -1402,14 +1413,15 @@ using `pause_train` stop after that label action; workers using
 `continue_after_blocking_pr` may continue to the next eligible pull request once
 the blocked pull request has been labeled.
 
-For service-controller batches using merge commits, two or more eligible
-entries land through a batch PR built and checked on the current base. Planning
+For service-controller candidates using merge commits, one or more eligible
+entries land through a batch PR built and checked on the current base, unless
+original-PR CODEOWNERS routing or proved head-check reuse applies. Planning
 and failed-candidate reflow therefore preserve their source heads even when
 GitHub reports them behind the base. Required checks and conflict guards still
 apply. The conflict probe re-evaluates this decision after holding out entries:
-a remaining batch preserves its heads; a lone remaining PR still refreshes.
-Direct PR landings, including single-entry candidates and squash/rebase methods,
-retain the branch-refresh requirement.
+a remaining batch or lone eligible PR preserves its heads. Direct original-PR
+landings, including CODEOWNERS changes and squash/rebase methods, retain the
+branch-refresh requirement.
 
 When the selected pull request needs a branch refresh, Launchplane updates that
 pull request using the observed head SHA as the compare point. The worker must
