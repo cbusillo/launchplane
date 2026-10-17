@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
+
+from alembic import command
+from sqlalchemy import create_engine, inspect
 
 from control_plane.storage.schema_adoption import (
     LEGACY_BASELINE_SCHEMA,
     LEGACY_CURRENT_SCHEMA,
     SchemaAdoptionError,
+    SchemaInspectorProtocol,
     verify_existing_schema_for_stamp,
 )
+from control_plane.storage.schema_invariants import EXPECTED_ALEMBIC_HEAD_REVISION
+from control_plane.storage.schema_migration import alembic_config
 
 
 class FakeInspector:
@@ -40,6 +50,35 @@ class FakeInspector:
 
     def get_pk_constraint(self, table_name: str) -> dict[str, object]:
         return {"constrained_columns": list(self.primary_keys_by_table.get(table_name, ()))}
+
+
+class LegacyWithHeadTable:
+    """A legacy database that also holds one table exactly as the migration head creates it."""
+
+    def __init__(
+        self,
+        legacy: SchemaInspectorProtocol,
+        head: SchemaInspectorProtocol,
+        head_table: str,
+    ) -> None:
+        self.legacy = legacy
+        self.head = head
+        self.head_table = head_table
+
+    def _source(self, table_name: str) -> SchemaInspectorProtocol:
+        return self.head if table_name == self.head_table else self.legacy
+
+    def get_table_names(self) -> list[str]:
+        return [*self.legacy.get_table_names(), self.head_table]
+
+    def get_columns(self, table_name: str) -> Sequence[Mapping[str, object]]:
+        return self._source(table_name).get_columns(table_name)
+
+    def get_indexes(self, table_name: str) -> Sequence[Mapping[str, object]]:
+        return self._source(table_name).get_indexes(table_name)
+
+    def get_pk_constraint(self, table_name: str) -> Mapping[str, object]:
+        return self._source(table_name).get_pk_constraint(table_name)
 
 
 class SchemaAdoptionTests(unittest.TestCase):
@@ -134,6 +173,32 @@ class SchemaAdoptionTests(unittest.TestCase):
                 inspector=inspector,
                 expected_schema=LEGACY_BASELINE_SCHEMA,
             )
+
+    def test_rejects_every_table_the_migration_head_creates_after_adoption(self) -> None:
+        with TemporaryDirectory() as directory:
+            database_url = f"sqlite+pysqlite:///{Path(directory) / 'head.sqlite3'}"
+            command.upgrade(alembic_config(database_url), EXPECTED_ALEMBIC_HEAD_REVISION)
+            engine = create_engine(database_url)
+            try:
+                head = cast(SchemaInspectorProtocol, inspect(engine))
+                later_tables = sorted(
+                    set(head.get_table_names()) - set(LEGACY_CURRENT_SCHEMA) - {"alembic_version"}
+                )
+                self.assertTrue(later_tables)
+                legacy = FakeInspector(
+                    {name: set(columns) for name, columns in LEGACY_CURRENT_SCHEMA.items()}
+                )
+                for table_name in later_tables:
+                    with (
+                        self.subTest(table=table_name),
+                        self.assertRaisesRegex(SchemaAdoptionError, table_name),
+                    ):
+                        verify_existing_schema_for_stamp(
+                            inspector=LegacyWithHeadTable(legacy, head, table_name),
+                            expected_schema=LEGACY_CURRENT_SCHEMA,
+                        )
+            finally:
+                engine.dispose()
 
     def test_ignores_tables_not_owned_by_launchplane_orm(self) -> None:
         columns_by_table = self._baseline_columns_by_table()

@@ -134,7 +134,38 @@ LEGACY_CURRENT_SCHEMA: dict[str, frozenset[str]] = {
     ),
 }
 
-LEGACY_KNOWN_LATER_TABLES = frozenset(Base.metadata.tables) - frozenset(LEGACY_CURRENT_SCHEMA)
+# Retired tables the migration history still creates after their models were
+# deleted. Remove a name only when a migration drops its table.
+MIGRATED_TABLES_WITHOUT_MODELS = frozenset(
+    {
+        "launchplane_authorization_bootstrap",
+        "launchplane_authorization_recovery_audits",
+        "launchplane_authorization_recovery_challenges",
+        "launchplane_authorization_recovery_keys",
+        "launchplane_ordinary_agent_candidate_check_observations",
+        "launchplane_ordinary_agent_credential_custody",
+        "launchplane_ordinary_agent_effect_completions",
+        "launchplane_ordinary_agent_effect_reconciliations",
+        "launchplane_ordinary_agent_job_claims",
+        "launchplane_ordinary_agent_landing_bindings",
+        "launchplane_ordinary_agent_landing_preparations",
+        "launchplane_ordinary_agent_lifecycle_audits",
+        "launchplane_ordinary_agent_no_op_landing_finalizations",
+        "launchplane_ordinary_agent_provider_waits",
+        "launchplane_ordinary_agent_read_attempts",
+        "launchplane_ordinary_agent_read_custody",
+        "launchplane_ordinary_agent_read_outcomes",
+        "launchplane_ordinary_agent_semantic_dispatches",
+        "launchplane_ordinary_agent_semantic_outcomes",
+        "launchplane_ordinary_agent_session_operations",
+        "launchplane_product_owner_requirement_authority_migrations",
+        "launchplane_provider_delivery_inspections",
+    }
+)
+
+LEGACY_KNOWN_LATER_TABLES = (
+    frozenset(Base.metadata.tables) | MIGRATED_TABLES_WITHOUT_MODELS
+) - frozenset(LEGACY_CURRENT_SCHEMA)
 
 
 class SchemaAdoptionError(RuntimeError):
