@@ -1658,7 +1658,7 @@ def reconcile_preview_target(
             and error.code.startswith("preview_cleanup_")
         ):
             plan.update(action="wait", held=True, reason=error.code)
-            return ReconcileOutcome(plan, error=str(error))
+            return ReconcileOutcome(plan)
         if plan["action"] != "destroy" or (
             isinstance(error, ProductReconcileError) and error.code == "preview_lease_lost"
         ):
@@ -1719,6 +1719,7 @@ def _preview_cleanup_guard(
             product=profile.product,
             context=profile.preview.context,
             instance=instance,
+            preview_cleanup=True,
         )
     except DisposableLaneSafetyUnknown as error:
         raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error

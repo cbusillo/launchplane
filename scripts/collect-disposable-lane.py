@@ -19,7 +19,7 @@ from control_plane.odoo_testing_usage import ODOO_USAGE_REASON_CODES
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("inspect", "collect"))
+    parser.add_argument("mode", choices=("inspect", "collect", "record", "clear"))
     parser.add_argument("--operator-helper", type=Path, required=True)
     parser.add_argument("--config")
     parser.add_argument("--env-config")
@@ -27,7 +27,20 @@ def main() -> int:
     for field in ("product", "context", "instance"):
         parser.add_argument(f"--{field}", required=True)
     parser.add_argument("--preview-id", default="")
+    parser.add_argument("--usage", choices=("unknown", "unused", "in_use"), default="unknown")
+    parser.add_argument(
+        "--data", choices=("unknown", "reproducible", "only_copy"), default="unknown"
+    )
+    parser.add_argument(
+        "--production-resources",
+        choices=("unknown", "isolated", "shared", "separation_ready"),
+        default="unknown",
+    )
+    for field in ("usage", "data", "isolation"):
+        parser.add_argument(f"--{field}-evidence", default="")
     args = parser.parse_args()
+    if args.mode == "record" and not args.preview_id:
+        parser.error("Recording cleanup facts requires an exact preview ID.")
     helper = args.operator_helper.expanduser().resolve(strict=True)
     if helper.name != "launchplane-write-action.py":
         parser.error("Select the installed Launchplane operator helper.")
@@ -37,6 +50,7 @@ def main() -> int:
     if not settings["token"]:
         parser.error("The existing local operator credential is not configured.")
     payload = DisposableLaneObservationRequest(
+        mode="clear" if args.mode == "clear" else "inspect",
         product=args.product,
         context=args.context,
         instance=args.instance,
@@ -50,12 +64,43 @@ def main() -> int:
             body=payload.model_dump(mode="json"),
             timeout=30,
         )
+        if args.mode == "clear":
+            if (
+                response["result"]["mode"] != "clear"
+                or response["result"]["provider_mutation"] is not False
+            ):
+                raise ValueError("The observation clear did not settle as requested.")
+            print(
+                json.dumps(
+                    {
+                        "mode": "clear",
+                        "trace_id": transport["public_trace_id"](response["trace_id"]),
+                    }
+                )
+            )
+            return 0
         if response["result"]["mode"] != "inspect":
             raise ValueError("The inspection did not settle as requested.")
-        if args.mode == "collect":
+        if args.mode in {"collect", "record"}:
             digest = response["result"]["binding_sha256"]
             payload = DisposableLaneObservationRequest(
-                **{**payload.model_dump(), "mode": "collect", "expected_binding_sha256": digest}
+                **{
+                    **payload.model_dump(),
+                    "mode": args.mode,
+                    "expected_binding_sha256": digest,
+                    **(
+                        {
+                            "usage": args.usage,
+                            "data": args.data,
+                            "production_resources": args.production_resources,
+                            "usage_evidence": args.usage_evidence,
+                            "data_evidence": args.data_evidence,
+                            "isolation_evidence": args.isolation_evidence,
+                        }
+                        if args.mode == "record"
+                        else {}
+                    ),
+                }
             )
             response = transport["request_launchplane"](
                 service_url=settings["service_url"],
@@ -67,7 +112,7 @@ def main() -> int:
         result = response["result"]
         if result["mode"] != args.mode:
             raise ValueError("The collection did not settle as requested.")
-        if args.mode == "collect" and (
+        if args.mode in {"collect", "record"} and (
             result["binding_sha256"] != payload.expected_binding_sha256
             or result["provider_mutation"] is not False
         ):
@@ -106,9 +151,13 @@ def main() -> int:
             historical_usage_retained and facts["usage"] != "in_use"
         ):
             raise ValueError("Invalid retained usage evidence.")
-        if facts["usage"] == "unused" and any(
-            value is not (None if reason_code == "never_served" else False)
-            for value in usage_facts.values()
+        if (
+            args.mode == "collect"
+            and facts["usage"] == "unused"
+            and any(
+                value is not (None if reason_code == "never_served" else False)
+                for value in usage_facts.values()
+            )
         ):
             raise ValueError("Unused requires complete Odoo usage evidence.")
         qualification = result.get(

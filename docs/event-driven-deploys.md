@@ -253,16 +253,23 @@ reservation. The webhook request never waits on a deploy.
     unused, reproducible data and isolated resources. Missing, stale or changed
     observations retain the preview, as do staff-testing holds and only-copy
     data; the reconcile names the condition holding cleanup. The existing
-    disposable-lane observation service supplies those facts, without a new
-    recovery endpoint or access grant.
+    disposable-lane observation service and client supply cleanup-only facts and
+    wake normal reconciliation, without a new recovery endpoint or access grant.
+    Safety holds do not spend failed-reconcile feedback budgets.
     A qualified destroy may supersede a missing-original-intent reservation
     under the same target execution lock, expired-lease grace and exact-record
     compare-and-swap. It records the earlier operation as superseded, never as
-    successful. Current provider work must be quiescent; a provider-absent
+    successful. An existing target's provider work must be quiescent; a provider-absent
     target is checked against complete stable compose inventories, name search
     and domain reads. A 404 or a successful deletion response alone is
     insufficient. The normal destroy then persists the destroyed lifecycle;
     the durable runner verifies its current record before reporting success.
+    Missing-intent disposal does not claim that historical server-side jobs
+    completed: it discards unused, reproducible, isolated preview output and
+    supersedes the old result as a failure. Retained original schedule proof is
+    still required when observing or superseding an available original request.
+    Missing recorded serving identity or incomplete provider evidence remains
+    an explicit hold; do not reconstruct that identity from a 404.
     The first qualified cleanup has its own bounded retry budget. Reopened PRs,
     active executors and unknown provider outcomes remain protected. No
     production or whole-product retirement is authorized by this behavior.

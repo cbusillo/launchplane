@@ -143,6 +143,7 @@ def require_disposable_lane(
     retirement: bool = False,
     separation_only: bool = False,
     preview_refresh: bool = False,
+    preview_cleanup: bool = False,
     preview: PreviewRecord | None = None,
     now: datetime | None = None,
     testing_hold_actor: str = "",
@@ -224,6 +225,14 @@ def require_disposable_lane(
             }
         )
     evidence = store.read_disposable_lane_safety(product, context, instance)
+    if (
+        evidence is not None
+        and evidence.observer_kind == "director_agent_preview_cleanup"
+        and not (preview_cleanup or preview_refresh or retirement)
+    ):
+        raise DisposableLaneSafetyUnknown(
+            "Preview cleanup observations do not qualify other lane mutations."
+        )
     usage = evaluate_lane_usage(
         usage_store if usage_store is not None else store,
         profile=profile,

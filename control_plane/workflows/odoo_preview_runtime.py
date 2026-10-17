@@ -1465,10 +1465,15 @@ def _destroyed_preview_absence_verified(
         query={"q": plan.compose_name, "limit": 25},
     )
     if isinstance(searched, dict):
+        total = searched.get("total", searched.get("total_count"))
         wrappers = [
             searched[key] for key in ("composes", "items", "results", "data") if key in searched
         ]
         searched = wrappers[0] if len(wrappers) == 1 else None
+        if total is not None and (
+            type(total) is not int or not isinstance(searched, list) or total != len(searched)
+        ):
+            return False
     if (
         not isinstance(searched, list)
         or len(searched) >= 25

@@ -204,7 +204,13 @@ The bounded service API `POST /v1/disposable-lanes/observations` accepts only th
 authenticated Director agent. `inspect` returns the binding digest and unknown
 facts, without provider actions. `record` requires that digest and records the
 authenticated actor and current time itself. For an exact owned preview it
-records the Director agent's observed usage, data custody and isolation facts,
+records the Director agent's observed usage, data custody and isolation facts
+as cleanup-only observations. They cannot qualify runtime sync, deploy or other
+ordinary preview mutations. Preview refresh and retirement still read protective
+reports under their existing rules. Recording wakes normal preview reconciliation.
+The existing client supports `record` with `--preview-id`, `--usage`, `--data`,
+`--production-resources` and the `--usage-evidence`, `--data-evidence`,
+`--isolation-evidence` references. Each observation remains bound
 with required evidence references, the current binding and the existing expiry.
 Unknown facts stay unknown. Existing protected reports cannot be overwritten by
 an unverified safe assertion. This supplies scheduled preview cleanup's facts
@@ -214,7 +220,11 @@ stores usage, custody and isolation as `unknown`, even if the request asserts
 `unused`, `reproducible` or `isolated`. Those assertions never permit an apply.
 `clear` removes this product's exact-scope observation, including stale preview
 observations; it changes no staff hold, custody inventory, provider resource or
-historical operation. Missing observations continue to refuse writes requiring positive facts. The
+historical operation. Clear a protective report only after resolving its source:
+the person has stopped using the lane, the needed copy is preserved, or resource
+separation is complete. Then record fresh facts and references. A safe assertion
+cannot silently overwrite an in-use, only-copy or shared report.
+Missing observations continue to refuse writes requiring positive facts. The
 generic profile-write API retains its original payload and behavior; it cannot
 write these separate records. This change grants no profile-write access.
 An absent preview can be inspected and

@@ -273,7 +273,8 @@ rule rather than requiring positive `unused` or `reproducible` observations that
 no automatic preview collector produces. This does not publish either fact.
 Scheduled closed-preview cleanup uses the existing disposable observation API:
 the authenticated Director agent records its current facts for the exact owned
-preview, with evidence and binding checks. Unknown facts hold cleanup. Testing
+preview, with evidence and binding checks. These observations qualify cleanup
+only; they cannot admit runtime sync or another preview mutation. Unknown facts hold cleanup. Testing
 observations retain their separate service-collector requirement. Same-key
 observation and lifecycle finalization remain available after evidence expires.
 An active, unique service

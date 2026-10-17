@@ -18,6 +18,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         self,
         *,
         collection_mode: str = "collect",
+        command_mode: str = "collect",
         private_fact: bool = False,
         truncated: bool = False,
         provider_mutation: bool = False,
@@ -39,6 +40,7 @@ class DisposableLaneClientTests(unittest.TestCase):
         }
         collected_result: dict[str, object] = {
             "mode": collection_mode,
+            "observer_kind": "director_agent_preview_cleanup",
             "source_coverage": disposable_collection_coverage(),
             "binding_sha256": binding_sha256,
             "provider_mutation": provider_mutation,
@@ -64,6 +66,13 @@ class DisposableLaneClientTests(unittest.TestCase):
         request = Mock(
             side_effect=[inspected, http.client.IncompleteRead(b"", 1) if truncated else collected]
         )
+        if command_mode == "clear":
+            request.side_effect = [
+                {
+                    "trace_id": "fixture-trace",
+                    "result": {"mode": "clear", "provider_mutation": False},
+                }
+            ]
         transport = {
             "resolve_settings": lambda args: {
                 "service_url": "https://service.invalid",
@@ -78,7 +87,7 @@ class DisposableLaneClientTests(unittest.TestCase):
             helper.touch()
             arguments = [
                 "collect-disposable-lane.py",
-                "collect",
+                command_mode,
                 "--operator-helper",
                 str(helper),
                 "--product",
@@ -88,6 +97,23 @@ class DisposableLaneClientTests(unittest.TestCase):
                 "--instance",
                 "testing",
             ]
+            if command_mode == "record":
+                arguments += [
+                    "--preview-id",
+                    "fixture-preview",
+                    "--usage",
+                    usage,
+                    "--data",
+                    data,
+                    "--production-resources",
+                    production_resources,
+                    "--usage-evidence",
+                    "private-evidence",
+                    "--data-evidence",
+                    "private-evidence",
+                    "--isolation-evidence",
+                    "private-evidence",
+                ]
             output = io.StringIO()
             with (
                 patch("sys.argv", arguments),
@@ -96,6 +122,28 @@ class DisposableLaneClientTests(unittest.TestCase):
             ):
                 status = client["main"]()
             return status, output.getvalue(), request
+
+    def test_record_binds_preview_facts_to_the_inspection_without_printing_references(self) -> None:
+        status, output, request = self.call_client(
+            command_mode="record",
+            collection_mode="record",
+            usage="unused",
+            data="reproducible",
+            production_resources="isolated",
+        )
+        self.assertEqual(status, 0, output)
+        body = request.call_args.kwargs["body"]
+        self.assertEqual(body["mode"], "record")
+        self.assertTrue(body["expected_binding_sha256"])
+        self.assertEqual(body["usage"], "unused")
+        self.assertTrue(body["preview_id"])
+        self.assertNotIn("private-evidence", output)
+
+    def test_clear_uses_the_existing_evidence_only_service_operation(self) -> None:
+        status, output, request = self.call_client(command_mode="clear")
+        self.assertEqual(status, 0, output)
+        request.assert_called_once()
+        self.assertEqual(request.call_args.kwargs["body"]["mode"], "clear")
 
     def test_qualified_resource_facts_are_reported_without_private_evidence(self) -> None:
         for data, resources in (("reproducible", "isolated"), ("only_copy", "shared")):
