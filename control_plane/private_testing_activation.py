@@ -272,6 +272,12 @@ class PrivateTestingActivationAdapter:
                 raise PrivateTestingTransportRefused(
                     "Removal cannot overwrite changed or foreign source."
                 )
+        if request.operation in {"remove", "refresh"} and any(
+            name not in installed["request"] for name in PrivateTestingTransportIntent.model_fields
+        ):
+            raise PrivateTestingTransportRefused(
+                "Legacy transport requires separate source recovery."
+            )
         if request.operation == "remove":
             fields = (
                 *PrivateTestingTransportIntent.model_fields,

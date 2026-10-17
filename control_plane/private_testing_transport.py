@@ -5,7 +5,7 @@ changes Compose, creates an endpoint record, or deploys a workload.
 """
 
 from copy import deepcopy
-from ipaddress import IPv4Address
+from ipaddress import IPv4Address, ip_address
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
@@ -47,6 +47,13 @@ class PrivateTestingTransportIntent(BaseModel):
         if private_url_error(value):
             raise ValueError("Edge endpoint must allow only private destinations.")
         parsed = urlsplit(value)
+        try:
+            address = ip_address(parsed.hostname or "")
+        except ValueError:
+            pass  # DNS authorities are validated at probe time.
+        else:
+            if not is_rfc1918_address(address):
+                raise ValueError("New edge plans require RFC1918 literal destinations.")
         if parsed.scheme != "https" or parsed.path != "/health" or parsed.query or parsed.fragment:
             raise ValueError("Edge endpoint requires HTTPS /health without query or fragment.")
         return value

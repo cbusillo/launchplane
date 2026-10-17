@@ -27,7 +27,10 @@ from control_plane.private_testing_activation import (
     PrivateTestingActivationAdapter,
     PrivateTestingActivationRequest,
 )
-from control_plane.private_testing_transport import transport_overlay
+from control_plane.private_testing_transport import (
+    transport_overlay,
+    PrivateTestingTransportRefused,
+)
 from control_plane.provider_operations import run_durable_provider_operation
 from control_plane.service_auth import BearerIdentityConfig, LaunchplaneAuthzPolicy
 from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifact
@@ -532,8 +535,12 @@ class PrivateTestingActivationTests(unittest.TestCase):
         legacy = deepcopy(plan.intent)
         del legacy["request"]["endpoint_url"]
         with patch.object(self.store, "read_original_mutation_intent", return_value=legacy):
-            with self.assertRaises(ValueError):
-                self.prepare(operation="remove", original_activation_key="install")
+            for operation in ("remove", "refresh"):
+                with (
+                    self.subTest(operation=operation),
+                    self.assertRaises(PrivateTestingTransportRefused),
+                ):
+                    self.prepare(operation=operation, original_activation_key="install")
         self.assertEqual(len(self.calls), 1)
 
     def test_removal_cannot_report_foreign_transport_and_refresh_needs_fresh_review(self) -> None:

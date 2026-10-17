@@ -3,6 +3,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 import unittest
@@ -155,7 +156,9 @@ class PrivateTestingTransportTests(unittest.TestCase):
         }
         result = self.plan()
         self.assertEqual(result["endpoint_proposal"]["url"], self.payload["endpoint_url"])
-        self.assertEqual(result["server_url"], "wss://bridge.example.test/agent-session/connect")
+        server = urlsplit(result["server_url"])
+        self.assertEqual(server.scheme, "wss")
+        self.assertEqual(server.netloc, urlsplit(cast(str, self.payload["endpoint_url"])).netloc)
         self.assertEqual(set(result["overlay"]["services"]), {"bridge"})
         self.assertNotIn("secrets", result["overlay"])
         ports = result["overlay"]["services"][self.payload["runtime_service"]]["ports"]
@@ -264,6 +267,9 @@ class PrivateTestingTransportTests(unittest.TestCase):
             {"runtime_service": "bridge;evil"},
             {"endpoint_url": "http://bridge.example.test/health"},
             {"endpoint_url": "https://8.8.8.8/health"},
+            {"endpoint_url": "https://127.0.0.1/health"},
+            {"endpoint_url": "https://100.64.0.1/health"},
+            {"endpoint_url": "https://[fc00::1]/health"},
             {"endpoint_url": "https://bridge.example.test/admin"},
             {"endpoint_url": "https://user:password@bridge.example.test/health"},
             {"mode": "apply"},

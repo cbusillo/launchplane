@@ -201,6 +201,20 @@ class PrivateTestingTrustTests(unittest.TestCase):
                 self.url.removesuffix("/health") + "/redirect", 3, tls_ca_pem=self.ca
             )
 
+    def test_new_edge_hostname_acceptance_is_testing_only(self) -> None:
+        payload = self.endpoint.model_dump(exclude={"tls_ca_pem"})
+        self.assertEqual(PrivateHealthEndpointRecord.model_validate(payload).url, self.url)
+        with self.assertRaises(ValueError):
+            PrivateHealthEndpointRecord.model_validate({**payload, "instance": "prod"})
+        legacy = PrivateHealthEndpointRecord.model_validate(
+            {
+                **payload,
+                "instance": "prod",
+                "url": "https://odoo.internal/health",
+            }
+        )
+        self.assertEqual(legacy.instance, "prod")
+
     def test_legacy_literal_records_stay_readable_but_non_rfc1918_probes_refuse(self) -> None:
         for address in ("127.0.0.1", "100.64.0.1", "[fc00::1]", "169.254.169.254"):
             with self.subTest(address=address):

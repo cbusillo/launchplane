@@ -11,8 +11,10 @@ The product still owns its immutable runtime template and build.
 
 ## Endpoint and outbound boundary
 
-A private endpoint record accepts an HTTP(S) DNS hostname, including a name
-covered by an existing wildcard certificate. Registration validates URL syntax;
+A testing private endpoint record accepts an HTTP(S) DNS hostname, including a name
+covered by an existing wildcard certificate. Other lane instances retain the existing internal-suffix/non-public-literal
+record rule; their credential-bearing consumers do not gain new DNS authorities.
+Registration validates URL syntax;
 it does not resolve DNS or claim reachability. Existing non-public literal records remain readable, including loopback and
 tailnet addresses; this preserves record readback, not permission to connect. At every check, the private HTTP client resolves the host again and accepts
 only a nonempty answer set entirely within `10/8`, `172.16/12` or `192.168/16`.
@@ -27,7 +29,8 @@ edge certificate. The optional testing-only endpoint CA contract remains for
 other existing private endpoints, without changing process-wide trust or
 following redirects with that scoped CA.
 
-Private DNS alone does not prove private exposure. Before activation, qualify
+New edge transport plans reject non-RFC1918 literals even though legacy endpoint
+records remain readable. Private DNS alone does not prove private exposure. Before activation, qualify
 edge listener/access enforcement and **public denial**, service/client private
 reachability, normal certificate chain and hostname verification, and a
 private testing-only upstream. Restrict the upstream TCP port to the edge host
@@ -135,8 +138,10 @@ source settings, preserving environment and state. Review/apply with a distinct
 removal key, read back, then use normal testing deployment to remove the upstream
 binding. Disable the matching edge route and endpoint/check through supported
 operations. Keep original operation receipts until rollback is no longer needed.
-Old sidecar request fields are rejected; no compatibility path creates private
-keys or restarts the deleted product TLS proxy.
+Old sidecar request fields are rejected, and refresh/remove refuse a legacy
+installation missing current transport fields. No compatibility path creates
+private keys or restarts the deleted product TLS proxy. Preserve such original
+operation evidence for separately supported source recovery; do not bypass its fence.
 
 ## Operational sequence
 
