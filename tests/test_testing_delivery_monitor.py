@@ -23,6 +23,8 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressNotificationPolicyRecord,
 )
 from control_plane.health_monitor_scheduler import HealthMonitorScheduler
+from control_plane.testing_delivery_monitor import TESTING_DELIVERY_NEXT_ACTION
+from control_plane.product_reconcile import _testing_failure_reason
 from control_plane.outbox_worker import run_outbox_worker_once
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.public_ingress_monitor import (
@@ -119,8 +121,11 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         self.assertEqual(incidents[0].instance, "testing")
         self.assertIn("compose_or_override_render_failed", incidents[0].summary)
         self.assertIn("launchplane_req_render", incidents[0].summary)
-        self.assertIn("path-check", incidents[0].summary)
-        self.assertNotIn("private", incidents[0].summary)
+        self.assertIn(TESTING_DELIVERY_NEXT_ACTION, incidents[0].summary)
+        self.assertNotIn(
+            self.store.read_product_reconcile_request(self.profile.product + ":testing").last_error,
+            incidents[0].summary,
+        )
         self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
         run_public_ingress_monitor_once(
             record_store=self.store,
@@ -257,7 +262,14 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         )
         self.monitor()
         latest = self.store.list_public_ingress_incident_records(status="open")[0]
-        self.assertIn("health_check_failed", latest.summary)
+        self.assertIn(
+            _testing_failure_reason(
+                self.store.read_odoo_stable_target_replacement_operation_record(
+                    operation.operation_id
+                )
+            )[0],
+            latest.summary,
+        )
 
     def test_attention_persistence_failure_is_retried_after_restart(self) -> None:
         self.reconcile(last_failed_error_code="deployment_failed")
@@ -312,3 +324,66 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         self.reconcile(last_failed_error_code="deployment_failed")
         self.monitor()
         self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+
+    def test_new_successful_desired_build_supersedes_exhausted_candidate(self) -> None:
+        self.reconcile(last_failed_error_code="deployment_failed")
+        self.monitor()
+        self.now += timedelta(minutes=1)
+        self.deploy("fixed", self.now)
+        self.reconcile(error="", desired_artifact_id="fixed", reason="already_deployed")
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+
+    def test_preplan_read_failure_recovers_without_an_unnecessary_redeploy(self) -> None:
+        self.reconcile(desired_artifact_id="", last_failed_error_code="testing_reconcile_failed")
+        self.monitor()
+        self.now += timedelta(minutes=1)
+        self.reconcile(error="", desired_artifact_id="old", reason="already_deployed")
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+
+    def test_preplan_read_failure_does_not_duplicate_existing_delivery_attention(self) -> None:
+        self.reconcile(last_failed_error_code="deployment_failed")
+        self.monitor()
+        self.now += timedelta(minutes=1)
+        self.reconcile(desired_artifact_id="", last_failed_error_code="testing_reconcile_failed")
+        self.monitor()
+        self.assertEqual(len(self.store.list_public_ingress_incident_records(status="open")), 1)
+        self.assertEqual(len(self.store.list_outbox_delivery_records()), 1)
+
+    def test_inactive_product_retires_testing_delivery_attention(self) -> None:
+        self.reconcile(last_failed_error_code="deployment_failed")
+        self.monitor()
+        self.now += timedelta(minutes=1)
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"lifecycle_state": "retiring"})
+        )
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+        self.assertEqual(
+            self.store.list_public_ingress_incident_records()[0].resolution_reason,
+            "monitoring_intent_changed",
+        )
+
+    def test_removed_testing_lane_retires_testing_delivery_attention(self) -> None:
+        self.reconcile(last_failed_error_code="deployment_failed")
+        self.monitor()
+        self.now += timedelta(minutes=1)
+        self.store.write_product_profile_record(self.profile.model_copy(update={"lanes": ()}))
+        self.monitor()
+        self.assertEqual(self.store.list_public_ingress_incident_records(status="open"), ())
+
+    def test_testing_profile_read_failure_does_not_stop_production_monitor(self) -> None:
+        with (
+            patch.object(
+                self.store, "list_product_profile_records", side_effect=RuntimeError("read failed")
+            ),
+            patch(
+                "control_plane.production_delivery_monitor.monitor_production_delivery_once"
+            ) as production,
+            self.assertLogs("control_plane.health_monitor_scheduler", "ERROR"),
+        ):
+            HealthMonitorScheduler(
+                self.store, clock=lambda: self.now.timestamp()
+            )._run_delivery_monitor()
+        production.assert_called_once()

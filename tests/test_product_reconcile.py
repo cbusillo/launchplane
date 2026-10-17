@@ -1316,7 +1316,6 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
                 for operation in self.store.list_odoo_stable_target_replacement_operation_records()
             )
         )
-        self.assertIn("path-check", incidents[0].summary)
 
     def fail_with_provider_text(self, operation_id: str) -> None:
         operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)

@@ -305,7 +305,7 @@ def _observe(
                 "targets": (
                     PublicIngressTargetObservation(
                         target="monitoring_intent",
-                        url="monitoring-intent://production-delivery",
+                        url=f"monitoring-intent://{delivery_kind}-delivery",
                         status="skipped",
                         failure_code="monitoring_intent_changed",
                         summary=summary,

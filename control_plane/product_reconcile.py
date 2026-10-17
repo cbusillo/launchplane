@@ -2478,7 +2478,7 @@ def run_product_reconcile_once(
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
         failed_plan: dict[str, object] = {"target": request.target_kind}
         if request.target_kind == "testing":
-            trace_id = f"launchplane-reconcile-{uuid4().hex}"
+            trace_id = f"{RECONCILE_SOURCE}-{uuid4().hex}"
             failed_plan.update(
                 last_failed_error_code=getattr(error, "code", "") or "testing_reconcile_failed",
                 failure_trace_id=trace_id,

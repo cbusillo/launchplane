@@ -1945,9 +1945,14 @@ outbox retry/deduplication apply. A policy limited to HTTP checks does not match
 Staff holds and the retained-database credential guard remain quiet; the latter
 is a correct protective refusal, not an outage. Delivery attention
 never rewrites runtime health or gates merge, deploy, promotion or acceptance.
-Only a later successful deployment of the matching candidate on the same testing
-lane resolves it; passing old-build health, another candidate or production
-success cannot do so. Notification persistence trouble is logged and retried by
+A later successful deployment of the lane's current desired candidate resolves
+its earlier delivery attention, including an exhausted candidate superseded by
+a newer verified build. An unrelated build, production success or passing
+old-build health cannot do so. A pre-plan source-read incident also resolves
+when a later successful reconciliation confirms the desired build is already
+deployed; it needs no unnecessary redeploy. A pre-plan read blip adds no second
+incident to a lane that already has delivery attention. Product deactivation or
+removal of the testing lane retires its delivery attention explicitly. Notification persistence trouble is logged and retried by
 the monitor without failing reconciliation. This is delivery evidence, not a
 claim that a notification reached a person; inspect the notification receipts.
 

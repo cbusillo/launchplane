@@ -19,6 +19,10 @@ from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 TESTING_DELIVERY_CHECK_PREFIX = "testing-delivery-"
+TESTING_DELIVERY_NEXT_ACTION = (
+    "Inspect the testing path-check and reconcile request; "
+    "use the supported testing retry after fixing the failed step."
+)
 _LOGGER = logging.getLogger(__name__)
 
 
@@ -32,9 +36,12 @@ def monitor_testing_delivery_once(
     for profile in store.list_product_profile_records():
         if should_stop():
             return
-        if not profile.is_active:
-            continue
         try:
+            _retire_attention(store, profile, observed_at or utc_now_timestamp())
+            if not profile.is_active or not any(
+                lane.instance == "testing" for lane in profile.lanes
+            ):
+                continue
             request = store.read_product_reconcile_request(
                 product_reconcile_target_key(
                     product=profile.product, target_kind="testing", pull_request_number=None
@@ -46,6 +53,29 @@ def monitor_testing_delivery_once(
             _LOGGER.exception("Could not read testing delivery evidence for %s", profile.product)
             continue
         record_testing_delivery_attention(store, request, observed_at=observed_at)
+
+
+def _retire_attention(
+    store: PostgresRecordStore, profile: LaunchplaneProductProfileRecord, now: str
+) -> None:
+    current_contexts = {lane.context for lane in profile.lanes if lane.instance == "testing"}
+    for incident in store.list_public_ingress_incident_records(
+        product=profile.product, instance_name="testing", status="open"
+    ):
+        if not incident.check_name.startswith(TESTING_DELIVERY_CHECK_PREFIX):
+            continue
+        if profile.is_active and incident.context in current_contexts:
+            continue
+        _observe(
+            store,
+            profile,
+            ProductLaneProfile(instance="testing", context=incident.context),
+            check_name=incident.check_name,
+            failed=False,
+            retired=True,
+            summary="Testing delivery monitoring retired by the product lifecycle or lane configuration.",
+            observed_at=now,
+        )
 
 
 def record_testing_delivery_attention(
@@ -124,8 +154,8 @@ def _record_attention(
         reason if re.fullmatch(r"[a-z][a-z0-9_.]{0,149}", reason) else "testing_reconcile_failed"
     )
     safe_trace = trace if re.fullmatch(r"[A-Za-z0-9_:\-.]{1,200}", trace) else "unavailable"
-    # Query only the intended candidate on this testing lane. Health, production,
-    # unrelated successful builds and an older success cannot claim recovery.
+    # Only a successful deployment of the current desired candidate proves delivery.
+    # It can supersede older failed candidates on this same testing lane.
     deployments = (
         store.list_deployment_records(
             context_name=lane.context,
@@ -144,11 +174,29 @@ def _record_attention(
         status="open",
     )
     recovered = False
+    unknown_check = TESTING_DELIVERY_CHECK_PREFIX + _candidate_key(request.target_key)
     for incident in existing:
-        if incident.check_name not in {
-            check_name,
-            TESTING_DELIVERY_CHECK_PREFIX + _candidate_key(request.target_key),
-        }:
+        if not incident.check_name.startswith(TESTING_DELIVERY_CHECK_PREFIX):
+            continue
+        source_read_recovered = (
+            incident.check_name == unknown_check
+            and request.state == "done"
+            and not request.last_error
+            and plan.get("reason") == "already_deployed"
+            and _time(request.updated_at) > _time(incident.opened_at)
+        )
+        if source_read_recovered:
+            _observe(
+                store,
+                profile,
+                lane,
+                check_name=incident.check_name,
+                failed=False,
+                reason=safe_reason,
+                summary="Testing reconciliation recovered and confirmed the desired build was already deployed.",
+                observed_at=now,
+            )
+            recovered = recovered or incident.check_name == check_name
             continue
         cutoff = (
             max(_time(incident.opened_at), _time(failed_at))
@@ -167,11 +215,16 @@ def _record_attention(
                 check_name=incident.check_name,
                 failed=False,
                 reason=safe_reason,
-                summary="The matching testing delivery succeeded.",
+                summary="The current desired testing delivery succeeded, superseding earlier delivery failures.",
                 observed_at=now,
             )
             recovered = recovered or incident.check_name == check_name
     if recovered or not failed:
+        return
+    if not candidate and any(
+        incident.check_name.startswith(TESTING_DELIVERY_CHECK_PREFIX) for incident in existing
+    ):
+        # A pre-plan read blip adds no second incident to an already actionable lane.
         return
     if (
         successful
@@ -188,8 +241,7 @@ def _record_attention(
         reason=safe_reason,
         summary=(
             f"Testing delivery failed at {safe_reason}; trace: {safe_trace}. "
-            "The previous runtime may still be healthy. Inspect the testing path-check "
-            "and reconcile request; use the supported testing retry after fixing the failed step."
+            "The previous runtime may still be healthy. " + TESTING_DELIVERY_NEXT_ACTION
         ),
         observed_at=now,
     )
