@@ -299,6 +299,20 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         self.assertEqual(result["candidate"]["status"], "passed")
         self.assertTrue(all(method == "GET" for method, _, _ in self.provider.requests))
 
+    def test_unbound_closed_singleton_is_not_legacy_reobservation(self) -> None:
+        self._prepare(singleton=True)
+        self.provider.checks_failed = False
+        self.provider.body = "manually edited generated PR"
+        self.provider.batch_head_sha = "different-generated-head"
+        with TemporaryDirectory() as directory:
+            result = self._reflow(
+                FilesystemRecordStore(state_dir=Path(directory)),
+                self.candidate,
+                observe_checks=True,
+            )
+        self.assertEqual(result["controller_action"], "candidate_failed")
+        self.assertTrue(all(method == "GET" for method, _, _ in self.provider.requests))
+
     def _check_passing_exact_sha_rebuilds_closed_candidate(self) -> None:
         failed_observation = self.client.observe_batch_candidate_checks(candidate=self.candidate)
         self.assertEqual(failed_observation.required_checks_status, "fail")

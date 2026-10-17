@@ -832,6 +832,15 @@ class LiveMergeAdmissionEvaluatorTests(unittest.TestCase):
                 evaluated_at="2026-08-11T03:01:00Z",
             )
         self.assertEqual(denied.exception.reason_code, "original_pull_request_landing_required")
+        from control_plane.merge_train_controller_run_once import _lineage_change_retires_landing
+
+        self.assertTrue(
+            _lineage_change_retires_landing(
+                reason_code=denied.exception.reason_code,
+                landing_record=landing_record,
+                has_stack_collapse=False,
+            )
+        )
 
     def test_an_existing_multi_pr_plan_cannot_land_an_owned_change_in_a_batch(self) -> None:
         candidate_record, landing_record, controller_state, _ = _guard_records()

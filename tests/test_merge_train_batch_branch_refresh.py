@@ -108,7 +108,9 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(_FakeMergeTrainGitHubClient, "update_pull_request_branch") as update,
             patch.object(
-                _FakeMergeTrainGitHubClient, "ensure_batch_pull_request", return_value=99
+                _FakeMergeTrainGitHubClient,
+                "ensure_batch_pull_request",
+                return_value=None if multiple else 99,
             ) as candidate_pr,
             patch(
                 "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader.read_merge_train_snapshot",
@@ -162,13 +164,14 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 mutated = await _post_merge_train_controller_run_once(app, payload)
                 if conflict == "none" and not individual:
                     actions = []
-                    for _ in range(3):
+                    for _ in range(4 if multiple else 3):
                         response = await _post_merge_train_controller_run_once(app, payload)
                         self.assertEqual(response.status_code, 202, response.text)
                         actions.append(response.json()["result"]["controller_action"])
                     self.assertEqual(
                         actions,
-                        ["build_candidate", "observe_candidate", "plan_landing"],
+                        ["build_candidate", "observe_candidate", "plan_landing"]
+                        + (["land_batch"] if multiple else []),
                     )
                     planned_landing = store.list_merge_train_batch_landing_plan_records(
                         repository=snapshot.repository, base_branch=snapshot.base_branch
@@ -176,7 +179,8 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                     self.assertTrue(planned_landing)
                     self.assertTrue(
                         all(
-                            record.landing_plan.candidate_pull_request_number == 99
+                            record.landing_plan.candidate_pull_request_number
+                            == candidate_pr.return_value
                             for record in planned_landing
                         )
                     )

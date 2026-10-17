@@ -910,8 +910,8 @@ branch, policy digest, root PR, and expected root head match the landing plan.
 Older waiting stack-collapse records stay visible as status evidence, but they
 must not block or annotate an unrelated unstacked batch landing.
 
-The protected batch PR is the auditable provider effect for a multi-entry
-merge-method batch. Each constituent outcome links through its admission and
+The protected batch PR is the auditable provider effect for a merge-method
+candidate of any size. Each constituent outcome links through its admission and
 landing-plan digest to that shared PR. Legacy partial plans are never converted
 into this mode. A member pushed after final validation is not reported as its
 new head having landed; mismatched original-PR completion requires reconciliation.
@@ -1625,7 +1625,7 @@ Controller actions have these retry/stop semantics:
   running. Stop and poll later; do not call phase endpoints. When no saved
   execution or applicable saved wait supplies an action, the controller answers
   from the whole queue, the same as for any queued pull request: a root behind its base refreshes for a direct landing
-  or keeps its head when joining a multi-PR merge batch, a root
+  or keeps its head in a generated-PR merge candidate of any size, a root
   with failed checks or conflicts reports `block`, and a root that left the
   queue lets the other ready pull requests proceed. A refreshed root still
   disposes of its stack's children when it lands. A mutating pass retires all
@@ -1691,7 +1691,7 @@ Controller actions have these retry/stop semantics:
   reread path: if one failed on check evidence and a
   re-run of the failed check at that SHA is now pending or passing, the controller
   returns `observe_candidate`, retires the failed record, and continues from the
-  re-read evidence. For a multi-entry merge batch, fresh passing required checks
+  re-read evidence. For a generated-PR merge candidate of any size, fresh passing required checks
   at its recorded SHA return `plan_candidate` with
   `reason_code: candidate_checks_recovered`, provided its service PR is exactly
   bound, closed and confirmed unmerged. The new record's `check_retry_of` points
@@ -1703,15 +1703,17 @@ Controller actions have these retry/stop semantics:
   can recover too. Its ref includes the failed record identity so generations
   cannot reuse a prior retry ref. Replaying an already recovered failure reports
   `candidate_check_retry_used` without blaming a member. Pending, missing or unreadable check evidence does
-  not authorize this retry. Dry runs report the plan without consuming a budget
+  not authorize this retry. Legacy singleton records with no visible generated-PR
+  history can still reobserve their exact SHA; edited or unbound generated history
+  cannot take that fallback. Dry runs report the plan without consuming a budget
   or changing a ref, record, PR or label. A replacement that fails real checks
   still goes through blocker isolation. The batch-body and infrastructure
   budgets remain separate. Conclusive failures enter isolation before inspecting
   generated-body changes; a changed body never spends CI on the same proven
   failing inputs. Pending, missing or unreadable failure evidence also stops
   without a body rebuild or blame. After fresh passing checks on the original
-  SHA establish recovery and its check-retry budget has been spent, a multi-entry
-  merge batch whose service PR is closed and confirmed unmerged may use its
+  SHA establish recovery and its check-retry budget has been spent, a generated-PR
+  merge candidate whose service PR is closed and confirmed unmerged may use its
   independent body budget once for the same ordered heads and base, only when
   the body Launchplane would generate now differs from that bound
   failed PR's body. The replacement uses a separate candidate ref and persists
@@ -1729,7 +1731,8 @@ Controller actions have these retry/stop semantics:
   the failure and retry budget until the wait resolves.
 - `plan_landing`: A passed candidate still matches the live eligible queue,
   recorded PR head SHAs, and base SHA and is ready for PR-native landing-plan
-  creation. Mutate once, then call again.
+  creation. An ordinary merge-method singleton uses the same generated-PR
+  binding as a larger batch; its source branch and head checks are not rerun. Mutate once, then call again.
 - `land_batch`: A landing plan with planned or in-progress merge entries is
   ready to execute or resume [PR-Native Landing](#pr-native-landing). Mutate once only after
   Director intent; call again to verify terminal state.

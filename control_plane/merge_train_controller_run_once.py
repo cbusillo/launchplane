@@ -71,6 +71,7 @@ from control_plane.merge_admission import (
 )
 from control_plane.merge_train_batch_pull_request import (
     bound_closed_batch_pull_request,
+    has_batch_pull_request,
     changed_closed_batch_body,
 )
 
@@ -1694,7 +1695,12 @@ def _lineage_change_retires_landing(
     for explicit reconciliation.
     """
     return (
-        reason_code in {"landing_lineage_changed", "head_check_reuse_unavailable"}
+        reason_code
+        in {
+            "landing_lineage_changed",
+            "head_check_reuse_unavailable",
+            "original_pull_request_landing_required",
+        }
         and landing_record.ordinary_job_binding is None
         and not has_stack_collapse
         and all(entry.status == "planned" for entry in landing_record.landing_plan.entries)
@@ -5499,7 +5505,9 @@ def _retry_closed_candidate_after_passing_checks(
     if closed is None:
         # Pre-existing singleton records may have no generated PR. Preserve
         # their exact-SHA recovery; a closed generated PR still needs a new ref.
-        if len(failed.entries) == 1:
+        if len(failed.entries) == 1 and not has_batch_pull_request(
+            client=github_client, candidate=failed
+        ):
             return _reobserve_failed_merge_train_candidate(
                 candidate_store=candidate_store,
                 active_candidate_record=active_candidate_record,

@@ -104,6 +104,13 @@ def _candidate_pull_requests(
     return [_owned_batch_pull_request(payload, candidate) for payload in pulls]
 
 
+def has_batch_pull_request(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+) -> bool:
+    """Keep unbound or edited generated history out of legacy singleton recovery."""
+    return bool(_candidate_pull_requests(client=client, candidate=candidate))
+
+
 def _owned_batch_pull_request(
     payload: object, candidate: MergeTrainBatchCandidate
 ) -> dict[str, object]:
