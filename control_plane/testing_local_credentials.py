@@ -378,3 +378,81 @@ def audit_testing_credentials(
             report.status = "unavailable"
         # No values, ciphertext, fingerprints or private exception text leave this function.
     return result
+
+
+def prepare_rehearsal_local_credentials(
+    store: TestingCredentialStore, rehearsal_id: str, *, actor: str
+) -> None:
+    """Allocate the existing local-password primitive to a rehearsal's own scope.
+
+    This writes no lane binding, existing key, integration credential or grant.
+    An incomplete or pre-existing non-generated set is retained for diagnosis.
+    """
+    import re
+    import secrets as random_secrets
+    from control_plane.odoo_testing_restore import FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+    from control_plane.product_config import _plan_product_config_secret_write
+
+    if not re.fullmatch(r"lp-rehearsal-[a-f0-9]{32}", rehearsal_id):
+        raise ValueError("Local rehearsal credentials require a service-owned identity.")
+    bindings = store.list_secret_bindings(
+        integration="runtime_environment", context_name=rehearsal_id, limit=None
+    )
+    records = store.list_secret_records(
+        integration="runtime_environment", context_name=rehearsal_id, limit=None
+    )
+    if records and not bindings:
+        raise ValueError("An incomplete rehearsal credential set retains its original custody.")
+    if bindings:
+        if (
+            len(bindings) != len(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS)
+            or {item.binding_key for item in bindings} != FRESH_TESTING_LOCAL_CREDENTIAL_KEYS
+            or any(
+                item.value_source != "generated"
+                or item.instance != "rehearsal"
+                or item.status != "configured"
+                for item in bindings
+            )
+        ):
+            raise ValueError(
+                "Existing rehearsal credentials are not an intact local generated set."
+            )
+        return
+    plans = [
+        _plan_product_config_secret_write(
+            record_store=store,
+            scope="context_instance",
+            integration="runtime_environment",
+            name=key.lower(),
+            binding_key=key,
+            plaintext_value=random_secrets.token_urlsafe(32),
+            context_name=rehearsal_id,
+            instance_name="rehearsal",
+            declared_secret_class="testing",
+            value_source="generated",
+            actor=actor,
+            source_label="service:odoo-upgrade-rehearsal",
+        )
+        for key in sorted(FRESH_TESTING_LOCAL_CREDENTIAL_KEYS)
+    ]
+    store.write_product_authority_bundle(
+        ProductAuthorityBundle(
+            secret_delivery_read_sets=(
+                SecretDeliverySetExpectation(
+                    integration="runtime_environment",
+                    context=rehearsal_id,
+                    instance="rehearsal",
+                    records=store.list_secret_records(
+                        integration="runtime_environment", context_name=rehearsal_id, limit=None
+                    ),
+                    bindings=bindings,
+                ),
+            ),
+            secret_records=tuple(item for plan in plans for item in plan["secret_records"]),
+            secret_versions=tuple(item for plan in plans for item in plan["secret_versions"]),
+            secret_bindings=tuple(item for plan in plans for item in plan["secret_bindings"]),
+            secret_audit_events=tuple(
+                item for plan in plans for item in plan["secret_audit_events"]
+            ),
+        )
+    )

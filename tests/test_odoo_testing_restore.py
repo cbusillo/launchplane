@@ -874,6 +874,12 @@ class FreshTestingHostProgramTests(unittest.TestCase):
 
 
 class TestingCopyBoundaryTests(unittest.TestCase):
+    def test_rehearsal_source_is_sanitized_without_starting_a_registry(self) -> None:
+        self.boundary_case("normal", instance="rehearsal", sanitize_only=True)
+
+    def test_rehearsal_upgrade_keeps_the_sql_and_post_hook_boundaries(self) -> None:
+        self.boundary_case("normal", instance="rehearsal", phase="resume")
+
     def test_partial_initial_restore_drops_only_its_new_copy(self) -> None:
         self.boundary_case("restore-partial")
 
@@ -892,11 +898,19 @@ class TestingCopyBoundaryTests(unittest.TestCase):
     def test_resume_rejects_a_copy_from_another_generation_without_dropping_it(self) -> None:
         self.boundary_case("foreign-witness", phase="resume")
 
-    def boundary_case(self, fault: str, *, phase: str = "fresh") -> None:
+    def boundary_case(
+        self,
+        fault: str,
+        *,
+        phase: str = "fresh",
+        instance: str = "testing",
+        sanitize_only: bool = False,
+    ) -> None:
         import logging
         import sqlite3
         from types import ModuleType, SimpleNamespace
         from control_plane.odoo_testing_restore import TESTING_COPY_RUNNER
+        from control_plane.odoo_testing_restore import rehearsal_copy_runner
         from tests.test_odoo_connection_isolation import SqliteCursor, seed
 
         events: list[str] = []
@@ -1033,7 +1047,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
             artifact.LocalServerSettings = lambda: SimpleNamespace(
                 host="database",
                 db_name="fresh",
-                platform_instance="testing",
+                platform_instance=instance,
                 db_conn=Connection(connection, writer=True),
             )
             artifact.OdooDataWorkflowRunner = NativeRunner
@@ -1044,7 +1058,7 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 patch.dict(
                     os.environ,
                     {
-                        "PLATFORM_INSTANCE": "testing",
+                        "PLATFORM_INSTANCE": instance,
                         "ODOO_KEY": "",
                         "ODOO_ADMIN_PASSWORD": "testing-password",
                         "ODOO_UPDATE_MODULES": "website",
@@ -1076,12 +1090,20 @@ class TestingCopyBoundaryTests(unittest.TestCase):
                 redirect_stdout(output),
             ):
                 if fault == "normal":
-                    exec(compile(TESTING_COPY_RUNNER, "<copy-runner>", "exec"), {})
+                    program = (
+                        rehearsal_copy_runner(sanitize_source_only=sanitize_only)
+                        if instance == "rehearsal"
+                        else TESTING_COPY_RUNNER
+                    )
+                    exec(compile(program, "<copy-runner>", "exec"), {})
                 else:
                     with self.assertRaises(RuntimeError):
                         exec(compile(TESTING_COPY_RUNNER, "<copy-runner>", "exec"), {})
             if fault == "normal":
-                self.assertIn("registry", events)
+                if sanitize_only:
+                    self.assertNotIn("registry", events)
+                else:
+                    self.assertIn("registry", events)
                 self.assertIn("testing_copy_sanitized=true", output.getvalue())
                 isolated()
             else:

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 
 
 ProviderTargetAuditStatus = Literal[
@@ -129,6 +130,32 @@ def audit_provider_targets(
         ):
             continue
         inspected_route_count += 1
+        if (
+            physical_record is not None
+            and physical_record.source_label == "service:odoo-upgrade-rehearsal"
+            and physical_record.provider_id == "dokploy"
+            and physical_record.provider_target_type == "compose"
+            and instance == "rehearsal"
+            and target_record is None
+            and target_id_record is None
+        ):
+            read_rehearsal = getattr(record_store, "read_odoo_upgrade_rehearsal", None)
+            rehearsal = read_rehearsal(context) if callable(read_rehearsal) else None
+            if (
+                isinstance(rehearsal, OdooUpgradeRehearsalRecord)
+                and rehearsal.compose_id == physical_record.target_id
+            ):
+                findings.append(
+                    _finding(
+                        context=context,
+                        instance=instance,
+                        status="complete",
+                        severity="ok",
+                        detail="independent rehearsal reservation matches its custody record",
+                        physical_record=physical_record,
+                    )
+                )
+                continue
         findings.extend(
             _audit_route(
                 context=context,

@@ -24695,6 +24695,77 @@
         "title": "OdooTestingRouteBindingRefreshEnvelope",
         "type": "object"
       },
+      "OdooUpgradeRehearsalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "prepare",
+            "enum": [
+              "prepare",
+              "execute",
+              "simulate-final",
+              "verify",
+              "retire"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "rehearsal_id": {
+            "default": "",
+            "pattern": "^(?:lp-rehearsal-[a-f0-9]{32})?$",
+            "title": "Rehearsal Id",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "source_context": {
+            "minLength": 1,
+            "title": "Source Context",
+            "type": "string"
+          },
+          "source_odoo_version": {
+            "pattern": "^[0-9]+(?:\\.[0-9]+)*$",
+            "title": "Source Odoo Version",
+            "type": "string"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/OdooTestingDrillStorageBudget"
+          },
+          "target_artifact_id": {
+            "minLength": 1,
+            "title": "Target Artifact Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_context",
+          "source_odoo_version",
+          "target_artifact_id",
+          "storage",
+          "reason"
+        ],
+        "title": "OdooUpgradeRehearsalRequest",
+        "type": "object"
+      },
       "OdooWalkthroughRequest": {
         "additionalProperties": false,
         "properties": {
@@ -91284,6 +91355,97 @@
           }
         },
         "summary": "Read persisted Odoo website bootstrap settings"
+      }
+    },
+    "/v1/products/{product}/odoo-upgrade-rehearsal": {
+      "post": {
+        "operationId": "rehearsal_v1_products__product__odoo_upgrade_rehearsal_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OdooUpgradeRehearsalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Rehearsal"
       }
     },
     "/v1/products/{product}/path-check": {
