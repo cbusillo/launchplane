@@ -473,6 +473,7 @@ from control_plane.merge_train_stack_collapse import (
     execute_merge_train_stack_collapse_run_once,
     require_merge_train_stack_collapse_plan_record_store,
 )
+from control_plane.launchplane_reconcile_authorization import TESTING_INSTANCE
 from control_plane.launchplane_self_deploy_http import (
     LAUNCHPLANE_SELF_DEPLOY_ROUTE as _LAUNCHPLANE_SELF_DEPLOY_ROUTE,
     LaunchplaneSelfDeployEnvelope,
@@ -17018,7 +17019,7 @@ def create_launchplane_fastapi_app(
             and config_profile.production_use == "live"
             # The profile's live status describes production, not its owned
             # testing lane. Target ownership and instance scope are checked above.
-            and product_config_request.instance != "testing"
+            and product_config_request.instance != TESTING_INSTANCE
             and product_config_has_undeclared_runtime_settings(
                 profile=config_profile, payload=request_payload
             )

@@ -137,8 +137,11 @@ Product-config likewise lets the authenticated Director agent plan undeclared
 non-secret settings on a Live product, including testing, production and context
 scope. The plan saves only review evidence. An owned testing lane is non-live
 even when its product is Live: existing product-config write authority may record
-its plain settings and provider-key retirements after a matching dry run. This
-records configuration without applying it to a provider. Production and
+its plain settings and provider-key retirements, or adopt plain settings from
+that lane's provider environment, after a matching dry run. Adoption reads stay
+inside the service and return only key dispositions. Credential-shaped keys
+remain refused; a request containing one cannot apply or create secret records.
+These operations record configuration without applying it to a provider. Production and
 context-wide undeclared settings still require admin authority and return
 `live_product_requires_operator` for the `local_operator` credential, even after
 a successful matching plan. Exact lane ownership, instance-only secret writes,

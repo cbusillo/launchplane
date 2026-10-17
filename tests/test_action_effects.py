@@ -72,7 +72,16 @@ class ActionEffectTests(unittest.TestCase):
             )
             identity = bearer_identity_from_token(token="director-test-token", config=config)
             assert identity is not None
-            for action, effect in ACTION_EFFECTS.items():
+            for action, allowed in (
+                ("product_profile.read", True),
+                ("product_config.plan", True),
+                ("ingress_route.audit", True),
+                ("ingress_route.apply", False),
+                ("product_config.apply", False),
+                ("dokploy_target.repair_domain_authority", False),
+                ("route_binding.apply", False),
+                ("authz_policy.manage", False),
+            ):
                 with self.subTest(transport=transport, action=action):
                     self.assertEqual(
                         policy.allows(
@@ -83,7 +92,7 @@ class ActionEffectTests(unittest.TestCase):
                             target=AuthorizationTarget(scope="instance", instances=("testing",)),
                             inherit_agent_read_role=True,
                         ),
-                        effect in {"read", "plan", "projection_sync"},
+                        allowed,
                     )
             # Metadata used by a credential-copy request is explicitly gated.
             self.assertFalse(

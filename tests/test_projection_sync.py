@@ -195,7 +195,9 @@ class ProjectionSyncTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(records[0].status, "unchanged")
                     self.assertEqual(records[0].provider_host_id, host.id)
                     self.assertEqual(records[0].edge_endpoint_key, endpoint.endpoint_key)
-                    self.assertEqual(records[0].requested_domains, ("ingress-canary.example.test",))
+                    self.assertEqual(
+                        records[0].requested_domains, tuple(cast(list[str], route["domain_names"]))
+                    )
                     self.assertTrue(all(not op.requires_apply for op in records[0].operations))
                     self.assertEqual(ingress.proxy_hosts, [host])
                 elif name == "drift-after-preflight":

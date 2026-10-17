@@ -391,6 +391,83 @@ class EnvironmentSettingsFormSiteSettingsTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
         self.assertEqual(self.store.list_secret_records(), ())
 
+    async def test_live_product_testing_adopts_only_plain_provider_settings(self) -> None:
+        profile = _profile(production_use="live")
+        self.store.write_product_profile_record(profile)
+        production = _runtime_record().model_copy(
+            update={"instance": "prod", "env": {"SITE_MODE": "production"}}
+        )
+        self.store.write_runtime_environment_record(production)
+        provider = LaneProviderEnv(
+            env={"SITE_MODE": "private-provider-value", "SERVICE_PASSWORD": "private-password"},
+            template_defaults={},
+        )
+
+        async def submit(keys: list[str], mode: str, key: str = "") -> _AsgiResponse:
+            return await _post_product_config_apply(
+                self.app,
+                {
+                    "schema_version": 2,
+                    "product": profile.product,
+                    "context": "example-site",
+                    "instance": "testing",
+                    "mode": mode,
+                    "reason": "Record only plain settings from testing's provider environment.",
+                    "runtime_env": {"adopt_provider_keys": keys},
+                },
+                authorization=_TOKEN,
+                idempotency_key=key,
+            )
+
+        before = self.store.list_runtime_environment_records()
+        with patch.object(
+            product_config_service, "read_lane_provider_env", return_value=provider
+        ) as read_provider:
+            keys = list(provider.env)
+            review = await submit(keys, "dry-run")
+            self.assertEqual(review.status_code, 202, review.text)
+            self.assertEqual(
+                {
+                    item["key"]: item["disposition"]
+                    for item in review.json()["result"]["provider_key_adoption"]
+                },
+                {"SITE_MODE": "adopted", "SERVICE_PASSWORD": "refused_credential"},
+            )
+            refused = await submit(keys, "apply", "testing-credential-adoption")
+            self.assertEqual(refused.status_code, 400, refused.text)
+            self.assertEqual(refused.json()["error"]["code"], "provider_key_adoption_refused")
+            self.assertEqual(self.store.list_runtime_environment_records(), before)
+            review_plain = await submit(["SITE_MODE"], "dry-run")
+            self.assertEqual(review_plain.status_code, 202, review_plain.text)
+            applied = await submit(["SITE_MODE"], "apply", "testing-plain-adoption")
+            self.assertEqual(applied.status_code, 202, applied.text)
+            for response in (review, refused, review_plain, applied):
+                for value in provider.env.values():
+                    self.assertNotIn(value, response.text)
+            self.assertTrue(read_provider.call_args_list)
+            for call in read_provider.call_args_list:
+                self.assertEqual(call.kwargs["product"], profile.product)
+                self.assertEqual(call.kwargs["context_name"], "example-site")
+                self.assertEqual(call.kwargs["instance_name"], "testing")
+        records = {
+            record.instance: record for record in self.store.list_runtime_environment_records()
+        }
+        self.assertEqual(records["prod"], production)
+        self.assertEqual(
+            records["testing"].env,
+            {**_runtime_record().env, "SITE_MODE": provider.env["SITE_MODE"]},
+        )
+        self.assertEqual(
+            records["testing"].retired_provider_keys, _runtime_record().retired_provider_keys
+        )
+        self.assertEqual(self.store.read_product_profile_record(profile.product), profile)
+        self.assertEqual(self.store.list_secret_records(), ())
+        self.assertEqual(self.store.list_secret_bindings(), ())
+
+    @scoped_agent_test
+    async def test_scoped_agent_testing_adoption_keeps_credential_refusals(self) -> None:
+        await self.test_live_product_testing_adopts_only_plain_provider_settings()
+
     async def test_director_live_setting_plan_does_not_authorize_apply(self) -> None:
         profile = _profile(production_use="live")
         self.store.write_product_profile_record(profile)
