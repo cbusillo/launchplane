@@ -1072,6 +1072,96 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             self.assertNotIn(value, plan.model_dump_json())
         self.assertEqual(store.deployment_records, [])
 
+    def test_plan_names_secret_settings_whose_references_disagree_with_lane_delivery(
+        self,
+    ) -> None:
+        # CM testing's shape: the override names the context binding, while the
+        # lane delivers its own exact binding for the same env key.
+        env_key = "ODOO_OVERRIDE_SECRET__CONFIG_PARAM__CM_DATA__DB__PASSWORD"
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            odoo_instance_override_record=OdooInstanceOverrideRecord(
+                context="cm",
+                instance="testing",
+                config_parameters=(
+                    OdooConfigParameterOverride(
+                        key="cm_data.db.password",
+                        value=OdooOverrideValue(
+                            source="secret_binding", secret_binding_id="context-password"
+                        ),
+                    ),
+                ),
+                updated_at="2026-10-16T12:00:00Z",
+            ),
+        )
+        store.secret_records = tuple(
+            SecretRecord(
+                secret_id=name,
+                scope="context_instance" if instance else "context",
+                integration="runtime_environment",
+                name=name,
+                context="cm",
+                instance=instance,
+                current_version_id=f"{name}-version",
+                created_at="2026-10-16T12:00:00Z",
+                updated_at="2026-10-16T12:00:00Z",
+            )
+            for instance, name in (("", "context-password"), ("testing", "lane-password"))
+        )
+        store.secret_bindings = tuple(
+            SecretBinding(
+                binding_id=record.secret_id,
+                secret_id=record.secret_id,
+                integration="runtime_environment",
+                binding_key=env_key,
+                context="cm",
+                instance=record.instance,
+                created_at="2026-10-16T12:00:00Z",
+                updated_at="2026-10-16T12:00:00Z",
+            )
+            for record in store.secret_records
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_source.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "env": "\n".join(
+                        (
+                            *_DATABASE_ENV_LINES,
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.dokploy_api.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+        ):
+            plan = build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementRequest(
+                    product=store.profile.product, instance="testing"
+                ),
+                dokploy_request=_request,
+            )
+        self.assertEqual(plan.blocker_codes, ("config_parameter_secret_reference_disagrees",))
+        self.assertEqual(
+            plan.blocker_keys, {"config_parameter_secret_reference_disagrees": (env_key,)}
+        )
+        for binding_id in ("context-password", "lane-password"):
+            self.assertNotIn(binding_id, plan.model_dump_json())
+        self.assertEqual(store.deployment_records, [])
+
     def test_apply_rechecks_provider_only_keys_after_ready_plan_before_provider_write(
         self,
     ) -> None:
