@@ -33,6 +33,17 @@ unmonitored states remain unverified. No probe or live action is initiated by
 this decision. The guard logs the durable monitor record IDs and interval;
 the drill also preserves those references in its private admission receipt.
 
+For initial Odoo generation preparation and its resource/bootstrap rechecks,
+HTTP 404 also qualifies when the same call's fixed host probe independently
+verifies the exact testing web container is stopped. Complete container
+inventories before and after must agree on identity, running state, start time,
+configuration, mounts and networks, and the provider placement must remain
+unchanged. Ambiguous services, an unavailable database, custom web commands or
+changed snapshots do not qualify. The normal two-slot, every-URL monitor rule
+still applies. A 404 alone, HTTP 401/403, a running web container, production or
+a staff hold never gains this exception. This proves present unavailability
+for repair; login/session usage remains UNKNOWN and no custody fact is supplied.
+
 These observations describe Launchplane's monitor vantage. A network, DNS or
 TLS fault in that vantage can look like a lane outage even if a person can reach
 it elsewhere. A staff-testing hold remains authoritative regardless of monitor
@@ -151,6 +162,10 @@ unreadable store as historical non-use. `web_configuration_unavailable`,
 missing read. Provider transport, ambiguous/stopped services and changed runtime
 snapshots have separate codes. All these failures leave usage UNKNOWN with null
 booleans; `complete` accompanies the qualified positive or negative read.
+`serving_container_stopped` identifies a stable, exact stopped testing web
+container. It remains UNKNOWN for usage; only the bounded repair rule above
+can combine it with current monitor evidence. It does not qualify walkthrough
+accounts, never-served history, data custody or production isolation.
 
 For a stranded runtime, deliver the diagnostics image through the normal service
 deploy and collect again through the same client, without starting, restarting or
