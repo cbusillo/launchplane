@@ -191,6 +191,68 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.assertEqual(checks[WalkthroughPrerequisite.USE], "unknown")
         self.assertEqual(checks[WalkthroughPrerequisite.ORIGIN], "clear")
 
+    def test_completed_provision_generation_does_not_require_copy_preparation(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.testing_path_check import read_testing_prerequisites
+        from tests.support.profiles import _odoo_profile_payload_with_prod_lane
+
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _odoo_profile_payload_with_prod_lane("example-odoo")
+        )
+        profile = profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"context": "example"})
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in profile.lanes
+                )
+            }
+        )
+        steps = read_testing_prerequisites(
+            intent="provision",
+            store=self.store,
+            profile=profile,
+            root=Path("/fixture"),
+            source_mode="container-export",
+            task_id=task_request().task_id,
+            operation_id=None,
+            action_allowed=lambda *args: True,
+            caller_can_provision=True,
+            caller_can_generate=False,
+        )
+        self.assertTrue(all(step.state == "clear" for step in steps))
+        self.store.read_disposable_resource_preparation.assert_not_called()
+        self.store.read_fresh_odoo_testing_generation.assert_not_called()
+
+    def test_preflight_transient_runtime_and_history_reads_remain_unknown(self) -> None:
+        from control_plane.odoo_runtime_reads import OdooRuntimeReadError
+        from control_plane.odoo_testing_drill_usage import DrillUsageUnreadable
+
+        for dependency, error, checkpoint in (
+            (
+                self.connect,
+                OdooRuntimeReadError("container_unavailable", "private host", 503),
+                WalkthroughPrerequisite.RUNTIME,
+            ),
+            (
+                self.usage,
+                DrillUsageUnreadable("private history"),
+                WalkthroughPrerequisite.PHYSICAL_COPY,
+            ),
+        ):
+            dependency.side_effect = error
+            try:
+                checks = {
+                    step: state
+                    for step, code, state in read_walkthrough_prerequisites(
+                        self.store, Path("/fixture"), "example-odoo", "example", task_request()
+                    )
+                }
+                self.assertEqual(checks[checkpoint], "unknown")
+            finally:
+                dependency.side_effect = None
+
     def test_production_foreign_context_and_origin_aliases_refuse_before_provider(self) -> None:
         with self.assertRaises(ValueError):
             plan_walkthrough(

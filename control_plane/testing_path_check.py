@@ -30,6 +30,7 @@ from control_plane.testing_initial_generation import (
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_replacement_bootstrap import (
     TestingBootstrapPrerequisiteError,
+    BootstrapPrerequisiteCode,
     require_testing_restore_policy,
     require_testing_credential_safety,
     testing_credential_omissions,
@@ -73,10 +74,10 @@ def read_testing_prerequisites(
         try:
             read()
         except TestingCredentialsOverlap:
-            state, code = "blocked", "testing_credentials_overlap"
+            state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
             description = "Generate independent testing-local passwords; an existing value equals production's."
         except TestingCredentialVersionsMissing:
-            state, code = "blocked", "testing_credential_versions_missing"
+            state, code = "blocked", BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING
             description = "Configure the missing managed local passwords before comparing testing and production."
         except TestingBootstrapPrerequisiteError as error:
             state, code = "unknown" if error.unavailable else "blocked", error.code
@@ -113,11 +114,8 @@ def read_testing_prerequisites(
             "Use an identity permitted to plan and provision this product's testing task accounts.",
             provision_authority,
         )
-        steps[-1] = (
-            steps[-1].model_copy(update={"fix": "grant"})
-            if steps[-1].state == "blocked"
-            else steps[-1]
-        )
+        if steps[-1].state == "blocked" and caller_can_provision:
+            steps[-1] = steps[-1].model_copy(update={"fix": "grant"})
     if intent != "provision":
         steps.append(
             PathCheckStep(
@@ -131,9 +129,55 @@ def read_testing_prerequisites(
             )
         )
 
+    if intent == "provision":
+        if root is None:
+            steps.append(
+                PathCheckStep(
+                    step_id="testing_provision",
+                    state="unknown",
+                    code="testing_probe_unavailable",
+                    description="The service runtime is required to inspect testing provision prerequisites.",
+                    fix="wait",
+                )
+            )
+        else:
+            request = (
+                OdooWalkthroughRequest(
+                    product=profile.product, context=context, task_id=task_id, operation="provision"
+                )
+                if task_id is not None
+                else None
+            )
+            for checkpoint, code, state in read_walkthrough_prerequisites(
+                store, root, profile.product, context, request
+            ):
+                steps.append(
+                    PathCheckStep(
+                        step_id=checkpoint.value,
+                        state=state,
+                        code=code.value,
+                        description=(
+                            "This prerequisite passed."
+                            if state == "clear"
+                            else _WALKTHROUGH_DESCRIPTIONS[code]
+                        ),
+                        fix="none"
+                        if state == "clear"
+                        else "wait"
+                        if state == "unknown"
+                        else "by_hand",
+                    )
+                )
+        if root is not None and any(
+            step.step_id == WalkthroughPrerequisite.GENERATION.value and step.state == "clear"
+            for step in steps
+        ):
+            return tuple(steps)
+    snapshot_unread = False
     try:
         generation = store.read_fresh_odoo_testing_generation(profile.product, context)
     except Exception:
+        snapshot_unread = True
         generation = None
         steps.append(
             PathCheckStep(
@@ -181,6 +225,22 @@ def read_testing_prerequisites(
         "Configure the selected production-copy source through its managed records.",
         source,
     )
+
+    if snapshot_unread:
+        steps = [
+            step.model_copy(
+                update={
+                    "state": "unknown",
+                    "code": "testing_generation_unread",
+                    "fix": "wait",
+                    "description": "The reviewed generation could not be read; its copy prerequisites remain unknown.",
+                }
+            )
+            if step.state == "clear"
+            and step.step_id in {"testing_credential_safety", "testing_restore_source"}
+            else step
+            for step in steps
+        ]
 
     def resources() -> None:
         target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
@@ -290,46 +350,30 @@ def read_testing_prerequisites(
                 root, store, profile.product, context, target, target_id
             )
 
-    check(
-        "testing_generation_use",
-        "testing_initial_usage_unverified",
-        "Verify current testing use before replacing or creating a generation; preserve staff holds.",
-        current_use,
-    )
-    if intent != "provision":
-        return tuple(steps)
-    if root is None:
+    try:
+        preparation = (
+            store.read_disposable_resource_preparation(operation_id) if operation_id else None
+        )
+    except Exception:
+        preparation = None
         steps.append(
             PathCheckStep(
-                step_id="testing_provision",
+                step_id="testing_generation_use",
                 state="unknown",
-                code="testing_probe_unavailable",
-                description="The service runtime is required to inspect testing provision prerequisites.",
+                code="testing_preparation_unread",
+                description="Retained testing use could not be selected from its preparation.",
                 fix="wait",
             )
         )
-        return tuple(steps)
-    request = (
-        OdooWalkthroughRequest(
-            product=profile.product, context=context, task_id=task_id, operation="provision"
-        )
-        if task_id is not None
-        else None
-    )
-    for checkpoint, code, state in read_walkthrough_prerequisites(
-        store, root, profile.product, context, request
+    if (
+        intent == "generation"
+        or (preparation is not None and preparation.initial_request_sha256)
+        or (intent == "provision" and preparation is None)
     ):
-        steps.append(
-            PathCheckStep(
-                step_id=checkpoint.value,
-                state=state,
-                code=code.value,
-                description=(
-                    "This prerequisite passed."
-                    if state == "clear"
-                    else _WALKTHROUGH_DESCRIPTIONS[code]
-                ),
-                fix="none" if state == "clear" else "wait" if state == "unknown" else "by_hand",
-            )
+        check(
+            "testing_generation_use",
+            "testing_initial_usage_unverified",
+            "Verify current testing use before replacing or creating a generation; preserve staff holds.",
+            current_use,
         )
     return tuple(steps)

@@ -34,6 +34,7 @@ from control_plane.dokploy.odoo_walkthrough import (
 from control_plane.dokploy import source
 from control_plane.odoo_runtime_reads import (
     OdooRuntimeConnection,
+    OdooRuntimeReadError,
     assert_selection_current,
     connect_runtime,
     select_stable_runtime,
@@ -41,6 +42,7 @@ from control_plane.odoo_runtime_reads import (
 from control_plane.odoo_testing_drill import DrillEvidenceUnavailable, require_drill_use_unprotected
 from control_plane.odoo_testing_drill_usage import (
     read_drill_recent_signins,
+    DrillUsageUnreadable,
     testing_drill_environment,
 )
 from control_plane.odoo_testing_restore import generation_binding, read_current_testing_generation
@@ -172,7 +174,9 @@ def _walkthrough_preflight(
             yield True
         except WalkthroughPrerequisiteError as error:
             checks.append((code, error.code, "blocked"))
-        except DrillEvidenceUnavailable:
+        except OdooRuntimeReadError as error:
+            checks.append((code, code, "unknown" if error.status_code >= 500 else "blocked"))
+        except (DrillEvidenceUnavailable, DrillUsageUnreadable):
             checks.append((code, code, "unknown"))
         except ValueError:
             checks.append((code, code, "blocked"))

@@ -94,6 +94,38 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["check"]["state"], "clear")
         prerequisites.assert_not_called()
+        self.assertNotIn("intent", response.json()["check"])
+
+    async def test_intent_on_promotion_is_rejected_instead_of_silently_ignored(self) -> None:
+        response = await request(
+            self.fixture.app,
+            "GET",
+            f"/v1/products/{self.fixture.profile.product}/path-check?path=promote&intent=provision",
+            headers={"Authorization": "Bearer local-operator-token"},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    async def test_unread_generation_cannot_clear_its_reviewed_copy_checks(self) -> None:
+        from types import SimpleNamespace
+
+        with (
+            patch.object(
+                self.store,
+                "read_fresh_odoo_testing_generation",
+                side_effect=RuntimeError("private row"),
+            ),
+            patch(
+                "control_plane.testing_replacement_bootstrap.native_testing_source_authority",
+                return_value=SimpleNamespace(binding_sha256="b" * 64),
+            ),
+        ):
+            response = await self.read()
+        self.assertEqual(response.status_code, 200, response.text)
+        steps = {step["step_id"]: step for step in response.json()["check"]["steps"]}
+        self.assertEqual(steps["testing_credential_safety"]["state"], "unknown")
+        self.assertEqual(steps["testing_restore_source"]["state"], "unknown")
+        self.assertEqual(steps["testing_credentials"]["state"], "blocked")
+        self.assertNotIn("private row", response.text)
 
     async def test_copy_hold_and_unreadable_source_are_not_cleared(self) -> None:
         from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
@@ -147,6 +179,7 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
                 write.assert_not_called()
         self.assertEqual(response.status_code, 200, response.text)
         check = response.json()["check"]
+        self.assertEqual(check.get("intent"), "provision")
         failures = {step["code"]: step for step in check["steps"] if step["state"] == "blocked"}
         for code in (
             WalkthroughPrerequisite.GENERATION_MISSING.value,
@@ -208,6 +241,33 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
 
 
 class TestingResourceResumePathTests(unittest.TestCase):
+    def test_stranded_replacement_does_not_require_initial_generation_use(self) -> None:
+        from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenario
+        from control_plane.testing_path_check import read_testing_prerequisites
+
+        fixture = FreshTestingBootstrapScenario()
+        fixture.seed("")
+        self.addCleanup(fixture.doCleanups)
+        with patch("control_plane.testing_initial_generation.read_odoo_testing_usage") as usage:
+            steps = read_testing_prerequisites(
+                intent="testing-replacement",
+                store=fixture.store,
+                profile=fixture.profile,
+                root=fixture.fixture.root,
+                source_mode="ssh",
+                task_id=None,
+                operation_id=fixture.request.operation_id,
+                action_allowed=lambda *args: True,
+                caller_can_provision=False,
+                caller_can_generate=True,
+            )
+        usage.assert_not_called()
+        self.assertNotIn("testing_generation_use", {step.step_id for step in steps})
+        self.assertEqual(
+            next(step for step in steps if step.step_id == "testing_resource_allocation").state,
+            "clear",
+        )
+
     def test_source_intent_must_match_qualified_initial_resources(self) -> None:
         from tests.test_testing_replacement_bootstrap import FreshTestingBootstrapScenario
         from control_plane.testing_path_check import read_testing_prerequisites

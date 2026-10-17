@@ -4322,7 +4322,9 @@ to inspect that source instead. Supply `operation_id` for the original resource
 preparation/replacement and `task_id` for the exact provision task when available.
 Unselected operation/task evidence and checks that depend on unavailable evidence
 are explicitly unknown. A missing generation does not hide a policy, resource,
-credential or current-use failure. `intent=provision` includes every copy prerequisite plus all walkthrough checks;
+credential or current-use failure. `intent=provision` checks the current generation
+and all walkthrough checkpoints; when the generation is not qualified it also
+reports copy prerequisites. A qualified generation needs no new copy preparation.
 `generation` and `testing-replacement` check copy/resource eligibility without
 requiring a task account. The default testing deploy path is unchanged. A selected
 intent is echoed in the response; ordinary reads omit that optional field. The
