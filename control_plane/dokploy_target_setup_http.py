@@ -7,7 +7,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.deploy_target import DeployedTargetReference
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.dokploy_target_adoption import (
     APPLICATION_CREATE_PATH,
@@ -27,6 +30,14 @@ from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.dokploy import api as dokploy_api
 from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy import compose as dokploy_compose
+
+
+CREATE_COMPOSE_SOURCE_LABEL = "service:dokploy-targets:setup:create-compose"
+CREATE_APPLICATION_SOURCE_LABEL = "service:dokploy-targets:setup:create-application"
+# Targets the setup route created empty; source completion and adoption relabel them.
+EMPTY_TARGET_SETUP_SOURCE_LABELS = frozenset(
+    {CREATE_COMPOSE_SOURCE_LABEL, CREATE_APPLICATION_SOURCE_LABEL}
+)
 
 
 def require_empty_testing_target_creation(
@@ -93,9 +104,11 @@ def _require_never_deployed_testing_target(
 ) -> None:
     """Allow a conventional application lane to replace only a target that never ran.
 
-    A testing lane with no successful deploy holds no data and serves nobody, so
-    replacing its target loses nothing. The caller names the exact target it
-    replaces; any other current target authority refuses.
+    Replacement needs positive evidence that nobody used the lane: Launchplane
+    created the target empty itself, no deploy passed and no artifact was ever
+    current there. An isolation-staging hold stops deploys while the caller holds
+    the target's deploy lock; a staff-testing hold means people are using it.
+    The caller names the exact target it replaces; any other authority refuses.
     """
     if any(
         record.deploy.status == "pass"
@@ -104,6 +117,14 @@ def _require_never_deployed_testing_target(
         )
     ):
         raise ValueError("First testing setup cannot replace a testing lane that has deployed.")
+    try:
+        record_store.read_environment_inventory(
+            context_name=request.context, instance_name=request.instance
+        )
+    except FileNotFoundError:
+        pass
+    else:
+        raise ValueError("First testing setup cannot replace a testing lane that has served.")
     expected = request.expected_current_provider_target
     try:
         current = record_store.read_provider_target_record(
@@ -125,6 +146,14 @@ def _require_never_deployed_testing_target(
             return
     if current is None or current.to_deployed_target_reference() != expected:
         raise ValueError("First testing setup requires the exact current testing target.")
+    target = record_store.read_dokploy_target_record(
+        context_name=request.context, instance_name=request.instance
+    )
+    if target.source_label not in EMPTY_TARGET_SETUP_SOURCE_LABELS:
+        raise ValueError("First testing setup replaces only a target Launchplane created empty.")
+    hold = target.policies.staff_testing_hold
+    if hold is None or hold.purpose != "isolation_staging":
+        raise ValueError("First testing setup replacement requires an isolation-staging hold.")
 
 
 class DokployTargetSetupEnvelope(BaseModel):
@@ -646,7 +675,8 @@ def execute_dokploy_target_setup(
             domains=request.domains,
             deploy_timeout_seconds=request.deploy_timeout_seconds,
             expected_current_provider_target=request.expected_current_provider_target,
-            source_label="service:dokploy-targets:setup:create-application",
+            source_label=CREATE_APPLICATION_SOURCE_LABEL,
+            policies=_replaced_target_policies(record_store, request),
             apply=apply_changes,
             mutate_provider=mutate_setup
             if disposable_checkpoint
@@ -685,7 +715,7 @@ def execute_dokploy_target_setup(
             domains=request.domains,
             deploy_timeout_seconds=request.deploy_timeout_seconds,
             expected_current_provider_target=request.expected_current_provider_target,
-            source_label="service:dokploy-targets:setup:create-compose",
+            source_label=CREATE_COMPOSE_SOURCE_LABEL,
             apply=apply_changes,
             mutate_provider=mutate_setup
             if disposable_checkpoint
@@ -743,6 +773,37 @@ def execute_dokploy_target_setup(
         "route_domain_ids": route_domain_ids,
         "setup": setup_payload,
     }
+
+
+def first_testing_replacement_lock_name(
+    record_store: PostgresRecordStore, request: DokployTargetSetupEnvelope
+) -> str | None:
+    """The execution lock of the testing target a first setup would replace."""
+    from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+    from control_plane.workflows.generic_web_deploy_provider import (
+        dokploy_generic_web_provider_target_key,
+    )
+
+    if request.mode != "apply" or request.expected_current_provider_target is None:
+        return None
+    try:
+        current = record_store.read_provider_target_record(
+            context_name=request.context, instance_name=request.instance
+        )
+    except FileNotFoundError:
+        return None
+    return testing_event_execution_lock_name(dokploy_generic_web_provider_target_key(current))
+
+
+def _replaced_target_policies(
+    record_store: PostgresRecordStore, request: DokployTargetSetupEnvelope
+) -> DokployTargetPolicies | None:
+    """Lane policies, including its hold, move with the lane to the replacement target."""
+    if request.expected_current_provider_target is None:
+        return None
+    return record_store.read_dokploy_target_record(
+        context_name=request.context, instance_name=request.instance
+    ).policies
 
 
 def ensure_dokploy_target_setup_context_is_not_historical(

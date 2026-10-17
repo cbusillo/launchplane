@@ -90,6 +90,7 @@ from control_plane.dokploy_target_setup_http import (
     DokployComposeDomainPartialError,
     DokployTargetSetupEnvelope,
     execute_dokploy_target_setup,
+    first_testing_replacement_lock_name,
     require_empty_testing_target_creation,
 )
 from control_plane import product_config as control_plane_product_config
@@ -26098,16 +26099,24 @@ def create_launchplane_fastapi_app(
 
         try:
             rebuild_checkpoint()
+            # Replacing a testing target holds the lock its event deploys run under.
+            replacement_lock = (
+                first_testing_replacement_lock_name(database_store, setup_request)
+                if first_testing_setup
+                else None
+            )
             lock = (
                 database_store.testing_replacement_execution_lock(
                     setup_request.replaces_operation_id
                 )
                 if disposable_rebuild_setup and setup_request.mode == "apply"
+                else database_store.testing_replacement_execution_lock(replacement_lock)
+                if replacement_lock
                 else nullcontext(lambda: None)
             )
             with lock as check:
                 if check is None:
-                    raise ValueError("The retained testing executor is still active.")
+                    raise ValueError("A testing executor for this target is still active.")
 
                 def checkpoint() -> None:
                     check()

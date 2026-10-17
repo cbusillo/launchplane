@@ -6,7 +6,11 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.deploy_target import DeployedTargetReference, ProviderTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord, DokployTargetType
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+    DokployTargetType,
+)
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.dokploy_target_comparison import require_provider_target_expectation
 from control_plane.dokploy.target_source_setup import (
@@ -333,6 +337,7 @@ def adopt_dokploy_target(
     fetch_target_payload: FetchDokployTargetPayload,
     required_context_owner: tuple[str, str] | None = None,
     expected_product_profile: LaunchplaneProductProfileRecord | None = None,
+    policies: DokployTargetPolicies | None = None,
 ) -> DokployTargetAdoptionResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -385,6 +390,7 @@ def adopt_dokploy_target(
         healthcheck_path=resolved_healthcheck_path,
         healthcheck_timeout_seconds=_int_field(provider_payload, "healthcheckTimeoutSeconds"),
         domains=domains,
+        policies=policies or DokployTargetPolicies(),
         updated_at=recorded_at,
         source_label=source_label.strip() or "cli:dokploy-targets:adopt",
     )
@@ -472,6 +478,7 @@ def create_dokploy_application_target(
     mutate_provider: MutateDokployPayload,
     fetch_target_payload: FetchDokployTargetPayload,
     required_context_owner: tuple[str, str] | None = None,
+    policies: DokployTargetPolicies | None = None,
 ) -> DokployTargetCreateResult:
     normalized_context = _normalize_route_part(context, "context")
     normalized_instance = _normalize_route_part(instance, "instance")
@@ -620,6 +627,7 @@ def create_dokploy_application_target(
         apply=True,
         fetch_target_payload=fetch_target_payload,
         required_context_owner=required_context_owner,
+        policies=policies,
     )
     return DokployTargetCreateResult(
         applied=True,

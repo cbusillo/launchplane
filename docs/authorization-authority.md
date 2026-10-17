@@ -211,12 +211,18 @@ replace it.
 The same path also accepts `create-application`, the conventional testing-lane
 shape: a new project, a new environment and an empty application on a named
 server, with no domain route. It may replace the lane's current testing target
-when that lane never had a successful deploy, because such a lane holds no data
-and serves nobody. The request names the exact target it replaces in
-`expected_current_provider_target`; a different, partial or missing target, or
-any deployment record whose deploy passed, refuses. The replaced provider
-resource is left in place for a supported retirement. Image delivery and runtime
-settings then follow the ordinary event-driven testing deploy.
+only with positive evidence that nobody used the lane: the setup route created
+that target empty (not adopted, not source-completed), no deploy passed there
+and no artifact was ever current. The target must carry an `isolation_staging`
+testing hold, which stops event deploys; a `staff_testing` hold refuses. Setup
+holds the target's event-deploy execution lock through its provider effects and
+authority commit, so a running deploy refuses it and a queued one waits. The
+lane's policies, including that hold, move to the new target; lift the hold
+through the testing-hold path when the lane should deploy. The request names
+the exact target it replaces in `expected_current_provider_target`; a
+different, partial or missing target refuses. The replaced provider resource is
+left in place for a supported retirement. Image delivery and runtime settings
+then follow the ordinary event-driven testing deploy.
 
 Other agent identities retain their scoped policy rules. No grant or credential
 is installed, and general setup, production, backup and promotion authority do

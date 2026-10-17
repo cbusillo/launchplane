@@ -7,11 +7,23 @@ from unittest.mock import patch
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetRecord,
+    DokployTargetStaffTestingHold,
+)
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.http_app import create_launchplane_fastapi_app
-from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
+from control_plane.dokploy_target_setup_http import (
+    CREATE_COMPOSE_SOURCE_LABEL,
+    DokployTargetSetupEnvelope,
+)
+from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+from control_plane.workflows.generic_web_deploy_provider import (
+    dokploy_generic_web_provider_target_key,
+)
 from control_plane.workflows.dokploy_target_adoption import (
     APPLICATION_CREATE_PATH,
     COMPOSE_CREATE_PATH,
@@ -307,17 +319,36 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             )
         )
 
-    def register_unused_testing_compose(self) -> ProviderTargetRecord:
-        self.profile = self.profile.model_copy(
+    def register_unused_testing_compose(
+        self,
+        *,
+        source_label: str = CREATE_COMPOSE_SOURCE_LABEL,
+        hold_purpose: Literal["staff_testing", "isolation_staging"] | None = "isolation_staging",
+    ) -> ProviderTargetRecord:
+        if all(lane.instance != "testing" for lane in self.profile.lanes):
+            self.profile = self.profile.model_copy(
+                update={
+                    "lanes": (
+                        *self.profile.lanes,
+                        self.profile.lanes[0].model_copy(update={"instance": "testing"}),
+                    )
+                }
+            )
+            self.store.write_product_profile_record(self.profile)
+        hold = (
+            DokployTargetStaffTestingHold(
+                reason="Stage the application lane.", purpose=hold_purpose
+            )
+            if hold_purpose
+            else None
+        )
+        target = self.production.model_copy(
             update={
-                "lanes": (
-                    *self.profile.lanes,
-                    self.profile.lanes[0].model_copy(update={"instance": "testing"}),
-                )
+                "instance": "testing",
+                "source_label": source_label,
+                "policies": DokployTargetPolicies(staff_testing_hold=hold),
             }
         )
-        self.store.write_product_profile_record(self.profile)
-        target = self.production.model_copy(update={"instance": "testing"})
         target_id = self.production_id.model_copy(
             update={"instance": "testing", "target_id": "empty-testing-compose"}
         )
@@ -386,6 +417,75 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             (replaced.target_id, replaced.provider_target_type),
             ("created-application", "application"),
         )
+        # The hold moves with the lane, so a deploy queued behind the lock still waits.
+        moved = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        hold = moved.policies.staff_testing_hold
+        self.assertIsNotNone(hold)
+        assert hold is not None
+        self.assertEqual(hold.purpose, "isolation_staging")
+        self.assert_production_unchanged()
+
+    async def test_replacement_needs_positive_evidence_nobody_used_the_lane(self) -> None:
+        inventory = EnvironmentInventory(
+            context=self.context,
+            instance="testing",
+            source_git_ref="abc123",
+            deploy=DeploymentEvidence(
+                target_name="empty-testing-compose",
+                target_type="compose",
+                deploy_mode="dokploy-compose-api",
+                status="fail",
+            ),
+            updated_at=self.profile.updated_at,
+            deployment_record_id="testing-deploy-fail",
+        )
+        for name, registration, served in (
+            ("adopted target", {"source_label": "service:dokploy-targets:setup:adopt"}, False),
+            ("source completed", {"source_label": "service:complete-compose-source"}, False),
+            ("staff testing", {"hold_purpose": "staff_testing"}, False),
+            ("no hold", {"hold_purpose": None}, False),
+            ("has served", {}, True),
+        ):
+            with self.subTest(name):
+                provider = self.register_unused_testing_compose(**registration)
+                if served:
+                    self.store.write_environment_inventory(inventory)
+                result = await self.post(**self.expected(provider))
+                self.assertEqual(result.status_code, 400, result.text)
+                self.provider.assert_not_called()
+                self.assertEqual(self.current_testing_target_id(), provider.target_id)
+
+    async def test_replacement_waits_for_a_running_testing_deploy(self) -> None:
+        provider = self.register_unused_testing_compose()
+        lock_name = testing_event_execution_lock_name(
+            dokploy_generic_web_provider_target_key(provider)
+        )
+        with self.store.testing_replacement_execution_lock(lock_name) as held:
+            self.assertIsNotNone(held)
+            result = await self.post(**self.expected(provider))
+        self.assertEqual(result.status_code, 400, result.text)
+        self.provider.assert_not_called()
+        self.assertEqual(self.current_testing_target_id(), provider.target_id)
+
+    async def test_a_deploy_passing_mid_replacement_keeps_the_current_target(self) -> None:
+        provider = self.register_unused_testing_compose()
+        created = {
+            PROJECT_CREATE_PATH: {"projectId": "created-project"},
+            ENVIRONMENT_CREATE_PATH: {"environmentId": "created-environment"},
+            APPLICATION_CREATE_PATH: {"applicationId": "created-application"},
+        }
+
+        def create(_host: str, _token: str, path: str, _payload: object) -> dict[str, str]:
+            if path == APPLICATION_CREATE_PATH:
+                self.record_testing_deploy("pass")
+            return created[path]
+
+        self.provider.side_effect = create
+        result = await self.post(**self.expected(provider))
+        self.assertEqual(result.status_code, 400, result.text)
+        self.assertEqual(self.current_testing_target_id(), provider.target_id)
         self.assert_production_unchanged()
 
     async def test_replacement_needs_the_exact_target_of_a_lane_that_never_ran(self) -> None:
