@@ -118,6 +118,17 @@ def generic_web_provider_target_key(
     return f"generic-web-provider-target:{hashlib.sha256(identity.encode()).hexdigest()}"
 
 
+def dokploy_generic_web_provider_target_key(provider_target: ProviderTargetRecord) -> str:
+    """The key a generic-web deploy fences this Dokploy target with."""
+    return generic_web_provider_target_key(
+        provider_id=DokployGenericWebDeployProvider.provider_id,
+        context=provider_target.context,
+        instance=provider_target.instance,
+        target_type=_dokploy_target_type_from_provider_target(provider_target=provider_target),
+        target_id=provider_target.target_id,
+    )
+
+
 def build_generic_web_provider_reconciliation_key(
     resolved_deploy_target: GenericWebResolvedDeployTarget,
     *,
