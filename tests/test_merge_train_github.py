@@ -4043,6 +4043,38 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
 
         self.assertEqual(snapshot.pull_requests[0].required_checks_status, "pass")
 
+    def test_pr_head_keeps_failure_when_another_suite_passes_the_same_named_job(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(),
+                [_github_pull_request(14)],
+                _github_pull_request(14),
+                {"permission": "admin"},
+                _label_events(),
+                _combined_status(statuses=()),
+                {
+                    "check_runs": [
+                        {
+                            **_required_check_run("ci-gate", "completed", "failure"),
+                            "id": 1,
+                            "check_suite": {"id": 10},
+                        },
+                        {
+                            **_required_check_run("ci-gate", "completed", "success"),
+                            "id": 2,
+                            "check_suite": {"id": 20},
+                        },
+                    ]
+                },
+                _conversation_rule(),
+                [],
+            )
+        )
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+        self.assertEqual(snapshot.pull_requests[0].required_checks_status, "fail")
+
     def test_snapshot_reader_records_who_last_applied_each_label(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
