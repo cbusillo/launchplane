@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 from typing import Callable, Protocol, cast
 
 from control_plane.contracts.merge_train_batch import (
@@ -77,7 +78,14 @@ class _LegacyCandidateTransport:
         self.transport = transport
 
     def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
-        if method == "GET" and "/pulls?state=all&head=" in path:
+        parsed = urlsplit(path)
+        query = parse_qs(parsed.query)
+        if (
+            method == "GET"
+            and parsed.path.endswith("/pulls")
+            and query.get("state") == ["all"]
+            and "head" in query
+        ):
             return []
         return cast(MergeTrainGitHubTransport, self.transport).request(
             method=method, path=path, body=body

@@ -895,7 +895,10 @@ the passed candidate still matches the live eligible queue, PR head SHAs, and
 base SHA. Drift supersedes the active passed-candidate record and resumes normal
 planning from a fresh snapshot instead of creating a stale landing plan.
 Transient mergeability or check-readiness changes do not invalidate an
-identity-stable candidate. A collapsed-stack candidate is compared against its
+identity-stable candidate. If fresh original-PR routing now requires a branch
+refresh, the controller retires the candidate and its generated PR before
+replanning that refresh; it never persists a behind-base original-PR landing
+from the former generated-PR route. A collapsed-stack candidate is compared against its
 admitted root entry, and proven drift resumes the existing stack-collapse state
 rather than creating a duplicate collapse plan.
 Before each PR merge, Launchplane must also verify that the PR still matches the

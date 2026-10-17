@@ -31,6 +31,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
         conflict: Literal["none", "leaves_batch", "leaves_single"] = "none",
         accepted_features: bool = False,
         individual: bool = False,
+        ownership_flip: bool = False,
     ) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
@@ -108,6 +109,9 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
             ),
             patch.object(_FakeMergeTrainGitHubClient, "update_pull_request_branch") as update,
             patch.object(
+                _FakeMergeTrainGitHubClient, "close_batch_pull_request"
+            ) as close_candidate,
+            patch.object(
                 _FakeMergeTrainGitHubClient,
                 "ensure_batch_pull_request",
                 return_value=None if multiple else 99,
@@ -149,7 +153,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                     _FakeMergeTrainGitHubClient,
                     "read_merge_train_snapshot",
                     return_value=behind_snapshot,
-                ),
+                ) as live_snapshot,
                 patch.object(
                     _FakeMergeTrainGitHubClient,
                     "probe_batch_entry_conflicts",
@@ -164,10 +168,34 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 mutated = await _post_merge_train_controller_run_once(app, payload)
                 if conflict == "none" and not individual:
                     actions = []
-                    for _ in range(4 if multiple else 3):
+                    for step in range(4 if multiple else 3):
+                        if ownership_flip and step == 2:
+                            live_snapshot.return_value = behind_snapshot.model_copy(
+                                update={
+                                    "pull_requests": tuple(
+                                        pr.model_copy(update={"requires_individual_landing": True})
+                                        for pr in behind_snapshot.pull_requests
+                                    )
+                                }
+                            )
                         response = await _post_merge_train_controller_run_once(app, payload)
                         self.assertEqual(response.status_code, 202, response.text)
                         actions.append(response.json()["result"]["controller_action"])
+                    if ownership_flip:
+                        self.assertTrue(close_candidate.called)
+                        self.assertEqual(
+                            actions, ["build_candidate", "observe_candidate", "update_branch"]
+                        )
+                        self.assertFalse(store.list_merge_train_batch_landing_plan_records())
+                        self.assertFalse(
+                            store.list_merge_train_batch_candidate_records(status="active")
+                        )
+                        update.assert_called_once_with(
+                            repository=snapshot.repository,
+                            pull_request_number=behind_snapshot.pull_requests[0].number,
+                            expected_head_sha=behind_snapshot.pull_requests[0].head_sha,
+                        )
+                        return
                     self.assertEqual(
                         actions,
                         ["build_candidate", "observe_candidate", "plan_landing"]
@@ -239,6 +267,9 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_single_entry_uses_a_candidate_without_refreshing(self) -> None:
         await self._check_planning(multiple=False)
+
+    async def test_singleton_ownership_flip_replans_before_original_pr_landing(self) -> None:
+        await self._check_planning(multiple=False, ownership_flip=True)
 
     async def test_owned_single_entry_keeps_its_original_pr_refresh(self) -> None:
         await self._check_planning(multiple=False, individual=True)

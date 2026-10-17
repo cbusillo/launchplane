@@ -3245,7 +3245,10 @@ def _reflow_stale_candidate_record(
         dry_run_result=dry_run_result,
         base_sha=snapshot.base_sha,
     )
-    if not candidate_matches_queue:
+    if not candidate_matches_queue or (
+        candidate_record.ordinary_job_binding is None
+        and dry_run_result.intended_next_action == "update_branch"
+    ):
         if request.mutate:
             lease.checkpoint(
                 active_action="reflow_candidate",
@@ -5499,15 +5502,18 @@ def _retry_closed_candidate_after_passing_checks(
             lease.observe(reason_code="candidate_checks_not_recovered")
             return None
         closed = bound_closed_batch_pull_request(client=github_client, candidate=failed)
+        legacy_singleton = (
+            closed is None
+            and len(failed.entries) == 1
+            and not has_batch_pull_request(client=github_client, candidate=failed)
+        )
     except (MergeTrainGitHubError, MergeAdmissionDeniedError):
         lease.observe(reason_code="candidate_retry_evidence_unavailable")
         return None
     if closed is None:
         # Pre-existing singleton records may have no generated PR. Preserve
         # their exact-SHA recovery; a closed generated PR still needs a new ref.
-        if len(failed.entries) == 1 and not has_batch_pull_request(
-            client=github_client, candidate=failed
-        ):
+        if legacy_singleton:
             return _reobserve_failed_merge_train_candidate(
                 candidate_store=candidate_store,
                 active_candidate_record=active_candidate_record,

@@ -27,7 +27,7 @@ from control_plane.merge_train_controller_run_once import (
     _reflow_stale_candidate_record,
     try_reflow_failed_merge_train_candidate,
 )
-from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerLeaseLostError
@@ -312,6 +312,24 @@ class FailedBatchRecoveryTests(unittest.TestCase):
             )
         self.assertEqual(result["controller_action"], "candidate_failed")
         self.assertTrue(all(method == "GET" for method, _, _ in self.provider.requests))
+
+    def test_legacy_singleton_discovery_error_keeps_recovery_stopped(self) -> None:
+        self._prepare(singleton=True)
+        self.provider.created = False
+        self.provider.checks_failed = False
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_controller_run_once.has_batch_pull_request",
+                side_effect=MergeTrainGitHubError("unavailable", status_code=503),
+            ),
+        ):
+            result = self._reflow(
+                FilesystemRecordStore(state_dir=Path(directory)),
+                self.candidate,
+                observe_checks=True,
+            )
+        self.assertEqual(result["controller_action"], "candidate_failed")
 
     def _check_passing_exact_sha_rebuilds_closed_candidate(self) -> None:
         failed_observation = self.client.observe_batch_candidate_checks(candidate=self.candidate)
