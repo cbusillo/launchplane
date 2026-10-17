@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 from email.message import Message
+from io import BytesIO
 from typing import Any, cast
 from unittest import TestCase
 from unittest.mock import Mock, patch
@@ -80,6 +81,7 @@ class PlanningProvider:
         self.config: dict[str, Any] = {}
         self.project_status = "active"
         self.drop_project_write = False
+        self.missing_project_item = False
         self.references = [7]
         self.merged = True
         self.drop_label_write = False
@@ -134,7 +136,9 @@ class PlanningProvider:
                     },
                     "node": {
                         "projectItems": {
-                            "nodes": [
+                            "nodes": []
+                            if self.missing_project_item
+                            else [
                                 {
                                     "id": "item7",
                                     "project": {"id": "project"},
@@ -561,7 +565,7 @@ class PlanningCompletionTests(TestCase):
         self.assertEqual(self.record().delivery_status, "delivered")
 
     def test_held_first_reference_does_not_leave_an_eligible_issue_stale(self) -> None:
-        for reason in ("waiting", "reporter", "blocker", "open"):
+        for reason in ("waiting", "reporter", "blocker", "open", "reopened", "project"):
             with self.subTest(reason=reason):
                 self.provider = PlanningProvider()
                 self.provider.references = [8, 7]
@@ -573,13 +577,21 @@ class PlanningCompletionTests(TestCase):
                     held.issue["user"]["id"] = 99
                 elif reason == "blocker":
                     held.blockers = [{"state": "open"}]
+                elif reason == "project":
+                    self.provider.config = {"planning": {"projects": {"default_project": 2}}}
+                    held.missing_project_item = True
                 else:
                     held.issue["state"] = "open"
+                    held.issue["state_reason"] = "reopened" if reason == "reopened" else None
                 before = copy.deepcopy(held.issue)
 
                 def request(*, path: str, **kwargs: Any) -> Any:
+                    issue_node = (kwargs.get("body") or {}).get("variables", {}).get("issue")
                     provider = (
-                        held if path.startswith(f"/repos/{_REPO}/issues/8") else self.provider
+                        held
+                        if path.startswith(f"/repos/{_REPO}/issues/8")
+                        or issue_node == held.issue["node_id"]
+                        else self.provider
                     )
                     return provider.request(path=path, **kwargs)
 
@@ -595,6 +607,14 @@ class PlanningCompletionTests(TestCase):
                 self.assertEqual(record.delivery_status, "failed")
                 self.assertEqual(record.retryable, reason == "open")
                 self.comment_mock.assert_not_called()
+                with TemporaryDirectory() as directory:
+                    store = FilesystemRecordStore(Path(directory))
+                    store.write_merge_train_pr_feedback_record(record)
+                    saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
+                    self.assertEqual(
+                        {item["number"]: item["status"] for item in _receipt(saved)["issues"]},
+                        {8: "pending" if reason == "open" else "review", 7: "reconciled"},
+                    )
 
     def test_failed_metadata_or_project_readback_is_never_delivered(self) -> None:
         self.provider.drop_label_write = True
@@ -620,7 +640,7 @@ class PlanningCompletionTests(TestCase):
             if method != "GET" and path != "/graphql":
                 attempts.append(path)
                 error = click.ClickException("provider denied metadata write")
-                error.__cause__ = HTTPError(path, 403, "Forbidden", Message(), None)
+                error.__cause__ = HTTPError(path, 403, "Forbidden", Message(), BytesIO())
                 raise error
             provider = other if path.startswith(f"/repos/{_REPO}/issues/8") else self.provider
             return provider.request(path=path, method=method, **kwargs)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
@@ -42,12 +43,31 @@ query($owner: String!, $name: String!, $number: Int!, $after: String, $config: S
 """
 
 
-class PlanningCompletionReview(click.ClickException):
+class PlanningCompletionFailure(click.ClickException):
+    """Incomplete completion evidence, optionally including successful sources."""
+
+    def __init__(self, message: str, *, receipt: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.receipt = receipt
+
+
+class PlanningCompletionReview(PlanningCompletionFailure):
     """The saved completion requires an owning agent, not a provider retry."""
 
 
-class PlanningCompletionPending(click.ClickException):
+class PlanningCompletionPending(PlanningCompletionFailure):
     """GitHub has not yet projected the keyword closure after the merge."""
+
+
+class _IssueProjectReview(PlanningCompletionReview):
+    """Project membership evidence is missing for this source only."""
+
+
+@dataclass(frozen=True)
+class _ProjectCompletion:
+    query: str
+    read_variables: dict[str, Any]
+    update_variables: dict[str, Any]
 
 
 def _object(value: object) -> dict[str, Any]:
@@ -194,6 +214,10 @@ def _labels(issue: dict[str, Any]) -> set[str]:
 
 def _require_completed(issue: dict[str, Any]) -> None:
     if issue.get("state") == "open" and "pull_request" not in issue:
+        if issue.get("state_reason") == "reopened":
+            raise PlanningCompletionReview(
+                "Planning completion preserves a reopened finish line for owning review."
+            )
         raise PlanningCompletionPending(
             "Planning completion is waiting for GitHub's keyword closure projection."
         )
@@ -207,11 +231,13 @@ def _require_completed(issue: dict[str, Any]) -> None:
         )
 
 
-def _sync_project(token: str, issue: dict[str, Any], config: dict[str, Any], owner: str) -> None:
+def _prepare_project(
+    token: str, issue: dict[str, Any], config: dict[str, Any], owner: str
+) -> _ProjectCompletion | None:
     project = _object(config.get("projects", {}))
     number = project.get("default_project")
     if not number:
-        return
+        return None
     try:
         number = int(number)
     except (ValueError, TypeError) as error:
@@ -252,23 +278,37 @@ def _sync_project(token: str, issue: dict[str, Any], config: dict[str, Any], own
     target = _object(projects[0])
     fields = _object(target.get("fields"))
     items = _object(_object(data.get("node")).get("projectItems"))
-    if (
-        _object(fields.get("pageInfo")).get("hasNextPage") is not False
-        or _object(items.get("pageInfo")).get("hasNextPage") is not False
-    ):
-        raise PlanningCompletionReview("Planning completion Project read was truncated.")
+    if _object(fields.get("pageInfo")).get("hasNextPage") is not False:
+        raise PlanningCompletionReview("Planning completion Project fields were truncated.")
+    if _object(items.get("pageInfo")).get("hasNextPage") is not False:
+        raise _IssueProjectReview("Planning completion issue Project items were truncated.")
     status = [field for field in fields["nodes"] if field.get("name") == "Status"]
     matches = [
         item for item in items["nodes"] if _object(item.get("project")).get("id") == target["id"]
     ]
-    if len(status) != 1 or len(matches) != 1:
-        raise PlanningCompletionReview(
-            "Planning completion needs the existing Project item and Status field."
-        )
+    if len(status) != 1:
+        raise PlanningCompletionReview("Planning completion needs the Project Status field.")
     done = [option for option in status[0]["options"] if option["name"] == "Done"]
     if len(done) != 1:
         raise PlanningCompletionReview("Planning completion Project lacks its Done option.")
+    if len(matches) != 1:
+        raise _IssueProjectReview("Planning completion needs the existing issue Project item.")
     if _object(matches[0].get("fieldValueByName") or {}).get("optionId") == done[0]["id"]:
+        return None
+    return _ProjectCompletion(
+        query=query,
+        read_variables={"owner": project_owner, "number": number, "issue": issue["node_id"]},
+        update_variables={
+            "project": target["id"],
+            "item": matches[0]["id"],
+            "field": status[0]["id"],
+            "option": done[0]["id"],
+        },
+    )
+
+
+def _sync_project(token: str, prepared: _ProjectCompletion | None) -> None:
+    if prepared is None:
         return
     mutation = """
     mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
@@ -279,22 +319,18 @@ def _sync_project(token: str, issue: dict[str, Any], config: dict[str, Any], own
     _graphql(
         token,
         mutation,
-        {
-            "project": target["id"],
-            "item": matches[0]["id"],
-            "field": status[0]["id"],
-            "option": done[0]["id"],
-        },
+        prepared.update_variables,
     )
     readback = _graphql(
         token,
-        query,
-        {"owner": project.get("owner") or owner, "number": number, "issue": issue["node_id"]},
+        prepared.query,
+        prepared.read_variables,
     )
     observed = _object(_object(readback.get("node")).get("projectItems"))
     if _object(observed.get("pageInfo")).get("hasNextPage") is not False or not any(
-        item.get("id") == matches[0]["id"]
-        and _object(item.get("fieldValueByName") or {}).get("optionId") == done[0]["id"]
+        item.get("id") == prepared.update_variables["item"]
+        and _object(item.get("fieldValueByName") or {}).get("optionId")
+        == prepared.update_variables["option"]
         for item in observed["nodes"]
     ):
         raise PlanningCompletionReview("Planning completion Project readback did not match.")
@@ -406,14 +442,24 @@ def reconcile_completed_change(
                 )
         except PlanningCompletionPending as error:
             pending_reasons.append(f"#{issue_number}: {error.message}")
+            outcomes.append({"number": issue_number, "status": "pending", "reason": error.message})
             continue
         except PlanningCompletionReview as error:
             review_reasons.append(f"#{issue_number}: {error.message}")
+            outcomes.append({"number": issue_number, "status": "review", "reason": error.message})
+            continue
+        try:
+            prepared_project = _prepare_project(
+                token, issue, _object(config.get("planning", {})), owner
+            )
+        except _IssueProjectReview as error:
+            review_reasons.append(f"#{issue_number}: {error.message}")
+            outcomes.append({"number": issue_number, "status": "review", "reason": error.message})
             continue
         # A held source does not block other eligible sources in this PR. Provider
         # failures during metadata writes still stop delivery and use its existing
         # retry/denial handling; they are not treated as another source's hold.
-        _sync_project(token, issue, _object(config.get("planning", {})), owner)
+        _sync_project(token, prepared_project)
         if labels["done"] not in names:
             github_api_request(
                 path=path + "/labels", token=token, method="POST", body={"labels": [labels["done"]]}
@@ -432,8 +478,11 @@ def reconcile_completed_change(
         ):
             raise PlanningCompletionReview("Planning completion metadata readback did not match.")
         outcomes.append({"number": issue_number, "status": "reconciled"})
+    incomplete = {"ok": False, "landing_sha": landing, "issues": outcomes}
     if pending_reasons:
-        raise PlanningCompletionPending("; ".join([*pending_reasons, *review_reasons]))
+        raise PlanningCompletionPending(
+            "; ".join([*pending_reasons, *review_reasons]), receipt=incomplete
+        )
     if review_reasons:
-        raise PlanningCompletionReview("; ".join(review_reasons))
+        raise PlanningCompletionReview("; ".join(review_reasons), receipt=incomplete)
     return {"ok": True, "landing_sha": landing, "issues": outcomes}

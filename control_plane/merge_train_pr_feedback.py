@@ -17,6 +17,7 @@ from control_plane.contracts.merge_train_pr_feedback_record import (
 )
 from control_plane.workflows.launchplane import upsert_github_issue_comment
 from control_plane.merge_train_planning_completion import (
+    PlanningCompletionFailure,
     PlanningCompletionPending,
     reconcile_completed_change,
 )
@@ -26,6 +27,19 @@ from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolic
 
 
 PLANNING_RECEIPT_PREFIX = "<!-- launchplane-planning-reconciliation "
+
+
+def _planning_comment(body: str, receipt: object) -> str:
+    controller_body = re.sub(
+        r"(?m)^" + re.escape(PLANNING_RECEIPT_PREFIX) + r"[^\n]* -->\n?", "", body
+    ).rstrip()
+    return (
+        controller_body
+        + "\n\n"
+        + PLANNING_RECEIPT_PREFIX
+        + json.dumps(receipt, sort_keys=True)
+        + " -->"
+    )
 
 
 class MergeTrainPrFeedbackEnvelope(BaseModel):
@@ -291,17 +305,8 @@ def deliver_merge_train_pr_feedback_record(
                 # Keep the existing persisted record schema readable by older
                 # workers during a rolling deploy or rollback. The receipt is
                 # evidence in its saved comment, never an authorization input.
-                controller_body = re.sub(
-                    r"(?m)^" + re.escape(PLANNING_RECEIPT_PREFIX) + r"[^\n]* -->\n?",
-                    "",
-                    record.comment_markdown,
-                ).rstrip()
-                changes["comment_markdown"] = (
-                    controller_body
-                    + "\n\n"
-                    + PLANNING_RECEIPT_PREFIX
-                    + json.dumps({"ok": False, "status": "incomplete"}, sort_keys=True)
-                    + " -->"
+                changes["comment_markdown"] = _planning_comment(
+                    record.comment_markdown, {"ok": False, "status": "incomplete"}
                 )
                 receipt = reconcile_completed_change(
                     repository=record.repository,
@@ -310,13 +315,7 @@ def deliver_merge_train_pr_feedback_record(
                     token=token,
                     trusted_author_ids=planning_author_ids,
                 )
-                changes["comment_markdown"] = (
-                    controller_body
-                    + "\n\n"
-                    + PLANNING_RECEIPT_PREFIX
-                    + json.dumps(receipt, sort_keys=True)
-                    + " -->"
-                )
+                changes["comment_markdown"] = _planning_comment(record.comment_markdown, receipt)
             comment = upsert_github_issue_comment(
                 owner=owner,
                 repo=repo,
@@ -334,6 +333,10 @@ def deliver_merge_train_pr_feedback_record(
                 retryable=False,
             )
         except click.ClickException as exc:
+            if isinstance(exc, PlanningCompletionFailure) and exc.receipt is not None:
+                changes["comment_markdown"] = _planning_comment(
+                    record.comment_markdown, exc.receipt
+                )
             retryable, retry_at, provider_retry_at = _delivery_retry(
                 exc, attempted_at=attempted_at, attempts=attempts
             )

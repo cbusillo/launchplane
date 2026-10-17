@@ -2153,6 +2153,12 @@ sources in the same PR from being reconciled. The held source stays unchanged,
 and its diagnostic keeps the overall planning receipt incomplete. Provider
 metadata-write failures still stop that delivery through existing retry/denial
 handling.
+Issue-specific Project membership gaps are preflight holds, so they also preserve
+only that issue. Unresolvable Project configuration, permissions, mutations and
+readback failures stop delivery. Saved receipts for source holds retain successful
+source readbacks and the held-source reasons. A deliberately reopened issue needs
+owning review rather than indefinite closure-projection retries; use the existing
+catalog reconciliation route after its finish line and wait review are resolved.
 
 Provider failures use terminal feedback's existing retry and quota backoff.
 GitHub's delayed keyword-closure projection also waits for a later feedback
