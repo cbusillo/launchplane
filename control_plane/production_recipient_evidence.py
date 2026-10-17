@@ -13,5 +13,7 @@ WRITER_ACTIONS = frozenset(
         "receipt_pause",
         "receipt_resume",
         "receipt_resume_retryable",
+        "fence",
+        "receipt_fenced",
     }
 )

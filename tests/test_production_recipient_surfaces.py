@@ -242,6 +242,7 @@ class HttpBoundaryTests(unittest.TestCase):
         from control_plane.production_recipient_continuation import CONTINUATION_ROUTE
         from control_plane.production_recipient_release_recovery import RELEASE_RECOVERY_ROUTE
         from control_plane.production_recipient_inverse import INVERSE_ROUTE
+        from control_plane.production_recipient_writer_fence import WRITER_FENCE_ROUTE
 
         self.identity = TerminalAgentIdentity("agent", "fixture", director_agent=True)
         requests = (
@@ -280,6 +281,17 @@ class HttpBoundaryTests(unittest.TestCase):
                     "replacement": self.fixture.body.model_copy(
                         update={"mode": "dry-run", "reviewed_plan_sha256": ""}
                     ).model_dump(mode="json"),
+                    "reason": "review",
+                    "mode": "apply",
+                    "reviewed_plan_sha256": "b" * 64,
+                },
+            ),
+            (
+                WRITER_FENCE_ROUTE,
+                {
+                    "context": self.fixture.context,
+                    "preparation_plan_sha256": "a" * 64,
+                    "operation_id": "uncertain-writer",
                     "reason": "review",
                     "mode": "apply",
                     "reviewed_plan_sha256": "b" * 64,

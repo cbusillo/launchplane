@@ -36,6 +36,13 @@ from control_plane.production_recipient_writer_control import (
 )
 
 
+from control_plane.production_recipient_writer_fence import (
+    WRITER_FENCE_ROUTE,
+    RecipientWriterFenceRequest,
+    RecipientWriterFencePlan,
+)
+
+
 from control_plane.production_recipient_release_recovery import (
     RELEASE_RECOVERY_ROUTE,
     RecipientReleaseRecoveryRequest,
@@ -97,6 +104,11 @@ def main() -> int:
         "--writer-control", action="store_true", help="Coordinate a recorded testing API writer."
     )
     operation.add_argument(
+        "--writer-fence",
+        action="store_true",
+        help="Fence one uncertain writer operation that never persisted its host witness.",
+    )
+    operation.add_argument(
         "--release-recovery",
         action="store_true",
         help="Reconcile the original Client release operation.",
@@ -130,6 +142,7 @@ def main() -> int:
             | type[RecipientWriterRequest]
             | type[RecipientReleaseRecoveryRequest]
             | type[RecipientInverseRequest]
+            | type[RecipientWriterFenceRequest]
         )
         result_type: (
             type[ProductionRecipientPlan]
@@ -139,8 +152,15 @@ def main() -> int:
             | type[RecipientWriterPlan]
             | type[RecipientReleaseRecoveryPlan]
             | type[RecipientInversePlan]
+            | type[RecipientWriterFencePlan]
         )
-        if args.inverse:
+        if args.writer_fence:
+            request_type, result_type, route = (
+                RecipientWriterFenceRequest,
+                RecipientWriterFencePlan,
+                WRITER_FENCE_ROUTE,
+            )
+        elif args.inverse:
             request_type, result_type, route = (
                 RecipientInverseRequest,
                 RecipientInversePlan,
@@ -182,7 +202,9 @@ def main() -> int:
                 ProductionRecipientPlan,
                 ROUTE,
             )
-        if (args.continuation or args.cutover or args.release_recovery) and args.mode in {
+        if (
+            args.continuation or args.cutover or args.release_recovery or args.writer_fence
+        ) and args.mode in {
             "receipt",
             "custody",
         }:
@@ -195,6 +217,10 @@ def main() -> int:
             if args.idempotency_key and args.idempotency_key != draft.original_key:
                 raise ValueError("Continuation retains the original preparation key.")
             args.idempotency_key = draft.original_key
+        if isinstance(draft, RecipientWriterFenceRequest):
+            if args.idempotency_key and args.idempotency_key != draft.operation_id:
+                raise ValueError("A writer fence names only its original operation.")
+            args.idempotency_key = draft.operation_id
         path = route.format(product=args.product)
         if args.mode == "apply":
             evidence = json.loads(args.evidence_file.read_text())

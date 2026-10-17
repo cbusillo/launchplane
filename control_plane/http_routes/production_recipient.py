@@ -480,6 +480,68 @@ def register_production_recipient_routes(
             },
         )
 
+    from control_plane.production_recipient_writer_fence import (
+        WRITER_FENCE_ROUTE,
+        RecipientWriterFenceRequest,
+        fence_writer_operation,
+    )
+
+    async def fence_writer(
+        product: Annotated[str, PathParameter(min_length=1, pattern=r"^[A-Za-z0-9._-]+$")],
+        body: RecipientWriterFenceRequest,
+        identity: Annotated[LaunchplaneIdentity, Depends(mutation_identity)],
+        record_store: Annotated[object, Depends(dependencies.get_record_store)],
+        idempotency_key: Annotated[str, Header(alias="Idempotency-Key")] = "",
+    ) -> AcceptedEvidenceResponse:
+        trace = dependencies.next_trace_id()
+        apply = body.mode == "apply"
+        store = require_custody_access(identity, product, body.context, apply, trace, record_store)
+        if apply and idempotency_key.strip() != body.operation_id:
+            raise dependencies.http_error(
+                status_code=400,
+                trace_id=trace,
+                code="original_operation_required",
+                message="A writer fence names only its original operation.",
+            )
+
+        def reauthorize(_phase: str) -> None:
+            require_custody_access(identity, product, body.context, True, trace, store)
+
+        try:
+            result = await run_in_worker_thread(
+                lambda: fence_writer_operation(root, store, product, body, reauthorize)
+            )
+            return accepted_evidence_response(
+                trace_id=trace, records={}, result=result.model_dump(mode="json")
+            )
+        except (
+            ValueError,
+            FileNotFoundError,
+            RuntimeError,
+            OSError,
+            click.ClickException,
+        ) as error:
+            raise dependencies.http_error(
+                status_code=409,
+                trace_id=trace,
+                code="recipient_writer_fence_unverified",
+                message="Retain the original writer operation; a witnessed or active writer is never fenced.",
+            ) from error
+
+    app.add_api_route(
+        WRITER_FENCE_ROUTE,
+        fence_writer,
+        methods=["POST"],
+        status_code=202,
+        response_model=AcceptedEvidenceResponse,
+        response_model_exclude_none=True,
+        operation_id="fence_production_recipient_writer",
+        summary="Fence one uncertain writer dispatch that never persisted its host witness",
+        responses={
+            code: {"model": dependencies.error_response_model} for code in (400, 401, 403, 409, 503)
+        },
+    )
+
     from control_plane.production_recipient_writer_control import (
         WRITER_ROUTE,
         RecipientWriterRequest,
