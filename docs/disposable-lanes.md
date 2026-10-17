@@ -559,6 +559,9 @@ project/environment/compose and independent local volumes without changing
 the lane profile, target records, runtime values, inventory or public address.
 The target is reserved in the existing physical provider registry in the same
 transaction as its candidate custody; another lane cannot adopt it.
+Compatibility target-ID records are also fenced, both at capture and before
+subsequent provider effects; an older lane reference cannot become permission
+to qualify or change its target as a candidate.
 
 The caller must hold the authorized lane operation and recheck its authority,
 holds, use, custody and isolation at every checkpoint. Provider effect intent

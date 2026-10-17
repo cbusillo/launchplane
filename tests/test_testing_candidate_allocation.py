@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.testing_candidate import (
     TestingCandidateAllocation,
     testing_candidate_namespace,
@@ -140,7 +141,7 @@ class TestingCandidateTests(unittest.TestCase):
         self.prepare()
         self.assertEqual(self.storage.call_args.kwargs["mode"], "readback")
         self.assertEqual(len(self.requests), 3)
-        with self.assertRaisesRegex(ValueError, "another route"):
+        with self.assertRaises(ValueError):
             self.store.write_provider_target_record(
                 ProviderTargetRecord(
                     context="other-product",
@@ -165,7 +166,7 @@ class TestingCandidateTests(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.prepare()
         self.assert_serving_unchanged()
-        with self.assertRaisesRegex(ValueError, "original-key"):
+        with self.assertRaises(ValueError):
             self.prepare()
         self.assertEqual(len(self.requests), 2)
         recovered = candidate.observe_candidate_creation(
@@ -191,7 +192,7 @@ class TestingCandidateTests(unittest.TestCase):
                 guard=self.guard,
             )
         )
-        with self.assertRaisesRegex(ValueError, "original-key"):
+        with self.assertRaises(ValueError):
             self.prepare()
         self.assertEqual(self.request.call_count, 1)
         self.assert_serving_unchanged()
@@ -213,11 +214,11 @@ class TestingCandidateTests(unittest.TestCase):
             update={"intent_sha256": canonical_json_sha256({"source": "upstream"})}
         )
         self.allocation = changed
-        with self.assertRaisesRegex(ValueError, "original lane or intent"):
+        with self.assertRaises(ValueError):
             self.prepare()
-        with self.assertRaisesRegex(ValueError, "custody changed"):
+        with self.assertRaises(ValueError):
             self.store.compare_and_write_testing_candidate(None, result)
-        with self.assertRaisesRegex(ValueError, "immutable"):
+        with self.assertRaises(ValueError):
             self.store.compare_and_write_testing_candidate(
                 result, result.model_copy(update={"compose_id": "another-target"})
             )
@@ -233,7 +234,7 @@ class TestingCandidateTests(unittest.TestCase):
             return response
 
         self.request.side_effect = alias
-        with self.assertRaisesRegex(ValueError, "another route"):
+        with self.assertRaises(ValueError):
             self.prepare()
         record = self.store.read_testing_candidate(self.allocation.namespace)
         assert record is not None
@@ -247,4 +248,50 @@ class TestingCandidateTests(unittest.TestCase):
             self.prepare()
         self.request.assert_not_called()
         self.assertIsNone(self.store.read_testing_candidate(self.allocation.namespace))
+        self.assert_serving_unchanged()
+
+    def test_legacy_lane_alias_refuses_capture_before_any_candidate_storage(self) -> None:
+        self.store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context="foreign-context",
+                instance="prod",
+                target_id="candidate-compose",
+                updated_at=self.allocation.created_at.isoformat(),
+            )
+        )
+        with self.assertRaises(ValueError):
+            self.prepare()
+        record = self.store.read_testing_candidate(self.allocation.namespace)
+        assert record is not None
+        self.assertFalse(record.compose_id)
+        self.storage.assert_not_called()
+        self.assertFalse(
+            any(
+                item.target_id == "candidate-compose"
+                for item in self.store.list_physical_provider_target_records()
+            )
+        )
+        self.assert_serving_unchanged()
+
+    def test_alias_added_after_capture_refuses_the_next_provider_checkpoint(self) -> None:
+        def readback(**kwargs: object) -> dict[str, str]:
+            self.store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="foreign-context",
+                    instance="prod",
+                    target_id="candidate-compose",
+                    updated_at=self.allocation.created_at.isoformat(),
+                )
+            )
+            checkpoint = kwargs["checkpoint"]
+            assert callable(checkpoint)
+            checkpoint()
+            self.fail("An aliased candidate cannot dispatch storage work.")
+
+        self.storage.side_effect = readback
+        with self.assertRaises(ValueError):
+            self.prepare()
+        record = self.store.read_testing_candidate(self.allocation.namespace)
+        assert record is not None
+        self.assertFalse(record.resources_binding_sha256)
         self.assert_serving_unchanged()

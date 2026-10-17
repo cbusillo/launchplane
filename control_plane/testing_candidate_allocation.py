@@ -29,6 +29,25 @@ def candidate_resources(record: TestingCandidateAllocation) -> OdooTestingResour
     )
 
 
+def require_candidate_target_custody(
+    store: PostgresRecordStore, record: TestingCandidateAllocation
+) -> None:
+    """Recheck aliases before provider effects, including compatibility records."""
+    if not record.compose_id:
+        return
+    provider = store.read_provider_target_record(
+        context_name=record.namespace, instance_name="testing-candidate"
+    )
+    if (
+        provider.provider_id != "dokploy"
+        or provider.target_category != "compose"
+        or provider.target_id != record.compose_id
+    ):
+        raise ValueError("The candidate's physical target reservation changed.")
+    if any(item.target_id == record.compose_id for item in store.list_dokploy_target_id_records()):
+        raise ValueError("Candidate identity is already named by a legacy lane target.")
+
+
 def prepare_candidate_storage(
     *,
     root: Path,
@@ -48,6 +67,9 @@ def prepare_candidate_storage(
     def checkpoint() -> None:
         lease.assert_current()
         guard()
+        current = store.read_testing_candidate(allocation.namespace)
+        if current is not None:
+            require_candidate_target_custody(store, current)
 
     checkpoint()
     existing = store.read_testing_candidate(allocation.namespace)

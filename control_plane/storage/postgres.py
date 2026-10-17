@@ -10702,6 +10702,16 @@ class PostgresRecordStore(HumanSessionStore):
                 or serving.target_id != replacement.serving_target_id
             ):
                 raise ValueError("The serving testing target changed during candidate preparation.")
+            if replacement.compose_id:
+                if (
+                    session.scalar(
+                        select(LaunchplaneDokployTargetIdRow)
+                        .where(LaunchplaneDokployTargetIdRow.target_id == replacement.compose_id)
+                        .limit(1)
+                    )
+                    is not None
+                ):
+                    raise ValueError("Candidate identity is already named by a legacy lane target.")
             if replacement.compose_id and (expected is None or not expected.compose_id):
                 # Physical alias fencing reserves custody without changing the
                 # canonical target, generation, runtime environment or inventory.
