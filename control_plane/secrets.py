@@ -480,6 +480,7 @@ def resolve_secret_values_for_integration_from_store(
     context_name: str = "",
     instance_name: str = "",
     scopes: frozenset[SecretScope] | None = None,
+    binding_keys: frozenset[str] | None = None,
 ) -> dict[str, str]:
     return {
         binding_key: value
@@ -489,6 +490,7 @@ def resolve_secret_values_for_integration_from_store(
             context_name=context_name,
             instance_name=instance_name,
             scopes=scopes,
+            binding_keys=binding_keys,
         ).items()
     }
 
@@ -500,6 +502,7 @@ def resolve_scoped_secret_values_for_integration_from_store(
     context_name: str = "",
     instance_name: str = "",
     scopes: frozenset[SecretScope] | None = None,
+    binding_keys: frozenset[str] | None = None,
 ) -> dict[str, tuple[str, SecretScope]]:
     """Return each effective binding value with the scope of the record that supplied it."""
 
@@ -511,6 +514,8 @@ def resolve_scoped_secret_values_for_integration_from_store(
         instance_name=instance_name,
         scopes=scopes,
     ).items():
+        if binding_keys is not None and binding_key not in binding_keys:
+            continue
         version = record_store.read_secret_version(record.current_version_id)
         resolved_values[binding_key] = (
             _decrypt_secret_value(version.ciphertext, version.key_id),
@@ -603,6 +608,7 @@ def resolve_site_secret_values(
     instance_name: str,
     include_site_shared: bool,
     database_url: str | None = None,
+    binding_keys: frozenset[str] | None = None,
 ) -> dict[str, str]:
     """Resolve a site lane's own runtime secrets, never global or another site's.
 
@@ -626,6 +632,7 @@ def resolve_site_secret_values(
             context_name=context_name,
             instance_name=instance_name,
             scopes=scopes,
+            binding_keys=binding_keys,
         )
     finally:
         store.close()

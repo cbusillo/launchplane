@@ -178,6 +178,7 @@ def resolve_site_runtime_environment(
     instance_name: str,
     database_url: str | None = None,
     target_environment_override: dict[str, str] | None = None,
+    secret_binding_keys: frozenset[str] | None = None,
 ) -> SiteRuntimeEnvironment:
     """The environment a site's lane runs with: its own values and nothing else.
 
@@ -185,6 +186,8 @@ def resolve_site_runtime_environment(
     shared across the site reach its testing and prod lanes, never a preview.
     A replacement can supply its intended target layer explicitly, so preparing
     it never inherits overrides from the retained recipient.
+    A private copy may restrict secret keys before any version is read or
+    decrypted; the default retains the site's ordinary delivery contract.
 
     Every path that writes a site's app runtime from Launchplane records uses this
     resolver, so the lane's ``retired_provider_keys`` are dropped and the
@@ -221,6 +224,7 @@ def resolve_site_runtime_environment(
         instance_name=instance_name,
         include_site_shared="context" in site_secret_scopes(instance_name),
         database_url=database_url,
+        binding_keys=secret_binding_keys,
     )
     setting_keys = frozenset(values)
     values.update(secret_values)
