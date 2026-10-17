@@ -309,9 +309,45 @@ before adoption, and that receipt stays in continuation history. Missing writer 
 never proves that a queued pause cannot still run. The original release recovery
 keeps that fence until positive terminal evidence exists.
 
+## Fencing an unwitnessed writer dispatch
+
+A writer pause can be dispatched and then lost before its host job writes the
+original witness, for example on a schedule trigger timeout. Its effect stays
+unknown: the queued job may still run. `--writer-fence` (route
+`POST /v1/products/{product}/production-recipient/writer-fence`) reviews one such
+operation by its original operation ID. It uses existing production setup
+authority, as continuation does. It admits only an uncertain testing-writer
+operation, the original pause of the retained writer during cutover, or the
+replacement pause of an inverse, and only after the original worker lease has
+expired.
+
+Apply runs the fixed writer program on the operation's own recorded host, and
+refuses if the provider has since moved the target to another server. It runs
+under the same writer lock the original job takes. An active job holds that lock
+and blocks the fence. If the original binding persisted `before.json`, the fence
+refuses: a witnessed writer may have stopped, and is reconciled from its witness
+instead. Otherwise it exclusively creates `before.json` as a permanent fence
+record for that binding only. Every dispatched writer program, including a job
+queued before this fence existed, refuses a witness that does not match its
+container before touching one, so any late job for that binding refuses. Other
+bindings and later operations are unaffected. Launchplane then records the
+no-effect disposition in custody, checking that custody and the original
+reservation did not change during the fence. The disposition is the flow's own
+"no writer was touched" state: a testing operation settles as not completed, a
+cutover attempt returns to `preflight_refused`, and an inverse is aborted with
+the replacement still published.
+
+The fence never completes the reservation itself. Retry the original operation
+key through its own route (`--writer-control`, `--release-recovery`, or the
+inverse) to adopt the recorded no-effect result. A fenced pause cannot be
+resumed; start a new pause instead. A cutover settled this way can continue
+through generation continuation. Readback verifies the retained host tombstone.
+Elapsed time, a missing container or a missing target never substitute for the
+fence.
+
 Host custody lives under `/var/lib/launchplane/recipient-execution/<namespace>/`
 and `/var/lib/launchplane/recipient-writers/<binding>/`. Execution tombstones and
-writer witnesses are fsynced and retained. A permanent writer-release marker
+writer witnesses and writer fences are fsynced and retained. A permanent writer-release marker
 rejects delayed pauses after restoration. A completed resume never starts a
 container again. An interrupted start can retry only while its original pause
 still owns the writer; an older resume cannot undo a later pause. Preserve these directories and recovery

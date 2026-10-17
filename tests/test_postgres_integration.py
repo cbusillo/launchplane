@@ -12490,6 +12490,26 @@ class RealPostgresRecipientWriterTests(unittest.TestCase):
         fixture.test_two_pause_resume_cycles_bind_each_resume_to_its_original_pause()
 
 
+class RealPostgresRecipientWriterFenceTests(unittest.TestCase):
+    def test_retaken_operation_refuses_the_fence_commit_under_row_locks(self) -> None:
+        from tests.test_production_recipient_writer_fence import TestingWriterFenceTests
+
+        fixture = TestingWriterFenceTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_original_worker_retaking_the_operation_refuses_the_fence_commit()
+
+    def test_unwitnessed_cutover_pause_settles_with_real_custody(self) -> None:
+        from tests.test_production_recipient_writer_fence import CutoverWriterFenceTests
+
+        fixture = CutoverWriterFenceTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_unwitnessed_old_pause_is_fenced_and_release_settles_without_effect()
+
+
 class RealPostgresOdooTestingDrillTests(unittest.TestCase):
     def setUp(self) -> None:
         from tests.test_odoo_testing_drill import TestingDrillScenario

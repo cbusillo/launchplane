@@ -51,7 +51,7 @@ def run_recipient_program(
             or not (
                 program == WRITER_RECEIPT_PROGRAM
                 and spec.get("action")
-                in {"receipt_pause", "receipt_resume", "receipt_resume_retryable"}
+                in {"receipt_pause", "receipt_resume", "receipt_resume_retryable", "receipt_fenced"}
                 or program == WRITER_PROGRAM
                 and spec.get("action") == "parked"
             )
