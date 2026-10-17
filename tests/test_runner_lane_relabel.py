@@ -412,7 +412,7 @@ class RunnerRelabelTests(unittest.TestCase):
                         "--approved-host",
                         self.request.host_name,
                         "--allowed-registration-root",
-                        self.request.registration_root,
+                        self.request.registration_root + "/./",
                         "--execution-lane",
                         "ops",
                         "--service-user",
@@ -464,14 +464,13 @@ class RunnerRelabelWorkflowTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                     env={
-                        **os.environ,
                         "PATH": f"{root}:{os.environ['PATH']}",
                         "FIXTURE_RESULT": output,
                         "AUDIT_RECORD_KEY": "fixture/audit",
                         "TARGET_REPOSITORY": "example/control",
                         "LANE_NAME": "general-1",
                         "REGISTRATION_ROOT": "auto",
-                        "RUNNER_REGISTRATION_ALLOWED_ROOT": "/srv/runners",
+                        "RUNNER_REGISTRATION_ALLOWED_ROOT": "/srv/runners/./",
                         "RUNNER_REGISTRATION_HOST": "build-1",
                         "RUNNER_REGISTRATION_EXECUTION_LANE": "ops",
                         "RUNNER_REGISTRATION_SERVICE_USER": "runner-user",
@@ -492,7 +491,8 @@ class RunnerRelabelWorkflowTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 packet = json.loads((root / "runner-lane-lifecycle-result.json").read_text())
                 self.assertEqual(
-                    packet["status"], "audit_delivery_pending" if output else "refused_before_write"
+                    packet["status"],
+                    "audit_delivery_pending" if output else "executor_result_unavailable",
                 )
                 if output:
                     self.assertEqual(packet["terminal_audit"], {"retained": True})

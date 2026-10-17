@@ -54,10 +54,15 @@ def runner_lane_relabel_executor(
             raise ValueError("request operation/mutate must match the explicit relabel invocation")
         if mutate and not service_url:
             raise ValueError("mutating relabel requires service-backed audit")
+        policy = RunnerLaneRegistrationPolicy(
+            allowed_repositories=(allowed_repository,),
+            approved_hosts=(approved_host,),
+            allowed_registration_roots=(allowed_registration_root,),
+        )
         if (
-            request.repository != allowed_repository.lower()
-            or request.host_name != approved_host.lower()
-            or request.registration_root != allowed_registration_root
+            request.repository not in policy.allowed_repositories
+            or request.host_name not in policy.approved_hosts
+            or request.registration_root not in policy.allowed_registration_roots
         ):
             raise ValueError("request does not match the approved repository/host/root")
         if mutate:
@@ -94,11 +99,7 @@ def runner_lane_relabel_executor(
             reader = GitHubRunnerLaneInventoryReader(transport=transport)
             result = execute_relabel(
                 request=request,
-                policy=RunnerLaneRegistrationPolicy(
-                    allowed_repositories=(allowed_repository,),
-                    approved_hosts=(approved_host,),
-                    allowed_registration_roots=(allowed_registration_root,),
-                ),
+                policy=policy,
                 transport=transport,
                 inventory_reader=lambda: reader.read_runner_lane_inventory(
                     repository=request.repository

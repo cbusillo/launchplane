@@ -286,6 +286,10 @@ For an inverse, review a new request with expected labels equal to the verified
 current custom labels and desired labels equal to the saved original custom
 labels. Check identity again; never overwrite intervening label changes. The
 operation never changes service configuration or runner registrations.
+If the executor exits or is interrupted before producing a result, the workflow
+retains `executor_result_unavailable` with unknown `write_attempted` for an apply.
+Treat that artifact as an uncertain outcome and read the exact runner back;
+an empty stdout or cancelled job never proves no label write occurred.
 
 To deliver a retained terminal packet, select the same workflow with
 `operation=relabel-audit`, `mutate=true`, the original repository, lane, root
@@ -298,14 +302,22 @@ status is `audit_delivered`, which proves audit delivery, not a fresh label
 mutation or resolution of an uncertain provider outcome. The equivalent terminal
 consumer adds `--audit-packet-file <saved-result.json>` to the original reviewed
 relabel invocation. No new credential or grant is required.
+Packet validation is structural/scope validation of caller-provided evidence,
+not cryptographic provenance or a new observation of provider state. Use only
+the original retained packet and unique lifecycle audit key; the existing audit
+store upserts by key, so fabricating or substituting a packet can overwrite
+unrelated evidence. An uncertain provider outcome still requires independent
+GitHub readback even after its audit is delivered.
 
 Scheduling labels are not proof of host-service retirement authority. The
 retirement executor independently verifies directory ownership and the narrow
 root-owned exact-target service binding before any registration deletion.
 Reserved-pool policies may intentionally remove generic managed routing labels;
-their inverse restores the saved labels. For a later approved retirement of
-such a lane, set `--required-label` to its actual approved reservation label
-instead of asserting that the old generic routing labels are still present.
+their inverse restores the saved labels. For a later approved retirement through
+the existing workflow, first apply the reviewed inverse to restore its generic
+labels: the retirement step still requires those labels. The terminal retirement
+CLI separately supports `--required-label` with the actual approved reservation
+policy on the operations lane; the workflow does not expose that override.
 
 ### Registration and retirement
 

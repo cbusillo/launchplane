@@ -146,6 +146,7 @@ jobs:
           fi
 
       - name: Read pre-lifecycle inventory
+        if: ${{ inputs.operation != 'relabel' && inputs.operation != 'relabel-audit' }}
         shell: bash
         env:
           TARGET_REPOSITORY: ${{ inputs.repository }}
@@ -301,10 +302,18 @@ jobs:
           OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
-          jq -n --arg key "$AUDIT_RECORD_KEY" \
-            '{status:"refused_before_write",audit_record_key:$key,write_attempted:false}' \
+          jq -n --arg key "$AUDIT_RECORD_KEY" --argjson mutate "$MUTATE_REQUESTED" \
+            '{status:"executor_result_unavailable",audit_record_key:$key,
+              write_attempted:(if $mutate then null else false end)}' \
             > runner-lane-lifecycle-result.json
           approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"
+          normalize_root() {
+            jq -Rr '"/" + (split("/") | map(select(. != "" and . != ".")) | join("/"))' <<<"$1"
+          }
+          approved_root="$(normalize_root "$approved_root")"
+          if [ "$REGISTRATION_ROOT" != "auto" ]; then
+            REGISTRATION_ROOT="$(normalize_root "$REGISTRATION_ROOT")"
+          fi
           if [ "$REGISTRATION_ROOT" != "auto" ] && [ "$REGISTRATION_ROOT" != "$approved_root" ]; then
             echo "registration_root must match Launchplane approved root." >&2
             exit 1
