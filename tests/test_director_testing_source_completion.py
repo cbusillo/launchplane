@@ -167,6 +167,7 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
         def safety(*args: Any, **kwargs: Any) -> Any:
             result = read_safety(*args, **kwargs)
             if self.in_source_transaction:
+                assert result is not None
                 return result.model_copy(update={"data": "only_copy"})
             return result
 
