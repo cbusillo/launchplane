@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
+from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 
 from pathlib import Path
 
@@ -3769,6 +3770,12 @@ class LaunchplaneDisposableReplacementPreparationRow(Base):
 class LaunchplaneDisposableTestingResourceAllocationRow(Base):
     __tablename__ = "launchplane_disposable_testing_resource_allocations"
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOdooUpgradeRehearsalRow(Base):
+    __tablename__ = "launchplane_odoo_upgrade_rehearsals"
+    rehearsal_id: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -10868,6 +10875,55 @@ class PostgresRecordStore(HumanSessionStore):
                     ).all()
                 ),
             )
+
+    def read_odoo_upgrade_rehearsal(self, rehearsal_id: str) -> OdooUpgradeRehearsalRecord | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneOdooUpgradeRehearsalRow, rehearsal_id)
+            return OdooUpgradeRehearsalRecord.model_validate(row.payload) if row else None
+
+    def compare_and_write_odoo_upgrade_rehearsal(
+        self,
+        expected: OdooUpgradeRehearsalRecord | None,
+        replacement: OdooUpgradeRehearsalRecord,
+    ) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(
+                session, "odoo-upgrade-rehearsal:" + replacement.rehearsal_id
+            )
+            row = session.get(
+                LaunchplaneOdooUpgradeRehearsalRow, replacement.rehearsal_id, with_for_update=True
+            )
+            if (row.payload if row else None) != (
+                self._payload_dict(expected) if expected is not None else None
+            ):
+                raise ValueError("Rehearsal state changed; preserve its original operation.")
+            if replacement.compose_id and (expected is None or not expected.compose_id):
+                # The native physical registry fences aliases without claiming a lane.
+                self._write_provider_target_with_expectation(
+                    session=session,
+                    write=ProviderTargetWrite(
+                        record=ProviderTargetRecord(
+                            context=replacement.rehearsal_id,
+                            instance="rehearsal",
+                            provider_id="dokploy",
+                            target_category="compose",
+                            target_id=replacement.compose_id,
+                            display_name=replacement.rehearsal_id,
+                            provider_target_type="compose",
+                            source_label="service:odoo-upgrade-rehearsal",
+                            updated_at=replacement.created_at.isoformat(),
+                        ),
+                        expected_absent=True,
+                    ),
+                )
+            session.merge(
+                LaunchplaneOdooUpgradeRehearsalRow(
+                    rehearsal_id=replacement.rehearsal_id, payload=self._payload_dict(replacement)
+                )
+            )
+            session.commit()
 
     def read_fresh_odoo_testing_generation(
         self, product: str, context: str

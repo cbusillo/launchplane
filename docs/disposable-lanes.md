@@ -1583,3 +1583,129 @@ one is open; forward-fix an interrupted preparation. An older image cannot
 interpret its exclusion contract. Never roll back storage or erase custody to
 clear a fence. The stranded-operation procedure above retains its original
 admission and supersession meaning.
+
+## Standalone Odoo upgrade rehearsal
+
+`POST /v1/products/{product}/odoo-upgrade-rehearsal` and the repository client
+`scripts/odoo-upgrade-rehearsal.py` operate a separately identified rehearsal.
+This is not an initial testing generation. It has its own record, provider
+placement, private Docker network and storage; it writes no product profile,
+canonical target, runtime environment, production release or testing binding.
+Its runtime instance is `rehearsal`. The tenant's testing-only migration hook is
+not enabled by changing that name.
+
+The implementation reuses the disposable volume producer and actual backing
+checks, uniquely named placement discovery, the durable provider-operation
+journal, disabled manual schedules, the standard isolated Odoo Compose renderer,
+SQL-before-registry copy runner, connection isolation, integration readback and
+storage headroom checks. The existing local-password primitive supplies only the
+new rehearsal's own scope; no existing password or integration key is copied or
+rotated. It creates no credential that reaches a live system and grants nobody
+access. No workflow or alternate identity substitutes for a denied service call.
+The source and target copies use the same SQL boundary independently, with a
+sanitized source-version snapshot preserved before the target registry runs.
+
+The necessary new boundary is one additive rehearsal record, not another lane or
+release controller. Its compose is reserved under the new context in the existing
+physical-target registry, which prevents canonical lane aliases. The service derives its `lp-rehearsal-…` identity from the
+product, authenticated principal and original prepare key. Sizing comes from the
+product's production records; application, database and runner topology comes
+from the common Odoo renderer. Only explicit sizing keys are inherited. Routing,
+volumes, credentials, database names, cron and connections are isolated.
+
+Before planning, supply a private intent file outside the checkout. It contains
+`source_context` (the product's existing testing source-reader context),
+`source_odoo_version`, `target_artifact_id`, `storage` and `reason`. `storage` uses
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`. The
+first two bound each streamed capture as well as supplying working headroom.
+Budget four database/filestore copies plus host staging and immutable recovery
+snapshots. Headroom checks group demands by actual backing filesystem; they are
+not filesystem quotas.
+
+The candidate artifact must already be registered, immutable, attributable to
+this product's repository, and declare its Odoo version and exact module intent.
+Its version must be newer than `source_odoo_version`; the restored database's
+actual base-module version must agree with that declared source version. The
+existing SQL-only sanitizer runs on the old schema without loading a candidate
+registry. It preserves the sanitized old-version recovery tuple before any
+upgrade. No separate source-version application image is required.
+
+The candidate needs the native SQL-before-registry credential boundary,
+OpenUpgrade assets and module-update witnesses. Preparing the independent runtime
+checks its runner before any business source is read. Metadata planning alone
+does not qualify an image's executable behavior. Unsupported native contracts
+fail closed; before-registry and before-web readback remain mandatory on the
+actual copied data.
+
+The source reader must already have its service-recorded `ODOO_UPSTREAM_*` and
+`OPENUPGRADE_*` settings, existing host SSH identity, known-host trust and source
+read access. No command installs a key, changes source trust, grants access,
+freezes the business host or edits its database. Placement uses the production
+lane's already registered remote server, read-only. Local/unregistered placement
+is refused. A missing record or unavailable prerequisite is not authorization to
+infer coordinates from an issue or workstation file.
+
+Use the installed `launchplane-write-action.py` helper as the authenticated, redacted transport:
+
+```bash
+uv run python scripts/odoo-upgrade-rehearsal.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --payload-file <private-intent.json> \
+  --idempotency-key <original-prepare-key> --evidence-file <private-prepare-review>
+```
+
+Review its result, then repeat with `apply --reviewed-dry-run`, exactly the same
+intent, key and evidence file. Planning writes only its own rehearsal evidence.
+Apply is restricted to the authenticated Director agent and PostgreSQL-backed
+execution. Existing read authority covers planning and readback. It is a source
+capability until the completing PR is deployed; a missing route is unavailable,
+not a reason to invoke a local live-target command.
+
+After prepare, keep the returned `rehearsal_id` in the private intent and take
+each next `action` through its own dry-run/review/apply with a distinct stable
+key and new evidence file:
+
+1. `execute` captures the external source through fixed read-only SSH commands.
+   Database and filestore streams are bounded. Source-copy lineage is hashed,
+   referenced attachments are checked against the restored database, and raw
+   failure material stays outside all container mounts. The SQL-only
+   source phase sanitizes with no registry execution. The service preserves that
+   source recovery tuple, clones it, and runs OpenUpgrade under the target
+   artifact. Strict connection readback gates private web startup.
+2. `simulate-final` uses the already sanitized source copy. It simulates the
+   final capture and switches only the rehearsal web's database to the final
+   upgraded copy. It never recaptures or fences the real business system.
+3. `verify` probes health identity and the login page inside the private
+   network, stops the disposable web writer, and preserves the final upgraded
+   database/filestore tuple. Product business validation remains part of the
+   consuming rehearsal; health/login proof is not Client acceptance.
+4. `retire` stops web, runner and database and preserves all recovery custody.
+   It requires both final source and upgraded tuples. It does not delete
+   volumes, provider placement, snapshots or keys. Their custodian carries them
+   into the rollback rehearsal before a separately reviewed physical disposal.
+
+Use `readback` with the original intent/action to inspect its completed effect.
+Retirement readback verifies stopped containers and immutable files without
+starting the database. Snapshot hashes, source binding, copy witnesses,
+artifact identities and elapsed times are value-free receipts. Provider ids,
+source coordinates and local passwords never reach the client's output.
+
+An uncertain effect stays fenced under its original key. Readback is not replay;
+repeat the original apply only for the provider journal's observation/adoption,
+never with a new key. An incomplete provider create or partial host operation
+keeps its namespace, phase journal, raw failure custody and storage for diagnosis.
+The route does not guess that absence or a timeout permits another create,
+restore, capture or deletion. Fixed prerequisite codes and the trace identify
+unavailable source, artifact, placement, credentials, state or recovery evidence;
+no provider exception text is returned.
+
+Elapsed times describe this isolated simulation. Real source writer drain,
+public DNS/TLS switching, business integration resumption and the actual
+production downtime window remain unmeasured. The consuming product issue must
+keep those limits with its rehearsal evidence. Neither a ready existing-data
+production plan nor a successful rehearsal authorizes production promotion.
+
+A partial operation's readback reports `completed: false`, any independently
+verified snapshot receipts and whether raw source custody remains. It does not
+start a runtime or clear the provider journal. Missing terminal evidence never
+becomes a successful migration or retirement; keep the original operation key.
