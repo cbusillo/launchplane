@@ -2876,6 +2876,9 @@ return a typed blocked result rather than guessing a domain.
   keys cannot be retired. Apply changes records only. The subsequent native
   live-target runtime sync removes exactly those names, preserves other
   provider entries, and verifies their absence before an optional deploy.
+  The sync also refuses to retire a key a plain site setting supplies; a key
+  only a managed secret supplies can be retired, which keeps that secret off
+  the lane.
   Odoo target replacement honors the same reviewed intent while continuing to
   refuse every unreviewed provider-only key. Both consumers recheck retirement
   intent and application declarations before writing. Execution uses the current

@@ -742,10 +742,12 @@ def apply_live_target_runtime_environment(
                 instance_name=instance_name,
                 allow_owned_preview=allow_owned_preview,
             )
+            # A key only a managed secret supplies may be retired from a lane; plain
+            # settings, declared keys and driver keys may not.
             validate_provider_key_retirement(
                 retired_keys=retired_keys,
                 application_keys=control_plane_runtime_environments.site_application_keys(
-                    site_environment.site_keys
+                    site_environment.setting_keys
                 )
                 | declared_keys,
             )
@@ -830,7 +832,7 @@ def apply_live_target_runtime_environment(
                                 context_name=context_name,
                                 instance_name=instance_name,
                                 database_url=database_url,
-                            ).site_keys
+                            ).setting_keys
                         )
                         | product_lane_declared_keys(
                             record_store=postgres_store,

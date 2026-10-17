@@ -155,6 +155,7 @@ class SiteRuntimeEnvironment:
     secret_keys: frozenset[str]
     retired_keys: frozenset[str] = frozenset()
     site_keys: frozenset[str] = frozenset()
+    setting_keys: frozenset[str] = frozenset()
 
 
 _SITE_SHARED_AND_LANE_SECRET_SCOPES: frozenset[SecretScope] = frozenset(
@@ -189,7 +190,8 @@ def resolve_site_runtime_environment(
     resolver, so the lane's ``retired_provider_keys`` are dropped and the
     platform-credential policy applies the same way: a platform credential, or a
     GitHub token value under any key, refuses the render and names the key and its
-    source. ``site_keys`` holds the key names before retirement.
+    source. ``site_keys`` holds the key names before retirement; ``setting_keys`` holds
+    the ones a plain setting supplies, leaving out keys only a managed secret supplies.
     """
     definition = load_runtime_environment_definition(
         control_plane_root=control_plane_root,
@@ -220,6 +222,7 @@ def resolve_site_runtime_environment(
         include_site_shared="context" in site_secret_scopes(instance_name),
         database_url=database_url,
     )
+    setting_keys = frozenset(values)
     values.update(secret_values)
     site_keys = frozenset(values)
     retired_keys = retired_provider_keys_for_lane(
@@ -247,6 +250,7 @@ def resolve_site_runtime_environment(
         secret_keys=frozenset(key for key in secret_values if key in values),
         retired_keys=retired_keys,
         site_keys=site_keys,
+        setting_keys=setting_keys,
     )
 
 
