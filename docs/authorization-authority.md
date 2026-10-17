@@ -205,7 +205,19 @@ Completed same-key replay does not allocate again. Source completion, lane
 registration, credential delivery, deployment and health qualification remain
 separate supported operations; staging an empty target proves none of them.
 An existing lane needs its own supported qualification/rebuild path, including
-current usage, data and isolation evidence. This path cannot reset or replace it.
+current usage, data and isolation evidence. The compose shape cannot reset or
+replace it.
+
+The same path also accepts `create-application`, the conventional testing-lane
+shape: a new project, a new environment and an empty application on a named
+server, with no domain route. It may replace the lane's current testing target
+when that lane never had a successful deploy, because such a lane holds no data
+and serves nobody. The request names the exact target it replaces in
+`expected_current_provider_target`; a different, partial or missing target, or
+any deployment record whose deploy passed, refuses. The replaced provider
+resource is left in place for a supported retirement. Image delivery and runtime
+settings then follow the ordinary event-driven testing deploy.
+
 Other agent identities retain their scoped policy rules. No grant or credential
 is installed, and general setup, production, backup and promotion authority do
 not change.
