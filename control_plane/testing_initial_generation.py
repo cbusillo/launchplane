@@ -151,6 +151,7 @@ def require_testing_generation_usage(
         target_id=target_id,
         instance="testing",
         usage="in_use" if known_use else usage.usage,
+        runtime_stopped=usage.reason_code == "serving_container_stopped",
     )
     if decision.protected:
         if not known_use and usage.usage == "unknown":
