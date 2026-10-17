@@ -36409,6 +36409,23 @@
             "title": "Blocked Count",
             "type": "integer"
           },
+          "intent": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provision",
+                  "generation",
+                  "testing-replacement"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent",
+            "x-launchplane-optional-response": true
+          },
           "path": {
             "enum": [
               "testing",
@@ -91300,6 +91317,76 @@
             }
           },
           {
+            "in": "query",
+            "name": "intent",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "provision",
+                    "generation",
+                    "testing-replacement"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Intent"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_mode",
+            "required": false,
+            "schema": {
+              "default": "container-export",
+              "enum": [
+                "ssh",
+                "container-export"
+              ],
+              "title": "Source Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "task_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{32}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Task Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "operation_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Operation Id"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,
@@ -91330,6 +91417,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
           },
           "401": {
             "content": {
