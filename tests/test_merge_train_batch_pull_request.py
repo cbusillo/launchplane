@@ -13,6 +13,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_id,
     build_merge_train_batch_landing_plan,
 )
+from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
     MergeAdmissionDeniedError,
@@ -28,6 +29,7 @@ from control_plane.release_review_github import owner_test_notes
 from tests.test_merge_train_github import (
     _combined_status,
     _owner_review_check,
+    _client_veto_record,
     _advisory_runtime_records,
     _conversation_rule,
     _review_threads,
@@ -307,7 +309,9 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             checkpoint=checkpoint or (lambda plan, _entry, _phase: self.progress.append(plan)),
         )
 
-    def _require_client_review_for_second_member(self, state: dict[str, str]) -> None:
+    def _require_client_review_for_second_member(
+        self, state: dict[str, str], decisions: list[ProductReviewDecisionRecord] | None = None
+    ) -> None:
         original = self.provider.request
 
         def request(*, method: str, path: str, body: dict[str, object] | None = None) -> object:
@@ -323,25 +327,56 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             if method == "GET" and path.endswith("/pulls/1") and isinstance(response, dict):
                 response["body"] = "## Client test notes\nNothing for the Client to test: CI only."
             if method == "GET" and path.endswith("/pulls/2") and isinstance(response, dict):
-                response["labels"] = [{"name": "client-check"}]
-                response["body"] = "## Client test notes\nTry the changed page."
+                response["labels"] = [] if state.get("engineering") else [{"name": "client-check"}]
+                response["body"] = "## Client test notes\n" + (
+                    "Nothing for the Client to test: CI only."
+                    if state.get("engineering")
+                    else "Try the changed page."
+                )
             return response
 
         provider_request = patch.object(self.provider, "request", side_effect=request)
         provider_request.start()
         self.addCleanup(provider_request.stop)
         profile = SimpleNamespace(
+            product="site",
             release_on_acceptance="held",
             is_active=True,
             repository=self.provider.repository_name,
-            owner=SimpleNamespace(review_label="client-check", is_set=True),
+            owner=SimpleNamespace(review_label="client-check", is_set=True, github_id="901"),
         )
         store = SimpleNamespace(
             list_product_profile_records=lambda: (profile,),
             list_runtime_environment_records=_advisory_runtime_records,
+            list_product_review_decision_records=lambda **_: tuple(decisions or ()),
         )
         self.client = GitHubMergeTrainClient(
             transport=self.provider, branch_refresh_store=cast(Any, store)
+        )
+
+    def test_engineering_reclassification_cannot_clear_batch_member_veto(self) -> None:
+        state = {"value": "neutral", "engineering": "yes"}
+        rejection = _client_veto_record(
+            repository=self.provider.repository_name, number=2, head_sha=self.provider.heads[2]
+        )
+        self._require_client_review_for_second_member(state, [rejection])
+        with self.assertRaises(MergeAdmissionDeniedError):
+            self.land()
+        self.assertFalse(self.provider.merge_calls)
+
+    def test_batch_rechecks_saved_veto_after_admission_despite_successful_projection(self) -> None:
+        state = {"value": "success", "engineering": "yes"}
+        decisions: list[ProductReviewDecisionRecord] = []
+        self._require_client_review_for_second_member(state, decisions)
+        rejection = _client_veto_record(
+            repository=self.provider.repository_name, number=2, head_sha=self.provider.heads[2]
+        )
+        self.guard.after_admit = lambda _number: decisions.append(rejection)
+        with self.assertRaises(MergeAdmissionDeniedError):
+            self.land()
+        self.assertFalse(self.provider.merge_calls)
+        self.assertTrue(
+            all(value == "batch_not_dispatched" for value in self.guard.outcomes.values())
         )
 
     def test_batch_cannot_land_later_member_without_current_client_status(self) -> None:

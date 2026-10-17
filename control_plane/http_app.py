@@ -380,7 +380,7 @@ from control_plane.release_review import (
     current_release_review,
 )
 from control_plane.release_review_record import publish_release_decision
-from control_plane.release_invitation import publish_release_invitation
+from control_plane.release_invitation import publish_release_invitation, adopt_release_invitation
 from control_plane.trusted_maintenance_github_webhook import TRUSTED_MAINTENANCE_WEBHOOK_ROUTE
 from control_plane.github_app_webhook import GITHUB_APP_WEBHOOK_ROUTE
 from control_plane.provider_operations import (
@@ -893,6 +893,11 @@ from control_plane.health_monitor_status import (
     HealthMonitorStatusResponse,
     read_health_monitor_status,
 )
+from control_plane.production_delivery_monitor import (
+    RefusedProductionRequestReconciliation,
+    reconcile_refused_production_requests,
+)
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import (
     DbOnlyMutationPreflightResult,
     DbOnlyMutationRequest,
@@ -2991,6 +2996,9 @@ class PublicIngressMonitorRunOnceRequest(BaseModel):
     product: str = "launchplane"
     timeout_seconds: int = Field(default=10, ge=1, le=120)
     notify: bool = True
+    refused_production_requests: tuple[RefusedProductionRequestReconciliation, ...] = Field(
+        default=(), max_length=100
+    )
 
     @model_validator(mode="after")
     def _validate_request(self) -> "PublicIngressMonitorRunOnceRequest":
@@ -13539,18 +13547,30 @@ def create_launchplane_fastapi_app(
                 code="invalid_request",
                 message="Product expected config request failed validation.",
             ) from error
-        if not resolved_authz_policy_runtime.allows(
-            identity=identity,
-            action="product_profile.expected_config.apply",
-            product=expected_config_request.product,
-            context=_LAUNCHPLANE_SERVICE_CONTEXT,
-        ) and not (
-            expected_config_request.mode != "apply"
-            and resolved_authz_policy_runtime.allows(
+        director_declaration = (
+            director_agent_identity(identity)
+            and not expected_config_request.requests_removal
+            and not any(
+                requirement.owner_input is not None
+                for requirement in expected_config_request.managed_secret_bindings
+            )
+        )
+        if (
+            not director_declaration
+            and not resolved_authz_policy_runtime.allows(
                 identity=identity,
-                action="product_profile.expected_config.plan",
+                action="product_profile.expected_config.apply",
                 product=expected_config_request.product,
                 context=_LAUNCHPLANE_SERVICE_CONTEXT,
+            )
+            and not (
+                expected_config_request.mode != "apply"
+                and resolved_authz_policy_runtime.allows(
+                    identity=identity,
+                    action="product_profile.expected_config.plan",
+                    product=expected_config_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                )
             )
         ):
             raise _launchplane_http_error(
@@ -13597,14 +13617,15 @@ def create_launchplane_fastapi_app(
             expected_config_request.mode == "apply"
             and isinstance(identity, LocalOperatorIdentity)
             and profile.production_use == "live"
+            and not director_declaration
         ):
             raise _launchplane_http_error(
                 status_code=403,
                 trace_id=trace_id,
                 code="live_product_requires_operator",
                 message=(
-                    "A live product's expected configuration is changed by an admin, "
-                    "not with the local_operator credential the Director's agent uses."
+                    "A live product's expected configuration requires an admin for "
+                    "scoped agents, removals, or Client credential requests."
                 ),
             )
         secret_bindings: tuple[SecretBinding, ...] = ()
@@ -13655,7 +13676,7 @@ def create_launchplane_fastapi_app(
                         "compare_and_write_product_profile_record"
                     ),
                 )
-            # Publish only over the exact profile that passed the live guard and built the
+            # Publish only over the exact profile that passed authorization and built the
             # merge, so a concurrent profile change is never overwritten with stale fields.
             # With a key, the database stores the replay result in the same transaction.
             mutation = (
@@ -26341,6 +26362,29 @@ def create_launchplane_fastapi_app(
             ),
         )
         result = monitor_result.model_dump(mode="json")
+        if monitor_request.refused_production_requests:
+            if not isinstance(record_store, (PostgresRecordStore, FilesystemRecordStore)):
+                raise _launchplane_http_error(
+                    status_code=503,
+                    trace_id=trace_id,
+                    code="database_storage_required",
+                    message="Refusal reconciliation requires a supported record store.",
+                )
+            try:
+                resolved_refusals = await run_in_threadpool(
+                    reconcile_refused_production_requests,
+                    record_store,
+                    requests=monitor_request.refused_production_requests,
+                    observed_at=utc_now_timestamp(),
+                )
+            except (ValueError, FileNotFoundError) as error:
+                raise _launchplane_http_error(
+                    status_code=409,
+                    trace_id=trace_id,
+                    code="refused_request_reconciliation_blocked",
+                    message=str(error),
+                ) from error
+            result["refused_production_requests_resolved"] = list(resolved_refusals)
         response = accepted_evidence_response(trace_id=trace_id, records={}, result=result)
         if idempotency_store is not None and normalized_idempotency_key:
             idempotency_store.write_idempotency_record(
@@ -28178,6 +28222,18 @@ def create_launchplane_fastapi_app(
                 profile=profile,
                 urgent_reason=reason,
                 urgent_checklist_digest=digest,
+            ),
+            adopt_invitation=lambda store, profile, digest, issue, comment, dry_run, reason: (
+                adopt_release_invitation(
+                    store=store,
+                    control_plane_root=resolved_control_plane_root,
+                    profile=profile,
+                    checklist_digest=digest,
+                    issue_number=issue,
+                    comment_id=comment,
+                    dry_run=dry_run,
+                    reason=reason,
+                )
             ),
         ),
     )

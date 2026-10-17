@@ -12,6 +12,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    PRODUCTION_REQUEST_REFUSED,
     PublicIngressCheckKind,
     PublicIngressFailureCode,
     PublicIngressFailureLayer,
@@ -676,6 +677,8 @@ def build_product_incident_summary(
 
 def _incident_summary_text(incident: PublicIngressIncidentRecord) -> str:
     if incident.status == "resolved":
+        if incident.resolution_reason == PRODUCTION_REQUEST_REFUSED:
+            return "Production request refused, nothing changed. The caller stopped and production remains healthy."
         return (
             "Launchplane resolved the incident with reason "
             f"'{incident.resolution_reason or 'not_recorded'}'."

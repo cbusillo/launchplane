@@ -1111,6 +1111,129 @@ class FastApiBackupGateEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FastApiPublicIngressMonitorTests(unittest.IsolatedAsyncioTestCase):
+    async def test_product_scoped_monitor_authority_cannot_attest_for_another_product(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            scoped_policy = _public_ingress_monitor_policy().model_dump(mode="json")
+            scoped_policy["github_actions"][0]["products"] = ["example-product"]
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(scoped_policy),
+                record_store_factory=lambda: store,
+            )
+            with patch("control_plane.http_app.reconcile_refused_production_requests") as reconcile:
+                for product, status in (("example-product", 400), ("launchplane", 403)):
+                    response = await _post_public_ingress_monitor(
+                        app,
+                        {
+                            "product": product,
+                            "notify": False,
+                            "refused_production_requests": [
+                                {
+                                    "incident_id": "other-product-refusal",
+                                    "caller_retired": True,
+                                    "caller_retired_at": "2026-10-16T20:00:00Z",
+                                    "caller_retirement_evidence": "https://example.test/changes/caller-retired",
+                                }
+                            ],
+                        },
+                    )
+                    self.assertEqual(response.status_code, status)
+                reconcile.assert_not_called()
+                self.assertEqual(store.list_public_ingress_incident_records(), ())
+
+    async def test_refusal_reconciliation_uses_existing_monitor_authority_and_replays(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            payload = {
+                "notify": False,
+                "refused_production_requests": [
+                    {
+                        "incident_id": "historical-refusal",
+                        "caller_retired": True,
+                        "caller_retired_at": "2026-10-16T20:00:00Z",
+                        "caller_retirement_evidence": "https://example.test/changes/retired-caller",
+                    }
+                ],
+            }
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=_public_ingress_monitor_policy(),
+                record_store_factory=lambda: store,
+            )
+            with (
+                patch(
+                    "control_plane.http_app.run_public_ingress_monitor_once",
+                    return_value=PublicIngressMonitorResult(
+                        checked_at="2026-10-16T21:00:00Z",
+                        target_count=0,
+                    ),
+                ),
+                patch(
+                    "control_plane.http_app.reconcile_refused_production_requests",
+                    return_value=("historical-refusal",),
+                ) as reconcile,
+            ):
+                response = await _post_public_ingress_monitor(
+                    app, payload, idempotency_key="reconcile-refusal"
+                )
+                self.assertEqual(response.status_code, 202)
+                self.assertEqual(
+                    response.json()["result"]["refused_production_requests_resolved"],
+                    ["historical-refusal"],
+                )
+                replay = await _post_public_ingress_monitor(
+                    app, payload, idempotency_key="reconcile-refusal"
+                )
+                self.assertTrue(replay.json()["replayed"])
+                reconcile.assert_called_once()
+                self.assertEqual(
+                    reconcile.call_args.kwargs["requests"][0].incident_id, "historical-refusal"
+                )
+            denied_app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_deployment_write_identity()),
+                authz_policy=_deployment_write_policy(context="example-site"),
+                record_store_factory=lambda: store,
+            )
+            with patch("control_plane.http_app.reconcile_refused_production_requests") as reconcile:
+                denied = await _post_public_ingress_monitor(denied_app, payload)
+                self.assertEqual(denied.status_code, 403)
+                reconcile.assert_not_called()
+
+    async def test_refusal_reconciliation_returns_a_supported_refusal_for_unqualified_history(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory) / "state")
+            app = create_launchplane_fastapi_app(
+                verifier=_StubVerifier(_public_ingress_monitor_identity()),
+                authz_policy=_public_ingress_monitor_policy(),
+                record_store_factory=lambda: store,
+            )
+            with patch(
+                "control_plane.http_app.run_public_ingress_monitor_once",
+                return_value=PublicIngressMonitorResult(
+                    checked_at="2026-10-16T21:00:00Z",
+                    target_count=0,
+                ),
+            ):
+                response = await _post_public_ingress_monitor(
+                    app,
+                    {
+                        "notify": False,
+                        "refused_production_requests": [
+                            {
+                                "incident_id": "missing-refusal",
+                                "caller_retired": True,
+                                "caller_retired_at": "2026-10-16T20:00:00Z",
+                                "caller_retirement_evidence": "https://example.test/changes/retired-caller",
+                            }
+                        ],
+                    },
+                )
+            self.assertEqual(response.status_code, 409)
+            self.assertEqual(store.list_public_ingress_incident_records(), ())
+
     async def test_public_ingress_monitor_runs_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

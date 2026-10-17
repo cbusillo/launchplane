@@ -53,6 +53,7 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    PRODUCTION_REQUEST_REFUSED,
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     MONITOR_CADENCE_CHECK_PREFIX,
     monitored_check_identity,
@@ -1011,6 +1012,10 @@ def _store_monitor_observation(
     recovery_observation_threshold: int,
     notify: bool,
     notification_drivers: PublicIngressNotificationDrivers | None,
+    expected_incident_sha256: str = "",
+    reconciliation_reason: Literal[
+        "monitoring_intent_changed", "request_refused"
+    ] = "monitoring_intent_changed",
 ) -> _StoredMonitorTransition:
     transition_writer = getattr(record_store, "write_public_ingress_transition_with_outbox", None)
     plan: _PlannedIncidentTransition | None = None
@@ -1021,7 +1026,13 @@ def _store_monitor_observation(
             record=record,
             incident_eligible=incident_eligible,
             recovery_observation_threshold=recovery_observation_threshold,
+            reconciliation_reason=reconciliation_reason,
         )
+        if (
+            expected_incident_sha256
+            and plan.expected_open_incident_sha256 != expected_incident_sha256
+        ):
+            raise ValueError("Incident changed during reconciliation; read its evidence again.")
         outbox_deliveries = (
             _public_ingress_notification_outbox_deliveries(
                 record_store=record_store,
@@ -1435,6 +1446,9 @@ def _plan_public_ingress_incident_transition(
     record: PublicIngressObservationRecord,
     incident_eligible: bool,
     recovery_observation_threshold: int,
+    reconciliation_reason: Literal[
+        "monitoring_intent_changed", "request_refused"
+    ] = "monitoring_intent_changed",
 ) -> _PlannedIncidentTransition:
     open_incidents = _open_incidents(record_store=record_store, record=record)
     existing = min(
@@ -1491,11 +1505,8 @@ def _plan_public_ingress_incident_transition(
         incident, resolved_event = _resolve_incident(
             incident=existing,
             record=record,
-            reason="monitoring_intent_changed",
-            summary=(
-                "Monitoring intent changed; this check is no longer incident-eligible. "
-                f"Previous incident evidence: {existing.summary}"
-            ),
+            reason=reconciliation_reason,
+            summary=(f"{record.summary} Previous incident evidence: {existing.summary}"),
         )
         reminder_states = _resolved_reminder_states(
             record_store=record_store,
@@ -2042,7 +2053,7 @@ def _resolve_incident(
     *,
     incident: PublicIngressIncidentRecord,
     record: PublicIngressObservationRecord,
-    reason: Literal["recovered", "monitoring_intent_changed"],
+    reason: Literal["recovered", "monitoring_intent_changed", "request_refused"],
     summary: str,
     recovery_count: int = 0,
     recovery_observation_threshold: int | None = None,
@@ -3467,7 +3478,11 @@ def deliver_public_ingress_notification_outbox_delivery(
         destination_payload = _dict_payload(payload.get("destination"))
         if record_store is not None:
             incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
-            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK:
+            retired_refusal = (
+                incident.status == "resolved"
+                and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED
+            )
+            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK or retired_refusal:
                 # An earlier send may have happened; preserve its uncertain outcome.
                 if record.provider_operation_key:
                     return record.model_copy(
@@ -3482,13 +3497,17 @@ def deliver_public_ingress_notification_outbox_delivery(
                     {
                         **attempt_payload,
                         "delivery_status": "skipped",
-                        "action": "retired_source_lag",
+                        "action": "retired_production_refusal"
+                        if retired_refusal
+                        else "retired_source_lag",
                     }
                 )
                 return record.model_copy(
                     update={
                         "state": "delivered",
-                        "action": "skipped_retired_source_lag",
+                        "action": "skipped_retired_production_refusal"
+                        if retired_refusal
+                        else "skipped_retired_source_lag",
                         "error_code": "",
                         "lease_owner": "",
                         "lease_expires_at": "",
