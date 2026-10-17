@@ -1,4 +1,4 @@
-"""Value-free testing import agreement and managed-source grant observations."""
+"""Value-free testing import agreement and source-grant observations."""
 
 import hmac
 import json
@@ -18,6 +18,8 @@ from pydantic import BaseModel, ConfigDict
 
 from control_plane import odoo_runtime_reads as reads
 from control_plane.odoo_diagnostic_identity import DIAGNOSTIC_IDENTITY_UNAVAILABLE
+from control_plane.odoo_runtime_source_grants import runtime_grants
+from control_plane.odoo_source_probe import GrantStatus
 from control_plane.integration_readback import INTEGRATION_FAMILIES
 from control_plane.contracts.odoo_import_parameters import config_parameter_runtime_key
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -30,7 +32,10 @@ from control_plane.secrets import _decrypt_secret_value
 from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
 from control_plane.runtime_key_safety import ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT
 from control_plane.workflows.odoo_preview_runtime import odoo_compose_has_domain
-from control_plane.contracts.runtime_identity import runtime_identity_from_health_payload
+from control_plane.contracts.runtime_identity import (
+    runtime_identity_from_health_payload,
+    RUNTIME_IDENTITY_ENV_KEY,
+)
 
 SOURCE_PREFIXES = {
     name: next(
@@ -43,6 +48,9 @@ SOURCE_PREFIXES = {
     for name in ("cm_data", "repairshopr", "fishbowl")
 }
 FIELDS = ("host", "user", "db", "port", "ssl_verify")
+# SHOW GRANTS is account-wide and selects no database. Producer database-name
+# keys differ; they belong to independent setting agreement, not grant identity.
+GRANT_FIELDS = tuple(field for field in FIELDS if field != "db")
 Agreement = Literal["match", "mismatch", "missing", "unknown"]
 ProbeKey = tuple[str, str, str, str, str]
 _PROBE_LOCK = threading.Lock()
@@ -69,9 +77,7 @@ class SourceDiagnostic(BaseModel):
     binding: Literal["selected", "missing_or_unsafe"] = "missing_or_unsafe"
     parameters: tuple[ParameterAgreement, ...] = ()
     managed_connection_grants: Literal["read_only", "unsafe", "unknown"] = "unknown"
-    # A connection from the service can select a different host-qualified MySQL
-    # account than a connection from Odoo. Never promote that observation to proof.
-    applied_connection_grants: Literal["unknown"] = "unknown"
+    applied_connection_grants: GrantStatus = "unknown"
 
 
 class ImportDiagnosticResult(BaseModel):
@@ -342,6 +348,68 @@ def _run_managed_grants(settings: dict[str, str]) -> Literal["read_only", "unsaf
     return "unknown"
 
 
+def runtime_origin_grants(
+    connection: reads.OdooRuntimeConnection,
+    selected: dict[str, SourceAuthority],
+    environment: dict[str, str],
+) -> dict[str, GrantStatus]:
+    keys = {
+        name: (
+            source.binding.binding_id,
+            source.version.version_id,
+            connection.evidence.container_id,
+            "runtime",
+            name,
+        )
+        for name, source in selected.items()
+    }
+    active = {}
+    results: dict[str, GrantStatus] = {name: "unknown" for name in selected}
+    with _PROBE_LOCK:
+        now = time.monotonic()
+        for expired in [key for key, until in _FAILED_PROBES.items() if until <= now]:
+            del _FAILED_PROBES[expired]
+        for name, key in keys.items():
+            if (
+                key not in _ACTIVE_PROBES
+                and key not in _FAILED_PROBES
+                and len(_ACTIVE_PROBES) < 4
+                and len(_FAILED_PROBES) < 128
+            ):
+                _ACTIVE_PROBES.add(key)
+                active[name] = key
+    try:
+        if not active:
+            return results
+        results.update(
+            runtime_grants(
+                connection,
+                tuple(active),
+                observed_identity=environment.get(RUNTIME_IDENTITY_ENV_KEY, ""),
+                prefixes=SOURCE_PREFIXES,
+                fields=GRANT_FIELDS,
+                environment_keys={
+                    name: {
+                        field: (
+                            config_parameter_secret_env_key(prefix + ".password")
+                            if field == "password"
+                            else config_parameter_runtime_key(prefix + "." + field)
+                        )
+                        for field in (*FIELDS, "password")
+                    }
+                    for name, prefix in SOURCE_PREFIXES.items()
+                },
+            )
+        )
+        return results
+    finally:
+        with _PROBE_LOCK:
+            for name, key in active.items():
+                _ACTIVE_PROBES.discard(key)
+                if results[name] == "unknown":
+                    _FAILED_PROBES[key] = time.monotonic() + 60
+
+
 def parameter_agreement(key: str, expected: str, applied: str) -> Agreement:
     if not applied:
         return "missing"
@@ -463,4 +531,90 @@ def diagnose_imports(
     except Exception:
         # No provider/RPC/driver/decryption exception text or chained context is
         # returned. This fixed response contains no caller/server-controlled text.
+        return unknown_result()
+
+
+def diagnose_runtime_source_grants(
+    *, store: DiagnosticStore, product: str, control_plane_root: Path, database_url: str | None
+) -> ImportDiagnosticResult:
+    """Fixed container read, independent of the login-based Odoo diagnostic."""
+    try:
+        authority = import_authority(store, product)
+        selection = reads.select_stable_runtime(store, authority.profile, "testing")
+        connection = reads.connect_runtime(
+            store=store,
+            selection=selection,
+            control_plane_root=control_plane_root,
+            database_url=database_url,
+        )
+        environment = reads.inspect_runtime_container(
+            connection.host,
+            connection.token,
+            connection.server_id,
+            connection.evidence.container_id,
+            connection.app_name,
+            selection.identity,
+        )
+        selected: dict[str, SourceAuthority] = {}
+        sources: list[SourceDiagnostic] = []
+        for name, prefix in SOURCE_PREFIXES.items():
+            source_name = cast(Literal["cm_data", "repairshopr", "fishbowl"], name)
+            source = authority.sources.get(name)
+            if source is None:
+                sources.append(SourceDiagnostic(source=source_name))
+                continue
+            try:
+                settings = {
+                    **source.settings,
+                    "password": _decrypt_secret_value(
+                        source.version.ciphertext, source.version.key_id
+                    ),
+                }
+                if all(
+                    parameter_agreement(
+                        key,
+                        settings[key],
+                        environment.get(
+                            config_parameter_secret_env_key(prefix + ".password")
+                            if key == "password"
+                            else config_parameter_runtime_key(prefix + "." + key),
+                            "",
+                        ),
+                    )
+                    == "match"
+                    for key in (*GRANT_FIELDS, "password")
+                ):
+                    selected[name] = source
+                sources.append(SourceDiagnostic(source=source_name, binding="selected"))
+            except Exception:
+                sources.append(SourceDiagnostic(source=source_name))
+        grants = runtime_origin_grants(connection, selected, environment)
+        reads.assert_selection_current(store, selection)
+        if import_authority(store, product).private_snapshot != authority.private_snapshot:
+            return unknown_result()
+        if (
+            reads.inspect_runtime_container(
+                connection.host,
+                connection.token,
+                connection.server_id,
+                connection.evidence.container_id,
+                connection.app_name,
+                selection.identity,
+            )
+            != environment
+        ):
+            return unknown_result()
+        if import_authority(store, product).private_snapshot != authority.private_snapshot:
+            return unknown_result()
+        reads.assert_selection_current(store, selection)
+        return ImportDiagnosticResult(
+            runtime="verified",
+            sources=tuple(
+                result.model_copy(
+                    update={"applied_connection_grants": grants.get(result.source, "unknown")}
+                )
+                for result in sources
+            ),
+        )
+    except Exception:
         return unknown_result()

@@ -13,6 +13,7 @@ from control_plane.odoo_import_diagnostics import (
     DiagnosticStore,
     ImportDiagnosticResult,
     diagnose_imports,
+    diagnose_runtime_source_grants,
 )
 from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyPhase,
@@ -305,13 +306,15 @@ def register_odoo_runtime_read_routes(
                 source_label=record.source_label,
             )
 
-    def read_import_diagnostics(
+    def import_evidence(
         product: str,
         environment: str,
         request: Request,
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
         response: Response,
+        *,
+        runtime_only: bool,
     ) -> OdooImportDiagnosticResponse:
         trace_id = common.next_trace_id()
         response.headers["Cache-Control"] = "no-store"
@@ -349,7 +352,7 @@ def register_odoo_runtime_read_routes(
                 )
             return OdooImportDiagnosticResponse(
                 trace_id=trace_id,
-                result=diagnose_imports(
+                result=(diagnose_runtime_source_grants if runtime_only else diagnose_imports)(
                     store=cast(DiagnosticStore, record_store),
                     product=profile.product,
                     control_plane_root=dependencies.control_plane_root,
@@ -357,7 +360,38 @@ def register_odoo_runtime_read_routes(
                 ),
             )
 
+    def read_import_diagnostics(
+        product: str,
+        environment: str,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> OdooImportDiagnosticResponse:
+        return import_evidence(
+            product, environment, request, identity, record_store, response, runtime_only=False
+        )
+
+    def read_runtime_source_grants(
+        product: str,
+        environment: str,
+        request: Request,
+        identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
+        record_store: Annotated[object, Depends(common.get_record_store)],
+        response: Response,
+    ) -> OdooImportDiagnosticResponse:
+        return import_evidence(
+            product, environment, request, identity, record_store, response, runtime_only=True
+        )
+
     for path, endpoint, model, operation_id, summary in (
+        (
+            "/v1/products/{product}/environments/{environment}/odoo-source-grants",
+            read_runtime_source_grants,
+            OdooImportDiagnosticResponse,
+            "read_odoo_runtime_source_grants",
+            "Read value-free source grants from the verified Odoo testing runtime without an Odoo login",
+        ),
         (
             "/v1/products/{product}/environments/{environment}/odoo-import-diagnostics",
             read_import_diagnostics,
