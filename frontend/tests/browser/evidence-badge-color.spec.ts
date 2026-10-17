@@ -11,17 +11,14 @@ async function expectEvidenceColors(badges: Locator) {
     document.body.append(reference);
     const expected = getComputedStyle(reference).color;
     reference.remove();
-    return {
-      state: badge.dataset.state,
-      expected,
-      badge: getComputedStyle(badge).color,
-      label: getComputedStyle(badge.querySelector("strong")!).color,
-      indicator: getComputedStyle(badge.querySelector(":scope > span")!).backgroundColor,
-    };
+    return expected;
   }));
   expect(colors.length).toBeGreaterThan(0);
-  for (const { expected, state, ...rendered } of colors) {
-    expect(rendered, `${state} evidence badge`).toEqual({ badge: expected, label: expected, indicator: expected });
+  for (const [index, expected] of colors.entries()) {
+    const badge = badges.nth(index);
+    await expect(badge).toHaveCSS("color", expected);
+    await expect(badge.locator("strong")).toHaveCSS("color", expected);
+    await expect(badge.locator(":scope > span")).toHaveCSS("background-color", expected);
   }
 }
 

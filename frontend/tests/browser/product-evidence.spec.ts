@@ -44,6 +44,11 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   await page.goto("/ui/products");
   const row = page.locator(".product-directory-row");
   await expect(row.locator(".directory-warnings > strong")).toHaveText("2");
+  await expect(row.locator('[data-lane="prod"]')).toContainText(warning.detail);
+  await expect(row.locator('[data-lane="testing"]')).toContainText(testing.topology.warnings[0].detail);
+  for (const detail of await row.locator(".directory-evidence-detail").all()) {
+    expect(await detail.evaluate(element => element.scrollWidth <= element.clientWidth && element.scrollHeight <= element.clientHeight)).toBe(true);
+  }
   await expect(row.locator(".directory-product > .evidence-badge > small")).toHaveCount(0);
   await expect(row.locator(".directory-preview .evidence-badge")).toHaveCount(0);
   await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-directory-${testInfo.project.name}.png`, fullPage: true });

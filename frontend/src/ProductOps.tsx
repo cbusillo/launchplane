@@ -336,8 +336,8 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
           <strong>
             {previewInventoryPresentation(product.preview).headline}
           </strong>
-          {product.preview.enabled && product.preview.trust_state !== "verified" && product.preview.trust_state !== "recorded" ? <small>{product.preview.active_count} recorded; live inventory unverified</small> : null}
-          {product.preview.enabled ? <EvidenceBadge compact state={product.preview.trust_state} qualifier="Inventory" /> : <small>Not applicable</small>}
+          <small className="directory-evidence-detail">{previewInventoryPresentation(product.preview).detail}</small>
+          {product.preview.enabled ? <EvidenceBadge compact state={product.preview.trust_state} qualifier="Inventory" /> : null}
         </span>
         <span className="directory-warnings" data-has-warnings={warnings.length > 0}>
           {warnings.length ? <AlertTriangle size={15} aria-hidden="true" /> : null}
@@ -373,8 +373,23 @@ function DirectoryLane({
         {headline}
       </strong>
       <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
+      <small className="directory-evidence-detail">
+        {environment ? topologyEvidenceDetail(environment) : "This product has no recorded lane for this environment."}
+      </small>
     </span>
   );
+}
+
+function topologyEvidenceDetail(environment: ProductEnvironmentSummary): string {
+  const topology = environment.topology;
+  const details = topology.warnings.map(warning => warning.detail);
+  if (topology.trust_state !== "verified") {
+    details.unshift(topology.provider_recorded.provenance.detail);
+  }
+  if (topology.trust_state === "stale") {
+    details.unshift("Topology evidence has expired; current health is evaluated separately.");
+  }
+  return [...new Set(details.filter(Boolean))].join(" ");
 }
 
 function ProductWorkspace({

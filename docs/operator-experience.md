@@ -235,6 +235,10 @@ A lane's operational tone colors only its headline; an evidence badge's label
 and indicator always take that badge's evidence color.
 Topology evidence badges include route, placement and observation evidence;
 runtime observation timestamps describe their own evidence.
+The directory shows the stored topology reasons beside each lane and the same
+preview inventory explanation as the workspace, including recorded/observed
+disagreements. These explanations wrap fully rather than hiding behind a badge
+or ellipsis. A stale topology explanation does not relabel passing health.
 Shared evidence badges wrap their full state label within the available width,
 including each lane's column in the narrow product directory.
 Combined lane and product evidence expire when their topology expires, even if

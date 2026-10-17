@@ -68,6 +68,7 @@ for (const state of cases) {
     await page.goto("/ui/products");
     const row = page.locator(".product-directory-row");
     await expect(row.locator(".directory-preview > strong")).toHaveText(expected.headline);
+    await expect(row.locator(".directory-preview")).toContainText(expected.detail);
     if (state.trust === "missing" && state.enabled && !state.scan) {
       await expect(row.locator(".directory-preview")).not.toContainText(/\d+ active|No active/);
     }
