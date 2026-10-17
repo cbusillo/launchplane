@@ -25866,11 +25866,18 @@ def create_launchplane_fastapi_app(
             and not setup_request.replaces_operation_id
             and bool(lane_owner)
         )
+        director_source_completion = (
+            director_agent_identity(identity)
+            and setup_request.operation == "complete-compose-source"
+            and setup_request.instance == "testing"
+            and bool(lane_owner)
+        )
         if (
             isinstance(identity, TerminalAgentIdentity)
             and setup_request.mode == "apply"
             and not disposable_rebuild_setup
             and not first_testing_setup
+            and not director_source_completion
         ):
             raise _launchplane_http_error(
                 status_code=403,
@@ -25901,8 +25908,15 @@ def create_launchplane_fastapi_app(
         first_testing_setup = first_testing_setup and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
+        director_source_completion = director_source_completion and (
+            isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
+        )
         can_setup_target = (
-            service_scoped or lane_scoped_only or disposable_rebuild_setup or first_testing_setup
+            service_scoped
+            or lane_scoped_only
+            or disposable_rebuild_setup
+            or first_testing_setup
+            or director_source_completion
         )
         can_repair_domain_authority = setup_request.operation == "repair-domain-authority" and (
             can_setup_target
@@ -26103,6 +26117,7 @@ def create_launchplane_fastapi_app(
                     control_plane_root_path=resolved_control_plane_root,
                     record_store=database_store,
                     request=setup_request,
+                    director_source_completion=director_source_completion,
                     # A lane-scoped caller's owner is re-checked when records commit.
                     required_context_owner=(
                         (lane_owner, setup_request.context)

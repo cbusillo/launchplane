@@ -145,6 +145,38 @@ operation evidence for separately supported source recovery; do not bypass its f
 
 ## Operational sequence
 
+For an existing empty testing Compose, the Director-agent transport may complete
+its source through `POST /v1/dokploy-targets/setup` with
+`operation=complete-compose-source`. Use the installed
+`dokploy-target-complete-compose-source-dry-run` and `-apply` helpers, with the
+saved plan, reviewed digest and original idempotency key. Supply a forty-character
+commit and its relative Compose path; the service derives the repository from
+the exclusive active product profile. This writes only source settings, leaves
+automatic deployment off and starts no deployment. The later activation still
+fetches and qualifies the immutable template and artifact provenance.
+
+Director-agent completion requires current, binding-matched disposable-lane
+evidence for usage, data and isolation. Unknown, stale, in-use, only-copy or
+shared evidence refuses; do not turn an observer's unknown result into a manual
+positive assertion. Identify the missing service evidence producer on the
+operational issue if that qualification is unavailable. The service also holds
+the testing executor lock, refuses unresolved physical-target reservations,
+checks complete provider deployment/queue/schedule inventories and isolated
+placement, and repeats these checks immediately before the source update inside
+the existing ownership/binding transaction. A configured/partial source, foreign
+or shared target, public route, provider drift or active/unknown work refuses.
+Existing scoped workflow source-completion authority is unchanged; all source
+completions now wait for unresolved lane operations and retained custody. A partial
+provider result retains the existing reconciliation requirement; never retry
+under a new key or identity.
+The source transaction also excludes active or unresolved lane operations and
+retained-target custody. With no source, the provider's automatic-deploy default
+is inert; the source update disables it atomically and verifies it off afterward.
+Completion changes the safety binding, so collect fresh usage/data/isolation
+evidence before any later operation that requires it. Provider requests have
+bounded timeouts; the final exclusion reads hold the product-authority lock and
+can delay other authority writers while a slow provider responds.
+
 1. Verify the deployed service includes this source. Resolve the independent
    immutable-source/hold prerequisites and recheck actual testing isolation.
 2. Select an edge-certified hostname with only RFC1918 DNS answers. Qualify its
