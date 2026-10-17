@@ -16,10 +16,19 @@ covered by an existing wildcard certificate. Other lane instances retain the exi
 record rule; their credential-bearing consumers do not gain new DNS authorities.
 Registration validates URL syntax;
 it does not resolve DNS or claim reachability. Existing non-public literal records remain readable, including loopback and
-tailnet addresses; this preserves record readback, not permission to connect. At every check, the private HTTP client resolves the host again and accepts
-only a nonempty answer set entirely within `10/8`, `172.16/12` or `192.168/16`.
-Public, mixed, loopback, link-local, CGNAT and IPv6 answers fail closed. Every
-redirect is checked again before opening its connection.
+tailnet addresses; record readback alone does not permit a connection. At every
+check, every product's private HTTP client resolves the host again and accepts
+only a nonempty answer set entirely within RFC1918 (`10/8`, `172.16/12`,
+`192.168/16`) or RFC6598 shared address space (`100.64.0.0/10`, used by tailnets).
+Answers mixing those allowed ranges are accepted; an answer set containing any
+public, loopback, link-local, other reserved or IPv6 address fails closed. Every
+redirect is checked again before opening its connection. Public HTTP probes
+continue to reject tailnet addresses.
+
+This restores probing for existing non-public literal endpoint records in
+`100.64.0.0/10`, including Discord Blue's `discord-blue-prod-runtime`, without
+rewriting their URL, scope or monitoring policy. Health and runtime identity
+still have to pass through ordinary monitoring after normal deployment.
 
 Connections use only the validated numeric socket addresses, without a second
 DNS lookup. HTTP Host, TLS SNI and certificate name verification retain the

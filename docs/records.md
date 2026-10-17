@@ -703,8 +703,10 @@ an ORM column/table or remains only in the evidence payload.
   `GET /v1/private-health-endpoints/records` with
   `private_health_endpoint.read`. Testing records may use ordinary DNS hostnames; other lane instances retain
   internal hostnames and non-public IP literals.
-  Each probe requires exclusively RFC1918 resolution and pins the connection to
-  the validated addresses, preserving TLS hostname verification. See
+  Every product's private HTTP probes require a nonempty answer set entirely in
+  RFC1918 IPv4 or RFC6598 shared address space (`100.64.0.0/10`, used by tailnets).
+  Each connection is pinned to validated addresses, preserving TLS hostname
+  verification and revalidating every redirect. See
   [private transport](private-testing-transport.md).
   Product profiles reference it by `private_endpoint_key` and do not own the
   mutable URL value.
