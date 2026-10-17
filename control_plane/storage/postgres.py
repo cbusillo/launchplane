@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from control_plane.contracts.merge_train_stall import MergeTrainStallRecord
+from control_plane.contracts.odoo_upgrade_rehearsal import OdooUpgradeRehearsalRecord
 
 from pathlib import Path
 
@@ -39,6 +40,7 @@ from typing import (
 from pydantic import BaseModel, JsonValue
 
 if TYPE_CHECKING:
+    from control_plane.testing_replacement_resources import TestingReplacementResourcesRequest
     from control_plane.testing_verification import TestingVerification
 from control_plane.lane_movement import source_read_retry_ready
 from sqlalchemy import (
@@ -2382,21 +2384,6 @@ def _private_ordinary_agent_operation(
     return wrapped
 
 
-class LaunchplaneOrdinaryAgentSessionOperationRow(Base):
-    """Private authenticated intent and historical approval, scoped by principal."""
-
-    __tablename__ = "launchplane_ordinary_agent_session_operations"
-    principal_id: Mapped[str] = mapped_column(String, primary_key=True)
-    operation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    kind: Mapped[str] = mapped_column(String, nullable=False)
-    intent_sha256: Mapped[str] = mapped_column(String, nullable=False)
-    approval_sha256: Mapped[str | None] = mapped_column(String, nullable=True)
-    administrator_github_id: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    terminal_session_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    cancelled_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
 class LaunchplaneOrdinaryAgentSessionRow(Base):
     __tablename__ = "launchplane_ordinary_agent_sessions"
     __table_args__ = (
@@ -2443,79 +2430,6 @@ class LaunchplaneOrdinaryAgentFiniteRequestRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class LaunchplaneOrdinaryAgentLandingPreparationRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_landing_preparations"
-    __table_args__ = (
-        Index(
-            "ordinary_landing_root_charge_uq",
-            "lease_id",
-            "action_ordinal",
-            unique=True,
-            sqlite_where=text("predecessor_preparation_id IS NULL"),
-            postgresql_where=text("predecessor_preparation_id IS NULL"),
-        ),
-        UniqueConstraint(
-            "request_id",
-            "binding_revision",
-            "pull_request_number",
-            "attempt_ordinal",
-            name="ordinary_landing_entry_attempt_uq",
-        ),
-        UniqueConstraint("predecessor_preparation_id", name="ordinary_landing_predecessor_uq"),
-        UniqueConstraint("custody_attempt_id", name="ordinary_landing_custody_uq"),
-    )
-    preparation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    request_id: Mapped[str] = mapped_column(String, nullable=False)
-    lease_id: Mapped[str] = mapped_column(String, nullable=False)
-    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    pull_request_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    attempt_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
-    predecessor_preparation_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    action_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    custody_attempt_id: Mapped[str] = mapped_column(String, nullable=False)
-    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentLandingBindingRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_landing_bindings"
-    __table_args__ = (
-        UniqueConstraint(
-            "effect_id", "dispatch_ordinal", name="ordinary_landing_effect_dispatch_uq"
-        ),
-    )
-    preparation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    admission_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-    effect_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    dispatch_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False, default=1)
-    child_id: Mapped[str] = mapped_column(String, nullable=False, unique=True)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentNoOpLandingFinalizationRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_no_op_landing_finalizations"
-    __table_args__ = (
-        UniqueConstraint("admission_id", name="ordinary_no_op_landing_admission_uq"),
-        UniqueConstraint("outcome_id", name="ordinary_no_op_landing_outcome_uq"),
-        UniqueConstraint("successor_record_id", name="ordinary_no_op_landing_successor_uq"),
-        UniqueConstraint(
-            "request_id",
-            "binding_revision",
-            "pull_request_number",
-            name="ordinary_no_op_landing_entry_uq",
-        ),
-    )
-    preparation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    request_id: Mapped[str] = mapped_column(String, nullable=False)
-    scope_sha256: Mapped[str] = mapped_column(String, nullable=False)
-    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    pull_request_number: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    admission_id: Mapped[str] = mapped_column(String, nullable=False)
-    outcome_id: Mapped[str] = mapped_column(String, nullable=False)
-    successor_record_id: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
 class LaunchplaneOrdinaryAgentEffectRow(Base):
     __tablename__ = "launchplane_ordinary_agent_effects"
     __table_args__ = (
@@ -2536,231 +2450,11 @@ class LaunchplaneOrdinaryAgentEffectRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class LaunchplaneOrdinaryAgentSemanticDispatchRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_semantic_dispatches"
-    __table_args__ = (
-        UniqueConstraint("effect_id", "semantic_ordinal", name="ordinary_dispatch_ordinal_uq"),
-    )
-    child_id: Mapped[str] = mapped_column(String, primary_key=True)
-    effect_id: Mapped[str] = mapped_column(String, nullable=False)
-    semantic_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentSemanticOutcomeRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_semantic_outcomes"
-    child_id: Mapped[str] = mapped_column(String, primary_key=True)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentEffectReconciliationRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_effect_reconciliations"
-    observation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    child_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentEffectCompletionRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_effect_completions"
-    effect_id: Mapped[str] = mapped_column(String, primary_key=True)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
 class LaunchplaneOrdinaryAgentEffectCustodyRow(Base):
     __tablename__ = "launchplane_ordinary_agent_effect_custody"
     attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
     effect_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     purpose: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentProviderWaitRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_provider_waits"
-    quota_key_sha256: Mapped[str] = mapped_column(String, primary_key=True)
-    retry_not_before: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentJobClaimRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_job_claims"
-    request_id: Mapped[str] = mapped_column(String, primary_key=True)
-    worker_id: Mapped[str] = mapped_column(String, nullable=False)
-    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    claim_expires_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    next_due_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False)
-    reason_code: Mapped[str | None] = mapped_column(String, nullable=True)
-    released_controller: Mapped[PayloadDict | None] = mapped_column(PayloadJsonType, nullable=True)
-
-
-class LaunchplaneOrdinaryAgentReadAttemptRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_read_attempts"
-    __table_args__ = (
-        UniqueConstraint(
-            "request_id",
-            "binding_revision",
-            "purpose",
-            "candidate_sha",
-            "attempt_ordinal",
-            name="ordinary_read_attempt_ordinal_uq",
-        ),
-        Index(
-            "ordinary_read_active_uq",
-            "request_id",
-            "binding_revision",
-            "purpose",
-            unique=True,
-            postgresql_where=text("state IN ('reserved', 'reading')"),
-            sqlite_where=text("state IN ('reserved', 'reading')"),
-        ),
-    )
-    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
-    request_id: Mapped[str] = mapped_column(String, nullable=False)
-    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    purpose: Mapped[str] = mapped_column(String, nullable=False)
-    candidate_sha: Mapped[str] = mapped_column(String, nullable=False)
-    attempt_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    state: Mapped[str] = mapped_column(String, nullable=False)
-    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentReadCustodyRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_read_custody"
-    custody_attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
-    read_attempt_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentReadOutcomeRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_read_outcomes"
-    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentCandidateCheckObservationRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_candidate_check_observations"
-    __table_args__ = (
-        UniqueConstraint(
-            "request_id",
-            "binding_revision",
-            "candidate_sha",
-            "observation_ordinal",
-            name="ordinary_candidate_observation_uq",
-        ),
-    )
-    observation_id: Mapped[str] = mapped_column(String, primary_key=True)
-    request_id: Mapped[str] = mapped_column(String, nullable=False)
-    binding_revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    candidate_sha: Mapped[str] = mapped_column(String, nullable=False)
-    observation_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneProviderDeliveryInspectionRow(Base):
-    """One charged generation attempt and its private terminal observation."""
-
-    __tablename__ = "launchplane_provider_delivery_inspections"
-    __table_args__ = (
-        CheckConstraint("generation > 0", name="provider_delivery_generation_ck"),
-        CheckConstraint(
-            "provider_attempt_ordinal BETWEEN 1 AND 3",
-            name="provider_delivery_attempt_ordinal_ck",
-        ),
-        CheckConstraint("action_ordinal > 0", name="provider_delivery_action_ordinal_ck"),
-        CheckConstraint("repository_id > 0", name="provider_delivery_repository_id_ck"),
-        CheckConstraint("revision > 0", name="provider_delivery_revision_ck"),
-        CheckConstraint(
-            "inspection_phase IN ('active', 'terminal')",
-            name="provider_delivery_inspection_phase_ck",
-        ),
-        CheckConstraint(
-            "custody_phase IN ('reserved', 'minting', 'issued', 'issue_unknown', "
-            "'cleanup_unknown', 'closed')",
-            name="provider_delivery_custody_phase_ck",
-        ),
-        CheckConstraint(
-            "dispatch_deadline = inspection_started_at + 45 AND "
-            "publication_deadline = inspection_started_at + 60",
-            name="provider_delivery_deadline_ck",
-        ),
-        CheckConstraint(
-            "(inspection_phase = 'active' AND terminal_class IS NULL "
-            "AND terminal_status IS NULL AND repository_completion_sequence IS NULL "
-            "AND receipt_id IS NULL) OR "
-            "(inspection_phase = 'terminal' AND custody_phase = 'closed' "
-            "AND terminal_class IS NOT NULL AND terminal_status IS NOT NULL "
-            "AND repository_completion_sequence IS NOT NULL)",
-            name="provider_delivery_terminal_ck",
-        ),
-        UniqueConstraint(
-            "demand_id",
-            "generation",
-            "provider_attempt_ordinal",
-            name="provider_delivery_attempt_uq",
-        ),
-        UniqueConstraint(
-            "repository_id",
-            "repository_completion_sequence",
-            name="provider_delivery_completion_sequence_uq",
-        ),
-        UniqueConstraint("receipt_id", name="provider_delivery_receipt_uq"),
-        Index(
-            "provider_delivery_generation_charge_uq",
-            "demand_id",
-            "generation",
-            unique=True,
-            postgresql_where=text("provider_attempt_ordinal = 1"),
-            sqlite_where=text("provider_attempt_ordinal = 1"),
-        ),
-        Index(
-            "provider_delivery_repository_flight_uq",
-            "repository_id",
-            unique=True,
-            postgresql_where=text("inspection_phase = 'active'"),
-            sqlite_where=text("inspection_phase = 'active'"),
-        ),
-        Index(
-            "provider_delivery_repository_custody_uq",
-            "repository_id",
-            unique=True,
-            postgresql_where=text(
-                "custody_phase IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown')"
-            ),
-            sqlite_where=text(
-                "custody_phase IN ('minting', 'issued', 'issue_unknown', 'cleanup_unknown')"
-            ),
-        ),
-        Index(
-            "provider_delivery_target_observation_idx",
-            "repository_id",
-            "base_branch",
-            "repository_completion_sequence",
-        ),
-    )
-
-    attempt_id: Mapped[str] = mapped_column(String, primary_key=True)
-    demand_id: Mapped[str] = mapped_column(String, nullable=False)
-    generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    provider_attempt_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    action_ordinal: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    profile_id: Mapped[str] = mapped_column(String, nullable=False)
-    profile_sha256: Mapped[str] = mapped_column(String, nullable=False)
-    repository_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    repository: Mapped[str] = mapped_column(String, nullable=False)
-    base_branch: Mapped[str] = mapped_column(String, nullable=False)
-    inspection_phase: Mapped[str] = mapped_column(String, nullable=False)
-    custody_phase: Mapped[str] = mapped_column(String, nullable=False)
-    revision: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    inspection_started_at: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    dispatch_deadline: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    publication_deadline: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    token_expires_at: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    next_retry_not_before: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    terminal_class: Mapped[str | None] = mapped_column(String, nullable=True)
-    terminal_status: Mapped[str | None] = mapped_column(String, nullable=True)
-    repository_completion_sequence: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    receipt_id: Mapped[str | None] = mapped_column(String, nullable=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -2832,56 +2526,6 @@ class LaunchplaneOrdinaryAgentAuthenticationCredentialRow(Base):
     credential_digest: Mapped[str] = mapped_column(String, nullable=False)
     recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     record_sha256: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentCredentialCustodyRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_credential_custody"
-    __table_args__ = (
-        Index(
-            "launchplane_ordinary_agent_custody_credential_version_uidx",
-            "credential_id",
-            "credential_version",
-            unique=True,
-        ),
-        Index(
-            "launchplane_ordinary_agent_custody_principal_idx",
-            "principal_id",
-            "credential_version",
-        ),
-    )
-
-    record_id: Mapped[str] = mapped_column(String, primary_key=True)
-    principal_id: Mapped[str] = mapped_column(String, nullable=False)
-    credential_id: Mapped[str] = mapped_column(String, nullable=False)
-    credential_version: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    predecessor_record_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
-    custody_sha256: Mapped[str] = mapped_column(String, nullable=False)
-    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
-
-
-class LaunchplaneOrdinaryAgentLifecycleAuditRow(Base):
-    __tablename__ = "launchplane_ordinary_agent_lifecycle_audits"
-    __table_args__ = (
-        Index(
-            "launchplane_ordinary_agent_lifecycle_audit_operation_uidx",
-            "operation_id",
-            unique=True,
-        ),
-        Index(
-            "launchplane_ordinary_agent_lifecycle_audit_principal_idx",
-            "principal_id",
-            "occurred_at",
-        ),
-    )
-
-    event_id: Mapped[str] = mapped_column(String, primary_key=True)
-    operation_id: Mapped[str] = mapped_column(String, nullable=False)
-    principal_id: Mapped[str] = mapped_column(String, nullable=False)
-    action: Mapped[str] = mapped_column(String, nullable=False)
-    occurred_at: Mapped[str] = mapped_column(String, nullable=False)
-    audit_sha256: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -3768,6 +3412,12 @@ class LaunchplaneDisposableReplacementPreparationRow(Base):
 class LaunchplaneDisposableTestingResourceAllocationRow(Base):
     __tablename__ = "launchplane_disposable_testing_resource_allocations"
     operation_id: Mapped[str] = mapped_column(String, primary_key=True)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOdooUpgradeRehearsalRow(Base):
+    __tablename__ = "launchplane_odoo_upgrade_rehearsals"
+    rehearsal_id: Mapped[str] = mapped_column(String, primary_key=True)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -9868,6 +9518,7 @@ class PostgresRecordStore(HumanSessionStore):
         context: str,
         instance: str,
         include_synchronous: bool = True,
+        exclude_initial_preparation: str = "",
     ) -> OdooStableLaneOperationOwner | None:
         if include_synchronous and not _try_odoo_synchronous_lane_lock(
             session, product=product, context=context, instance=instance
@@ -9875,6 +9526,34 @@ class PostgresRecordStore(HumanSessionStore):
             return OdooStableLaneOperationOwner(
                 operation_kind="synchronous_release", operation_id=""
             )
+        if instance == "testing":
+            for custody, allocation in session.execute(
+                select(
+                    LaunchplaneDisposableReplacementPreparationRow,
+                    LaunchplaneDisposableTestingResourceAllocationRow,
+                )
+                .join(
+                    LaunchplaneDisposableTestingResourceAllocationRow,
+                    LaunchplaneDisposableReplacementPreparationRow.operation_id
+                    == LaunchplaneDisposableTestingResourceAllocationRow.operation_id,
+                )
+                .where(
+                    LaunchplaneDisposableReplacementPreparationRow.payload["product"].as_string()
+                    == product,
+                    LaunchplaneDisposableReplacementPreparationRow.payload["context"].as_string()
+                    == context,
+                )
+            ):
+                if (
+                    custody.operation_id != exclude_initial_preparation
+                    and allocation.payload.get("initial_apply_started_at")
+                    and not allocation.payload.get("initial_reconcile_requested_at")
+                    and not allocation.payload.get("initial_released_at")
+                ):
+                    return OdooStableLaneOperationOwner(
+                        operation_kind="initial_testing_generation",
+                        operation_id=custody.operation_id,
+                    )
         operation_tables: tuple[tuple[OdooStableLaneOperationKind, Any], ...] = (
             ("stable_bootstrap", LaunchplaneOdooStableBootstrapOperationRow),
             ("target_replacement", LaunchplaneOdooStableTargetReplacementOperationRow),
@@ -10839,6 +10518,55 @@ class PostgresRecordStore(HumanSessionStore):
                 ),
             )
 
+    def read_odoo_upgrade_rehearsal(self, rehearsal_id: str) -> OdooUpgradeRehearsalRecord | None:
+        with self._session_factory() as session:
+            row = session.get(LaunchplaneOdooUpgradeRehearsalRow, rehearsal_id)
+            return OdooUpgradeRehearsalRecord.model_validate(row.payload) if row else None
+
+    def compare_and_write_odoo_upgrade_rehearsal(
+        self,
+        expected: OdooUpgradeRehearsalRecord | None,
+        replacement: OdooUpgradeRehearsalRecord,
+    ) -> None:
+        with self._session_factory() as session:
+            self._begin_serialized_write(session)
+            self._lock_product_authority_bundle_write(session)
+            self._lock_landing_authority(
+                session, "odoo-upgrade-rehearsal:" + replacement.rehearsal_id
+            )
+            row = session.get(
+                LaunchplaneOdooUpgradeRehearsalRow, replacement.rehearsal_id, with_for_update=True
+            )
+            if (row.payload if row else None) != (
+                self._payload_dict(expected) if expected is not None else None
+            ):
+                raise ValueError("Rehearsal state changed; preserve its original operation.")
+            if replacement.compose_id and (expected is None or not expected.compose_id):
+                # The native physical registry fences aliases without claiming a lane.
+                self._write_provider_target_with_expectation(
+                    session=session,
+                    write=ProviderTargetWrite(
+                        record=ProviderTargetRecord(
+                            context=replacement.rehearsal_id,
+                            instance="rehearsal",
+                            provider_id="dokploy",
+                            target_category="compose",
+                            target_id=replacement.compose_id,
+                            display_name=replacement.rehearsal_id,
+                            provider_target_type="compose",
+                            source_label="service:odoo-upgrade-rehearsal",
+                            updated_at=replacement.created_at.isoformat(),
+                        ),
+                        expected_absent=True,
+                    ),
+                )
+            session.merge(
+                LaunchplaneOdooUpgradeRehearsalRow(
+                    rehearsal_id=replacement.rehearsal_id, payload=self._payload_dict(replacement)
+                )
+            )
+            session.commit()
+
     def read_fresh_odoo_testing_generation(
         self, product: str, context: str
     ) -> FreshOdooTestingGeneration | None:
@@ -11356,9 +11084,33 @@ class PostgresRecordStore(HumanSessionStore):
                     "published",
                     "qualified_at",
                     "published_target",
+                    "generated_configuration_sha256",
                 }
                 if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
                     raise ValueError("Testing activation identities are immutable.")
+                if (
+                    previous.generated_configuration_sha256 != record.generated_configuration_sha256
+                    and (
+                        previous.generated_configuration_sha256
+                        or not record.generated_configuration_sha256
+                        or previous.published
+                        or previous.configuration_version != 3
+                        or bundle is None
+                        or not bundle.secret_records
+                        or any(
+                            (secret.scope, secret.context, secret.instance)
+                            != ("context_instance", record.context, "testing")
+                            for secret in bundle.secret_records
+                        )
+                        or any(
+                            binding.value_source != "generated"
+                            for binding in bundle.secret_bindings
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "Generated activation credentials require their one-time atomic bundle."
+                    )
                 for key in (
                     "project_id",
                     "environment_id",
@@ -12214,11 +11966,27 @@ class PostgresRecordStore(HumanSessionStore):
             current = FreshOdooTestingGeneration.model_validate(row.payload)
             if not generation_snapshot_matches(current, generation):
                 raise ValueError("Fresh testing generation changed before queueing.")
-            operation = session.get(
-                LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id
+            allocation = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                generation.operation_id,
+                with_for_update=True,
             )
-            if operation is None or operation.payload.get("status") != "superseded":
-                raise ValueError("Fresh testing supersession is incomplete.")
+            initial = allocation is not None and bool(
+                allocation.payload.get("initial_request_sha256")
+            )
+            if initial:
+                assert allocation is not None
+                if (
+                    not allocation.payload.get("initial_apply_started_at")
+                    or allocation.payload.get("replacement_target_id") != generation.target_id
+                ):
+                    raise ValueError("Initial testing preparation is incomplete.")
+            else:
+                operation = session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow, generation.operation_id
+                )
+                if operation is None or operation.payload.get("status") != "superseded":
+                    raise ValueError("Fresh testing supersession is incomplete.")
             if current.reconcile_requested_at:
                 return
             from control_plane.odoo_testing_restore import read_current_testing_generation
@@ -12243,6 +12011,9 @@ class PostgresRecordStore(HumanSessionStore):
             self._fold_product_reconcile_request(
                 session, target=target, requested_at=now, delivery_id=""
             )
+            if initial:
+                assert allocation is not None
+                allocation.payload = {**allocation.payload, "initial_reconcile_requested_at": now}
             row.payload = self._payload_dict(
                 current.model_copy(update={"reconcile_requested_at": now})
             )
@@ -12282,12 +12053,45 @@ class PostgresRecordStore(HumanSessionStore):
                         # A new ID in this same bundle must never inherit that host.
                         continue
             hosts.add(generation.domain_host)
-        for payload in session.scalars(
-            select(LaunchplaneDisposableTestingResourceAllocationRow.payload)
+        for allocation, custody in session.execute(
+            select(
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                LaunchplaneDisposableReplacementPreparationRow,
+            ).outerjoin(
+                LaunchplaneDisposableReplacementPreparationRow,
+                LaunchplaneDisposableTestingResourceAllocationRow.operation_id
+                == LaunchplaneDisposableReplacementPreparationRow.operation_id,
+            )
         ):
+            payload = allocation.payload
+            if payload.get("initial_request_sha256") and (
+                not payload.get("initial_apply_started_at") or payload.get("initial_released_at")
+            ):
+                continue
             snapshot = payload.get("retained_target_record")
             if snapshot is not None:
                 retained = DokployTargetRecord.model_validate(snapshot)
+                if (
+                    custody is not None
+                    and current_target is not None
+                    and (
+                        current_target.context,
+                        current_target.instance,
+                    )
+                    == (retained.context, retained.instance)
+                ):
+                    current_identity = session.get(
+                        LaunchplaneDokployTargetIdRow, (retained.context, retained.instance)
+                    )
+                    retained_id = custody.payload.get("retained_target_id")
+                    if (
+                        current_identity is not None
+                        and current_identity.target_id == retained_id
+                        and target_id in (None, retained_id)
+                    ):
+                        # Writing a hold or metadata on the unchanged original
+                        # recipient cannot transfer its hostname to a fresh target.
+                        continue
                 hosts.update(
                     (
                         *retained.domains,
@@ -12367,6 +12171,287 @@ class PostgresRecordStore(HumanSessionStore):
                     },
                 )
             )
+            session.commit()
+
+    def require_initial_testing_lane_available(
+        self,
+        preparation: DisposableTestingResourcePreparation,
+        allow_bootstrap_resume: bool = False,
+        *,
+        shared_session: Any = None,
+    ) -> None:
+        held = (
+            shared_session
+            if shared_session is not None
+            else getattr(self._disposable_authority_context, "session", None)
+        )
+        with nullcontext(held) if held is not None else self._session_factory() as session:
+            owner = self._active_odoo_stable_lane_operation_owner(
+                session,
+                product=preparation.product,
+                context=preparation.context,
+                instance="testing",
+                exclude_initial_preparation=preparation.operation_id,
+            )
+            if owner is not None:
+                raise ValueError(
+                    "Another operation owns testing; initial preparation cannot recover it."
+                )
+            if (
+                session.get(
+                    LaunchplaneOdooStableTargetReplacementOperationRow, preparation.operation_id
+                )
+                is not None
+            ):
+                raise ValueError("An initial intent cannot name historical operation authority.")
+            row = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow, (preparation.product, preparation.context)
+            )
+            if row is not None and not (
+                allow_bootstrap_resume
+                and row.payload.get("operation_id") == preparation.operation_id
+            ):
+                raise ValueError("Testing already has a generation.")
+
+    def prepare_initial_testing_generation(
+        self,
+        *,
+        product: str,
+        request: TestingReplacementResourcesRequest,
+        prepared_by: str,
+    ) -> None:
+        from control_plane.testing_replacement_resources import (
+            resource_request_payload,
+            resource_context,
+        )
+        from control_plane.disposable_lanes import (
+            disposable_lane_binding_sha256,
+            disposable_lane_configuration,
+        )
+        from uuid import uuid4
+
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=product, context=request.context, instance="testing"
+            )
+            self._lock_product_authority_bundle_write(session)
+            old = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                existing = self.read_disposable_resource_preparation(request.operation_id)
+                if existing is not None:
+                    if existing.prepared_by != prepared_by:
+                        raise ValueError("Initial preparation belongs to another principal.")
+                    resource_context(self, product=product, request=request)
+                    return
+                profile = self.read_product_profile_record(product)
+                target = self.read_dokploy_target_record(
+                    context_name=request.context, instance_name="testing"
+                )
+                target_id = self.read_dokploy_target_id_record(
+                    context_name=request.context, instance_name="testing"
+                )
+                preparation = DisposableTestingResourcePreparation(
+                    operation_id=request.operation_id,
+                    product=product,
+                    context=request.context,
+                    retained_target_id=target_id.target_id,
+                    prepared_by=prepared_by,
+                    recorded_at=datetime.now(timezone.utc),
+                    resource_namespace=f"lp-testing-{uuid4().hex}",
+                    retained_target_record=target,
+                    initial_request_sha256=canonical_json_sha256(resource_request_payload(request)),
+                    initial_source_mode=request.source_mode,
+                    initial_binding_sha256=disposable_lane_binding_sha256(
+                        profile,
+                        target,
+                        target_id,
+                        configuration=disposable_lane_configuration(
+                            self, request.context, "testing"
+                        ),
+                    ),
+                )
+                # The common context enforces product ownership, holds and target aliases.
+                from control_plane.testing_initial_generation import initial_resource_context
+
+                initial_resource_context(self, product, request, preparation, False)
+                if profile.driver_id != "odoo" or not profile.is_active:
+                    raise ValueError("Initial generation requires active Odoo testing.")
+                from control_plane.contracts.product_profile_record import (
+                    is_exclusive_product_context,
+                    product_context_owner_map,
+                )
+
+                if (
+                    not is_exclusive_product_context(
+                        context=request.context,
+                        product=product,
+                        owners=product_context_owner_map(self.list_product_profile_records()),
+                    )
+                    or len(
+                        [
+                            lane
+                            for lane in profile.lanes
+                            if (lane.context, lane.instance) == (request.context, "testing")
+                        ]
+                    )
+                    != 1
+                    or target.policies.staff_testing_hold is not None
+                    or target.pending_public_host_effects
+                ):
+                    raise ValueError("Initial generation requires an exact unheld testing lane.")
+                if (
+                    target.target_type != "compose"
+                    or any(
+                        item.target_id == target_id.target_id
+                        and (item.context, item.instance) != (request.context, "testing")
+                        for item in self.list_dokploy_target_id_records()
+                    )
+                    or any(
+                        item.provider_id == "dokploy"
+                        and item.target_id == target_id.target_id
+                        and (item.context, item.instance) != (request.context, "testing")
+                        for item in self.list_physical_provider_target_records()
+                    )
+                ):
+                    raise ValueError("Original testing target aliases another lane.")
+                base_fields = set(DisposableTestingReplacementPreparation.model_fields)
+                session.add(
+                    LaunchplaneDisposableReplacementPreparationRow(
+                        operation_id=request.operation_id,
+                        payload=preparation.model_dump(mode="json", include=base_fields),
+                    )
+                )
+                session.add(
+                    LaunchplaneDisposableTestingResourceAllocationRow(
+                        operation_id=request.operation_id,
+                        payload=preparation.model_dump(mode="json", exclude=base_fields),
+                    )
+                )
+                session.commit()
+            finally:
+                self._disposable_authority_context.session = old
+
+    def activate_initial_testing_preparation(
+        self,
+        expected: DisposableTestingResourcePreparation,
+        *,
+        before_activation: Callable[[], None] | None = None,
+        validate: Callable[[], object] | None = None,
+    ) -> None:
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=expected.product, context=expected.context, instance="testing"
+            )
+            self.require_initial_testing_lane_available(expected, shared_session=session)
+            # Read provider usage under lane exclusion, before acquiring global authority.
+            if before_activation is not None:
+                before_activation()
+            self._lock_product_authority_bundle_write(session)
+            outer = getattr(self._disposable_authority_context, "session", None)
+            self._disposable_authority_context.session = session
+            try:
+                if validate is not None:
+                    validate()
+                row = session.get(
+                    LaunchplaneDisposableTestingResourceAllocationRow,
+                    expected.operation_id,
+                    with_for_update=True,
+                )
+                if (
+                    row is None
+                    or not row.payload.get("initial_request_sha256")
+                    or row.payload.get("initial_released_at")
+                ):
+                    raise ValueError("Initial testing preparation is unavailable.")
+                if not row.payload.get("initial_apply_started_at"):
+                    row.payload = {
+                        **row.payload,
+                        "initial_apply_started_at": self._database_mutation_timestamp(session),
+                    }
+                    session.commit()
+            finally:
+                self._disposable_authority_context.session = outer
+
+    def release_initial_testing_preparation(
+        self,
+        expected: DisposableTestingResourcePreparation,
+        *,
+        reservation_scope: str,
+        idempotency_key: str,
+        reviewed_plan_sha256: str,
+        trace_id: str,
+    ) -> None:
+        from control_plane.testing_replacement_resources import (
+            ROUTE,
+            TestingInitialPreparationRelease,
+        )
+        from control_plane.provider_operations import provider_operation_response_payload
+
+        with self._session_factory() as session:
+            self._lock_odoo_stable_lane(
+                session, product=expected.product, context=expected.context, instance="testing"
+            )
+            self._lock_product_authority_bundle_write(session)
+            row = session.get(
+                LaunchplaneDisposableTestingResourceAllocationRow,
+                expected.operation_id,
+                with_for_update=True,
+            )
+            receipt = session.scalar(
+                self._idempotency_statement(
+                    scope=reservation_scope,
+                    route_path=ROUTE.format(product=expected.product),
+                    idempotency_key=idempotency_key,
+                    for_update=True,
+                )
+            )
+            generation = session.get(
+                LaunchplaneFreshOdooTestingGenerationRow, (expected.product, expected.context)
+            )
+            if (
+                row is None
+                or not row.payload.get("initial_request_sha256")
+                or row.payload.get("replacement_target_id")
+                or row.payload.get("resources_binding_sha256")
+                or row.payload.get("initial_reconcile_requested_at")
+                or generation is not None
+                or row.payload.get("reviewed_plan_sha256") != reviewed_plan_sha256
+                or receipt is not None
+                and receipt.payload.get("provider_effect_started_at")
+            ):
+                raise ValueError(
+                    "An effect may have started; preserve its original fence and resources."
+                )
+            # The caller holds the exact executor lock and independently found no
+            # named provider placement. Preserve all custody and reservation history.
+            if not row.payload.get("initial_released_at"):
+                row.payload = {
+                    **row.payload,
+                    "initial_released_at": self._database_mutation_timestamp(session),
+                }
+            if receipt is not None and receipt.state != "completed":
+                original = self._read_payload(
+                    model_type=LaunchplaneIdempotencyRecord, payload=receipt.payload
+                )
+                disposition = self._updated_idempotency_record(
+                    original,
+                    state="completed",
+                    updated_at=row.payload["initial_released_at"],
+                    recorded_at=row.payload["initial_released_at"],
+                    response_status_code=202,
+                    response_trace_id=trace_id,
+                    response_payload=provider_operation_response_payload(
+                        trace_id=trace_id,
+                        records={"operation": expected.operation_id},
+                        result=TestingInitialPreparationRelease(
+                            product=expected.product,
+                            context=expected.context,
+                            operation_id=expected.operation_id,
+                        ).model_dump(mode="json"),
+                    ),
+                )
+                self._sync_idempotency_row(receipt, disposition)
             session.commit()
 
     def prepare_disposable_testing_replacement(
@@ -27906,8 +27991,30 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             raise ValueError("Source completion cannot change other target fields.")
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            self._lock_odoo_stable_lane(
+                session,
+                product=expected_profile.product,
+                context=expected_record.context,
+                instance=expected_record.instance,
+            )
             self._lock_product_authority_bundle_write(session)
+            if (
+                self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=expected_profile.product,
+                    context=expected_record.context,
+                    instance=expected_record.instance,
+                )
+                is not None
+            ):
+                raise ValueError("A lane operation still owns testing source or recovery.")
+            if any(
+                row.payload.get("retained_target_id") == expected_target_id.target_id
+                for row in session.scalars(
+                    select(LaunchplaneDisposableReplacementPreparationRow)
+                ).all()
+            ):
+                raise ValueError("Testing source remains reserved by retained-target custody.")
             self._lock_landing_authority(
                 session, landing_authority.product_profile(expected_profile.product)
             )

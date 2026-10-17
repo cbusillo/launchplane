@@ -14,7 +14,7 @@ from control_plane.contracts.product_profile_record import ProductLaneProfile
 from control_plane.contracts.public_dns import PublicDnsObservation
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
-    health_monitor_interval_seconds,
+    health_monitor_freshness_seconds,
 )
 
 
@@ -98,7 +98,7 @@ def build_public_dns_diagnostics(
                     evidence=evidence,
                     record=latest,
                     now=now,
-                    interval=health_monitor_interval_seconds(lane.instance),
+                    interval=health_monitor_freshness_seconds(lane.instance),
                 )
             )
     return tuple(diagnostics)
@@ -130,7 +130,7 @@ def _project_dns(
         try:
             observed_at = datetime.fromisoformat(record.observed_at.replace("Z", "+00:00"))
             deadline = observed_at + timedelta(seconds=interval)
-            fresh = observed_at.tzinfo is not None and observed_at <= now < deadline
+            fresh = observed_at.tzinfo is not None and observed_at <= now <= deadline
             stale_after = deadline.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         except (ValueError, TypeError):
             fresh, stale_after = False, ""

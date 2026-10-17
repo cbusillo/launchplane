@@ -15,6 +15,7 @@ from control_plane.contracts.product_topology_read_model import (
     build_product_environment_topology,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    health_monitor_freshness_seconds,
     health_monitor_interval_seconds,
     PublicIngressFailureCode,
     PublicIngressIncidentRecord,
@@ -1087,6 +1088,37 @@ class ProductTopologyReadModelTests(unittest.TestCase):
         )
         self.assertEqual(topology.observed.trust_state, "verified")
         self.assertEqual(topology.trust_state, "recorded")
+
+    def test_normal_publication_lag_keeps_public_and_runtime_proof_fresh(self) -> None:
+        profile = _strict_public_profile()
+        identity = _runtime_identity()
+        observed_at = _NOW - timedelta(seconds=health_monitor_interval_seconds("prod") + 3)
+        observation = _http_observation(
+            observed_at=observed_at.isoformat(),
+            expected_runtime_identity=identity,
+            monitoring_intent="public",
+        )
+        store = _TopologyStore(
+            route_binding=_route_binding(),
+            observations=(observation, _tls_observation(status="valid")),
+        )
+        deadline = observed_at + timedelta(seconds=health_monitor_freshness_seconds("prod"))
+        for now, expected in ((_NOW, "verified"), (deadline + timedelta(seconds=1), "stale")):
+            with self.subTest(now=now):
+                topology = build_product_environment_topology(
+                    record_store=store,
+                    profile=profile,
+                    lane=profile.lanes[0],
+                    lane_summary=_lane_summary(identity=identity),
+                    now=now,
+                )
+                self.assertEqual(topology.observed.ingress.trust_state, expected)
+                self.assertEqual(topology.observed.placement.trust_state, expected)
+                if expected == "verified":
+                    self.assertEqual(
+                        topology.observed.ingress.stale_after,
+                        topology.observed.placement.provenance.stale_after,
+                    )
 
     def test_stale_public_runtime_proof_does_not_corroborate_placement(self) -> None:
         profile = _strict_public_profile()

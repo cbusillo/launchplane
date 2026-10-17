@@ -657,8 +657,14 @@ temporary paths and fails when the checked schema or generated types drift from
 the backend contract. The canonical `x-launchplane-ui-read-operations` and
 `x-launchplane-ui-write-operations` manifests own each selected GET or accepted
 browser-safe POST path and stable operation id; slicing fails closed when a
-route, method, operation id, success response, or referenced schema drifts. The
-write slice currently covers work-graph ranking, product-config dry-run/apply,
+route, method, operation id, success response, or referenced schema drifts. A
+new browser-called route reaches `openapi-ui.json` and the generated types only
+after it is added to `UI_OPENAPI_WRITE_OPERATIONS` (or
+`UI_OPENAPI_READ_OPERATIONS` for a GET) in `control_plane/openapi_export.py`. A
+write route also goes in `BROWSER_WRITE_ROUTES` in
+`frontend/src/browser-write-contract.ts`;
+`frontend/tests/action-model.test.mjs` checks that those routes match the write
+manifest. The write slice currently covers work-graph ranking, product-config dry-run/apply,
 generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
 It also covers browser-human privileged-operation approval and revocation; the
 service-internal execution path is intentionally absent.
@@ -1239,7 +1245,8 @@ transition summaries instead of writing ad hoc comments from scheduler scripts.
 `GET /v1/work-graph/merge-train/policy-targets` is a native FastAPI route that
 returns the authorized repository/base-branch targets from the active DB-backed
 merge-train policy. It performs no GitHub reads or mutations and is the source
-of truth for Launchplane UI target selection and scheduled runner intent; callers
+of truth for Launchplane UI target selection; the service scheduler reads the
+active policy record directly. Callers
 should not infer merge-train targets from product inventory, work-graph
 awareness items, or repository variables.
 
@@ -1402,17 +1409,14 @@ scheduler for this route: every five minutes by default it runs one pass over
 the scheduler-enabled policy targets, one target at a time, calling the same
 admission and worker functions in-process. See [merge-train policy](merge-train-policy.md).
 
-`.github/workflows/merge-train-runner.yml` is the external caller for
+`.github/workflows/merge-train-runner.yml` is a manual external caller for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
-reads DB-backed policy targets for scheduled runs, reads admission, and calls
-one worker entrypoint only when the decision is `admitted`. Scheduled
-repository, base-branch, runner-mode, and mutation selection come from the
-active merge-train policy record through `policy-targets`; manual dispatch uses
-explicit workflow inputs. Scheduled runs with no enabled policy scheduler target
-complete as no-ops before admission, and each enabled target gets its own
-independent run job. The default manual runner mode calls the Level 1 `run-once`
-route; setting manual `runner_mode: controller` switches an admitted pass to one
-full-controller `run-once` call instead.
+reads admission, and calls one worker entrypoint only when the decision is
+`admitted`. Repository, base branch, runner mode and mutation come from explicit
+workflow inputs. Automatic sweeps and event progression belong to the service
+worker; the workflow has no schedule or target fan-out. The default manual
+runner mode calls the Level 1 `run-once` route; setting `runner_mode: controller`
+switches an admitted pass to one full-controller `run-once` call instead.
 Controller-mode dry-runs do not deliver PR feedback comments; feedback delivery
 is reserved for mutate runs and explicit manual phase workflows.
 Workflow dispatches may select at most one non-`none` phase input across
@@ -2048,9 +2052,13 @@ profile permissions; no Client or workflow permission expands. See
 for the bounded client and separate isolation/sanitization requirements.
 
 Expected-config apply is a narrower metadata mutation for runtime contract
-requirements already owned by product profiles. It requires
+requirements already owned by product profiles. The authenticated Director's
+`local_operator` credential can add declarations on any product, including Live products,
+without an additional grant. This exception cannot remove requirements or
+publish Client credential requests through `owner_input`, and does not extend
+to other agent identities. Other callers and removals require
 `product_profile.expected_config.apply` for the target product in the
-Launchplane service context, loads the existing DB-backed product profile,
+Launchplane service context. The route loads the existing DB-backed product profile,
 appends supplied runtime keys or managed secret binding requirements only when
 absent, and removes requirements named in `remove_runtime_environment_keys` or
 `remove_managed_secret_bindings`. Adding and removing the same identity in one
@@ -2059,10 +2067,16 @@ request asks for removals, each section also reports `removed` and `absent`
 (named but not declared), and the secret section reports `still_bound`:
 configured stored bindings for a removed requirement, which this route never
 unbinds or deletes. Dry-run returns the same redacted summary without writing. Apply updates only the profile `expected_config`, `updated_at`, and
-`source` fields; callers must use the live-target-runtime workflow afterward to
-sync live provider environment. The route does not accept secret plaintext,
-runtime values, or checked-in product catalogs, and workflow authority for real
-products must be granted through admin-supplied authz input.
+`source` fields. Requirements must come from the intended application contract,
+not simply every currently configured key. Declaring a required key that is
+missing from the lane can block a later delivery until it is configured or
+the declaration is corrected. Inspect config status when reviewing the plan.
+Declared keys are also protected from provider-key retirement. An incorrect
+Live-product requirement needs an admin to remove it.
+Runtime delivery is a separate
+operation through the supported runtime-sync path and its own authorization;
+declaring requirements does not start it. The route does not accept secret
+plaintext, runtime values, release settings, or caller-supplied identity markers.
 
 Client apply names or clears the product's Client and changes only the
 profile `owner`, `updated_at`, and `source` fields. It requires
@@ -2235,6 +2249,13 @@ and rejects cross-product/context/instance overwrites for an existing endpoint
 key. The accepted response preserves the legacy private-health apply envelope:
 the endpoint key/status remain in `result`, while `records` stays empty for
 compatibility with existing replays.
+
+[Testing local credential generation](testing-local-credentials.md) uses this
+same product-config route with `generate: "testing_local"` instead of a value.
+`GET /v1/testing-credentials` and
+`GET /v1/products/{product}/testing-credentials` provide names-only overlap
+audit and provenance readback; they authorize all participating product lanes
+before inspecting values. Neither route returns a value or value fingerprint.
 
 Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
@@ -4304,6 +4325,29 @@ plan is not held. It cites the artifact id without inventing a deploy operation.
 Missing or inconsistent provenance, or a request that is not done, stays unknown.
 This cites saved reconciliation evidence, not a fresh provider observation;
 a later manual deployment requires reconciliation before this evidence is current.
+For Odoo, select `intent=provision|generation|testing-replacement` on the testing
+path to report the prerequisites for task provisioning, initial
+fresh generation, and testing replacement together. It independently reads restore
+policy, opaque credential separation and lane-local safety, selected copy source,
+target bindings, resource qualification, current use, and every walkthrough
+checkpoint. The default copy source is `container-export`; use `source_mode=ssh`
+to inspect that source instead. Supply `operation_id` for the original resource
+preparation/replacement and `task_id` for the exact provision task when available.
+Unselected operation/task evidence and checks that depend on unavailable evidence
+are explicitly unknown. A missing generation does not hide a policy, resource,
+credential or current-use failure. `intent=provision` checks the current generation
+and all walkthrough checkpoints; when the generation is not qualified it also
+reports copy prerequisites. A qualified generation needs no new copy preparation.
+`generation` and `testing-replacement` check copy/resource eligibility without
+requiring a task account. The default testing deploy path is unchanged. A selected
+intent is echoed in the response; ordinary reads omit that optional field. The
+helper exposes the same optional arguments after the companion helper update.
+
+These reads reuse execution validators and perform only observations: they do not
+reserve resources, issue credentials, create accounts, acquire an execution fence,
+or persist a dry-run plan. A passing diagnostic never substitutes for the action's
+own reviewed intent, concurrency checks, authorization or live safety gates.
+
 `promote` checks the caller's own promotion grant, Client acceptance, the prod
 lane's backup authority and the last promotion's failure. A step whose evidence
 cannot be read is `unknown`, never `clear`, and the response never carries

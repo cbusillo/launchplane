@@ -4743,6 +4743,35 @@
         "title": "ConsumerVerificationResponse",
         "type": "object"
       },
+      "CredentialOverlap": {
+        "additionalProperties": false,
+        "properties": {
+          "production_context": {
+            "title": "Production Context",
+            "type": "string"
+          },
+          "production_key": {
+            "title": "Production Key",
+            "type": "string"
+          },
+          "production_product": {
+            "title": "Production Product",
+            "type": "string"
+          },
+          "testing_key": {
+            "title": "Testing Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "testing_key",
+          "production_context",
+          "production_key",
+          "production_product"
+        ],
+        "title": "CredentialOverlap",
+        "type": "object"
+      },
       "DataProvenance": {
         "additionalProperties": false,
         "properties": {
@@ -24666,6 +24695,77 @@
         "title": "OdooTestingRouteBindingRefreshEnvelope",
         "type": "object"
       },
+      "OdooUpgradeRehearsalRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "default": "prepare",
+            "enum": [
+              "prepare",
+              "execute",
+              "simulate-final",
+              "verify",
+              "retire"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "rehearsal_id": {
+            "default": "",
+            "pattern": "^(?:lp-rehearsal-[a-f0-9]{32})?$",
+            "title": "Rehearsal Id",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          },
+          "source_context": {
+            "minLength": 1,
+            "title": "Source Context",
+            "type": "string"
+          },
+          "source_odoo_version": {
+            "pattern": "^[0-9]+(?:\\.[0-9]+)*$",
+            "title": "Source Odoo Version",
+            "type": "string"
+          },
+          "storage": {
+            "$ref": "#/components/schemas/OdooTestingDrillStorageBudget"
+          },
+          "target_artifact_id": {
+            "minLength": 1,
+            "title": "Target Artifact Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_context",
+          "source_odoo_version",
+          "target_artifact_id",
+          "storage",
+          "reason"
+        ],
+        "title": "OdooUpgradeRehearsalRequest",
+        "type": "object"
+      },
       "OdooWalkthroughRequest": {
         "additionalProperties": false,
         "properties": {
@@ -29761,35 +29861,18 @@
       "PrivateTestingActivationRequest": {
         "additionalProperties": false,
         "properties": {
-          "ca_bundle_sha256": {
-            "pattern": "^[a-f0-9]{64}$",
-            "title": "Ca Bundle Sha256",
-            "type": "string"
-          },
-          "certificate_root": {
-            "pattern": "^/[A-Za-z0-9._/-]+$",
-            "title": "Certificate Root",
-            "type": "string"
-          },
-          "certificate_sha256": {
-            "pattern": "^[a-f0-9]{64}$",
-            "title": "Certificate Sha256",
-            "type": "string"
-          },
           "context": {
             "minLength": 1,
             "title": "Context",
             "type": "string"
           },
-          "custody_review": {
-            "maxLength": 1000,
-            "minLength": 1,
-            "title": "Custody Review",
-            "type": "string"
-          },
           "endpoint_key": {
             "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
             "title": "Endpoint Key",
+            "type": "string"
+          },
+          "endpoint_url": {
+            "title": "Endpoint Url",
             "type": "string"
           },
           "expected_plan_sha256": {
@@ -29826,15 +29909,6 @@
             "title": "Mode",
             "type": "string"
           },
-          "monitor_ca_bundle_path": {
-            "title": "Monitor Ca Bundle Path",
-            "type": "string"
-          },
-          "nginx_image": {
-            "pattern": "^[a-z0-9][a-z0-9./:_-]+@sha256:[a-f0-9]{64}$",
-            "title": "Nginx Image",
-            "type": "string"
-          },
           "operation": {
             "default": "install",
             "enum": [
@@ -29861,10 +29935,6 @@
             "title": "Reason",
             "type": "string"
           },
-          "receiver_ca_bundle_path": {
-            "title": "Receiver Ca Bundle Path",
-            "type": "string"
-          },
           "runtime_service": {
             "pattern": "^[a-z][a-z0-9_-]{0,62}$",
             "title": "Runtime Service",
@@ -29879,12 +29949,6 @@
             "pattern": "^[A-Za-z0-9._/-]+$",
             "title": "Source Path",
             "type": "string"
-          },
-          "trust_review": {
-            "maxLength": 1000,
-            "minLength": 1,
-            "title": "Trust Review",
-            "type": "string"
           }
         },
         "required": [
@@ -29893,17 +29957,10 @@
           "private_ip",
           "listener_port",
           "runtime_service",
-          "nginx_image",
-          "ca_bundle_sha256",
-          "certificate_sha256",
-          "monitor_ca_bundle_path",
-          "receiver_ca_bundle_path",
-          "trust_review",
+          "endpoint_url",
           "source_commit",
           "source_path",
-          "certificate_root",
           "host_review",
-          "custody_review",
           "reason"
         ],
         "title": "PrivateTestingActivationRequest",
@@ -29912,16 +29969,6 @@
       "PrivateTestingTransportRequest": {
         "additionalProperties": false,
         "properties": {
-          "ca_bundle_sha256": {
-            "pattern": "^[a-f0-9]{64}$",
-            "title": "Ca Bundle Sha256",
-            "type": "string"
-          },
-          "certificate_sha256": {
-            "pattern": "^[a-f0-9]{64}$",
-            "title": "Certificate Sha256",
-            "type": "string"
-          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -29930,6 +29977,10 @@
           "endpoint_key": {
             "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
             "title": "Endpoint Key",
+            "type": "string"
+          },
+          "endpoint_url": {
+            "title": "Endpoint Url",
             "type": "string"
           },
           "expected_plan_sha256": {
@@ -29959,33 +30010,14 @@
             "title": "Mode",
             "type": "string"
           },
-          "monitor_ca_bundle_path": {
-            "title": "Monitor Ca Bundle Path",
-            "type": "string"
-          },
-          "nginx_image": {
-            "pattern": "^[a-z0-9][a-z0-9./:_-]+@sha256:[a-f0-9]{64}$",
-            "title": "Nginx Image",
-            "type": "string"
-          },
           "private_ip": {
             "format": "ipv4",
             "title": "Private Ip",
             "type": "string"
           },
-          "receiver_ca_bundle_path": {
-            "title": "Receiver Ca Bundle Path",
-            "type": "string"
-          },
           "runtime_service": {
             "pattern": "^[a-z][a-z0-9_-]{0,62}$",
             "title": "Runtime Service",
-            "type": "string"
-          },
-          "trust_review": {
-            "maxLength": 1000,
-            "minLength": 1,
-            "title": "Trust Review",
             "type": "string"
           }
         },
@@ -29995,12 +30027,7 @@
           "private_ip",
           "listener_port",
           "runtime_service",
-          "nginx_image",
-          "ca_bundle_sha256",
-          "certificate_sha256",
-          "monitor_ca_bundle_path",
-          "receiver_ca_bundle_path",
-          "trust_review"
+          "endpoint_url"
         ],
         "title": "PrivateTestingTransportRequest",
         "type": "object"
@@ -32734,6 +32761,19 @@
             ],
             "title": "Sharing Reason",
             "x-launchplane-optional-response": true
+          },
+          "value_source": {
+            "anyOf": [
+              {
+                "const": "generated",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Source",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -34214,7 +34254,8 @@
               "recovered",
               "monitoring_intent_changed",
               "migration_baseline",
-              "duplicate_reconciled"
+              "duplicate_reconciled",
+              "request_refused"
             ],
             "title": "Reason",
             "type": "string"
@@ -34883,7 +34924,8 @@
                 "enum": [
                   "recovered",
                   "monitoring_intent_changed",
-                  "duplicate_reconciled"
+                  "duplicate_reconciled",
+                  "request_refused"
                 ],
                 "type": "string"
               },
@@ -36437,6 +36479,23 @@
           "blocked_count": {
             "title": "Blocked Count",
             "type": "integer"
+          },
+          "intent": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provision",
+                  "generation",
+                  "testing-replacement"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent",
+            "x-launchplane-optional-response": true
           },
           "path": {
             "enum": [
@@ -38467,8 +38526,16 @@
       },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "The source acceptance and immutable evidence for an unchanged feature patch.",
+        "description": "The source acceptance and immutable evidence for carrying its decision.",
         "properties": {
+          "commits": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductReviewCarryCommit"
+            },
+            "title": "Commits",
+            "type": "array"
+          },
           "comparison_base_sha": {
             "default": "",
             "title": "Comparison Base Sha",
@@ -38482,7 +38549,8 @@
             "default": "merge_train_base_refresh",
             "enum": [
               "merge_train_base_refresh",
-              "unchanged_patch_base_update"
+              "unchanged_patch_base_update",
+              "client_impact_none"
             ],
             "title": "Reason",
             "type": "string"
@@ -38505,6 +38573,28 @@
           "head_sha"
         ],
         "title": "ProductReviewCarry",
+        "type": "object"
+      },
+      "ProductReviewCarryCommit": {
+        "additionalProperties": false,
+        "description": "An immutable commit and the Client-impact trailer used to carry acceptance.",
+        "properties": {
+          "client_impact": {
+            "const": "none",
+            "title": "Client Impact",
+            "type": "string"
+          },
+          "sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Sha",
+            "type": "string"
+          }
+        },
+        "required": [
+          "sha",
+          "client_impact"
+        ],
+        "title": "ProductReviewCarryCommit",
         "type": "object"
       },
       "ProductReviewDecisionEnvelope": {
@@ -39176,6 +39266,12 @@
                 "type": "null"
               }
             ]
+          },
+          "testing_local_credential": {
+            "default": false,
+            "title": "Testing Local Credential",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -41716,6 +41812,15 @@
             "title": "Product",
             "type": "string"
           },
+          "refused_production_requests": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/RefusedProductionRequestReconciliation"
+            },
+            "maxItems": 100,
+            "title": "Refused Production Requests",
+            "type": "array"
+          },
           "schema_version": {
             "default": 1,
             "minimum": 1.0,
@@ -42724,6 +42829,41 @@
           "description"
         ],
         "title": "RecordFailure",
+        "type": "object"
+      },
+      "RefusedProductionRequestReconciliation": {
+        "additionalProperties": false,
+        "description": "An admin attests caller retirement; the service verifies refusal and health.",
+        "properties": {
+          "caller_retired": {
+            "const": true,
+            "title": "Caller Retired",
+            "type": "boolean"
+          },
+          "caller_retired_at": {
+            "format": "date-time",
+            "title": "Caller Retired At",
+            "type": "string"
+          },
+          "caller_retirement_evidence": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Caller Retirement Evidence",
+            "type": "string"
+          },
+          "incident_id": {
+            "minLength": 1,
+            "title": "Incident Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "incident_id",
+          "caller_retired",
+          "caller_retired_at",
+          "caller_retirement_evidence"
+        ],
+        "title": "RefusedProductionRequestReconciliation",
         "type": "object"
       },
       "ReleaseChecklist": {
@@ -46821,7 +46961,8 @@
             "default": "register",
             "enum": [
               "register",
-              "retire"
+              "retire",
+              "relabel"
             ],
             "title": "Operation",
             "type": "string"
@@ -46888,6 +47029,26 @@
             "title": "Audit Record Key",
             "type": "string"
           },
+          "expected_custom_labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Expected Custom Labels",
+            "type": "array"
+          },
+          "expected_runner_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Runner Id"
+          },
           "host_name": {
             "title": "Host Name",
             "type": "string"
@@ -46912,7 +47073,8 @@
             "default": "register",
             "enum": [
               "register",
-              "retire"
+              "retire",
+              "relabel"
             ],
             "title": "Operation",
             "type": "string"
@@ -47855,7 +48017,8 @@
                 "enum": [
                   "supplied",
                   "copy",
-                  "provider"
+                  "provider",
+                  "generated"
                 ],
                 "type": "string"
               },
@@ -48757,8 +48920,12 @@
         "additionalProperties": false,
         "properties": {
           "applied_connection_grants": {
-            "const": "unknown",
             "default": "unknown",
+            "enum": [
+              "read_only",
+              "unsafe",
+              "unknown"
+            ],
             "title": "Applied Connection Grants",
             "type": "string"
           },
@@ -50447,6 +50614,162 @@
         "title": "TestingActivationRequest",
         "type": "object"
       },
+      "TestingCredentialAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "generated_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Generated Keys",
+            "type": "array"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "local_binding_names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Local Binding Names",
+            "type": "object"
+          },
+          "local_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Local Keys",
+            "type": "array"
+          },
+          "missing_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Keys",
+            "type": "array"
+          },
+          "overlaps": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CredentialOverlap"
+            },
+            "title": "Overlaps",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "production_keys": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "default": {},
+            "title": "Production Keys",
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "overlap",
+              "unavailable",
+              "no_production"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "status",
+          "local_keys"
+        ],
+        "title": "TestingCredentialAudit",
+        "type": "object"
+      },
+      "TestingCredentialAuditResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/TestingCredentialAudit"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "lanes"
+        ],
+        "title": "TestingCredentialAuditResponse",
+        "type": "object"
+      },
+      "TestingCredentialInventoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/TestingCredentialAudit"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "products": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "products",
+          "lanes"
+        ],
+        "title": "TestingCredentialInventoryResponse",
+        "type": "object"
+      },
       "TestingExclusionFacet": {
         "additionalProperties": false,
         "properties": {
@@ -50647,6 +50970,11 @@
             "title": "Domain Host",
             "type": "string"
           },
+          "initial_generation": {
+            "default": false,
+            "title": "Initial Generation",
+            "type": "boolean"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -50819,6 +51147,11 @@
             "title": "Context",
             "type": "string"
           },
+          "initial_generation": {
+            "default": false,
+            "title": "Initial Generation",
+            "type": "boolean"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -50830,13 +51163,14 @@
             "enum": [
               "dry-run",
               "apply",
-              "readback"
+              "readback",
+              "release"
             ],
             "title": "Mode",
             "type": "string"
           },
           "operation_id": {
-            "minLength": 1,
+            "default": "",
             "title": "Operation Id",
             "type": "string"
           },
@@ -50850,11 +51184,19 @@
             "pattern": "^(?:[a-f0-9]{64})?$",
             "title": "Reviewed Plan Sha256",
             "type": "string"
+          },
+          "source_mode": {
+            "default": "ssh",
+            "enum": [
+              "ssh",
+              "container-export"
+            ],
+            "title": "Source Mode",
+            "type": "string"
           }
         },
         "required": [
           "context",
-          "operation_id",
           "reason"
         ],
         "title": "TestingReplacementResourcesRequest",
@@ -51758,10 +52100,39 @@
         "additionalProperties": false,
         "description": "An admin's request to ask the Client about an engineering-only release now.",
         "properties": {
+          "adopt_comment_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adopt Comment Id"
+          },
+          "adopt_issue_number": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adopt Issue Number"
+          },
           "checklist_digest": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Checklist Digest",
             "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
           },
           "product": {
             "maxLength": 256,
@@ -80772,6 +81143,18 @@
                         "title": "Description",
                         "type": "string"
                       },
+                      "generate": {
+                        "anyOf": [
+                          {
+                            "const": "testing_local",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Generate"
+                      },
                       "instance": {
                         "anyOf": [
                           {
@@ -83270,6 +83653,12 @@
                             "type": "null"
                           }
                         ]
+                      },
+                      "testing_local_credential": {
+                        "default": false,
+                        "title": "Testing Local Credential",
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
                       }
                     },
                     "required": [
@@ -83790,6 +84179,12 @@
                             "type": "null"
                           }
                         ]
+                      },
+                      "testing_local_credential": {
+                        "default": false,
+                        "title": "Testing Local Credential",
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
                       }
                     },
                     "required": [
@@ -89859,6 +90254,134 @@
         "summary": "Reconcile Secret References"
       }
     },
+    "/v1/products/{product}/environments/{environment}/odoo-source-grants": {
+      "get": {
+        "operationId": "read_odoo_runtime_source_grants",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "environment",
+            "required": true,
+            "schema": {
+              "title": "Environment",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OdooImportDiagnosticResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "410": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Gone"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Read value-free source grants from the verified Odoo testing runtime without an Odoo login"
+      }
+    },
     "/v1/products/{product}/environments/{environment}/outgoing-email": {
       "get": {
         "operationId": "read_environment_outgoing_email",
@@ -90966,6 +91489,97 @@
         "summary": "Read persisted Odoo website bootstrap settings"
       }
     },
+    "/v1/products/{product}/odoo-upgrade-rehearsal": {
+      "post": {
+        "operationId": "rehearsal_v1_products__product__odoo_upgrade_rehearsal_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/OdooUpgradeRehearsalRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Rehearsal"
+      }
+    },
     "/v1/products/{product}/path-check": {
       "get": {
         "operationId": "read_product_path_check",
@@ -90994,6 +91608,76 @@
               ],
               "title": "Path",
               "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "intent",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "provision",
+                    "generation",
+                    "testing-replacement"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Intent"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source_mode",
+            "required": false,
+            "schema": {
+              "default": "container-export",
+              "enum": [
+                "ssh",
+                "container-export"
+              ],
+              "title": "Source Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "task_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{32}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Task Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "operation_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Operation Id"
             }
           },
           {
@@ -91027,6 +91711,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
           },
           "401": {
             "content": {
@@ -92463,6 +93157,105 @@
           }
         },
         "summary": "Activate a qualified independent testing recipient while retaining historical effects"
+      }
+    },
+    "/v1/products/{product}/testing-credentials": {
+      "get": {
+        "operationId": "read_testing_credentials",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingCredentialAuditResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Audit testing credential separation without values or fingerprints"
       }
     },
     "/v1/products/{product}/testing-generation-retirement": {
@@ -96747,6 +97540,86 @@
           }
         },
         "summary": "Apply or dry-run a trusted-maintenance policy record"
+      }
+    },
+    "/v1/testing-credentials": {
+      "get": {
+        "operationId": "audit_testing_credentials",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingCredentialInventoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Audit all products' testing lanes without credential values"
       }
     },
     "/v1/work-graph/github/issues": {

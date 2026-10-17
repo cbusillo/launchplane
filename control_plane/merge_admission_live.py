@@ -362,6 +362,15 @@ class LiveMergeAdmissionEvaluator:
                 "Live merge queue or base identity changed from the landing-plan lineage.",
                 reason_code="landing_lineage_changed",
             )
+        if landing_plan.candidate_pull_request_number is not None and any(
+            queue_entry.requires_individual_landing
+            for queue_entry in live_queue.queue
+            if queue_entry.number in planned_numbers
+        ):
+            raise MergeAdmissionDeniedError(
+                "Code-owner changes require landing on their original pull request.",
+                reason_code="original_pull_request_landing_required",
+            )
         try:
             observations = tuple(
                 self._entry_evidence(

@@ -25,6 +25,8 @@ from control_plane.contracts.testing_activation import (
     TestingActivationResult,
 )
 from control_plane.disposable_lanes import disposable_lane_configuration
+from control_plane.disposable_lanes import LaneConfigurationRecord
+from control_plane.contracts.secret_record import SecretRecord, SecretBinding
 from control_plane.dokploy import api, compose, post_deploy, source
 from control_plane.generic_web_testing_exclusion import (
     _bind,
@@ -121,13 +123,37 @@ def activation_record(
 
 
 def configuration_digest(
-    store: PostgresRecordStore, product: str, context: str, *, version: Literal[1, 2] = 2
+    store: PostgresRecordStore,
+    product: str,
+    context: str,
+    *,
+    version: Literal[1, 2, 3] = 3,
+    generated: ProductAuthorityBundle | None = None,
 ) -> str:
     profile = store.read_product_profile_record(product)
     lane = next(
         item for item in profile.lanes if (item.context, item.instance) == (context, "testing")
     )
-    configuration = disposable_lane_configuration(store, context, "testing")
+    configuration: list[LaneConfigurationRecord] = list(
+        disposable_lane_configuration(store, context, "testing")
+    )
+    if generated is not None:
+        replaced_records = {record.secret_id for record in generated.secret_records}
+        replaced_bindings = {binding.binding_id for binding in generated.secret_bindings}
+        configuration = [
+            row
+            for row in configuration
+            if not (
+                isinstance(row, SecretRecord)
+                and row.secret_id in replaced_records
+                or isinstance(row, SecretBinding)
+                and row.binding_id in replaced_bindings
+            )
+        ]
+        configuration.extend(generated.secret_records)
+        configuration.extend(generated.secret_bindings)
+    if version == 3:
+        configuration.sort(key=lambda row: row.model_dump_json())
     keys = {item.binding_key for item in configuration if hasattr(item, "binding_key")}
     return canonical_json_sha256(
         {
@@ -135,7 +161,12 @@ def configuration_digest(
                 "product": profile.product,
                 "repository": profile.repository,
                 "driver_id": profile.driver_id,
-                **({"public_website": profile.public_website} if version == 2 else {}),
+                **({"public_website": profile.public_website} if version >= 2 else {}),
+                **(
+                    {"expected_config": profile.expected_config.model_dump(mode="json")}
+                    if version == 3
+                    else {}
+                ),
                 "is_active": profile.is_active,
                 "image": profile.image.model_dump(mode="json"),
                 "lane": lane.model_dump(mode="json"),
@@ -535,7 +566,7 @@ def build_activation(
             target_id=target_id.target_id,
         ),
         configuration_sha256=digest,
-        configuration_version=2,
+        configuration_version=3,
         compose_source=document,
         image_reference=image_reference,
     )
@@ -674,12 +705,9 @@ class TestingActivationAdapter:
         )
 
     def require_unchanged(self, record: TestingActivationRecord) -> None:
-        if (
-            configuration_digest(
-                self.store, self.product, record.context, version=record.configuration_version
-            )
-            != record.configuration_sha256
-        ):
+        if configuration_digest(
+            self.store, self.product, record.context, version=record.configuration_version
+        ) != (record.generated_configuration_sha256 or record.configuration_sha256):
             raise TestingActivationRefusal(
                 "Testing configuration or key policy changed.",
                 code=TestingActivationRefusalCode.AUTHORITY_CHANGED,
@@ -1095,6 +1123,46 @@ class TestingActivationAdapter:
             )
         return published
 
+    def prepare_credentials(self, record: TestingActivationRecord) -> TestingActivationRecord:
+        from control_plane.testing_local_credentials import generation_bundle
+
+        if record.generated_configuration_sha256:
+            return record
+        profile = self.store.read_product_profile_record(self.product)
+        bundle = generation_bundle(
+            self.store,
+            profile,
+            record.context,
+            actor="service:testing-activation",
+            generation=record.preparation_record_id,
+        )
+        if not bundle.secret_records:
+            return record
+        if record.configuration_version != 3:
+            raise TestingActivationRefusal(
+                "Legacy activation cannot introduce newly declared local credentials."
+            )
+        self.require_unchanged(record)
+        replacement = record.model_copy(
+            update={
+                "generated_configuration_sha256": configuration_digest(
+                    self.store, self.product, record.context, version=3, generated=bundle
+                )
+            }
+        )
+        self.store.write_testing_activation(
+            expected=record.model_dump(mode="json"),
+            replacement=replacement.model_dump(mode="json"),
+            bundle=bundle.model_copy(
+                update={
+                    "expected_product_profiles": (profile,),
+                    "required_context_owner": (self.product, record.context),
+                }
+            ),
+        )
+        self.require_unchanged(replacement)
+        return replacement
+
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str
     ) -> ProviderObservation:
@@ -1359,6 +1427,7 @@ class TestingActivationAdapter:
                         app_name=app_name,
                         before_configuration_sha256=self.recipient_configuration_sha256(fresh),
                     )
+                record = self.prepare_credentials(record)
                 values = runtime_values(self.store, self.root, record, resources)
                 if not configured:
                     rendered_source(record, values, resources)

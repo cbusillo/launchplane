@@ -80,7 +80,8 @@ class TestingActivationRecord(BaseModel):
     retained_provider: ProviderTargetRecord
     retained_reservations: tuple[LaunchplaneIdempotencyRecord, ...]
     configuration_sha256: str
-    configuration_version: Literal[1, 2] = Field(default=1, exclude_if=lambda value: value == 1)
+    configuration_version: Literal[1, 2, 3] = Field(default=1, exclude_if=lambda value: value == 1)
+    generated_configuration_sha256: str = Field(default="", exclude_if=lambda value: not value)
     compose_source: str
     image_reference: str
     host_ports: tuple[int, ...] = ()

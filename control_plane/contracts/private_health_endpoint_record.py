@@ -8,7 +8,7 @@ from cryptography import x509
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from control_plane.notifications import public_url_error
+from control_plane.outbound_http import private_url_error, public_url_error
 
 
 PrivateHealthEndpointStatus = Literal["active", "disabled"]
@@ -53,11 +53,15 @@ class PrivateHealthEndpointRecord(BaseModel):
     def _validate_record(self) -> "PrivateHealthEndpointRecord":
         if self.schema_version != 1:
             raise ValueError("Unsupported private health endpoint record schema version")
-        public_error = public_url_error(self.url)
-        if public_error == "invalid_url":
+        private_error = private_url_error(self.url)
+        if private_error == "invalid_url":
             raise ValueError("private health endpoint url must be a valid HTTP URL")
-        if not public_error:
+        if private_error == "public_url":
             raise ValueError("private health endpoint url must not be public")
+        # Only testing gains ordinary DNS authorities. Other consumers, including
+        # production calendar RPC, still rely on the original stored-host boundary.
+        if self.instance != "testing" and public_url_error(self.url) != "private_url":
+            raise ValueError("Non-testing private endpoints require an internal hostname or IP.")
         if self.tls_ca_pem:
             if self.instance != "testing" or urlsplit(self.url).scheme != "https":
                 raise ValueError("Scoped private CA trust is supported only on testing HTTPS.")

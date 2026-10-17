@@ -17,6 +17,7 @@ from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
     health_monitor_interval_seconds,
+    health_monitor_freshness_seconds,
 )
 from control_plane.contracts.product_topology_read_model import build_product_environment_topology
 from control_plane.product_health_monitoring import (
@@ -274,7 +275,7 @@ class PublicDnsDiagnosticTests(unittest.TestCase):
             dns_get=lambda url: _EXPECTED.addresses,
         )
         deadline = _NOW + timedelta(
-            seconds=health_monitor_interval_seconds(profile.lanes[0].instance)
+            seconds=health_monitor_freshness_seconds(profile.lanes[0].instance)
         )
         changed = profile.model_dump(mode="json")
         changed["lanes"][0]["health_monitoring"]["checks"][0]["expected_dns_targets"][0][
@@ -283,7 +284,13 @@ class PublicDnsDiagnosticTests(unittest.TestCase):
         changed_profile = LaunchplaneProductProfileRecord.model_validate(changed)
         for current, time, status in (
             (profile, deadline - timedelta(microseconds=1), "match"),
-            (profile, deadline, "stale"),
+            (profile, deadline, "match"),
+            (profile, deadline + timedelta(microseconds=1), "stale"),
+            (
+                profile,
+                _NOW + timedelta(seconds=health_monitor_interval_seconds("prod") + 3),
+                "match",
+            ),
             (profile, _NOW - timedelta(seconds=1), "stale"),
             (changed_profile, _NOW, "stale"),
         ):

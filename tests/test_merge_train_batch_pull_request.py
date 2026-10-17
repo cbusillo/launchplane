@@ -13,6 +13,7 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_id,
     build_merge_train_batch_landing_plan,
 )
+from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.merge_admission import (
     GuardedMergeAdmission,
     MergeAdmissionDeniedError,
@@ -28,6 +29,7 @@ from control_plane.release_review_github import owner_test_notes
 from tests.test_merge_train_github import (
     _combined_status,
     _owner_review_check,
+    _client_veto_record,
     _advisory_runtime_records,
     _conversation_rule,
     _review_threads,
@@ -253,7 +255,10 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
         sleeper = patch("control_plane.merge_train_batch_pull_request.sleep")
         sleeper.start()
         self.addCleanup(sleeper.stop)
-        candidate_record, landing_record = _records((_entry(1, 1), _entry(2, 2)))
+        self._prepare((_entry(1, 1), _entry(2, 2)))
+
+    def _prepare(self, entries: Any) -> None:
+        candidate_record, landing_record = _records(entries)
 
         def git_identities(value: Any) -> Any:
             if isinstance(value, dict):
@@ -297,7 +302,9 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             candidate_record, landing_record.model_copy(update={"landing_plan": plan})
         )
         self.progress: list[Any] = []
-        self.provider.before_merge = lambda: self.assertEqual(set(self.guard.admissions), {1, 2})
+        self.provider.before_merge = lambda: self.assertEqual(
+            set(self.guard.admissions), set(self.provider.heads)
+        )
 
     def land(self, checkpoint: Any = None) -> Any:
         return self.client.land_batch_candidate(
@@ -307,7 +314,60 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             checkpoint=checkpoint or (lambda plan, _entry, _phase: self.progress.append(plan)),
         )
 
-    def _require_client_review_for_second_member(self, state: dict[str, str]) -> None:
+    def test_single_candidate_lands_the_tested_tree_with_one_guarded_merge(self) -> None:
+        self._prepare((_entry(1, 1),))
+        source_heads = dict(self.provider.heads)
+        landed = self.land()
+        self.assertTrue(all(entry.status == "merged" for entry in landed.entries))
+        self.assertEqual(self.provider.heads, source_heads)
+        self.assertEqual(
+            self.provider.merge_calls,
+            [
+                (
+                    "PUT",
+                    f"/repos/{landed.repository}/pulls/{self.provider.number}/merge",
+                    {"sha": self.provider.candidate.candidate_sha, "merge_method": "merge"},
+                )
+            ],
+        )
+        self.assertEqual(
+            landed.entries[0].merge_commit_tree_sha, self.provider.candidate.candidate_tree_sha
+        )
+        self.assertEqual(landed.entries[0].landed_head_sha, source_heads[1])
+        self.assertFalse(
+            any(
+                "update-branch" in path or "/rerun" in path for _, path, _ in self.provider.requests
+            )
+        )
+
+    def test_single_candidate_pending_checks_prevent_a_merge(self) -> None:
+        self._prepare((_entry(1, 1),))
+        self.provider.checks_pass = False
+        with self.assertRaises(MergeAdmissionDeniedError):
+            self.land()
+        self.assertFalse(self.provider.merge_calls)
+        self.assertFalse(self.guard.admissions)
+
+    def test_single_candidate_interrupted_merge_reconciles_without_repeating_it(self) -> None:
+        self._prepare((_entry(1, 1),))
+        self.provider.interrupt_after_merge = True
+        with self.assertRaises(KeyboardInterrupt):
+            self.land()
+        landed = self.land()
+        self.assertEqual(landed.entries[0].status, "merged")
+        self.assertEqual(len(self.provider.merge_calls), 1)
+        self.assertEqual(self.guard.outcomes, {1: "landed"})
+
+    def test_single_candidate_retirement_closes_its_generated_pr(self) -> None:
+        self._prepare((_entry(1, 1),))
+        self.client.close_batch_pull_request(candidate=self.provider.candidate)
+        self.assertTrue(self.provider.closed)
+        self.assertFalse(self.provider.merged)
+        self.assertFalse(self.provider.merge_calls)
+
+    def _require_client_review_for_second_member(
+        self, state: dict[str, str], decisions: list[ProductReviewDecisionRecord] | None = None
+    ) -> None:
         original = self.provider.request
 
         def request(*, method: str, path: str, body: dict[str, object] | None = None) -> object:
@@ -323,25 +383,56 @@ class ProtectedBatchPullRequestTests(unittest.TestCase):
             if method == "GET" and path.endswith("/pulls/1") and isinstance(response, dict):
                 response["body"] = "## Client test notes\nNothing for the Client to test: CI only."
             if method == "GET" and path.endswith("/pulls/2") and isinstance(response, dict):
-                response["labels"] = [{"name": "client-check"}]
-                response["body"] = "## Client test notes\nTry the changed page."
+                response["labels"] = [] if state.get("engineering") else [{"name": "client-check"}]
+                response["body"] = "## Client test notes\n" + (
+                    "Nothing for the Client to test: CI only."
+                    if state.get("engineering")
+                    else "Try the changed page."
+                )
             return response
 
         provider_request = patch.object(self.provider, "request", side_effect=request)
         provider_request.start()
         self.addCleanup(provider_request.stop)
         profile = SimpleNamespace(
+            product="site",
             release_on_acceptance="held",
             is_active=True,
             repository=self.provider.repository_name,
-            owner=SimpleNamespace(review_label="client-check", is_set=True),
+            owner=SimpleNamespace(review_label="client-check", is_set=True, github_id="901"),
         )
         store = SimpleNamespace(
             list_product_profile_records=lambda: (profile,),
             list_runtime_environment_records=_advisory_runtime_records,
+            list_product_review_decision_records=lambda **_: tuple(decisions or ()),
         )
         self.client = GitHubMergeTrainClient(
             transport=self.provider, branch_refresh_store=cast(Any, store)
+        )
+
+    def test_engineering_reclassification_cannot_clear_batch_member_veto(self) -> None:
+        state = {"value": "neutral", "engineering": "yes"}
+        rejection = _client_veto_record(
+            repository=self.provider.repository_name, number=2, head_sha=self.provider.heads[2]
+        )
+        self._require_client_review_for_second_member(state, [rejection])
+        with self.assertRaises(MergeAdmissionDeniedError):
+            self.land()
+        self.assertFalse(self.provider.merge_calls)
+
+    def test_batch_rechecks_saved_veto_after_admission_despite_successful_projection(self) -> None:
+        state = {"value": "success", "engineering": "yes"}
+        decisions: list[ProductReviewDecisionRecord] = []
+        self._require_client_review_for_second_member(state, decisions)
+        rejection = _client_veto_record(
+            repository=self.provider.repository_name, number=2, head_sha=self.provider.heads[2]
+        )
+        self.guard.after_admit = lambda _number: decisions.append(rejection)
+        with self.assertRaises(MergeAdmissionDeniedError):
+            self.land()
+        self.assertFalse(self.provider.merge_calls)
+        self.assertTrue(
+            all(value == "batch_not_dispatched" for value in self.guard.outcomes.values())
         )
 
     def test_batch_cannot_land_later_member_without_current_client_status(self) -> None:

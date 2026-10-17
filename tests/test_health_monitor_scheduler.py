@@ -27,6 +27,7 @@ from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRec
 from control_plane.provider_operations import _ReservationHeartbeat, DurableProviderOperationStore
 from control_plane.contracts.public_ingress_monitoring import (
     PublicIngressObservationRecord,
+    health_monitor_freshness_seconds,
     health_monitor_interval_seconds,
     PublicIngressNotificationDestination,
     PublicIngressNotificationPolicyRecord,
@@ -883,6 +884,32 @@ class MonitorCadenceIncidentTests(unittest.TestCase):
             [record.product for record in result.records], [first.product, second.product]
         )
 
+    def test_healthy_observation_stays_fresh_while_next_cadence_publishes(self) -> None:
+        store = _Store((_profile(),))
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at="2026-05-29T12:20:00Z",
+            http_get=lambda url, _timeout: HttpObservation(
+                status_code=200, final_url=url, redirect_count=0
+            ),
+            notify=False,
+        )
+        observed = store.records[-1]
+        observed_at = datetime.fromisoformat(observed.observed_at.replace("Z", "+00:00"))
+        for instance in ("prod", "testing"):
+            with self.subTest(instance=instance):
+                observation = observed.model_copy(update={"instance": instance})
+                # A normal next run can publish three seconds after its nominal slot.
+                next_publication = observed_at + timedelta(
+                    seconds=health_monitor_interval_seconds(instance) + 3
+                )
+                self.assertEqual(
+                    monitor_observation_provenance(
+                        observation, now=next_publication
+                    ).freshness_status,
+                    "verified",
+                )
+
     def test_observation_freshness_uses_the_observations_lane_cadence(self) -> None:
         store = _Store((_profile(),))
         run_public_ingress_monitor_once(
@@ -899,7 +926,7 @@ class MonitorCadenceIncidentTests(unittest.TestCase):
             with self.subTest(instance=instance):
                 lane_observation = observed.model_copy(update={"instance": instance})
                 deadline = observed_at + timedelta(
-                    seconds=health_monitor_interval_seconds(instance)
+                    seconds=health_monitor_freshness_seconds(instance)
                 )
                 self.assertEqual(
                     monitor_observation_provenance(lane_observation, now=deadline).freshness_status,

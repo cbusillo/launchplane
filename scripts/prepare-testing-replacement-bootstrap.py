@@ -24,6 +24,7 @@ def main() -> int:
     parser.add_argument("--operator-helper", type=Path, required=True)
     for field in ("product", "context", "operation-id", "reason"):
         parser.add_argument(f"--{field}", required=True)
+    parser.add_argument("--initial-generation", action="store_true")
     parser.add_argument("--domain-host", required=True)
     parser.add_argument("--certificate-type", choices=("none", "letsencrypt"), default="none")
     parser.add_argument("--source-mode", choices=("ssh", "container-export"), default="ssh")
@@ -58,6 +59,7 @@ def main() -> int:
         context=args.context,
         operation_id=args.operation_id,
         reason=args.reason,
+        initial_generation=args.initial_generation,
         domain_host=args.domain_host,
         certificate_type=args.certificate_type,
         source_mode=args.source_mode,

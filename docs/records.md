@@ -43,7 +43,8 @@ Status: retired. Ordinary-agent delegated delivery is retired in
 deleted (cbusillo/launchplane#2437). Do not extend them. This section describes
 what is still in the code.
 
-Four DB-backed tables hold the authoritative ordinary-agent lifecycle boundary:
+Two DB-backed tables with live readers hold the ordinary-agent lifecycle
+boundary:
 
 - `launchplane_ordinary_agent_principals` stores linear principal revisions and
   enforces one current revision per principal.
@@ -51,13 +52,14 @@ Four DB-backed tables hold the authoritative ordinary-agent lifecycle boundary:
   agent-to-Launchplane authentication digest and lifetime, with one current
   credential per principal and one row per credential version. It never stores
   bearer material or a provider App key/token.
-- `launchplane_ordinary_agent_credential_custody` stores the exact redacted
-  Launchplane-held provider App custody reference, including inventory and
-  managed-secret version provenance. It stores no decrypted secret or minted
-  token.
-- `launchplane_ordinary_agent_lifecycle_audits` stores one immutable redacted
-  outcome per privileged operation, including its own version-neutral current
-  administrator-policy provenance.
+
+Sixteen retired ordinary-agent tables, including credential custody, lifecycle
+audits, session operations, landing, semantic, effect-reconciliation, read and
+job-claim records, have no remaining reader. Their ORM models are deleted, and
+the privileged-operation worker no longer requires them at startup. The tables
+and their rows remain, created by the migration history and still checked by
+the PostgreSQL schema invariants and the adoption verifier, until a later
+migration under #2437 drops them.
 
 Enrollment, authentication/credential claim, session admission, finite-job
 execution, provider inspection, and joined ordinary-controller writes have been
@@ -83,9 +85,9 @@ Status: retired with ordinary-agent delegated delivery; deletion is tracked in
 cbusillo/launchplane#2437. Do not extend it.
 
 The inspection reservation, token-custody transition, completion, and recovery
-methods are removed. `launchplane_provider_delivery_inspections` remains as
-historical storage with its uniqueness and state constraints until the later
-table migration under #2437. No inspection profile, credential, expectation, or
+methods and its ORM model are removed. `launchplane_provider_delivery_inspections`
+remains as historical storage with its uniqueness and state constraints until
+the later table migration under #2437. No inspection profile, credential, expectation, or
 activation is created by a migration.
 
 ## Schema Migrations
@@ -118,9 +120,12 @@ the current revision only after the automated schema adoption verifier passes.
 The verifier inspects existing Launchplane-owned tables and fails closed when a
 live table is missing an ORM-managed column, has an unexpected column, or has a
 critical idempotency/active-operation index with missing uniqueness, columns, or
-partial predicate. A failure means the admin must stop and reconcile the
-schema before stamping; do not hand-edit the Alembic version table or skip the
-check.
+partial predicate. It also refuses a database that already holds any table the
+migration history creates after the adoption revision. That includes retired
+tables whose ORM models are deleted while their tables remain; the verifier
+names them in `MIGRATED_TABLES_WITHOUT_MODELS` until a migration drops them. A
+failure means the admin must stop and reconcile the schema before stamping; do
+not hand-edit the Alembic version table or skip the check.
 
 The hosted startup wrapper runs that helper before starting the service:
 
@@ -696,8 +701,12 @@ an ORM column/table or remains only in the evidence payload.
   validation, and cross-scope endpoint-key conflict protection. The service
   reads them through
   `GET /v1/private-health-endpoints/records` with
-  `private_health_endpoint.read`. The stored URL must be private/internal;
-  product profiles reference it by `private_endpoint_key` and do not own the
+  `private_health_endpoint.read`. Testing records may use ordinary DNS hostnames; other lane instances retain
+  internal hostnames and non-public IP literals.
+  Each probe requires exclusively RFC1918 resolution and pins the connection to
+  the validated addresses, preserving TLS hostname verification. See
+  [private transport](private-testing-transport.md).
+  Product profiles reference it by `private_endpoint_key` and do not own the
   mutable URL value.
 - Runtime environment: modeled fields are `scope`, `context`, `instance`, and
   `updated_at`. Individual key/value settings stay payload-only until GUI
@@ -1543,14 +1552,19 @@ id and login, and `decided_at`. The newest record for a repository and pull
 request is the current decision. The record authorizes nothing.
 
 A record with `carried_from` was not decided again: it carries an acceptance to
-a new head after an unchanged-feature base update or rebase (see
+a new head after an unchanged-feature base update, rebase, or declared invisible
+follow-up commits (see
 [carried acceptance](owner-acceptance.md#carried-acceptance)). `carried_from`
 names the decision record and head it came from, the reason
-(`merge_train_base_refresh` or `unchanged_patch_base_update`), the immutable
+(`merge_train_base_refresh`, `unchanged_patch_base_update`, or
+`client_impact_none`), the immutable
 `comparison_base_sha`, and any merge train branch refresh records that produced
 the new head. Older train carries remain readable without a comparison base;
-their refresh records supply it. A carry outside the train requires a full
-comparison base revision and needs no train refresh record. Its `decided_at` is
+their refresh records supply it. An unchanged-patch rebase carry requires a full
+comparison base revision and needs no train refresh record. A `client_impact_none`
+carry instead names every intervening commit SHA and its `client_impact: none`
+trailer value in `commits`, oldest first, ending at the carried head. It leaves
+`comparison_base_sha` empty because no patch comparison was used. Its `decided_at` is
 when Launchplane carried it.
 `base_branch` is the pull request's base branch when the decision was first shown
 on it; an acceptance carries, and a carried acceptance applies, only on that base.

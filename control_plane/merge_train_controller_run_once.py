@@ -71,6 +71,7 @@ from control_plane.merge_admission import (
 )
 from control_plane.merge_train_batch_pull_request import (
     bound_closed_batch_pull_request,
+    has_batch_pull_request,
     changed_closed_batch_body,
 )
 
@@ -1694,7 +1695,12 @@ def _lineage_change_retires_landing(
     for explicit reconciliation.
     """
     return (
-        reason_code in {"landing_lineage_changed", "head_check_reuse_unavailable"}
+        reason_code
+        in {
+            "landing_lineage_changed",
+            "head_check_reuse_unavailable",
+            "original_pull_request_landing_required",
+        }
         and landing_record.ordinary_job_binding is None
         and not has_stack_collapse
         and all(entry.status == "planned" for entry in landing_record.landing_plan.entries)
@@ -2810,6 +2816,28 @@ def _advance_without_active_landing(
     )
 
 
+def _uses_protected_candidate_pr(
+    *,
+    candidate_record: MergeTrainBatchCandidateRecord,
+    merge_method: str,
+    dry_run_result: MergeTrainDryRunResult,
+) -> bool:
+    # Original-PR code-owner approval and proved head-check reuse keep their
+    # existing landing routes. Otherwise a batch of any size lands its tested ref.
+    members = set(dry_run_result.queue_order)
+    return (
+        candidate_record.ordinary_job_binding is None
+        and merge_method == "merge"
+        and candidate_record.candidate.head_check_reuse is None
+        and bool(members)
+        and not any(
+            entry.requires_individual_landing
+            for entry in dry_run_result.queue
+            if entry.number in members
+        )
+    )
+
+
 def _close_service_batch_pull_request(
     *,
     github_client: GitHubMergeTrainClient,
@@ -2820,7 +2848,7 @@ def _close_service_batch_pull_request(
     candidate = candidate_record.candidate
     if (
         candidate_record.ordinary_job_binding is None
-        and len(candidate.entries) > 1
+        and candidate.head_check_reuse is None
         and candidate.candidate_sha
     ):
         lease.checkpoint(active_phase=active_phase)
@@ -2944,7 +2972,7 @@ def _advance_active_candidate_record(
             "candidate": active_candidate_record.candidate.model_dump(mode="json"),
         }
 
-    reflow_result = _reflow_stale_candidate_record(
+    reflow_result, current_queue = _reflow_stale_candidate_record(
         request=request,
         policy=policy,
         policy_sha256=policy_sha256,
@@ -3061,11 +3089,10 @@ def _advance_active_candidate_record(
                 },
             )
         try:
-            if (
-                request.mutate
-                and lease.record.ordinary_job_binding is None
-                and len(active_candidate_record.candidate.entries) > 1
-                and repository_policy.merge_method == "merge"
+            if request.mutate and _uses_protected_candidate_pr(
+                candidate_record=active_candidate_record,
+                merge_method=repository_policy.merge_method,
+                dry_run_result=current_queue,
             ):
                 lease.checkpoint(active_phase="ensure_batch_pull_request")
                 github_client.ensure_batch_pull_request(candidate=active_candidate_record.candidate)
@@ -3161,7 +3188,7 @@ def _reflow_stale_candidate_record(
     trace_id: str,
     recorded_at: str,
     lease: MergeTrainControllerLeaseContext,
-) -> dict[str, object] | None:
+) -> tuple[dict[str, object] | None, MergeTrainDryRunResult]:
     """Replan obsolete candidates before build, check observation, or landing."""
     snapshot = github_client.read_merge_train_snapshot(
         repository=request.repository,
@@ -3218,7 +3245,10 @@ def _reflow_stale_candidate_record(
         dry_run_result=dry_run_result,
         base_sha=snapshot.base_sha,
     )
-    if not candidate_matches_queue:
+    if not candidate_matches_queue or (
+        candidate_record.ordinary_job_binding is None
+        and dry_run_result.intended_next_action == "update_branch"
+    ):
         if request.mutate:
             lease.checkpoint(
                 active_action="reflow_candidate",
@@ -3233,7 +3263,6 @@ def _reflow_stale_candidate_record(
             retry = candidate_record.candidate
             if (
                 candidate_record.ordinary_job_binding is None
-                and len(retry.entries) > 1
                 and retry.candidate_sha
                 and retry.status in {"building", "ready_for_checks"}
                 and (
@@ -3279,7 +3308,7 @@ def _reflow_stale_candidate_record(
             held_out=candidate_record.candidate.held_out,
         )
         result["superseded_merge_train_batch_candidate_record_id"] = candidate_record.record_id
-        return result
+        return result, dry_run_result
     if (
         candidate_record.ordinary_job_binding is None
         and candidate_record.candidate.candidate_sha
@@ -3326,7 +3355,7 @@ def _reflow_stale_candidate_record(
             lease=lease,
         )
         if recovery is not None:
-            return recovery
+            return recovery, dry_run_result
     if candidate_record.ordinary_job_binding is None and any(
         (
             pr.client_test_notes_error
@@ -3364,8 +3393,8 @@ def _reflow_stale_candidate_record(
             "controller_action": dry_run_result.intended_next_action,
             "merge_train_batch_candidate_record_id": candidate_record.record_id,
             "dry_run_result": dry_run_result.model_dump(mode="json"),
-        }
-    return None
+        }, dry_run_result
+    return None, dry_run_result
 
 
 def _advance_passed_candidate_record(
@@ -3420,7 +3449,7 @@ def _advance_passed_candidate_record(
             "merge_train_batch_landing_plan_record_id": completed_landing_record.record_id,
             "landing_plan": completed_landing_record.landing_plan.model_dump(mode="json"),
         }
-    reflow_result = _reflow_stale_candidate_record(
+    reflow_result, current_queue = _reflow_stale_candidate_record(
         request=request,
         policy=policy,
         policy_sha256=policy_sha256,
@@ -3482,10 +3511,10 @@ def _advance_passed_candidate_record(
                 "candidate": refreshed.model_dump(mode="json"),
             }
         passed_candidate_record = refreshed_record
-    if (
-        lease.record.ordinary_job_binding is None
-        and len(passed_candidate_record.candidate.entries) > 1
-        and repository_policy.merge_method == "merge"
+    if _uses_protected_candidate_pr(
+        candidate_record=passed_candidate_record,
+        merge_method=repository_policy.merge_method,
+        dry_run_result=current_queue,
     ):
         try:
             batch_pull_request_number = github_client.ensure_batch_pull_request(
@@ -4839,8 +4868,8 @@ def try_reflow_failed_merge_train_candidate(
         snapshot=snapshot,
         batch_landing=active_candidate_record.ordinary_job_binding is None,
     )
-    # Readiness of a changed queue belongs to its newly capped selection. A
-    # singleton replacement may also need a branch refresh before recovery.
+    # Readiness of a changed queue belongs to its newly capped selection. An
+    # original-PR landing may also need a branch refresh before recovery.
     if not queue_unchanged or current_queue.intended_next_action == "update_branch":
         dry_run_result = current_queue
     if (
@@ -4864,10 +4893,10 @@ def try_reflow_failed_merge_train_candidate(
         and active_candidate_record.candidate.candidate_sha
     ):
         failed = active_candidate_record.candidate
-        if (
-            active_candidate_record.ordinary_job_binding is None
-            and len(failed.entries) > 1
-            and merge_method == "merge"
+        if _uses_protected_candidate_pr(
+            candidate_record=active_candidate_record,
+            merge_method=merge_method,
+            dry_run_result=dry_run_result,
         ):
             recovered = _retry_closed_candidate_after_passing_checks(
                 candidate_store=candidate_store,
@@ -5066,8 +5095,11 @@ def try_reflow_failed_merge_train_candidate(
     if (
         active_candidate_record.candidate.candidate_sha
         and active_candidate_record.ordinary_job_binding is None
-        and merge_method == "merge"
-        and len(active_candidate_record.candidate.entries) > 1
+        and _uses_protected_candidate_pr(
+            candidate_record=active_candidate_record,
+            merge_method=merge_method,
+            dry_run_result=probe.dry_run_result,
+        )
         and _merge_train_candidate_matches_dry_run_queue(
             candidate=active_candidate_record.candidate,
             dry_run_result=probe.dry_run_result,
@@ -5317,7 +5349,9 @@ def _resume_known_failed_batch(
     )
     if failed_record is None or failed_record.candidate.status == "passed":
         return None
-    if len(failed_record.candidate.entries) > 1 and merge_method == "merge":
+    if _uses_protected_candidate_pr(
+        candidate_record=failed_record, merge_method=merge_method, dry_run_result=dry_run_result
+    ):
         recovered = _retry_closed_candidate_after_passing_checks(
             candidate_store=candidate_store,
             active_candidate_record=failed_record,
@@ -5468,10 +5502,31 @@ def _retry_closed_candidate_after_passing_checks(
             lease.observe(reason_code="candidate_checks_not_recovered")
             return None
         closed = bound_closed_batch_pull_request(client=github_client, candidate=failed)
+        legacy_singleton = (
+            closed is None
+            and len(failed.entries) == 1
+            and not has_batch_pull_request(client=github_client, candidate=failed)
+        )
     except (MergeTrainGitHubError, MergeAdmissionDeniedError):
         lease.observe(reason_code="candidate_retry_evidence_unavailable")
         return None
     if closed is None:
+        # Pre-existing singleton records may have no generated PR. Preserve
+        # their exact-SHA recovery; a closed generated PR still needs a new ref.
+        if legacy_singleton:
+            return _reobserve_failed_merge_train_candidate(
+                candidate_store=candidate_store,
+                active_candidate_record=active_candidate_record,
+                github_client=github_client,
+                merge_method="merge",
+                repository=repository,
+                base_branch=base_branch,
+                recorded_at=recorded_at,
+                trace_id=trace_id,
+                mutate=mutate,
+                lease=lease,
+                held_out=held_out,
+            )
         lease.observe(reason_code="candidate_closed_batch_evidence_unavailable")
         return None
     details: dict[str, object] = {

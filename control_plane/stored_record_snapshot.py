@@ -33,6 +33,7 @@ from control_plane.contracts.stored_record_snapshot import (
     CompressedStoredRecordSnapshot,
     StoredRecordSnapshot,
 )
+from control_plane.cron import validate_cron_expression
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.stored_record_snapshot_codec import SnapshotRowEncoder
 from control_plane.merge_train import MergeTrainDryRunResult, MergeTrainDryRunSnapshot
@@ -135,7 +136,9 @@ class _Scrubber:
             self._used_numbers.add(candidate)
         return self._numbers[digest]
 
-    def string(self, value: str, name: str, *, protocol: bool = False) -> str:
+    def string(
+        self, value: str, name: str, *, protocol: bool = False, maximum_length: int | None = None
+    ) -> str:
         if not value or value == "*":
             return value
         # Action names and driver identifiers are code protocol, not identities.
@@ -154,6 +157,26 @@ class _Scrubber:
         if value.isdecimal():
             return str(self.number(value))
         digest = self._digest(value)
+        if (
+            protocol
+            and name == "app_name_suffix"
+            and re.fullmatch(r"-[a-z0-9-]+", value)
+            and (maximum_length is None or len(value) <= maximum_length)
+        ):
+            return f"-snapshot-{digest[:12]}"
+        if protocol and name == "cron_expression":
+            try:
+                validate_cron_expression(value)
+            except ValueError:
+                # Historical invalid input must still fail the candidate reader.
+                return f"snapshot-{digest[:12]}"
+            minute = int(digest[:4], 16) % 60
+            hour = int(digest[4:8], 16) % 24
+            weekday = int(digest[8:12], 16) % 7
+            expression = f"{minute} {hour} * * {weekday}"
+            if expression == value.strip():
+                expression = f"{(minute + 1) % 60} {hour} * * {weekday}"
+            return expression
         if re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", value):
             return digest[: len(value)]
         if name == "slug_template":
@@ -232,7 +255,9 @@ class _Scrubber:
         if isinstance(value, str):
             if value in schema.get("enum", []) or ("const" in schema and value == schema["const"]):
                 return value
-            return self.string(value, name, protocol=declared)
+            return self.string(
+                value, name, protocol=declared, maximum_length=schema.get("maxLength")
+            )
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             if (
                 not declared

@@ -527,7 +527,7 @@ class MergeTrainSchedulerPassTests(TestCase):
         scenarios = (
             {"required_checks_status": "pending"},
             {"mergeable": "unknown"},
-            {"branch_update_required": True},
+            {"branch_update_required": True, "requires_individual_landing": True},
         )
         for changes in scenarios:
             with self.subTest(changes=changes):

@@ -67,6 +67,47 @@ class GenericWebTestingResources(OdooTestingResources):
         }
 
 
+class OdooRehearsalResources(BaseModel):
+    """The same empty storage protocol, without a canonical lane identity."""
+
+    model_config = ConfigDict(extra="forbid")
+    product: str = Field(min_length=1)
+    context: str = Field(pattern=r"^lp-rehearsal-[a-f0-9]{32}$")
+    instance: Literal["rehearsal"] = "rehearsal"
+    operation_id: str = Field(min_length=1)
+    target_id: str = Field(min_length=1)
+    namespace: str = Field(pattern=r"^lp-rehearsal-[a-f0-9]{32}$")
+    resource_kind: Literal["odoo-upgrade-rehearsal"] = "odoo-upgrade-rehearsal"
+
+    @property
+    def volumes(self) -> dict[str, str]:
+        return {
+            "ODOO_DATA_VOLUME": self.namespace + "-data",
+            "ODOO_DB_VOLUME": self.namespace + "-db",
+            "ODOO_LOG_VOLUME": self.namespace + "-logs",
+        }
+
+    @property
+    def binding_sha256(self) -> str:
+        return canonical_json_sha256(self.model_dump(mode="json"))
+
+    def script(self, mode: Literal["prepare", "readback"]) -> str:
+        spec = {
+            **self.model_dump(mode="json"),
+            "volumes": self.volumes,
+            "mode": mode,
+            "compose_project": self.namespace,
+        }
+        encoded = base64.b64encode(json.dumps(spec, sort_keys=True).encode()).decode()
+        return (
+            "#!/usr/bin/env bash\nset -euo pipefail\npython3 - "
+            + encoded
+            + " <<'LP_TESTING_RESOURCES'\n"
+            + ODOO_TESTING_RESOURCE_PROGRAM
+            + "\nLP_TESTING_RESOURCES\n"
+        )
+
+
 def resource_readback_passes(evidence: dict[str, str], resources: OdooTestingResources) -> bool:
     return (
         evidence.get("testing_resources_ok") == "true"
@@ -114,10 +155,11 @@ def inspect_volume(name):
 def main():
     spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
     namespace = spec["namespace"]
+    rehearsal = spec.get("resource_kind") == "odoo-upgrade-rehearsal"
     if (
-        spec["instance"] != "testing"
+        spec["instance"] != ("rehearsal" if rehearsal else "testing")
         or spec["mode"] not in {"prepare", "readback"}
-        or not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace)
+        or not re.fullmatch(("lp-rehearsal-" if rehearsal else "lp-testing-") + r"[a-f0-9]{32}", namespace)
     ):
         raise RuntimeError("Invalid testing resource scope")
     volumes = {
@@ -130,7 +172,7 @@ def main():
             "database": namespace + "-db",
             "config": namespace + "-config",
         }
-    elif "resource_kind" in spec:
+    elif "resource_kind" in spec and not rehearsal:
         raise RuntimeError("Unsupported testing resource kind")
     if spec["volumes"] != volumes:
         raise RuntimeError("Invalid testing resource names")

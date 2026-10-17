@@ -20,6 +20,8 @@ from control_plane.contracts.idempotency_record import (
 )
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.public_ingress_monitoring import (
+    HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS,
+    HEALTH_MONITOR_POLL_SECONDS,
     PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
     health_monitor_interval_seconds,
 )
@@ -33,7 +35,7 @@ from control_plane.workflows.public_ingress_monitor import (
 
 MONITOR_INTERVAL_SECONDS = PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
 MONITOR_COMPLETION_GRACE_SECONDS = MONITOR_INTERVAL_SECONDS
-MONITOR_POLL_SECONDS = 5
+MONITOR_POLL_SECONDS = HEALTH_MONITOR_POLL_SECONDS
 MONITOR_LEASE_SECONDS = 30
 MONITOR_MAX_CONCURRENT_PROBES = 16
 MONITOR_RECEIPT_FINGERPRINT = "health-monitor-scheduler-v2"
@@ -374,7 +376,7 @@ class HealthMonitorScheduler:
         return run_public_ingress_monitor_once(
             record_store=self.store,
             notification_drivers=public_ingress_notification_drivers(record_store=self.store),
-            runtime_identity_confirmation_delay_seconds=30,
+            runtime_identity_confirmation_delay_seconds=HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS,
             should_stop=should_stop,
             sleep=wait,
             lane_keys=lanes,

@@ -906,6 +906,13 @@ h3 {
   font-weight: 650;
 }
 
+.directory-lane .directory-evidence-detail,
+.directory-preview .directory-evidence-detail {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
 .directory-lane,
 .directory-preview {
   display: grid;

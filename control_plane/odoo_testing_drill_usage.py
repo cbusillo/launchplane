@@ -19,6 +19,10 @@ from control_plane.integration_readback import INTEGRATION_READBACK_PASSED_PATH
 DRILL_RECENT_USE_SECONDS = 24 * 60 * 60
 
 
+class DrillUsageUnreadable(ValueError):
+    """A read did not establish the successful-login history."""
+
+
 class DrillCopyAlreadyServing(ValueError):
     """A reclaimed copy may already contain a tester's work."""
 
@@ -127,5 +131,5 @@ def parse_drill_usage_result(
         or frames[0].get("type") != "complete"
         or type(frames[0].get("recent_signins")) is not bool
     ):
-        raise ValueError("Testing successful-login history is unreadable.")
+        raise DrillUsageUnreadable("Testing successful-login history is unreadable.")
     return bool(frames[0]["recent_signins"])

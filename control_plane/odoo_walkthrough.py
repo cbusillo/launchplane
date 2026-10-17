@@ -6,6 +6,7 @@ from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 import secrets as random_secrets
 import time
 import hashlib
@@ -33,13 +34,15 @@ from control_plane.dokploy.odoo_walkthrough import (
 from control_plane.dokploy import source
 from control_plane.odoo_runtime_reads import (
     OdooRuntimeConnection,
+    OdooRuntimeReadError,
     assert_selection_current,
     connect_runtime,
     select_stable_runtime,
 )
-from control_plane.odoo_testing_drill import require_drill_use_unprotected
+from control_plane.odoo_testing_drill import DrillEvidenceUnavailable, require_drill_use_unprotected
 from control_plane.odoo_testing_drill_usage import (
     read_drill_recent_signins,
+    DrillUsageUnreadable,
     testing_drill_environment,
 )
 from control_plane.odoo_testing_restore import generation_binding, read_current_testing_generation
@@ -108,153 +111,285 @@ class WalkthroughPlan:
 def plan_walkthrough(
     store: PostgresRecordStore, root: Path, request: OdooWalkthroughRequest, actor: str
 ) -> WalkthroughPlan:
+    plan = _walkthrough_preflight(
+        store, root, request.product, request.context, request=request, actor=actor
+    )
+    assert plan is not None
+    return plan
+
+
+def read_walkthrough_prerequisites(
+    store: PostgresRecordStore,
+    root: Path,
+    product: str,
+    context: str,
+    request: OdooWalkthroughRequest | None = None,
+) -> tuple[
+    tuple[WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]],
+    ...,
+]:
+    checks: list[
+        tuple[
+            WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]
+        ]
+    ] = []
+    _walkthrough_preflight(store, root, product, context, request=request, checks=checks)
+    return tuple(checks)
+
+
+def _walkthrough_preflight(
+    store: PostgresRecordStore,
+    root: Path,
+    product: str,
+    context: str,
+    *,
+    request: OdooWalkthroughRequest | None = None,
+    actor: str = "",
+    checks: list[
+        tuple[
+            WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]
+        ]
+    ]
+    | None = None,
+) -> WalkthroughPlan | None:
+    operation = request.operation if request is not None else "provision"
+    passed: set[WalkthroughPrerequisite] = set()
+
+    @contextmanager
+    def checkpoint(
+        code: WalkthroughPrerequisite,
+        requires: tuple[WalkthroughPrerequisite, ...] = (),
+        *,
+        task_required: bool = False,
+    ) -> Iterator[bool]:
+        if checks is None:
+            with _prerequisite(code):
+                yield True
+            return
+        if any(item not in passed for item in requires) or (task_required and request is None):
+            checks.append((code, code, "unknown"))
+            yield False
+            return
+        try:
+            yield True
+        except WalkthroughPrerequisiteError as error:
+            checks.append((code, error.code, "blocked"))
+        except OdooRuntimeReadError as error:
+            checks.append((code, code, "unknown" if error.status_code >= 500 else "blocked"))
+        except (DrillEvidenceUnavailable, DrillUsageUnreadable):
+            checks.append((code, code, "unknown"))
+        except ValueError:
+            checks.append((code, code, "blocked"))
+        except Exception:
+            # Unreadable provider/storage evidence is not a known failed predicate.
+            checks.append((code, code, "unknown"))
+        else:
+            passed.add(code)
+            checks.append((code, code, "clear"))
+
+    selection = None
+    generation = None
+    connection = None
+    parsed = None
+    database = ""
+    secret_name = ""
     # This check precedes profile, provider and secret resolution. Even trusted
     # direct callers cannot turn this into a production account operation.
-    if request.instance != "testing":
+    if request is not None and request.instance != "testing":
         raise ValueError("Only testing lanes support task accounts.")
-    with _prerequisite(WalkthroughPrerequisite.IDENTITY):
-        profile = store.read_product_profile_record(request.product)
-        if not profile.is_active:
-            raise ValueError("The product is not active.")
-        selection = select_stable_runtime(store, profile, "testing")
-        if selection.identity.context != request.context:
-            raise ValueError("The product does not own this testing context.")
-        parsed = urlsplit(selection.base_url)
-        if (
-            parsed.scheme != "https"
-            or not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
-        ):
-            raise ValueError("Testing sign-in requires its recorded HTTPS origin.")
-        if any(
-            lane.instance != "testing"
-            and (urlsplit(lane.base_url).hostname or "").rstrip(".") == parsed.hostname.rstrip(".")
-            for product in store.list_product_profile_records()
-            for lane in product.lanes
-        ):
-            raise ValueError("Testing origin aliases another lane.")
-    with _prerequisite(WalkthroughPrerequisite.GENERATION):
-        generation = read_current_testing_generation(
-            store,
-            product=request.product,
-            context=request.context,
-            instance="testing",
-            task_account_cleanup=request.operation == "cleanup",
-        )
-        if generation is None:
-            raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
-        if not generation.completed_at:
-            raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_INCOMPLETE)
-    with _prerequisite(WalkthroughPrerequisite.USE):
-        if request.operation != "cleanup":
-            require_drill_use_unprotected(
-                store, request.product, request.context, allow_down_repair=False
+    with checkpoint(WalkthroughPrerequisite.IDENTITY, ()) as run:
+        if run:
+            profile = store.read_product_profile_record(product)
+            if not profile.is_active:
+                raise ValueError("The product is not active.")
+            selection = select_stable_runtime(store, profile, "testing")
+            if selection.identity.context != context:
+                raise ValueError("The product does not own this testing context.")
+            parsed = urlsplit(selection.base_url)
+            if (
+                parsed.scheme != "https"
+                or not parsed.hostname
+                or parsed.username
+                or parsed.password
+                or parsed.path not in {"", "/"}
+                or parsed.query
+                or parsed.fragment
+            ):
+                raise ValueError("Testing sign-in requires its recorded HTTPS origin.")
+            if any(
+                lane.instance != "testing"
+                and (urlsplit(lane.base_url).hostname or "").rstrip(".")
+                == parsed.hostname.rstrip(".")
+                for product in store.list_product_profile_records()
+                for lane in product.lanes
+            ):
+                raise ValueError("Testing origin aliases another lane.")
+    with checkpoint(WalkthroughPrerequisite.GENERATION, ()) as run:
+        if run:
+            generation = read_current_testing_generation(
+                store,
+                product=product,
+                context=context,
+                instance="testing",
+                task_account_cleanup=operation == "cleanup",
             )
+            if generation is None:
+                raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_MISSING)
+            if not generation.completed_at:
+                raise WalkthroughPrerequisiteError(WalkthroughPrerequisite.GENERATION_INCOMPLETE)
+    with checkpoint(WalkthroughPrerequisite.USE, ()) as run:
+        if run:
+            if operation != "cleanup":
+                require_drill_use_unprotected(store, product, context, allow_down_repair=False)
     # Preserve the existing real host storage/network/image/copy inspection.
     # Its aggregate usage boolean includes our own historical task accounts;
     # the native witnessed-account read below distinguishes those from staff.
-    with _prerequisite(WalkthroughPrerequisite.PHYSICAL_COPY):
-        if request.operation != "cleanup":
-            read_drill_recent_signins(store, generation, time.time())
-    with _prerequisite(WalkthroughPrerequisite.RUNTIME):
-        connection = connect_runtime(
-            store=store,
-            selection=selection,
-            control_plane_root=root,
-            database_url=store.database_url,
-        )
-        if connection.evidence.target_id != generation.target_id:
-            raise ValueError("Testing recipient changed.")
-    with _prerequisite(WalkthroughPrerequisite.ORIGIN):
-        if not odoo_compose_has_domain(
-            host=connection.host,
-            token=connection.token,
-            compose_id=connection.evidence.target_id,
-            domain_host=parsed.hostname,
-        ):
-            raise ValueError("The origin does not belong to this testing target.")
-    with _prerequisite(WalkthroughPrerequisite.DATABASE):
-        database = testing_drill_environment(store, request.context).get("ODOO_DB_NAME", "")
-        if not database or database != connection.credentials.get("ODOO_DB_NAME"):
-            raise ValueError("Testing database is unavailable or changed.")
-    copy_binding = generation_binding(generation)
-    with _prerequisite(WalkthroughPrerequisite.PHYSICAL_COPY):
-        if request.operation == "cleanup":
-            frames: list[dict[str, object]] = []
-            inspect_native_testing_receiver(
+    with checkpoint(
+        WalkthroughPrerequisite.PHYSICAL_COPY, (WalkthroughPrerequisite.GENERATION,)
+    ) as run:
+        if run:
+            assert generation is not None
+            if operation != "cleanup":
+                read_drill_recent_signins(store, generation, time.time())
+    with checkpoint(
+        WalkthroughPrerequisite.RUNTIME,
+        (WalkthroughPrerequisite.IDENTITY, WalkthroughPrerequisite.GENERATION),
+    ) as run:
+        if run:
+            assert selection is not None
+            assert generation is not None
+            connection = connect_runtime(
+                store=store,
+                selection=selection,
+                control_plane_root=root,
+                database_url=store.database_url,
+            )
+            if connection.evidence.target_id != generation.target_id:
+                raise ValueError("Testing recipient changed.")
+    with checkpoint(WalkthroughPrerequisite.ORIGIN, (WalkthroughPrerequisite.RUNTIME,)) as run:
+        if run:
+            assert connection is not None
+            assert parsed is not None
+            if not odoo_compose_has_domain(
                 host=connection.host,
                 token=connection.token,
-                server_id=connection.server_id,
-                spec={
-                    "generation": generation.model_dump(mode="json"),
-                    "compose_project": connection.app_name,
-                    "image_reference": selection.identity.image_reference,
-                    "database_name": database,
-                    "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
-                    "workflow_environment": {},
-                    "copy_binding_sha256": copy_binding,
-                    "usage_only": True,
-                    "task_account_cleanup": True,
-                },
-                receive=frames.append,
-            )
-            if len(frames) != 1 or frames[0].get("cleanup_qualified") is not True:
-                raise ValueError("Testing cleanup isolation is unavailable.")
-    binding = canonical_json_sha256(
-        [request.product, request.context, request.task_id, copy_binding]
-    )
-    readback_intent: dict[str, object] = {
-        "project": connection.app_name,
-        "identity": selection.identity.model_dump(mode="json"),
-        "identity_key": RUNTIME_IDENTITY_ENV_KEY,
-        "image": selection.identity.image_reference,
-        "database": database,
-        "copy_binding": copy_binding,
-        "usage_since": generation.prepared_at,
-    }
-    with _prerequisite(WalkthroughPrerequisite.ISOLATION_OR_USAGE):
-        if request.operation == "cleanup":
-            clear = testing_connection_isolated(
-                host=connection.host,
-                token=connection.token,
-                server_id=connection.server_id,
-                intent=readback_intent,
-            )
-        else:
-            clear = testing_task_unused(
-                host=connection.host,
-                token=connection.token,
-                server_id=connection.server_id,
-                require_task=False,
-                intent=readback_intent,
-            )
-        if not clear:
-            raise ValueError(
-                "Testing connection isolation or protected usage readback did not pass."
-            )
-    with _prerequisite(WalkthroughPrerequisite.CREDENTIAL):
-        secret_name = "task-" + binding
-        secret = store.find_secret_record(
-            scope="context_instance",
-            integration=WALKTHROUGH_SECRET_INTEGRATION,
-            name=secret_name,
-            context=request.context,
-            instance="testing",
-        )
-        if request.operation == "run" and secret is None:
-            raise ValueError("There is no task account for this testing copy.")
-        if secret is not None and secret.status != "configured" and request.operation != "cleanup":
-            raise ValueError("The task account is closed.")
-        if secret is not None and request.operation != "cleanup":
-            created = datetime.fromisoformat(secret.created_at.replace("Z", "+00:00"))
-            if created.tzinfo is None or datetime.now(timezone.utc) - created > timedelta(
-                seconds=WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS
+                compose_id=connection.evidence.target_id,
+                domain_host=parsed.hostname or "",
             ):
-                raise ValueError("The task account expired; clean it up and use a new task ID.")
+                raise ValueError("The origin does not belong to this testing target.")
+    with checkpoint(WalkthroughPrerequisite.DATABASE, (WalkthroughPrerequisite.RUNTIME,)) as run:
+        if run:
+            assert connection is not None
+            database = testing_drill_environment(store, context).get("ODOO_DB_NAME", "")
+            if not database or database != connection.credentials.get("ODOO_DB_NAME"):
+                raise ValueError("Testing database is unavailable or changed.")
+    copy_binding = generation_binding(generation) if generation is not None else ""
+    if operation == "cleanup":
+        with checkpoint(
+            WalkthroughPrerequisite.PHYSICAL_COPY,
+            (
+                WalkthroughPrerequisite.GENERATION,
+                WalkthroughPrerequisite.RUNTIME,
+                WalkthroughPrerequisite.DATABASE,
+            ),
+        ) as run:
+            if run:
+                assert generation is not None
+                assert connection is not None and selection is not None
+                frames: list[dict[str, object]] = []
+                inspect_native_testing_receiver(
+                    host=connection.host,
+                    token=connection.token,
+                    server_id=connection.server_id,
+                    spec={
+                        "generation": generation.model_dump(mode="json"),
+                        "compose_project": connection.app_name,
+                        "image_reference": selection.identity.image_reference,
+                        "database_name": database,
+                        "database_data_directory": ODOO_DATABASE_DATA_DIRECTORY,
+                        "workflow_environment": {},
+                        "copy_binding_sha256": copy_binding,
+                        "usage_only": True,
+                        "task_account_cleanup": True,
+                    },
+                    receive=frames.append,
+                )
+                if len(frames) != 1 or frames[0].get("cleanup_qualified") is not True:
+                    raise ValueError("Testing cleanup isolation is unavailable.")
+    binding = canonical_json_sha256(
+        [product, context, request.task_id if request is not None else "", copy_binding]
+    )
+    readback_intent: dict[str, object] = {}
+    if connection is not None and selection is not None and generation is not None:
+        readback_intent = {
+            "project": connection.app_name,
+            "identity": selection.identity.model_dump(mode="json"),
+            "identity_key": RUNTIME_IDENTITY_ENV_KEY,
+            "image": selection.identity.image_reference,
+            "database": database,
+            "copy_binding": copy_binding,
+            "usage_since": generation.prepared_at,
+        }
+    with checkpoint(
+        WalkthroughPrerequisite.ISOLATION_OR_USAGE,
+        (
+            WalkthroughPrerequisite.RUNTIME,
+            WalkthroughPrerequisite.DATABASE,
+            WalkthroughPrerequisite.GENERATION,
+        ),
+    ) as run:
+        if run:
+            assert connection is not None
+            assert selection is not None
+            assert generation is not None
+            if operation == "cleanup":
+                clear = testing_connection_isolated(
+                    host=connection.host,
+                    token=connection.token,
+                    server_id=connection.server_id,
+                    intent=readback_intent,
+                )
+            else:
+                clear = testing_task_unused(
+                    host=connection.host,
+                    token=connection.token,
+                    server_id=connection.server_id,
+                    require_task=False,
+                    intent=readback_intent,
+                )
+            if not clear:
+                raise ValueError(
+                    "Testing connection isolation or protected usage readback did not pass."
+                )
+    with checkpoint(
+        WalkthroughPrerequisite.CREDENTIAL,
+        (WalkthroughPrerequisite.GENERATION,),
+        task_required=True,
+    ) as run:
+        if run:
+            assert request is not None
+            secret_name = "task-" + binding
+            secret = store.find_secret_record(
+                scope="context_instance",
+                integration=WALKTHROUGH_SECRET_INTEGRATION,
+                name=secret_name,
+                context=context,
+                instance="testing",
+            )
+            if operation == "run" and secret is None:
+                raise ValueError("There is no task account for this testing copy.")
+            if secret is not None and secret.status != "configured" and operation != "cleanup":
+                raise ValueError("The task account is closed.")
+            if secret is not None and operation != "cleanup":
+                created = datetime.fromisoformat(secret.created_at.replace("Z", "+00:00"))
+                if created.tzinfo is None or datetime.now(timezone.utc) - created > timedelta(
+                    seconds=WALKTHROUGH_CREDENTIAL_LIFETIME_SECONDS
+                ):
+                    raise ValueError("The task account expired; clean it up and use a new task ID.")
+    if checks is not None:
+        return None
+    assert request is not None and selection is not None
+    assert generation is not None and connection is not None
     digest = canonical_json_sha256(
         [
             actor,

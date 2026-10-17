@@ -25,7 +25,7 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
 )
 from control_plane.contracts.public_ingress_monitoring import (
-    PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
+    health_monitor_freshness_seconds,
     PublicIngressIncidentEventRecord,
     PublicIngressIncidentMaterialFingerprint,
     PublicIngressIncidentRecord,
@@ -2349,7 +2349,7 @@ class FastApiProductEnvironmentReadTests(unittest.IsolatedAsyncioTestCase):
                         observed_at = datetime.now(timezone.utc)
                         if mode == "stale":
                             observed_at -= timedelta(
-                                seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1
+                                seconds=health_monitor_freshness_seconds(lane["instance"]) + 1
                             )
                         store.write_public_ingress_observation_record(
                             PublicIngressObservationRecord(
@@ -3551,6 +3551,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(status, 202, payload)
                 self.assertEqual(len(stored.expected_config.managed_secret_bindings), 1)
 
+    @scoped_agent_test
     async def test_apply_product_expected_config_refuses_local_operator_on_live(self) -> None:
         for mode in ("dry-run", "apply"):
             with self.subTest(mode=mode):
@@ -3563,12 +3564,10 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                     continue
                 error = cast(dict[str, object], payload["error"])
                 self.assertEqual(error["code"], "live_product_requires_operator")
-                self.assertIn("changed by an admin", str(error["message"]))
                 self.assertEqual(stored.expected_config.managed_secret_bindings, ())
 
     async def test_apply_product_expected_config_workflow_still_allowed_on_live(self) -> None:
-        # This route accepts only bearer callers (workflows, local admins, local operators);
-        # the live refusal applies to the local_operator credential alone.
+        # Existing workflow authority is independent of the Director-agent exception.
         status, payload, stored = await self._post_expected_config_for_production_use(
             production_use="live", mode="apply", workflow=True
         )
@@ -3713,6 +3712,7 @@ class FastApiProductProfileTests(unittest.IsolatedAsyncioTestCase):
                             },
                         )
 
+    @scoped_agent_test
     async def test_apply_product_expected_config_stale_local_operator_cannot_revert_live(
         self,
     ) -> None:

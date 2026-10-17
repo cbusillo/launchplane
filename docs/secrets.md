@@ -212,6 +212,10 @@ do not attempt a release or post-deploy on that lane first.
 
 ## Current Contract
 
+[Testing local credentials](testing-local-credentials.md) are generated and
+encrypted inside Launchplane, with a supported dry-run/apply/readback path and
+an all-product overlap audit. Production bindings remain unchanged.
+
 [Private testing TLS](private-testing-transport.md) uses purpose-separated
 Chris-owned certificate/key files, mounted read-only by the isolated proxy.
 Agents handle only public CA/leaf metadata and custody references. The optional

@@ -23,6 +23,7 @@ from control_plane.contracts.runtime_dependency_health import RuntimeDependencyH
 
 # Historical source-age incidents are retained as evidence, never failure alerts.
 RETIRED_PRODUCTION_DELIVERY_LAG_CHECK = "production-delivery-lag"
+PRODUCTION_REQUEST_REFUSED: Literal["request_refused"] = "request_refused"
 
 PublicIngressObservationStatus = Literal["pass", "fail", "skipped"]
 PublicIngressObservationPurpose = Literal["probe", "reconciliation"]
@@ -31,6 +32,7 @@ PublicIngressIncidentResolutionReason = Literal[
     "recovered",
     "monitoring_intent_changed",
     "duplicate_reconciled",
+    "request_refused",
 ]
 PublicIngressIncidentEvent = Literal["opened", "updated", "reminder", "resolved"]
 PublicIngressIncidentEventKind = PublicIngressIncidentEvent | Literal["baseline"]
@@ -42,6 +44,7 @@ PublicIngressIncidentEventReason = Literal[
     "monitoring_intent_changed",
     "migration_baseline",
     "duplicate_reconciled",
+    "request_refused",
 ]
 PublicIngressIncidentSeverity = Literal["warning", "critical"]
 PublicIngressIncidentNotificationState = Literal["active", "acknowledged", "silenced"]
@@ -129,6 +132,9 @@ PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service",
 PUBLIC_TLS_EXPIRING_DAYS = 14
 PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS = 60
 TESTING_HEALTH_MONITOR_INTERVAL_SECONDS = 5 * 60
+HEALTH_MONITOR_POLL_SECONDS = 5
+HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS = 10
+HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS = 30
 PUBLIC_TLS_STALE_AFTER_SECONDS = 2 * 60 * 60
 PUBLIC_INGRESS_DEFAULT_REMINDER_INTERVAL_SECONDS = 6 * 60 * 60
 PUBLIC_INGRESS_MIN_REMINDER_INTERVAL_SECONDS = 15 * 60
@@ -142,6 +148,16 @@ def health_monitor_interval_seconds(instance: str) -> int:
         TESTING_HEALTH_MONITOR_INTERVAL_SECONDS
         if instance == "testing"
         else PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
+    )
+
+
+def health_monitor_freshness_seconds(instance: str) -> int:
+    """Cover polling/publication ticks, initial probe, identity wait and reprobe."""
+    return (
+        health_monitor_interval_seconds(instance)
+        + 2 * HEALTH_MONITOR_POLL_SECONDS
+        + 2 * HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS
+        + HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS
     )
 
 

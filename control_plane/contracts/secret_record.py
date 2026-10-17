@@ -10,7 +10,7 @@ SecretPolicy = Literal["write_only"]
 SecretStatus = Literal["configured", "disabled"]
 SecretEventType = Literal["created", "rotated", "imported", "validated", "disabled", "relabelled"]
 SecretSharingKind = IntegrationAllowanceKind | Literal["site_shared"]
-SecretValueSource = Literal["supplied", "copy", "provider"]
+SecretValueSource = Literal["supplied", "copy", "provider", "generated"]
 
 
 class SecretRecord(BaseModel):
