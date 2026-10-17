@@ -1307,6 +1307,16 @@ class ProductReconcileTestingTests(ProductReconcileTestCase):
         self.assertEqual(completed.state, "failed")
         self.assertIn("failed 3 times", completed.last_error)
         self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 3)
+        incidents = self.store.list_public_ingress_incident_records(status="open")
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0].instance, "testing")
+        self.assertTrue(
+            any(
+                operation.operation_id in incidents[0].summary
+                for operation in self.store.list_odoo_stable_target_replacement_operation_records()
+            )
+        )
+        self.assertIn("path-check", incidents[0].summary)
 
     def fail_with_provider_text(self, operation_id: str) -> None:
         operation = self.store.read_odoo_stable_target_replacement_operation_record(operation_id)

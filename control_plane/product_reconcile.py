@@ -636,6 +636,8 @@ def reconcile_testing_target(
             last_failed_operation_id=attempt.last_failed.operation_id,
             last_failed_error_code=error_code,
             last_failed_error_summary=error_summary,
+            failure_trace_id=attempt.last_failed.runner_trace_id
+            or attempt.last_failed.operation_id,
         )
     if attempt.deployed_operation_id:
         plan.update(
@@ -1065,6 +1067,8 @@ def _generic_web_testing_outcome(
     *, plan: dict[str, object], result: DurableProviderOperationResult
 ) -> ReconcileOutcome:
     plan["deploy_operation_status"] = result.status
+    if result.record is not None:
+        plan["failure_trace_id"] = result.record.response_trace_id
     if result.status == "in_progress" or (
         result.status == "target_busy"
         and (result.record is None or result.record.state != "reconcile_required")
@@ -2473,6 +2477,13 @@ def run_product_reconcile_once(
     except Exception as error:
         _LOGGER.warning("Product reconcile of %s failed: %s", request.target_key, error)
         failed_plan: dict[str, object] = {"target": request.target_kind}
+        if request.target_kind == "testing":
+            trace_id = f"launchplane-reconcile-{uuid4().hex}"
+            failed_plan.update(
+                last_failed_error_code=getattr(error, "code", "") or "testing_reconcile_failed",
+                failure_trace_id=trace_id,
+            )
+            _LOGGER.warning("Testing reconcile failure trace: %s", trace_id)
         if request.target_kind == "preview":
             # A failed read or lost lease must not re-arm a previously exhausted destroy.
             for key in ("destroy_retry_key", "destroy_failed_attempts"):
@@ -2561,13 +2572,14 @@ def run_product_reconcile_once(
             ),
             _utc_now(),
         )
-    if outcome.error:
-        return record_store.complete_product_reconcile_request(
-            request.target_key, lease_owner, "failed", plan, outcome.error
-        )
-    return record_store.complete_product_reconcile_request(
-        request.target_key, lease_owner, "done", plan
+    completed = record_store.complete_product_reconcile_request(
+        request.target_key, lease_owner, "failed" if outcome.error else "done", plan, outcome.error
     )
+    if isinstance(record_store, PostgresRecordStore) and request.target_kind == "testing":
+        from control_plane.testing_delivery_monitor import record_testing_delivery_attention
+
+        record_testing_delivery_attention(record_store, completed)
+    return completed
 
 
 def _owner_review_status_writer(

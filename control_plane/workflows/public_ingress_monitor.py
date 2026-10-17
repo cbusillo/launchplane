@@ -1177,7 +1177,7 @@ def _monitoring_reconciliation_observations(
             )
             for incident in open_incidents:
                 # Delivery has its own recovery evidence; HTTP target retirement cannot resolve it.
-                if incident.check_name.startswith("production-delivery-"):
+                if incident.check_name.startswith(("production-delivery-", "testing-delivery-")):
                     continue
                 target_key = _incident_target_key(incident)
                 monitored = monitored_check_identity(incident.check_name)
@@ -4001,7 +4001,9 @@ def _deliver_discord_notification(
         )
     color = 0x2E7D32 if event == "resolved" else 0xC62828
     title = (
-        "Production delivery"
+        "Testing delivery"
+        if incident.check_name.startswith("testing-delivery-")
+        else "Production delivery"
         if incident.check_name.startswith("production-delivery-")
         else "Public ingress"
     )
@@ -4038,7 +4040,9 @@ def public_ingress_incident_notification_body(
     marker: str = "",
 ) -> str:
     subject = (
-        "production delivery"
+        "testing delivery"
+        if incident.check_name.startswith("testing-delivery-")
+        else "production delivery"
         if incident.check_name.startswith("production-delivery-")
         else "public ingress"
     )
