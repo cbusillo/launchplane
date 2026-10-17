@@ -384,6 +384,7 @@ export function App() {
       ) : null}
       {route.kind === "engineering" ? (
         <EngineeringOpsRoute
+          admin={authState.identity.role === "admin"}
           actorId={authState.identity?.github_id ?? 0}
           fixtureMode={fixtureMode}
           key={`engineering:${route.view}:${fixtureMode}`}

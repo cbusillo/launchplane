@@ -92,10 +92,12 @@ const ENGINEERING_SURFACES = [
 ];
 
 export function EngineeringOpsRoute({
+  admin,
   fixtureMode,
   view,
   actorId,
 }: {
+  admin: boolean;
   fixtureMode: DevFixtureMode;
   view: EngineeringView;
   actorId: number;
@@ -122,7 +124,7 @@ export function EngineeringOpsRoute({
     return <EngineeringGovernanceProjectionRoute fixtureMode={fixtureMode} />;
   }
   if (view === "privileged-operations") {
-    return <EngineeringPrivilegedOperationsRoute fixtureMode={fixtureMode} />;
+    return <EngineeringPrivilegedOperationsRoute admin={admin} fixtureMode={fixtureMode} />;
   }
   return <EngineeringOpsHub />;
 }

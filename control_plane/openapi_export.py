@@ -247,6 +247,7 @@ UI_OPENAPI_WRITE_OPERATIONS: dict[str, str] = {
     "/v1/odoo-prod-promotions": "enqueue_odoo_prod_promotion",
     SERVICE_RESTART_ROUTE: "restart_lane_service",
     "/v1/odoo-prod-rollbacks": "enqueue_odoo_prod_rollback",
+    "/v1/privileged-operations/plans/{operation_id}/cancel": ("cancel_human_privileged_operation"),
     "/v1/privileged-operations/plans/{operation_id}/approve": (
         "approve_human_privileged_operation"
     ),

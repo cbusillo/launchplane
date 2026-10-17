@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -827,39 +827,21 @@ def run_public_ingress_monitor_once(
 
     def probe_targets(
         selected: tuple[PublicIngressMonitorTarget, ...],
-    ) -> list[tuple[PublicIngressMonitorTarget, PublicIngressObservationRecord]]:
+    ) -> Iterator[tuple[PublicIngressMonitorTarget, PublicIngressObservationRecord]]:
         if max_concurrent_probes == 1 or not selected:
-            return [(target, probe(target)) for target in selected]
-        with ThreadPoolExecutor(
-            max_workers=min(max_concurrent_probes, len(selected)), thread_name_prefix="health-probe"
-        ) as executor:
-            return list(zip(selected, executor.map(probe, selected), strict=True))
+            for target in selected:
+                yield target, probe(target)
+        else:
+            with ThreadPoolExecutor(
+                max_workers=min(max_concurrent_probes, len(selected)),
+                thread_name_prefix="health-probe",
+            ) as executor:
+                pending = {executor.submit(probe, target): target for target in selected}
+                for future in as_completed(pending):
+                    yield pending[future], future.result()
 
-    probed = probe_targets(targets)
-    unconfirmed = [
-        index
-        for index, (_target, record) in enumerate(probed)
-        if record.failure_code == "wrong_runtime_identity"
-    ]
-    if unconfirmed:
-        # One wait per run, however many lanes are mid-deploy.
-        if runtime_identity_confirmation_delay_seconds > 0:
-            sleep(runtime_identity_confirmation_delay_seconds)
-        retry_targets = []
-        for index in unconfirmed:
-            target = probed[index][0]
-            target = replace(
-                target,
-                expected_runtime_identity=_expected_runtime_identity(
-                    record_store=record_store,
-                    context_name=target.context,
-                    instance_name=target.instance,
-                ),
-            )
-            retry_targets.append(target)
-        for index, retried in zip(unconfirmed, probe_targets(tuple(retry_targets)), strict=True):
-            probed[index] = retried
-    for target, record in probed:
+    def publish(target: PublicIngressMonitorTarget, record: PublicIngressObservationRecord) -> None:
+        nonlocal authority_changed_count
         _check_monitor_cancelled(should_stop)
         stored_transition = _store_monitor_observation(
             record_store=record_store,
@@ -879,6 +861,35 @@ def run_public_ingress_monitor_once(
         reminder_states.extend(stored_transition.reminder_states)
         delivery_attempts.extend(stored_transition.delivery_attempts)
         authority_changed_count += int(stored_transition.authority_changed)
+
+    unconfirmed = []
+    for target, record in probe_targets(targets):
+        if record.failure_code == "wrong_runtime_identity":
+            unconfirmed.append(target)
+        else:
+            publish(target, record)
+    if unconfirmed:
+        # Healthy and failed probes publish before waiting for a deploy to settle.
+        _check_monitor_cancelled(should_stop)
+        if runtime_identity_confirmation_delay_seconds > 0:
+            sleep(runtime_identity_confirmation_delay_seconds)
+        _check_monitor_cancelled(should_stop)
+        retry_targets = tuple(
+            replace(
+                target,
+                expected_runtime_identity=_expected_runtime_identity(
+                    record_store=record_store,
+                    context_name=target.context,
+                    instance_name=target.instance,
+                ),
+            )
+            for target in unconfirmed
+        )
+        for target, record in probe_targets(retry_targets):
+            publish(target, record)
+    # Publication follows completion; the returned report retains discovery order.
+    target_order = {_monitor_target_key(target): index for index, target in enumerate(targets)}
+    records.sort(key=lambda record: target_order[_monitor_target_key(record)])
     for record, profile_sha256 in _monitoring_reconciliation_observations(
         record_store=record_store,
         profiles=profiles,
@@ -1119,7 +1130,7 @@ def _store_monitor_observation(
 
 
 def _monitor_target_key(
-    target: PublicIngressMonitorTarget,
+    target: PublicIngressMonitorTarget | PublicIngressObservationRecord,
 ) -> tuple[str, str, str, str, str]:
     return (
         target.product,
