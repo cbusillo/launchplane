@@ -1,3 +1,4 @@
+import os
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -8,6 +9,7 @@ from unittest.mock import Mock, patch
 from click.testing import CliRunner
 from click import Command
 
+from control_plane import secrets as control_plane_secrets
 from control_plane.cli import main
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
@@ -473,3 +475,107 @@ class ProviderKeyRetirementLiveSyncTests(unittest.TestCase):
                 else:
                     self.assertEqual(updates, [])
                 deploy.assert_not_called()
+
+    def test_a_key_only_a_managed_secret_supplies_can_be_retired(self) -> None:
+        for plain_setting_too in (False, True):
+            with (
+                self.subTest(plain_setting_too=plain_setting_too),
+                TemporaryDirectory() as temporary_directory,
+                patch.dict(
+                    os.environ,
+                    {
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"
+                    },
+                ),
+            ):
+                root = Path(temporary_directory)
+                database_url = _sqlite_database_url(root / "records.sqlite3")
+                store = PostgresRecordStore(database_url=database_url)
+                store.ensure_schema()
+                self.addCleanup(store.close)
+                store.write_product_profile_record(_profile())
+                store.write_runtime_environment_record(_runtime_record(retired=("ALERT_TOKEN",)))
+                if plain_setting_too:
+                    store.write_runtime_environment_record(
+                        RuntimeEnvironmentRecord(
+                            scope="context",
+                            context="example-site",
+                            env={"ALERT_TOKEN": "private-plain-value"},
+                            updated_at="2026-09-27T00:00:00Z",
+                            source_label="test",
+                        )
+                    )
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name="alert-token",
+                    plaintext_value="private-lane-secret",
+                    binding_key="ALERT_TOKEN",
+                    context_name="example-site",
+                    instance_name="testing",
+                    actor="test",
+                    source_label="test",
+                )
+                _seed_tracked_target_records(
+                    database_url=database_url,
+                    context="example-site",
+                    instance="testing",
+                    target_id="test-application",
+                    target_type="application",
+                    target_name="test-app",
+                )
+                provider_env = "APP_MODE=private-mode-value\nALERT_TOKEN=private-lane-secret"
+                updates: list[dict[str, object]] = []
+
+                def update(**kwargs: object) -> None:
+                    nonlocal provider_env
+                    updates.append(kwargs)
+                    provider_env = str(kwargs["env_text"])
+
+                with (
+                    patch(
+                        "control_plane.live_target_runtime.dokploy_source.read_dokploy_config",
+                        return_value=("host", "token"),
+                    ),
+                    patch(
+                        "control_plane.live_target_runtime.dokploy_api.fetch_dokploy_target_payload",
+                        side_effect=lambda **_kwargs: {"name": "test-app", "env": provider_env},
+                    ),
+                    patch(
+                        "control_plane.live_target_runtime.dokploy_api.update_dokploy_target_env",
+                        side_effect=update,
+                    ),
+                ):
+                    if plain_setting_too:
+                        with self.assertRaises(LiveTargetRuntimeError) as refusal:
+                            apply_live_target_runtime_environment(
+                                control_plane_root=root,
+                                database_url=database_url,
+                                product_name="example-site",
+                                context_name="example-site",
+                                instance_name="testing",
+                                apply_changes=True,
+                                deploy=False,
+                                no_cache=False,
+                                deploy_timeout_seconds=None,
+                                deploy_trigger=Mock(),
+                            )
+                        self.assertEqual(refusal.exception.code, "runtime_retirement_conflict")
+                        self.assertEqual(updates, [])
+                        continue
+                    apply_live_target_runtime_environment(
+                        control_plane_root=root,
+                        database_url=database_url,
+                        product_name="example-site",
+                        context_name="example-site",
+                        instance_name="testing",
+                        apply_changes=True,
+                        deploy=False,
+                        no_cache=False,
+                        deploy_timeout_seconds=None,
+                        deploy_trigger=Mock(),
+                    )
+                self.assertEqual(len(updates), 1)
+                self.assertNotIn("ALERT_TOKEN", provider_env)
+                self.assertIn("APP_MODE=private-mode-value", provider_env)
