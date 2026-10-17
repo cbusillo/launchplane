@@ -1,5 +1,19 @@
 import { waitForState, expect, test } from "./state";
 
+test("a carried acceptance explains invisible follow-ups and can be replaced", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=carried-invisible-decision");
+  const decision = page.getByLabel("Recorded decision");
+  await expect(decision).toContainText("Your acceptance still applies.");
+  await expect(decision).toContainText("no Client-visible changes");
+  await expect(decision).not.toContainText("the base was updated");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("owner-acceptance-invisible.png"), fullPage: true });
+  await page.getByRole("textbox").fill("Please revise the feature.");
+  await page.getByRole("button", { name: "Request changes" }).click();
+  await expect(decision).toContainText("Changes requested");
+  await expect(decision).not.toContainText("Your acceptance still applies.");
+});
+
 test("a carried acceptance applies to this preview and a new decision replaces it", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=carried-decision");
   const decision = page.getByLabel("Recorded decision");

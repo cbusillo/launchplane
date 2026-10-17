@@ -58,6 +58,7 @@ class _GitHub:
         self.head_sha = _REFRESHED_HEAD
         self.base_branch = "main"
         self.base_sha = _BASE_COMMIT
+        self.commit_comparison: dict[str, object] = {"status": "diverged"}
         self.file_modes = {
             head: {"website/views/home.xml": "100644"}
             for head in (_ACCEPTED_HEAD, _REFRESHED_HEAD, _OTHER_MERGE_HEAD, _SECOND_REFRESH_HEAD)
@@ -128,6 +129,8 @@ class _GitHub:
             return run
         if path.startswith(f"{repository_path}/compare/"):
             base, head = path.rsplit("/", 1)[1].split("...")
+            if base == _ACCEPTED_HEAD:
+                return self.commit_comparison
             if head == self.base_branch:
                 return {"status": "ahead" if base in self.on_base else "diverged"}
             if head in self.on_base:
@@ -224,6 +227,105 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             ("pending", "Waiting for @site-owner to review the preview"),
         )
         self.assertEqual(self._decisions(), (self.accepted,))
+
+    def _later_commits(self, *messages: str) -> list[dict[str, object]]:
+        heads = [_SECOND_REFRESH_HEAD, _REFRESHED_HEAD][-len(messages) :]
+        parents = [_ACCEPTED_HEAD, *heads[:-1]]
+        commits: list[dict[str, object]] = [
+            {"sha": head, "parents": [{"sha": parent}], "commit": {"message": message}}
+            for head, parent, message in zip(heads, parents, messages, strict=True)
+        ]
+        self.github.commit_comparison = {
+            "status": "ahead",
+            "ahead_by": len(commits),
+            "behind_by": 0,
+            "total_commits": len(commits),
+            "merge_base_commit": {"sha": _ACCEPTED_HEAD},
+            "commits": commits,
+        }
+        return commits
+
+    def test_test_only_followup_carries_acceptance_and_records_its_trailer(self) -> None:
+        # verireel#525: an accepted product patch, then a test-only follow-up.
+        commits = self._later_commits("Strengthen billing tests\n\nClient-impact: none")
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] += [
+            {**_change()[0], "filename": "tests/test_billing.py"}
+        ]
+        self.assertEqual(self._publish()["state"], "success")
+        carried, accepted = self._decisions()
+        self.assertEqual(accepted, self.accepted)
+        evidence = carried.model_dump()["carried_from"]
+        self.assertEqual(evidence["reason"], "client_impact_none")
+        self.assertEqual(
+            evidence["commits"],
+            ({"sha": commits[0]["sha"], "client_impact": "none"},),
+        )
+        self.assertEqual(carried.owner_github_id, accepted.owner_github_id)
+        self.assertEqual(carried.feedback_url, accepted.feedback_url)
+        self.assertIn("no Client-visible changes", str(self.github.statuses[0]["description"]))
+        self._publish()
+        self.assertEqual(len(self._decisions()), 2)
+
+    def test_every_later_commit_must_have_an_unambiguous_none_trailer(self) -> None:
+        for message in (
+            "Change tests",
+            "Change behavior\n\nClient-impact: visible",
+            "Mention Client-impact: none in prose",
+            "Client-impact: none",
+            "Client-impact: none\n\nLater body text",
+            "Change tests\n\nClient-impact: none\nClient-impact: visible",
+            "Change tests\n\nClient-impact: unknown",
+        ):
+            with self.subTest(message=message):
+                self.setUp()
+                # Even an identical final patch cannot erase a visible/missing claim.
+                self._later_commits(message, "Change tests\n\nClient-impact: none")
+                self.assert_waits_for_the_client(self._publish())
+
+    def test_all_none_commits_carry_in_order_and_remain_bound_to_the_change(self) -> None:
+        commits = self._later_commits(
+            "Adjust test\n\nClient-impact: none\nSigned-off-by: Example <e@example.invalid>",
+            "More tests\n\nClient-impact: none",
+        )
+        self.assertEqual(self._publish()["state"], "success")
+        carry = self._decisions()[0].carried_from
+        assert carry is not None
+        self.assertEqual([commit.sha for commit in carry.commits], [c["sha"] for c in commits])
+        self.github.base_branch = "release"
+        self.assertEqual(self._publish()["state"], "pending")
+
+    def test_conflict_merge_needs_a_new_decision_even_if_marked_none(self) -> None:
+        # verireel#520: resolve a conflict with an earlier landed change.
+        commits = self._later_commits("Resolve billing conflict\n\nClient-impact: none")
+        commits[0]["parents"] = [{"sha": _ACCEPTED_HEAD}, {"sha": _BASE_COMMIT}]
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change(
+            patch=_PATCH + "\n+Resolved billing behavior"
+        )
+        self.assert_waits_for_the_client(self._publish())
+        # A matching final patch does not prove the merge was conflict-free either.
+        self.github.changes[(_BASE_COMMIT, _REFRESHED_HEAD)] = _change()
+        self.assert_waits_for_the_client(self._publish())
+
+    def test_incomplete_or_unrelated_commit_history_cannot_carry(self) -> None:
+        for mutation in ("truncated", "count", "diverged", "parent", "head", "duplicate"):
+            with self.subTest(mutation=mutation):
+                self.setUp()
+                commits = self._later_commits(
+                    "Adjust tests\n\nClient-impact: none", "More tests\n\nClient-impact: none"
+                )
+                if mutation == "truncated":
+                    commits.pop(0)
+                elif mutation == "count":
+                    self.github.commit_comparison["total_commits"] = True
+                elif mutation == "diverged":
+                    self.github.commit_comparison["merge_base_commit"] = {"sha": _BASE_COMMIT}
+                elif mutation == "parent":
+                    commits[0]["parents"] = [{"sha": _OTHER_MERGE_HEAD}]
+                elif mutation == "head":
+                    commits[-1]["sha"] = _OTHER_MERGE_HEAD
+                else:
+                    commits[-1]["sha"] = commits[0]["sha"]
+                self.assert_waits_for_the_client(self._publish())
 
     def test_acceptance_carries_across_the_trains_base_only_refresh(self) -> None:
         refresh_id = self._train_refreshed()
@@ -452,6 +554,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(
             comparisons,
             [
+                f"/repos/{_REPOSITORY}/compare/{_ACCEPTED_HEAD}...{_REFRESHED_HEAD}",
                 f"/repos/{_REPOSITORY}/compare/{_BASE_COMMIT}...{_ACCEPTED_HEAD}",
                 f"/repos/{_REPOSITORY}/compare/{_BASE_COMMIT}...{_REFRESHED_HEAD}",
             ],
@@ -476,6 +579,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 self.assert_waits_for_the_client(self._publish())
 
     def test_new_client_and_undelivered_acceptance_do_not_carry(self) -> None:
+        self._later_commits("Adjust tests\n\nClient-impact: none")
         for update in ({"owner_github_id": "9002"}, {"feedback_url": ""}):
             with self.subTest(update=update):
                 self.store.write_product_review_decision_record(
@@ -515,6 +619,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(self._decisions()), 2)
 
     def test_carry_provenance_round_trips_through_database_storage(self) -> None:
+        self._later_commits("Adjust tests\n\nClient-impact: none")
         with TemporaryDirectory() as directory:
             database = PostgresRecordStore(
                 database_url=sqlite_database_url(Path(directory) / "records.sqlite")
@@ -538,6 +643,10 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
                 carried,
             )
 
+    def test_newer_rejection_during_trailer_read_is_not_overridden(self) -> None:
+        self._later_commits("Adjust tests\n\nClient-impact: none")
+        self.test_newer_client_rejection_during_comparison_is_not_overridden()
+
     def test_carry_contract_requires_evidence_but_reads_legacy_train_carries(self) -> None:
         legacy = {"record_id": self.accepted.record_id, "head_sha": _ACCEPTED_HEAD}
         train = ProductReviewCarry.model_validate({**legacy, "refresh_record_ids": ["refresh-1"]})
@@ -547,6 +656,22 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
             legacy,
             {**legacy, "reason": "unchanged_patch_base_update"},
             {**legacy, "reason": "unchanged_patch_base_update", "comparison_base_sha": "main"},
+            {**legacy, "reason": "client_impact_none"},
+            {
+                **legacy,
+                "reason": "client_impact_none",
+                "commits": [{"sha": _REFRESHED_HEAD, "client_impact": "visible"}],
+            },
+            {
+                **legacy,
+                "reason": "client_impact_none",
+                "commits": [{"sha": "main", "client_impact": "none"}],
+            },
+            {
+                **legacy,
+                "reason": "client_impact_none",
+                "commits": [{"sha": _REFRESHED_HEAD, "client_impact": "none"}] * 2,
+            },
         ):
             with self.subTest(evidence=evidence), self.assertRaises(ValueError):
                 ProductReviewCarry.model_validate(evidence)

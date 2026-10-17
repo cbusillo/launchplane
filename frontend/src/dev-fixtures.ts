@@ -2890,13 +2890,14 @@ export function productReviewForFixture(
         ? { ...productReviewDecisionForFixture("accepted", ""), feedback_url: "", head_sha: "b".repeat(40) }
         : scenario === "earlier-decision"
         ? { ...productReviewDecisionForFixture("accepted", ""), head_sha: "b".repeat(40) }
-        : scenario === "carried-decision"
+        : ["carried-decision", "carried-invisible-decision"].includes(scenario)
         ? {
             ...productReviewDecisionForFixture("accepted", ""),
             carried_from: {
               record_id: "fixture-original-acceptance",
               head_sha: "b".repeat(40),
-              reason: "unchanged_patch_base_update",
+              reason: scenario === "carried-invisible-decision" ? "client_impact_none" : "unchanged_patch_base_update",
+              commits: scenario === "carried-invisible-decision" ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
               refresh_record_ids: [],
               comparison_base_sha: "c".repeat(40),
             },
