@@ -710,6 +710,57 @@ Maintenance uses the original candidate operation and its stored receipts.
 Rollback retains candidate application intent, storage and physical reservations;
 it does not clear fences or adopt a candidate as the serving lane. No schema
 migration is added beyond the candidate custody table.
+## Stable testing traffic between disposable copies
+
+The native testing route adapter gives the lane one stable dynamic route identity.
+It binds the existing HTTPS hostname to an observed private predecessor backend
+and the prepared candidate backend. A first migration from Docker-owned routing
+publishes a lane-owned file at strictly higher numeric priority, initially still
+serving the predecessor. The adapter verifies every applicable router and its
+actual backend; it does not treat a duplicate or tied router as proven authority.
+HTTP and HTTPS entrypoints remain distinct when the predecessor uses both.
+Subsequent rebuilds require the recorded owned template and reuse the same route.
+
+The managed testing connection policy is rendered from the same source as Odoo
+Compose routes. It lives in the owned file and survives retirement of its former
+Docker producer. Unknown/broad host rules, unsupported middleware, changed
+predecessor configuration and unexpected services refuse admission. The host-rule
+check evaluates boolean ownership conservatively; a foreign Host clause joined
+with OR cannot hide another matching path, and Go regex syntax is not evaluated
+using Python regex semantics.
+
+The fixed managed-server program discovers the running Dokploy Traefik process,
+its watched writable directory mount and private applied API. It reads only the
+lane-qualified dynamic filename. Publication rechecks the static configuration,
+provider state, current file digest and retained physical web identity, then uses
+the existing proxy container to write a temporary file and atomically rename it.
+No application receives a provider credential or host mount. No global Traefik
+configuration, shared file, process or other product route is updated. The caller
+must hold and renew the original authorized lane/provider operation throughout,
+including immediately before dispatch. A real provider denial propagates through
+the existing transport; there is no second writer or identity fallback.
+
+An absent reply is reconciled from the owned file and the applied API. A written
+but partly/unapplied group stays pending without another dispatch. Public health
+and exact runtime identity remain the controller's separate proof before serving
+publication or old-copy retirement. The old physical copy must still be qualified
+before switch-back; an already stopped predecessor does not prevent observing the
+current candidate, but cannot authorize an inverse switch.
+
+The supported host capability requires Dokploy's directory-mounted dynamic file
+provider, its private applied API and the existing managed terminal/Docker
+transport. Missing capability remains unqualified; no host configuration or access
+grant is invented to make it pass. Source delivery alone does not activate this
+adapter, establish canonical publication or prove CM. Those stages remain #3963.
+Maintenance and rollback use the same recorded route identity, original effect
+and admitted backends; retain the owned template/receipts and old-copy custody.
+Do not remove a route or a data volume to clear uncertainty.
+
+The isolated Traefik rehearsal executes the actual Linux atomic writer and checks
+continuous public old/new/switch-back responses while retaining the old copy. It
+cleans up its own containers/networks. Initial Docker migration, stale provider
+state, partial application, foreign routing and denial paths also have fixture
+behavior tests. These are distinct from managed-host and live CM qualification.
 
 ## Service collection
 
