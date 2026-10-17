@@ -181,6 +181,7 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             ),
         )
         for target, code in scenarios:
+            self.usage.reset_mock()
             with (
                 self.subTest(checkpoint=code),
                 patch(target, side_effect=ValueError("private topology and credential detail")),
@@ -189,6 +190,7 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.status_code, 409, response.text)
                 self.assertEqual(response.json()["error"]["code"], code)
                 self.assertNotIn("private topology and credential detail", response.text)
+                self.usage.assert_not_called()
                 self.assertIsNone(
                     self.store.read_fresh_odoo_testing_generation(
                         self.fixture.profile.product, self.fixture.context

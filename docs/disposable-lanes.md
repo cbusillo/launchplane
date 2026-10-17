@@ -1519,7 +1519,8 @@ refuse. Original copy custody is preserved by construction, not declared safe.
 
 An initial resource dry-run refusal identifies its first failed checkpoint:
 `testing_initial_preparation_unavailable` covers the original intent, lane,
-ownership, generation and operation admission;
+ownership, generation and operation admission (original intent/key validation
+also returns this code in apply, readback and release);
 `testing_initial_copy_prerequisite_unverified` covers copy prerequisites outside
 the classified bootstrap checks; and `testing_initial_usage_unverified` covers
 the original-lane usage decision. Classified bootstrap credential and restore
