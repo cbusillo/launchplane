@@ -33,9 +33,16 @@ _NOTE_LINK = re.compile(
     re.IGNORECASE,
 )
 
+_RELEASE_PROCESS_INSTRUCTION = re.compile(
+    r"(?P<join>,[ \t]*then[ \t]+|(?<=[.!?])[ \t]+(?:then[ \t]+)?"
+    r"|^[ \t]*(?:(?:[-*+]|\d+[.)])[ \t]+)?(?:then[ \t]+)?)"
+    r"(?P<instruction>(?:accept|approve)\b[^\n]*?(?:[.!?](?=[ \t]|$)|$))",
+    re.IGNORECASE | re.MULTILINE,
+)
+
 
 def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tuple[str, bool]:
-    """Replace preview/revision-review links without changing the source PR body."""
+    """Remove obsolete review links and agent handoff conditions from Client checks."""
     recorded_hosts = {host.casefold().rstrip(".") for host in preview_hosts if host}
     changed = False
 
@@ -61,8 +68,76 @@ def release_test_notes(notes: str, *, preview_hosts: tuple[str, ...] = ()) -> tu
         changed = True
         return "\nCheck this on the testing site.\n"
 
-    displayed = _NOTE_LINK.sub(replace, notes).strip()
+    def remove_process(match: re.Match[str]) -> str:
+        nonlocal changed
+        instruction = match["instruction"]
+        # An internal handoff condition is not a Client's testing obligation.
+        # Do not infer or rewrite arbitrary product instructions about acceptance.
+        if not all(
+            re.search(pattern, instruction, re.IGNORECASE)
+            for pattern in (
+                r"\brelease\b",
+                r"\bLaunchplane\b",
+                r"\b(?:cleanup|memory)\b",
+                r"\b(?:after|once|until|when)\b",
+                r"\b(?:evidence|cleanup)\b.*\b(?:recorded|completed?)\b",
+            )
+        ):
+            return match[0]
+        changed = True
+        condition_end = max(
+            match.end()
+            for match in re.finditer(r"\b(?:recorded|completed?)\b", instruction, re.IGNORECASE)
+        )
+        following_check = re.search(
+            r"\s+(?:then|and)(?:\s+then)?\s+"
+            r"(?P<check>(?:check|confirm|verify|open|try|repeat|inspect|look|test)\b.*)",
+            instruction[condition_end:],
+            re.IGNORECASE,
+        )
+        retained = "." if match["join"].startswith(",") else ""
+        if following_check:
+            check = following_check["check"]
+            retained += (" " if retained else "") + check[0].upper() + check[1:]
+        return retained
+
+    displayed = "".join(
+        original if fence else _RELEASE_PROCESS_INSTRUCTION.sub(remove_process, original)
+        for original, (_line, _heading, fence) in zip(
+            notes.splitlines(keepends=True), _markdown_lines(notes), strict=True
+        )
+    )
+    displayed = _NOTE_LINK.sub(replace, displayed)
+    if changed:
+        # A batch member whose only instruction was removed still needs notes.
+        lines = displayed.splitlines()
+        members = [
+            (index, int(number[1]))
+            for index, (_line, heading, _fence) in enumerate(_markdown_lines(displayed))
+            if heading is not None
+            and len(heading[1]) == 3
+            and (number := re.match(r"#([1-9][0-9]*)\b", heading[2]))
+        ]
+        for position in range(len(members) - 1, -1, -1):
+            start, member_number = members[position]
+            end = members[position + 1][0] if position + 1 < len(members) else len(lines)
+            if not _note_content("\n".join(lines[start + 1 : end])):
+                lines.insert(start + 1, missing_owner_test_notes(member_number))
+        if not _note_content("\n".join(lines)):
+            lines = []
+        displayed = "\n".join(lines)
+    displayed = displayed.strip()
     return displayed, changed
+
+
+def _note_content(notes: str) -> bool:
+    return any(
+        line.strip()
+        and heading is None
+        and not line.strip().endswith(":")
+        and not re.fullmatch(r"[ \t]*(?:[-*+]|[0-9]+[.)]|`{3,}|~{3,})[ \t]*", line)
+        for line, heading, _fence in _markdown_lines(notes)
+    )
 
 
 # Batch PRs written before the role words changed say "Owner"; both are read.
