@@ -7,11 +7,7 @@ from unittest.mock import patch
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
-from control_plane.contracts.dokploy_target_record import (
-    DokployTargetPolicies,
-    DokployTargetRecord,
-    DokployTargetStaffTestingHold,
-)
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import DeploymentEvidence
@@ -21,6 +17,12 @@ from control_plane.dokploy_target_setup_http import (
     DokployTargetSetupEnvelope,
 )
 from control_plane.testing_event_deploy_recovery import testing_event_execution_lock_name
+from control_plane.testing_lane_hold import (
+    TestingHoldApplyRequest,
+    apply_testing_hold_plan,
+    build_testing_hold_plan,
+    read_staff_testing_hold,
+)
 from control_plane.workflows.generic_web_deploy_provider import (
     dokploy_generic_web_provider_target_key,
 )
@@ -132,7 +134,7 @@ class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
             control_plane_root_path=self.root,
         )
 
-    async def post(self, **changes: Any) -> Any:
+    async def post(self, *, idempotency_key: str = "first-testing-setup", **changes: Any) -> Any:
         return await request(
             self.app,
             "POST",
@@ -140,7 +142,7 @@ class _DirectorTestingSetupFixture(unittest.IsolatedAsyncioTestCase):
             payload={**self.payload, **changes},
             headers={
                 "Authorization": "Bearer local-operator-token",
-                "Idempotency-Key": "first-testing-setup",
+                "Idempotency-Key": idempotency_key,
             },
         )
 
@@ -307,24 +309,29 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
         self.payload["confirmation"] = DokployTargetSetupEnvelope.model_validate(
             self.payload
         ).expected_confirmation
+        created = {
+            "application": {
+                "applicationId": "created-application",
+                "name": self.payload["target_name"],
+                "environmentId": "created-environment",
+                "serverId": self.payload["server_id"],
+            },
+            "compose": {
+                "composeId": "created-compose",
+                "name": "new-testing-target",
+                "environmentId": "created-environment",
+                "serverId": self.payload["server_id"],
+                "sourceType": "raw",
+            },
+        }
         self.enterContext(
             patch(
                 "control_plane.dokploy_target_setup_http.fetch_dokploy_target_payload_for_setup",
-                return_value={
-                    "applicationId": "created-application",
-                    "name": self.payload["target_name"],
-                    "environmentId": "created-environment",
-                    "serverId": self.payload["server_id"],
-                },
+                side_effect=lambda _host, _token, target_type, _target_id: created[target_type],
             )
         )
 
-    def register_unused_testing_compose(
-        self,
-        *,
-        source_label: str = CREATE_COMPOSE_SOURCE_LABEL,
-        hold_purpose: Literal["staff_testing", "isolation_staging"] | None = "isolation_staging",
-    ) -> ProviderTargetRecord:
+    def register_testing_lane(self) -> None:
         if all(lane.instance != "testing" for lane in self.profile.lanes):
             self.profile = self.profile.model_copy(
                 update={
@@ -335,22 +342,47 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
                 }
             )
             self.store.write_product_profile_record(self.profile)
-        hold = (
-            DokployTargetStaffTestingHold(
-                reason="Stage the application lane.", purpose=hold_purpose
-            )
-            if hold_purpose
-            else None
+
+    def apply_testing_hold(self, purpose: Literal["staff_testing", "isolation_staging"]) -> None:
+        """Hold the lane through the supported path, which relabels its target record."""
+        dry_run = TestingHoldApplyRequest(
+            product=self.profile.product,
+            context=self.context,
+            instance="testing",
+            hold=True,
+            purpose=purpose,
+            reason="Stage the application lane.",
         )
+        plan, _ = build_testing_hold_plan(
+            record_store=self.store, request=dry_run, actor="operator"
+        )
+        apply_testing_hold_plan(
+            record_store=self.store,
+            request=dry_run.model_copy(
+                update={"mode": "apply", "reviewed_plan_sha256": plan.plan_sha256}
+            ),
+            actor="operator",
+        )
+
+    def register_unused_testing_compose(
+        self,
+        *,
+        created_by: str = CREATE_COMPOSE_SOURCE_LABEL,
+        completed_source: bool = False,
+        hold_purpose: Literal["staff_testing", "isolation_staging"] | None = "isolation_staging",
+    ) -> ProviderTargetRecord:
+        self.register_testing_lane()
         target = self.production.model_copy(
+            update={"instance": "testing", "source_type": "raw", "source_label": created_by}
+        )
+        if completed_source:
+            target = target.model_copy(update={"source_type": "git", "custom_git_branch": "a" * 40})
+        target_id = self.production_id.model_copy(
             update={
                 "instance": "testing",
-                "source_label": source_label,
-                "policies": DokployTargetPolicies(staff_testing_hold=hold),
+                "target_id": "empty-testing-compose",
+                "source_label": created_by,
             }
-        )
-        target_id = self.production_id.model_copy(
-            update={"instance": "testing", "target_id": "empty-testing-compose"}
         )
         provider = ProviderTargetRecord.from_dokploy_records(
             target_record=target, target_id_record=target_id
@@ -358,6 +390,8 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
         self.store.write_dokploy_target_record(target)
         self.store.write_dokploy_target_id_record(target_id)
         self.store.write_provider_target_record(provider)
+        if hold_purpose:
+            self.apply_testing_hold(hold_purpose)
         return provider
 
     def record_testing_deploy(self, status: Literal["pass", "fail"]) -> None:
@@ -401,10 +435,19 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
         self.assertEqual(self.current_testing_target_id(), "created-application")
         self.assert_production_unchanged()
 
-    async def test_director_replaces_a_testing_target_that_never_deployed(self) -> None:
-        provider = self.register_unused_testing_compose()
+    async def test_director_creates_holds_then_replaces_an_unused_testing_target(self) -> None:
+        compose = await self.post(
+            operation="create-compose", target_name="new-testing-target", idempotency_key="compose"
+        )
+        self.assertEqual(compose.status_code, 202, compose.text)
+        self.register_testing_lane()
+        self.apply_testing_hold("isolation_staging")
         self.record_testing_deploy("fail")
-        result = await self.post(**self.expected(provider))
+        current = self.store.read_provider_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.provider.reset_mock()
+        result = await self.post(**self.expected(current), idempotency_key="application")
         self.assertEqual(result.status_code, 202, result.text)
         self.assertEqual(
             [call.args[2] for call in self.provider.call_args_list],
@@ -418,10 +461,7 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             ("created-application", "application"),
         )
         # The hold moves with the lane, so a deploy queued behind the lock still waits.
-        moved = self.store.read_dokploy_target_record(
-            context_name=self.context, instance_name="testing"
-        )
-        hold = moved.policies.staff_testing_hold
+        hold = read_staff_testing_hold(record_store=self.store, context=self.context)
         self.assertIsNotNone(hold)
         assert hold is not None
         self.assertEqual(hold.purpose, "isolation_staging")
@@ -442,8 +482,8 @@ class DirectorTestingApplicationLaneTests(_DirectorTestingSetupFixture):
             deployment_record_id="testing-deploy-fail",
         )
         for name, registration, served in (
-            ("adopted target", {"source_label": "service:dokploy-targets:setup:adopt"}, False),
-            ("source completed", {"source_label": "service:complete-compose-source"}, False),
+            ("adopted target", {"created_by": "service:dokploy-targets:setup:adopt"}, False),
+            ("source completed", {"completed_source": True}, False),
             ("staff testing", {"hold_purpose": "staff_testing"}, False),
             ("no hold", {"hold_purpose": None}, False),
             ("has served", {}, True),

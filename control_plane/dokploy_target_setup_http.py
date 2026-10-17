@@ -34,7 +34,7 @@ from control_plane.dokploy import compose as dokploy_compose
 
 CREATE_COMPOSE_SOURCE_LABEL = "service:dokploy-targets:setup:create-compose"
 CREATE_APPLICATION_SOURCE_LABEL = "service:dokploy-targets:setup:create-application"
-# Targets the setup route created empty; source completion and adoption relabel them.
+# Id-record labels of targets the setup route created empty.
 EMPTY_TARGET_SETUP_SOURCE_LABELS = frozenset(
     {CREATE_COMPOSE_SOURCE_LABEL, CREATE_APPLICATION_SOURCE_LABEL}
 )
@@ -149,7 +149,19 @@ def _require_never_deployed_testing_target(
     target = record_store.read_dokploy_target_record(
         context_name=request.context, instance_name=request.instance
     )
-    if target.source_label not in EMPTY_TARGET_SETUP_SOURCE_LABELS:
+    # Only binding a target writes its id record, so that label names its creator;
+    # later writers such as holds relabel the target record itself.
+    created_by = record_store.read_dokploy_target_id_record(
+        context_name=request.context, instance_name=request.instance
+    ).source_label
+    if (
+        created_by not in EMPTY_TARGET_SETUP_SOURCE_LABELS
+        or target.source_type not in {"", "raw"}
+        or target.custom_git_url
+        or target.custom_git_branch
+        or target.domains
+        or target.public_hosts
+    ):
         raise ValueError("First testing setup replaces only a target Launchplane created empty.")
     hold = target.policies.staff_testing_hold
     if hold is None or hold.purpose != "isolation_staging":
