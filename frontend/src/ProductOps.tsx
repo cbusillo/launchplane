@@ -336,8 +336,8 @@ function ProductDirectoryRow({ product }: { product: ProductSiteOverview }) {
           <strong>
             {previewInventoryPresentation(product.preview).headline}
           </strong>
-          {product.preview.enabled && product.preview.trust_state !== "verified" && product.preview.trust_state !== "recorded" ? <small>{product.preview.active_count} recorded; live inventory unverified</small> : null}
-          {product.preview.enabled ? <EvidenceBadge compact state={product.preview.trust_state} qualifier="Inventory" /> : <small>Not applicable</small>}
+          <small className="directory-evidence-detail">{previewInventoryPresentation(product.preview).detail}</small>
+          {product.preview.enabled ? <EvidenceBadge compact state={product.preview.trust_state} qualifier="Inventory" /> : null}
         </span>
         <span className="directory-warnings" data-has-warnings={warnings.length > 0}>
           {warnings.length ? <AlertTriangle size={15} aria-hidden="true" /> : null}
@@ -373,8 +373,37 @@ function DirectoryLane({
         {headline}
       </strong>
       <EvidenceBadge compact state={environment?.topology.trust_state ?? "missing"} qualifier="Topology evidence" />
+      <small className="directory-evidence-detail">
+        {environment ? topologyEvidenceDetail(environment) : "This product has no recorded lane for this environment."}
+      </small>
     </span>
   );
+}
+
+function topologyEvidenceDetail(environment: ProductEnvironmentSummary): string {
+  const topology = environment.topology;
+  const details = topology.warnings.map(warning => warning.detail);
+  const privateWithoutRoute = topology.desired.public_website === "none" &&
+    topology.provider_recorded.authority_status === "missing";
+  const components = [
+    { label: "Configured topology", evidence: topology.desired },
+    { label: privateWithoutRoute ? "Recorded placement" : "Route record",
+      evidence: privateWithoutRoute ? topology.provider_recorded.placement : topology.provider_recorded },
+    { label: "Runtime observation", evidence: topology.observed.placement },
+    ...(topology.desired.public_website === "none" ? [] : [
+      { label: "Public ingress", evidence: topology.observed.ingress },
+      ...topology.observed.tls_domains.map(domain => ({ label: `TLS ${domain.domain_name}`, evidence: domain })),
+    ]),
+  ];
+  for (const { label, evidence } of components) {
+    if (topology.trust_state !== "verified" && evidence.trust_state === topology.trust_state) {
+      details.push(`${label}: ${trustLabel(evidence.trust_state)}. ${evidence.provenance.detail}`);
+    }
+  }
+  if (topology.observed.placement.runtime_identity_status === "unchecked") {
+    details.push(topology.observed.placement.runtime_identity_detail || "Runtime identity has not been verified.");
+  }
+  return [...new Set(details.filter(Boolean))].join(" ");
 }
 
 function ProductWorkspace({
