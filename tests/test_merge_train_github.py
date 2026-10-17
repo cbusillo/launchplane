@@ -1,8 +1,11 @@
 import unittest
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.github_app_identity import ADVISORY_GITHUB_APP_ID_ENV_KEY
 from types import SimpleNamespace
 from typing import Any, cast
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from email.message import Message
 from http.client import IncompleteRead
 from unittest.mock import patch
@@ -57,6 +60,9 @@ from control_plane.merge_train_candidate_failures import classify_candidate_chec
 
 from tests.test_merge_train_dependency_updates import INDIRECT_PATCH, SCOPED_MINOR
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.support.profiles import product_profile_payload
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 class _ReadOnlyMergeTrainTransport(RecordingMergeTrainGitHubTransport):
@@ -3155,6 +3161,91 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
 
 class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
+    def test_veto_queries_the_profiles_preserved_repository_spelling(self) -> None:
+        repository = "CBusillo/SellYourOutboard"
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            payload = product_profile_payload("site")
+            payload.update(
+                repository=repository, owner={"github_login": "client", "github_id": "901"}
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(payload)
+            )
+            store.write_product_review_decision_record(
+                _client_veto_record(repository=repository, head_sha="head-42")
+            )
+            reader = GitHubMergeTrainSnapshotReader(
+                transport=RecordingMergeTrainGitHubTransport(responses=()),
+                branch_refresh_store=cast(Any, store),
+            )
+            self.assertTrue(
+                reader.client_veto(
+                    repository=repository.casefold(), pull_request_number=42, head_sha="head-42"
+                )
+            )
+
+    def test_engineering_only_notes_do_not_clear_current_client_veto(self) -> None:
+        rejection = ProductReviewDecisionRecord(
+            record_id="client-veto",
+            product="site",
+            repository="cbusillo/sellyouroutboard",
+            pull_request_number=42,
+            head_sha="head-42",
+            decision="changes_requested",
+            reason="The changed page is wrong.",
+            owner_github_id="901",
+            owner_github_login="client",
+            decided_at="2026-10-16T18:00:00Z",
+        )
+        cases = (
+            ((rejection,), "fail", True),
+            ((rejection.model_copy(update={"head_sha": "old-head"}),), "pass", False),
+            ((rejection.model_copy(update={"owner_github_id": "902"}),), "pass", False),
+            ((rejection.model_copy(update={"product": "another-site"}),), "pass", False),
+            ((rejection.model_copy(update={"decision": "accepted"}), rejection), "pass", False),
+            ((), "pass", False),
+        )
+        for decisions, expected_status, expected_review in cases:
+            with self.subTest(decisions=decisions):
+                pull = _github_pull_request(42)
+                pull["body"] = "## Client test notes\nNothing for the Client to test: CI only."
+                pull["labels"] = [{"name": "ready-to-merge"}]
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _github_branch(),
+                        [pull],
+                        pull,
+                        {"permission": "admin"},
+                        _label_events(),
+                        _combined_status(),
+                        {"check_runs": [_check_run("completed", "success")]},
+                        _conversation_rule(),
+                        [],
+                    )
+                )
+                store = _client_veto_store(decisions)
+                snapshot = GitHubMergeTrainSnapshotReader(
+                    transport=transport, branch_refresh_store=cast(Any, store)
+                ).read_merge_train_snapshot(repository=rejection.repository, base_branch="main")
+                self.assertEqual(snapshot.pull_requests[0].required_checks_status, expected_status)
+                self.assertEqual(snapshot.pull_requests[0].owner_review_required, expected_review)
+
+    def test_direct_merge_rechecks_veto_after_notes_reclassification(self) -> None:
+        pull = _github_pull_request(42)
+        pull["body"] = "## Client test notes\nNothing for the Client to test: CI only."
+        pull["labels"] = []
+        rejection = _client_veto_record(repository="cbusillo/sellyouroutboard", head_sha="head-42")
+        transport = RecordingMergeTrainGitHubTransport(responses=(pull,))
+        client = GitHubMergeTrainClient(
+            transport=transport, branch_refresh_store=cast(Any, _client_veto_store((rejection,)))
+        )
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            client.require_current_client_review(
+                repository=rejection.repository, pull_request_number=42, head_sha="head-42"
+            )
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+
     def test_unknown_mergeability_uses_current_base_ancestry_for_refresh_only(self) -> None:
         for status, expected in (
             ("diverged", "update_branch"),
@@ -4353,6 +4444,39 @@ def _advisory_runtime_records(**_: object) -> tuple[RuntimeEnvironmentRecord, ..
             env={ADVISORY_GITHUB_APP_ID_ENV_KEY: "77"},
             updated_at="2026-10-05T14:00:00Z",
         ),
+    )
+
+
+def _client_veto_record(
+    *, repository: str, head_sha: str, number: int = 42
+) -> ProductReviewDecisionRecord:
+    return ProductReviewDecisionRecord(
+        record_id="client-veto",
+        product="site",
+        repository=repository,
+        pull_request_number=number,
+        head_sha=head_sha,
+        decision="changes_requested",
+        reason="The changed page is wrong.",
+        owner_github_id="901",
+        owner_github_login="client",
+        decided_at="2026-10-16T18:00:00Z",
+    )
+
+
+def _client_veto_store(decisions: tuple[ProductReviewDecisionRecord, ...]) -> SimpleNamespace:
+    return SimpleNamespace(
+        list_product_profile_records=lambda: (
+            SimpleNamespace(
+                product="site",
+                release_on_acceptance="held",
+                is_active=True,
+                repository="cbusillo/sellyouroutboard",
+                owner=SimpleNamespace(is_set=True, github_id="901", review_label="owner-review"),
+            ),
+        ),
+        list_product_review_decision_records=lambda **_: decisions,
+        list_runtime_environment_records=_advisory_runtime_records,
     )
 
 

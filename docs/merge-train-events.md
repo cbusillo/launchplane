@@ -46,7 +46,8 @@ one-action interfaces; this progression belongs to the in-service worker.
 The GitHub Runner defers a pass when the controller returns HTTP 409 with
 `merge_train_controller_lease_held`: another worker owns that train's lease.
 It records the deferral in the job summary, sends no PR feedback, and leaves
-the next scheduled pass to reobserve. Other 409 responses still fail the job.
+the service scheduler or next manual pass to reobserve. Other 409 responses
+still fail the job.
 
 The App must already deliver these events to the receiver with its configured
 managed webhook secret. This source change adds no App subscription, grant or
@@ -54,7 +55,7 @@ credential; enabling missing subscriptions is a separate administrator action.
 Deployment and live delivery are separate from the local notification rehearsal.
 
 See [merge-train policy](merge-train-policy.md) for admission, leases, policy
-records and the existing service-worker and GitHub sweep entrypoints.
+records and the service-worker sweeps and manual GitHub entrypoint.
 
 ## Stall monitoring
 
