@@ -104,6 +104,13 @@ def _candidate_pull_requests(
     return [_owned_batch_pull_request(payload, candidate) for payload in pulls]
 
 
+def has_batch_pull_request(
+    *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
+) -> bool:
+    """Keep unbound or edited generated history out of legacy singleton recovery."""
+    return bool(_candidate_pull_requests(client=client, candidate=candidate))
+
+
 def _owned_batch_pull_request(
     payload: object, candidate: MergeTrainBatchCandidate
 ) -> dict[str, object]:
@@ -239,7 +246,7 @@ def close_batch_pull_request(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
 ) -> None:
     """Close PRs owned by this generated ref even when their mutable fields drift."""
-    if not candidate.candidate_sha or len(candidate.entries) < 2:
+    if not candidate.candidate_sha or candidate.head_check_reuse is not None:
         return
     for payload in _candidate_pull_requests(client=client, candidate=candidate):
         number = payload["number"]
@@ -320,10 +327,8 @@ def changed_closed_batch_body(
 def ensure_batch_pull_request(
     *, client: GitHubMergeTrainClient, candidate: MergeTrainBatchCandidate
 ) -> int:
-    if candidate.status not in {"ready_for_checks", "passed"} or len(candidate.entries) < 2:
-        raise MergeAdmissionDeniedError(
-            "Batch PR creation requires a fully built multi-entry candidate."
-        )
+    if candidate.status not in {"ready_for_checks", "passed"}:
+        raise MergeAdmissionDeniedError("Batch PR creation requires a fully built candidate.")
     branch = _candidate_branch(
         repository=candidate.repository,
         base_branch=candidate.base_branch,

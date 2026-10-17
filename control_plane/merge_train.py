@@ -453,7 +453,8 @@ def build_merge_train_dry_run_result(
         skip_branch_update=(
             batch_landing
             and repository_policy.merge_method == "merge"
-            and len(eligible_entries) > 1
+            and bool(eligible_entries)
+            and not any(entry.requires_individual_landing for entry in eligible_entries)
         ),
     )
     if batch_landing and intended_next_action == "merge":

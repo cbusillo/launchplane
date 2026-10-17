@@ -30,6 +30,8 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
         failed_candidate: bool = False,
         conflict: Literal["none", "leaves_batch", "leaves_single"] = "none",
         accepted_features: bool = False,
+        individual: bool = False,
+        ownership_flip: bool = False,
     ) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
@@ -65,7 +67,12 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
         behind_snapshot = snapshot.model_copy(
             update={
                 "pull_requests": tuple(
-                    pull_request.model_copy(update={"branch_update_required": True})
+                    pull_request.model_copy(
+                        update={
+                            "branch_update_required": True,
+                            "requires_individual_landing": individual,
+                        }
+                    )
                     for pull_request in pull_requests
                 )
             }
@@ -101,6 +108,14 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 _FakeMergeTrainGitHubClient,
             ),
             patch.object(_FakeMergeTrainGitHubClient, "update_pull_request_branch") as update,
+            patch.object(
+                _FakeMergeTrainGitHubClient, "close_batch_pull_request"
+            ) as close_candidate,
+            patch.object(
+                _FakeMergeTrainGitHubClient,
+                "ensure_batch_pull_request",
+                return_value=None if multiple else 99,
+            ) as candidate_pr,
             patch(
                 "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader.read_merge_train_snapshot",
                 return_value=snapshot,
@@ -138,7 +153,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                     _FakeMergeTrainGitHubClient,
                     "read_merge_train_snapshot",
                     return_value=behind_snapshot,
-                ),
+                ) as live_snapshot,
                 patch.object(
                     _FakeMergeTrainGitHubClient,
                     "probe_batch_entry_conflicts",
@@ -151,16 +166,53 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 )
                 update.assert_not_called()
                 mutated = await _post_merge_train_controller_run_once(app, payload)
-                if multiple and conflict == "none":
+                if conflict == "none" and not individual:
                     actions = []
-                    for _ in range(4):
+                    for step in range(4 if multiple else 3):
+                        if ownership_flip and step == 2:
+                            live_snapshot.return_value = behind_snapshot.model_copy(
+                                update={
+                                    "pull_requests": tuple(
+                                        pr.model_copy(update={"requires_individual_landing": True})
+                                        for pr in behind_snapshot.pull_requests
+                                    )
+                                }
+                            )
                         response = await _post_merge_train_controller_run_once(app, payload)
                         self.assertEqual(response.status_code, 202, response.text)
                         actions.append(response.json()["result"]["controller_action"])
+                    if ownership_flip:
+                        self.assertTrue(close_candidate.called)
+                        self.assertEqual(
+                            actions, ["build_candidate", "observe_candidate", "update_branch"]
+                        )
+                        self.assertFalse(store.list_merge_train_batch_landing_plan_records())
+                        self.assertFalse(
+                            store.list_merge_train_batch_candidate_records(status="active")
+                        )
+                        update.assert_called_once_with(
+                            repository=snapshot.repository,
+                            pull_request_number=behind_snapshot.pull_requests[0].number,
+                            expected_head_sha=behind_snapshot.pull_requests[0].head_sha,
+                        )
+                        return
                     self.assertEqual(
                         actions,
-                        ["build_candidate", "observe_candidate", "plan_landing", "land_batch"],
+                        ["build_candidate", "observe_candidate", "plan_landing"]
+                        + (["land_batch"] if multiple else []),
                     )
+                    planned_landing = store.list_merge_train_batch_landing_plan_records(
+                        repository=snapshot.repository, base_branch=snapshot.base_branch
+                    )
+                    self.assertTrue(planned_landing)
+                    self.assertTrue(
+                        all(
+                            record.landing_plan.candidate_pull_request_number
+                            == candidate_pr.return_value
+                            for record in planned_landing
+                        )
+                    )
+                    self.assertTrue(candidate_pr.called)
             self.assertEqual(dry_run.status_code, 202, dry_run.text)
             self.assertEqual(mutated.status_code, 202, mutated.text)
             result = mutated.json()["result"]
@@ -176,7 +228,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                     [entry.number for entry in probe.call_args.kwargs["queue"]],
                     [entry.number for entry in behind_snapshot.pull_requests],
                 )
-            if len(expected_entries) > 1:
+            if expected_entries and not individual:
                 update.assert_not_called()
                 self.assertEqual(dry_run.json()["result"]["controller_action"], "plan_candidate")
                 self.assertEqual(result["controller_action"], "plan_candidate")
@@ -200,6 +252,7 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(planned.candidate.base_sha, behind_snapshot.base_sha)
             else:
                 self.assertEqual(result["controller_action"], "update_branch")
+                candidate_pr.assert_not_called()
                 update.assert_called_once_with(
                     repository=snapshot.repository,
                     pull_request_number=pull_requests[0].number,
@@ -212,22 +265,28 @@ class BatchBranchRefreshTests(unittest.IsolatedAsyncioTestCase):
     async def test_accepted_features_land_together_while_other_features_wait(self) -> None:
         await self._check_planning(multiple=True, accepted_features=True)
 
-    async def test_single_entry_still_refreshes(self) -> None:
+    async def test_single_entry_uses_a_candidate_without_refreshing(self) -> None:
         await self._check_planning(multiple=False)
+
+    async def test_singleton_ownership_flip_replans_before_original_pr_landing(self) -> None:
+        await self._check_planning(multiple=False, ownership_flip=True)
+
+    async def test_owned_single_entry_keeps_its_original_pr_refresh(self) -> None:
+        await self._check_planning(multiple=False, individual=True)
 
     async def test_failed_candidate_reflows_to_a_batch_without_refreshing_heads(self) -> None:
         await self._check_planning(multiple=True, failed_candidate=True)
 
-    async def test_failed_candidate_reflows_to_a_single_entry_and_refreshes(self) -> None:
+    async def test_failed_candidate_reflows_to_a_single_entry_without_refreshing(self) -> None:
         await self._check_planning(multiple=False, failed_candidate=True)
 
     async def test_probe_leaves_a_batch_and_preserves_the_remaining_heads(self) -> None:
         await self._check_planning(multiple=True, conflict="leaves_batch")
 
-    async def test_probe_leaves_one_entry_and_restores_its_refresh(self) -> None:
+    async def test_probe_leaves_one_entry_and_preserves_its_head(self) -> None:
         await self._check_planning(multiple=True, conflict="leaves_single")
 
-    async def test_failed_candidate_probe_leaves_one_entry_and_restores_its_refresh(self) -> None:
+    async def test_failed_candidate_probe_leaves_one_entry_and_preserves_its_head(self) -> None:
         await self._check_planning(multiple=True, failed_candidate=True, conflict="leaves_single")
 
 
@@ -264,7 +323,7 @@ class BatchBranchRefreshDecisionTests(unittest.TestCase):
                 self.assertIsNotNone(result.selected_pr)
                 self.assertTrue(result.selected_pr and result.selected_pr.branch_update_required)
 
-    def test_single_eligible_entry_and_non_merge_methods_still_refresh(self) -> None:
+    def test_individual_landing_and_non_merge_methods_still_refresh(self) -> None:
         snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
         ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
@@ -285,7 +344,12 @@ class BatchBranchRefreshDecisionTests(unittest.TestCase):
                     snapshot=snapshot.model_copy(
                         update={
                             "pull_requests": (
-                                first.model_copy(update={"branch_update_required": True}),
+                                first.model_copy(
+                                    update={
+                                        "branch_update_required": True,
+                                        "requires_individual_landing": merge_method == "merge",
+                                    }
+                                ),
                                 second.model_copy(update={"is_draft": not eligible_second}),
                             )
                         }

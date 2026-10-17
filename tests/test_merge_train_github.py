@@ -3393,9 +3393,13 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                     repository="cbusillo/sellyouroutboard", base_branch="main"
                 )
                 decision = build_merge_train_dry_run_result(
-                    policy=build_test_merge_train_policy(), snapshot=snapshot, batch_landing=True
+                    policy=build_test_merge_train_policy(), snapshot=snapshot
                 )
                 self.assertEqual(decision.intended_next_action, expected)
+                candidate_decision = build_merge_train_dry_run_result(
+                    policy=build_test_merge_train_policy(), snapshot=snapshot, batch_landing=True
+                )
+                self.assertEqual(candidate_decision.intended_next_action, "wait_for_checks")
                 self.assertEqual(snapshot.pull_requests[0].mergeable, "unknown")
                 self.assertIn(
                     "/repos/cbusillo/sellyouroutboard/compare/base-main-current...head-13",
