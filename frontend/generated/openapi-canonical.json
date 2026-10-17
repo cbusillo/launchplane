@@ -91040,6 +91040,55 @@
             }
           },
           {
+            "in": "query",
+            "name": "source_mode",
+            "required": false,
+            "schema": {
+              "default": "container-export",
+              "enum": [
+                "ssh",
+                "container-export"
+              ],
+              "title": "Source Mode",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "task_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[a-f0-9]{32}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Task Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "operation_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Operation Id"
+            }
+          },
+          {
             "in": "header",
             "name": "Authorization",
             "required": false,

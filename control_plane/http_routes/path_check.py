@@ -25,6 +25,7 @@ from control_plane.service_auth import (
     LocalAdminIdentity,
     LocalOperatorIdentity,
     LaunchplaneIdentity,
+    director_agent_identity,
 )
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -51,6 +52,9 @@ def register_product_path_check_read_routes(
         path: Annotated[PathName, Query()],
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
+        source_mode: Annotated[Literal["ssh", "container-export"], Query()] = "container-export",
+        task_id: Annotated[str | None, Query(pattern=r"^[a-f0-9]{32}$")] = None,
+        operation_id: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     ) -> ProductPathCheckResponse:
         trace_id = common.next_trace_id()
         try:
@@ -102,6 +106,13 @@ def register_product_path_check_read_routes(
 
         inputs = read_path_check_inputs(
             path=path,
+            control_plane_root=dependencies.control_plane_root,
+            source_mode=source_mode,
+            task_id=task_id,
+            operation_id=operation_id,
+            caller_can_generate=director_agent_identity(identity),
+            caller_can_provision=isinstance(identity, (LocalOperatorIdentity, LocalAdminIdentity))
+            or (isinstance(identity, GitHubHumanIdentity) and identity.role == "admin"),
             profile=profile,
             record_store=record_store,
             action_allowed=action_allowed,

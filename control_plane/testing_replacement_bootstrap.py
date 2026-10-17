@@ -197,7 +197,18 @@ def bootstrap_copy_prerequisites(
     generation: FreshOdooTestingGeneration | None,
     source_mode: Literal["ssh", "container-export"],
 ) -> tuple[tuple[str, ...], str]:
-    product = profile.product
+    require_testing_restore_policy(profile, context)
+    omitted = testing_credential_omissions(store, context, generation)
+    require_testing_credential_safety(store, context, omitted)
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED):
+        require_distinct_testing_credentials(store, profile, context)
+    source_binding = testing_restore_source_binding(
+        store, profile, context, target, generation, source_mode
+    )
+    return tuple(sorted(omitted)), source_binding
+
+
+def require_testing_restore_policy(profile: LaunchplaneProductProfileRecord, context: str) -> None:
     lane = next(
         lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
     )
@@ -205,9 +216,15 @@ def bootstrap_copy_prerequisites(
     if (
         len(production) != 1
         or not lane.odoo_data_policy.allows_rebuild_source("upstream_restore")
-        or lane.odoo_data_policy.upstream_source != f"{product}:{production[0].context}:prod"
+        or lane.odoo_data_policy.upstream_source
+        != f"{profile.product}:{production[0].context}:prod"
     ):
         raise ValueError("Prepare the testing-only same-product production restore policy first.")
+
+
+def testing_credential_omissions(
+    store: PostgresRecordStore, context: str, generation: FreshOdooTestingGeneration | None
+) -> frozenset[str]:
     bindings = site_delivered_secret_bindings_from_store(
         record_store=store, context_name=context, instance_name="testing"
     )
@@ -221,6 +238,15 @@ def bootstrap_copy_prerequisites(
         if omitted.difference(generation.omitted_runtime_keys):
             raise ValueError("Fresh testing credential delivery changed after review.")
         omitted = frozenset(generation.omitted_runtime_keys)
+    return omitted
+
+
+def require_testing_credential_safety(
+    store: PostgresRecordStore, context: str, omitted: frozenset[str]
+) -> None:
+    bindings = site_delivered_secret_bindings_from_store(
+        record_store=store, context_name=context, instance_name="testing"
+    )
     bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
     with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE):
         safety = evaluate_runtime_key_safety_for_live_target_sync(
@@ -239,8 +265,16 @@ def bootstrap_copy_prerequisites(
                 or record.instance != "testing"
             ):
                 raise ValueError("Fresh testing cannot carry a shared or production credential.")
-    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED):
-        require_distinct_testing_credentials(store, profile, context)
+
+
+def testing_restore_source_binding(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    target: DokployTargetRecord,
+    generation: FreshOdooTestingGeneration | None,
+    source_mode: Literal["ssh", "container-export"],
+) -> str:
     source_values: dict[str, str] = {}
     for scope in ("context", "instance"):
         for runtime_record in store.list_runtime_environment_records(context_name=context):
@@ -268,7 +302,7 @@ def bootstrap_copy_prerequisites(
             encoded_restore_source(source_values)
     if generation is not None and source_binding != generation.source_binding_sha256:
         raise ValueError("The reviewed production source authority changed.")
-    return tuple(sorted(omitted)), source_binding
+    return source_binding
 
 
 def bootstrap_plan(

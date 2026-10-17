@@ -249,3 +249,12 @@ clean up task accounts through this route. Otherwise retain a compatible image
 and its encrypted history for supported cleanup. Live account/sign-in proof
 is a separate post-landing session; source tests and fixture browser evidence
 do not claim any real testing walkthrough passed.
+
+Before a provision or initial-copy attempt, use the product's read-only
+`GET /v1/products/{product}/path-check?path=testing` to see all independent
+prerequisites together, including credential overlap even when no generation
+exists. Add `task_id` and the original `operation_id` to check their exact custody
+and resource qualification; select `source_mode=ssh` if that is the intended copy
+source (the default is `container-export`). Each failure has a plain description
+and fix kind. Dependent or unselected evidence stays unknown. See the
+[path-check contract](service-boundary.md#product-retirement) for the read boundary.
