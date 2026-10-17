@@ -153,8 +153,8 @@ def _reconcile_refused_production_request(
     if not _time(incident.opened_at) <= request.caller_retired_at <= now:
         raise ValueError("Caller retirement must follow the refused request and precede now.")
     profile = store.read_product_profile_record(incident.product)
-    lane = next(lane for lane in profile.lanes if lane.instance == "prod")
-    if not profile.is_active or lane.context != incident.context:
+    lane = next((lane for lane in profile.lanes if lane.instance == "prod"), None)
+    if lane is None or not profile.is_active or lane.context != incident.context:
         raise ValueError("The production lane has changed; inspect its current evidence.")
     history = store.list_public_ingress_observation_records(incident_id=incident.incident_id)
     if not history or any(

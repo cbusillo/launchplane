@@ -448,6 +448,41 @@ class ProductionDeliveryMonitorTests(unittest.TestCase):
             self.store.read_public_ingress_incident_record(incident.incident_id), recovered
         )
 
+    def test_reconciliation_refuses_a_removed_production_lane(self) -> None:
+        self.reject(reason="promotion_required")
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=2)
+        self.store.write_product_profile_record(self.profile.model_copy(update={"lanes": ()}))
+        with self.assertRaises(ValueError):
+            reconcile_refused_production_requests(
+                self.store,
+                requests=(self.reconciliation(incident.incident_id),),
+                observed_at=self.timestamp(),
+            )
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id), incident
+        )
+
+    def test_reconciliation_refuses_while_the_delivery_monitor_holds_the_lane(self) -> None:
+        self.reject(reason="promotion_required")
+        incident = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.now += timedelta(seconds=2)
+        self.healthy_production()
+        with (
+            self.store.delivery_evidence_index() as index,
+            index.lane_lock(self.lane.context, self.profile.product) as acquired,
+        ):
+            self.assertTrue(acquired)
+            with self.assertRaises(ValueError):
+                reconcile_refused_production_requests(
+                    self.store,
+                    requests=(self.reconciliation(incident.incident_id),),
+                    observed_at=self.timestamp(),
+                )
+        self.assertEqual(
+            self.store.read_public_ingress_incident_record(incident.incident_id), incident
+        )
+
     def test_legacy_lag_retires_without_recovering_a_real_delivery_failure(self) -> None:
         self.seed_legacy_lag()
         legacy = self.store.list_public_ingress_incident_records(status="open")[0]
