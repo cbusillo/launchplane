@@ -79,7 +79,14 @@ def retained_writer_receipt(
             ),
         }
     )
-    action = "receipt_resume_retryable" if retry_resume else "receipt_" + request.action
+    fenced = bool(saved.get("fenced"))
+    action = (
+        "receipt_fenced"
+        if fenced
+        else "receipt_resume_retryable"
+        if retry_resume
+        else "receipt_" + request.action
+    )
     evidence = run_recipient_program(
         root,
         projected,
@@ -106,7 +113,7 @@ def retained_writer_receipt(
         preparation_plan_sha256=request.preparation_plan_sha256,
         binding_id=request.binding_id,
         action=request.action,
-        completed=not retry_resume,
+        completed=not retry_resume and not fenced,
         pause_operation_id=saved["record_id"]
         if request.action == "pause"
         else request.pause_operation_id,
@@ -193,6 +200,7 @@ class RecipientWriterAdapter:
                 for entry in record.writer_custody
                 if entry.get("record_id") == self.request.pause_operation_id
                 and entry["request"]["action"] == "pause"
+                and not entry.get("fenced")
                 and entry["request"]["binding_id"] == self.request.binding_id
             ]
             if (

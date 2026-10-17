@@ -35,6 +35,7 @@ OdooTargetReplacementPlanBlockerCode = Literal[
     "upstream_restore_environment_invalid",
     "live_runtime_keys_invalid",
     "compose_or_override_render_failed",
+    "config_parameter_secret_reference_disagrees",
     "current_artifact_changed",
     "artifact_manifest_missing",
     "artifact_repository_mismatch",

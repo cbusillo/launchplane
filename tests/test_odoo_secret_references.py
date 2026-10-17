@@ -1,3 +1,7 @@
+import asyncio
+import contextlib
+import io
+import runpy
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -614,6 +618,58 @@ class SecretReferenceHttpTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status_code, 200, result.text)
         self.assertEqual(result.json()["result"]["entries"], [])
         self.assertFalse(result.json()["result"]["applied"])
+
+    async def test_operator_client_reviews_then_corrects_and_reads_back_agreement(self) -> None:
+        loop = asyncio.get_running_loop()
+
+        def call(payload: dict[str, object] | None) -> dict[str, object]:
+            response = asyncio.run_coroutine_threadsafe(self.submit(payload), loop).result()
+            self.assertEqual(response.status_code, 200, response.text)
+            body: dict[str, object] = response.json()
+            return body
+
+        transport = {
+            "resolve_settings": lambda _: {"service_url": "https://fixture.invalid", "token": "t"},
+            "validate_service_url": lambda _: None,
+            "request_launchplane_read": lambda **_: call(None),
+            "request_launchplane": lambda **kwargs: call(kwargs["body"]),
+            "public_trace_id": lambda value: value,
+        }
+        client = runpy.run_path(
+            str(Path(__file__).resolve().parents[1] / "scripts/reconcile-odoo-secret-references.py")
+        )
+        with TemporaryDirectory() as directory:
+            helper = Path(directory) / "launchplane-write-action.py"
+            helper.touch()
+            evidence = Path(directory) / "review.json"
+            argv = [
+                "client",
+                "dry-run",
+                "--operator-helper",
+                str(helper),
+                "--product",
+                "odoo-tenant-cm",
+                "--environment",
+                "prod",
+                "--evidence-file",
+                str(evidence),
+            ]
+            for mode in ("dry-run", "apply"):
+                argv[1] = mode
+                output = io.StringIO()
+                with (
+                    patch("runpy.run_path", return_value=transport),
+                    patch("sys.argv", argv + (["--reviewed-dry-run"] if mode == "apply" else [])),
+                    contextlib.redirect_stdout(output),
+                ):
+                    self.assertEqual(await asyncio.to_thread(client["main"]), 0)
+                for private in ("context-password", "lane-password", "private-unrelated-literal"):
+                    self.assertNotIn(private, output.getvalue() + evidence.read_text())
+            self.assertEqual(evidence.stat().st_mode & 0o777, 0o600)
+        stored = self.store.read_odoo_instance_override_record(
+            context_name="cm", instance_name="prod"
+        )
+        self.assertEqual(stored.config_parameters[0].value.secret_binding_id, "lane-password")
 
 
 class SecretReferenceCliTests(unittest.TestCase):
