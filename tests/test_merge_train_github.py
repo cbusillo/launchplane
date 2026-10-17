@@ -2051,7 +2051,6 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         rule_cases: tuple[object, ...] = (
             [],
             {},
-            [{}] * 100,
             [{"type": "required_status_checks", "parameters": {}}],
             [
                 {
@@ -2070,6 +2069,40 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     _required_branch_checks(
                         transport=transport, repository_path="owner/repo", base_branch="main"
                     )
+
+    def test_ruleset_checks_include_later_pages_and_multiple_publishers(self) -> None:
+        from control_plane.merge_train_github import _required_branch_checks
+
+        branch = {
+            "protected": True,
+            "protection": {"required_status_checks": {"enforcement_level": "off"}},
+        }
+        rule = {
+            "type": "required_status_checks",
+            "parameters": {
+                "required_status_checks": [{"context": "formula", "integration_id": 15368}],
+            },
+        }
+        later_rule = {
+            "type": "required_status_checks",
+            "parameters": {
+                "required_status_checks": [
+                    {"context": "formula", "integration_id": 99999},
+                    {"context": "audit"},
+                ],
+            },
+        }
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                branch,
+                [rule] * 100,
+                [{"type": "deletion"}, later_rule],
+            )
+        )
+        checks = _required_branch_checks(
+            transport=transport, repository_path="owner/repo", base_branch="release/v1"
+        )
+        self.assertEqual(set(checks), {("formula", 15368), ("formula", 99999), ("audit", None)})
 
     def test_observe_batch_candidate_checks_requires_pinned_check_app(self) -> None:
         candidate = _batch_candidate().model_copy(
