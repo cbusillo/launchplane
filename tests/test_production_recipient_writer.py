@@ -262,7 +262,7 @@ class RecipientWriterProgramTests(unittest.TestCase):
                 self.run_program("pause")
         with self.assertRaises(ValueError):
             self.run_program("fence")
-        with self.assertRaises(FileNotFoundError):
+        with self.assertRaises(ValueError):
             self.read_fence()
         self.assertFalse(self.row["State"]["Running"])
         self.assertEqual(self.effects, ["stop"])

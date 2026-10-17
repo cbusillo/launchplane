@@ -349,6 +349,7 @@ def fence_writer_operation(
         action="fence",
         checkpoint=fence_checkpoint,
         binding=writer.binding,
+        server_id=writer.host["server_id"],
     )
     with store._session_factory() as session:
         store._begin_serialized_write(session)

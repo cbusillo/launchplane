@@ -321,12 +321,15 @@ operation, the original pause of the retained writer during cutover, or the
 replacement pause of an inverse, and only after the original worker lease has
 expired.
 
-Apply runs the fixed writer program on the operation's own host, under the same
-writer lock the original job takes. An active job holds that lock and blocks the
-fence. If the original binding persisted `before.json`, the fence refuses: a
-witnessed writer may have stopped, and is reconciled from its witness instead.
-Otherwise it writes a permanent `fenced.json` tombstone for that binding only,
-and any late job for that binding refuses before touching a container. Other
+Apply runs the fixed writer program on the operation's own recorded host, and
+refuses if the provider has since moved the target to another server. It runs
+under the same writer lock the original job takes. An active job holds that lock
+and blocks the fence. If the original binding persisted `before.json`, the fence
+refuses: a witnessed writer may have stopped, and is reconciled from its witness
+instead. Otherwise it exclusively creates `before.json` as a permanent fence
+record for that binding only. Every dispatched writer program, including a job
+queued before this fence existed, refuses a witness that does not match its
+container before touching one, so any late job for that binding refuses. Other
 bindings and later operations are unaffected. Launchplane then records the
 no-effect disposition in custody, checking that custody and the original
 reservation did not change during the fence. The disposition is the flow's own

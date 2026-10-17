@@ -69,9 +69,7 @@ class WriterFenceHarness:
             + timedelta(seconds=1)
         ).isoformat()
 
-    def fence(
-        self, record_id: str, *, project: str, mode: str = "apply", reviewed: str = ""
-    ) -> Any:
+    def fence(self, record_id: str, *, mode: str = "apply", reviewed: str = "") -> Any:
         record = custody(self.store, self.product, self.context)
         assert record is not None
         request = RecipientWriterFenceRequest(
@@ -82,17 +80,15 @@ class WriterFenceHarness:
         )
 
         def host_fence(
-            root: Any, projected: Any, *, old: bool, action: str, checkpoint: Any, binding: str
-        ) -> None:
+            root: Any, projected: Any, spec: dict[str, Any], program: str, checkpoint: Any
+        ) -> dict[str, str]:
+            # Only the schedule transport is replaced; writer_action's identity
+            # and placement checks run, then the actual fixed program runs.
+            self.placements.append(projected.request.destination_server_id)  # type: ignore[attr-defined]
             checkpoint(ODOO_POST_DEPLOY_SCHEDULE_TRIGGER)
-            run_host(
+            return run_host(
                 self.base,
-                {
-                    "project": project,
-                    "service": projected.request.application_service,
-                    "binding": binding,
-                    "action": action,
-                },
+                {key: spec[key] for key in ("project", "service", "binding", "action")},
             )
 
         def host_read(
@@ -103,7 +99,7 @@ class WriterFenceHarness:
 
         with (
             patch(
-                "control_plane.production_recipient_writer_fence.writer_action",
+                "control_plane.production_recipient_cutover.run_recipient_program",
                 side_effect=host_fence,
             ),
             patch(
@@ -138,6 +134,7 @@ class TestingWriterFenceTests(WriterFenceHarness, unittest.TestCase):
         self.context = f.record.context
         self.base = self.control.host.root / "writer-custody"
         self.reads: list[str] = []
+        self.placements: list[str] = []
         self.dispatched: list[str] = []
 
     def dispatch(self, key: str, action: str = "pause", pause: str = "", lost: bool = True) -> Any:
@@ -204,15 +201,13 @@ class TestingWriterFenceTests(WriterFenceHarness, unittest.TestCase):
         assert record is not None
         operation = record.writer_custody[-1]["record_id"]
         with self.assertRaises(ValueError):
-            self.fence(operation, project="testing-peer", mode="dry-run")
+            self.fence(operation, mode="dry-run")
         with patch.object(
             self.store, "_database_mutation_timestamp", return_value=self.expired(operation)
         ):
-            result = self.fence(operation, project="testing-peer")
+            result = self.fence(operation)
             self.assertTrue(result.fenced)
-            self.assertEqual(
-                self.fence(operation, project="testing-peer", reviewed=result.plan_sha256), result
-            )
+            self.assertEqual(self.fence(operation, reviewed=result.plan_sha256), result)
         self.assertEqual(result.witness_binding, self.dispatched[0])
         with self.assertRaises(ValueError):
             self.late_pause(self.dispatched[0])
@@ -224,7 +219,7 @@ class TestingWriterFenceTests(WriterFenceHarness, unittest.TestCase):
         with self.assertRaises(ValueError):
             self.dispatch("resume-fenced", "resume", operation, lost=False)
         self.assertEqual(self.control.host.effects, [])
-        readback = self.fence(operation, project="testing-peer", mode="readback")
+        readback = self.fence(operation, mode="readback")
         self.assertEqual(readback.plan_sha256, result.plan_sha256)
         self.assertEqual(set(self.reads), {"testing-peer-id"})
         fresh = self.dispatch("next-pause", lost=False)
@@ -247,10 +242,25 @@ class TestingWriterFenceTests(WriterFenceHarness, unittest.TestCase):
             self.store, "_database_mutation_timestamp", return_value=self.expired(operation)
         ):
             with self.assertRaises(ValueError):
-                self.fence(operation, project="testing-peer")
+                self.fence(operation)
         self.assertEqual(custody(self.store, self.product, self.context), record)
         self.assertFalse(self.control.host.row["State"]["Running"])
         self.assertEqual(self.control.host.effects, ["stop"])
+
+    def test_target_moved_to_another_server_is_not_fenced_in_its_place(self) -> None:
+        self.assertEqual(self.dispatch("moved-pause").response_status_code, 409)
+        record = custody(self.store, self.product, self.context)
+        assert record is not None
+        operation = record.writer_custody[-1]["record_id"]
+        expired = self.expired(operation)
+        with patch.object(self.store, "_database_mutation_timestamp", return_value=expired):
+            reviewed = self.fence(operation, mode="dry-run").plan_sha256
+            self.control.fixture.fixture.provider["testing-peer-id"]["serverId"] = "other-host"
+            with self.assertRaises(ValueError):
+                self.fence(operation, reviewed=reviewed)
+        self.assertEqual(self.placements, [])
+        self.assertEqual(custody(self.store, self.product, self.context), record)
+        self.assertFalse(any(self.base.rglob("before.json")))
 
     def test_original_worker_retaking_the_operation_refuses_the_fence_commit(self) -> None:
         self.assertEqual(self.dispatch("raced-pause").response_status_code, 409)
@@ -259,7 +269,7 @@ class TestingWriterFenceTests(WriterFenceHarness, unittest.TestCase):
         operation = record.writer_custody[-1]["record_id"]
         expired = self.expired(operation)
         with patch.object(self.store, "_database_mutation_timestamp", return_value=expired):
-            reviewed = self.fence(operation, project="testing-peer", mode="dry-run").plan_sha256
+            reviewed = self.fence(operation, mode="dry-run").plan_sha256
         original = run_host
 
         def retake(base: Path, spec: dict[str, Any], **kwargs: Any) -> dict[str, str]:
@@ -274,7 +284,7 @@ class TestingWriterFenceTests(WriterFenceHarness, unittest.TestCase):
             patch(f"{__name__}.run_host", side_effect=retake),
         ):
             with self.assertRaises(ValueError):
-                self.fence(operation, project="testing-peer", reviewed=reviewed)
+                self.fence(operation, reviewed=reviewed)
         self.assertEqual(custody(self.store, self.product, self.context), record)
         with self.assertRaises(ValueError):
             self.late_pause(self.dispatched[0])
@@ -294,6 +304,7 @@ class CutoverWriterFenceTests(WriterFenceHarness, unittest.TestCase):
         self.context = self.cutover.record.context
         self.base = self.cutover.fixture.root.resolve() / "writer-custody"
         self.reads: list[str] = []
+        self.placements: list[str] = []
         self.dispatched: list[str] = []
 
     def lose(self, old: bool) -> Any:
@@ -322,7 +333,7 @@ class CutoverWriterFenceTests(WriterFenceHarness, unittest.TestCase):
         with patch.object(
             self.store, "_database_mutation_timestamp", return_value=self.expired(operation)
         ):
-            self.assertEqual(self.fence(operation, project="old-production").operation, "cutover")
+            self.assertEqual(self.fence(operation).operation, "cutover")
         record = custody(self.store, self.product, self.context)
         assert record is not None
         self.assertEqual(record.phase, "preflight_refused")
@@ -343,7 +354,7 @@ class CutoverWriterFenceTests(WriterFenceHarness, unittest.TestCase):
         self.assertEqual(self.cutover.deploys, 0)
         self.assertTrue(self.cutover.old_running)
         self.assertEqual(
-            self.fence(operation, project="old-production", mode="readback").witness_binding,
+            self.fence(operation, mode="readback").witness_binding,
             self.dispatched[0],
         )
         self.assertEqual(self.reads, [record.retained_target_id.target_id])
@@ -386,7 +397,7 @@ class CutoverWriterFenceTests(WriterFenceHarness, unittest.TestCase):
             with patch.object(
                 self.store, "_database_mutation_timestamp", return_value=self.expired(operation)
             ):
-                self.fence(operation, project=published.app_name)
+                self.fence(operation)
             with self.assertRaises(ValueError):
                 self.cutover.writer(
                     None,

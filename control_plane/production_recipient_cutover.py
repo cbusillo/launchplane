@@ -390,6 +390,7 @@ def writer_action(
     ],
     checkpoint: Callable[[str], None],
     binding: str | None = None,
+    server_id: str | None = None,
 ) -> None:
     host, token = source.read_dokploy_config(control_plane_root=root)
     target_id = record.retained_target_id.target_id if old else record.target_id
@@ -397,7 +398,9 @@ def writer_action(
         host=host, token=token, target_type="compose", target_id=target_id
     )
     if (
-        payload.get("composeId") != target_id
+        server_id is not None
+        and str(payload.get("serverId") or "") != server_id
+        or payload.get("composeId") != target_id
         or (old and provider_binding_digest(payload) != record.retained_provider_sha256)
         or (not old and payload.get("appName") != record.app_name)
     ):
@@ -494,21 +497,23 @@ def coordinate_writer(spec, *, base=None):
         return _coordinate_writer(spec,base=base,owner_path=directory/'binding.json')
     finally:
         os.close(descriptor)
+def writer_fence(spec):
+    return {'fenced':True,'binding':spec['binding'],'project':spec['project'],'service':spec['service']}
 def fence_writer(spec, *, base):
     # Runs under the active writer lock. Without the original witness this
-    # binding had no effect, and the tombstone refuses any late dispatch of it.
+    # binding had no effect. The fence occupies the witness path itself: every
+    # dispatched writer program refuses a witness that is not its container
+    # before any effect, including jobs queued before this fence existed.
     writer=hashlib.sha256(json.dumps([spec['project'],spec['service']]).encode()).hexdigest()
     directory=base/spec['binding']/writer
     if directory.is_symlink() or any(item.is_symlink() for item in directory.parents):
         raise ValueError('invalid writer custody')
     directory.mkdir(parents=True,exist_ok=True,mode=0o700)
-    if (directory/'before.json').exists() or (directory/'before.json').is_symlink():
-        raise ValueError('the original writer operation was witnessed')
-    path=directory/'fenced.json'
-    expected={'binding':spec['binding'],'project':spec['project'],'service':spec['service']}
+    path=directory/'before.json'
+    expected=writer_fence(spec)
     if path.exists() or path.is_symlink():
         if path.is_symlink() or json.loads(path.read_text())!=expected:
-            raise ValueError('writer fence changed')
+            raise ValueError('the original writer operation was witnessed')
         return
     with os.fdopen(os.open(path,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600),'w') as output:
         json.dump(expected,output)
@@ -572,11 +577,11 @@ def _coordinate_writer(spec, *, base, owner_path):
         directory=base/spec['binding']/writer
         if directory.is_symlink() or any(item.is_symlink() for item in directory.parents):
             raise ValueError('invalid writer custody')
-        if (directory/'fenced.json').exists() or (directory/'fenced.json').is_symlink():
-            raise ValueError('this writer operation is permanently fenced')
         if not receipt:
             directory.mkdir(parents=True,exist_ok=True,mode=0o700)
         path=directory/'before.json'
+        if path.exists() and not path.is_symlink() and json.loads(path.read_text()).get('fenced') is True:
+            raise ValueError('this writer operation is permanently fenced')
         if path.exists():
             if path.is_symlink():
                 raise ValueError('invalid writer witness')
@@ -656,9 +661,9 @@ def read_writer_receipt(spec, *, base=None):
     if path.is_symlink() or any(parent.is_symlink() for parent in path.parents):
         raise ValueError('invalid retained writer custody')
     if spec['action']=='receipt_fenced':
-        # A fence is written only without a witness, and no witness can follow it.
-        fence=directory/'fenced.json'
-        if fence.is_symlink() or json.loads(fence.read_text())!={'binding':spec['binding'],'project':spec['project'],'service':spec['service']} or path.exists():
+        # The fence was created exclusively in place of the witness, so no
+        # witness can exist beside it or follow it.
+        if json.loads(path.read_text())!=writer_fence(spec):
             raise ValueError('no retained writer fence')
         print(WRITER_ACTION_MARKER+'='+spec['action'])
         print(WRITER_BINDING_MARKER+'='+spec['binding'])
