@@ -308,7 +308,8 @@ jobs:
             > runner-lane-lifecycle-result.json
           approved_root="${RUNNER_REGISTRATION_ALLOWED_ROOT:-$HOME/actions-runners}"
           normalize_root() {
-            jq -Rr '"/" + (split("/") | map(select(. != "" and . != ".")) | join("/"))' <<<"$1"
+            jq -eRr 'select(startswith("/")) | split("/") | select(index("..") == null) |
+              map(select(. != "" and . != ".")) | select(length > 0) | "/" + join("/")' <<<"$1"
           }
           approved_root="$(normalize_root "$approved_root")"
           if [ "$REGISTRATION_ROOT" != "auto" ]; then

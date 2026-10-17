@@ -496,3 +496,5 @@ class RunnerRelabelWorkflowTests(unittest.TestCase):
                 )
                 if output:
                     self.assertEqual(packet["terminal_audit"], {"retained": True})
+                else:
+                    self.assertIsNone(packet["write_attempted"])
