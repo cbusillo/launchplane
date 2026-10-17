@@ -110,6 +110,24 @@ class CandidateHostProbeTests(unittest.TestCase):
                     self.run_probe()
                 setattr(self, field, original)
 
+    def test_provider_permission_refusal_remains_a_denial_on_the_wire(self) -> None:
+        import sys
+
+        output = io.StringIO()
+        encoded = base64.b64encode(json.dumps(self.spec).encode()).decode()
+        with (
+            patch.object(sys, "argv", ["probe", encoded, "frame:"]),
+            patch("subprocess.run", side_effect=PermissionError("fixture denied")),
+            redirect_stdout(output),
+            self.assertRaises(SystemExit),
+        ):
+            exec(
+                compile(probe.CANDIDATE_HOST_PROBE, "<candidate-probe>", "exec"),
+                {"__name__": "__main__"},
+            )
+        frame = json.loads(output.getvalue().removeprefix("frame:"))
+        self.assertEqual(frame["type"], "denied")
+
     def test_shared_or_published_runtime_refuses_before_login(self) -> None:
         self.fixture.containers["web"]["HostConfig"]["PortBindings"] = {
             "8069/tcp": [{"HostPort": "8069"}]

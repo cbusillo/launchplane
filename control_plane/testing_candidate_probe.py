@@ -124,7 +124,7 @@ if __name__ == '__main__':
         spec = json.loads(base64.b64decode(sys.argv[1], validate=True))
         print(sys.argv[2] + json.dumps(probe(spec)), flush=True)
     except PermissionError:
-        print(sys.argv[2] + json.dumps({'type':'failed','authorization_denied':True}), flush=True)
+        print(sys.argv[2] + json.dumps({'type':'denied'}), flush=True)
         sys.exit(1)
     except Exception:
         print(sys.argv[2] + json.dumps({'type':'failed'}), flush=True)
