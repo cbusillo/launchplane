@@ -2732,6 +2732,12 @@ export type PrivilegedOperationApprovalEnvelope = {
     source_event_id: string;
 };
 
+export type PrivilegedOperationCancelEnvelope = {
+    reason: string;
+    schema_version?: number;
+    source_event_id: string;
+};
+
 export type PrivilegedOperationEventRecord = {
     action: 'planned' | 'approved' | 'revoked' | 'executing' | 'executed' | 'execution_failed' | 'expired' | 'cancelled';
     actor: PrivilegedOperationActor | PrivilegedOperationAgentActor | PrivilegedOperationLocalOperatorActor;
@@ -6862,6 +6868,34 @@ export type ApproveHumanPrivilegedOperationResponses = {
 };
 
 export type ApproveHumanPrivilegedOperationResponse = ApproveHumanPrivilegedOperationResponses[keyof ApproveHumanPrivilegedOperationResponses];
+
+export type CancelHumanPrivilegedOperationData = {
+    body: PrivilegedOperationCancelEnvelope;
+    headers?: {
+        Authorization?: string;
+        Cookie?: string;
+    };
+    path: {
+        operation_id: string;
+    };
+    query?: never;
+    url: '/v1/privileged-operations/plans/{operation_id}/cancel';
+};
+
+export type CancelHumanPrivilegedOperationErrors = {
+    403: LaunchplaneErrorResponse;
+    404: LaunchplaneErrorResponse;
+    409: LaunchplaneErrorResponse;
+    503: LaunchplaneErrorResponse;
+};
+
+export type CancelHumanPrivilegedOperationError = CancelHumanPrivilegedOperationErrors[keyof CancelHumanPrivilegedOperationErrors];
+
+export type CancelHumanPrivilegedOperationResponses = {
+    200: PrivilegedOperationHumanResponse;
+};
+
+export type CancelHumanPrivilegedOperationResponse = CancelHumanPrivilegedOperationResponses[keyof CancelHumanPrivilegedOperationResponses];
 
 export type RevokeHumanPrivilegedOperationData = {
     body: PrivilegedOperationRevocationEnvelope;
