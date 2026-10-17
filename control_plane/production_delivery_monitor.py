@@ -26,6 +26,7 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.public_ingress_monitoring import (
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     PRODUCTION_REQUEST_REFUSED,
+    PublicIngressFailureCode,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
     PublicIngressIncidentRecord,
@@ -250,6 +251,10 @@ def _observe(
     refused: bool = False,
     expected_incident_sha256: str = "",
 ) -> None:
+    delivery_kind = "testing" if lane.instance == "testing" else "production"
+    failure_code: PublicIngressFailureCode = (
+        "testing_delivery_failed" if lane.instance == "testing" else "production_delivery_failed"
+    )
     observation = PublicIngressObservationRecord(
         record_id=build_public_ingress_observation_id(
             product=profile.product,
@@ -268,14 +273,14 @@ def _observe(
         monitoring_intent=lane.health_monitoring.monitoring_intent,
         observed_at=observed_at,
         status="fail" if failed else "pass",
-        failure_code="production_delivery_failed" if failed else None,
+        failure_code=failure_code if failed else None,
         summary=summary,
         targets=(
             PublicIngressTargetObservation(
                 target="provider",
-                url=_delivery_target_url(reason),
+                url=f"provider://launchplane/{delivery_kind}-delivery/{reason}",
                 status="fail" if failed else "pass",
-                failure_code="production_delivery_failed" if failed else None,
+                failure_code=failure_code if failed else None,
                 summary=summary,
             ),
         ),
@@ -300,7 +305,7 @@ def _observe(
                 "targets": (
                     PublicIngressTargetObservation(
                         target="monitoring_intent",
-                        url="monitoring-intent://production-delivery",
+                        url=f"monitoring-intent://{delivery_kind}-delivery",
                         status="skipped",
                         failure_code="monitoring_intent_changed",
                         summary=summary,
