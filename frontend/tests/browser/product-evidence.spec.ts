@@ -1,4 +1,4 @@
-import { expect, test } from "./state";
+import { expect, setClockTime, test } from "./state";
 
 test("Product Ops scopes evidence and preserves each distinct warning", { tag: "@responsive" }, async ({ page }, testInfo) => {
   await page.goto("/ui/products?fixture=products");
@@ -79,4 +79,56 @@ test("Product Ops scopes evidence and preserves each distinct warning", { tag: "
   await expect(privateLane).toContainText(testing.public_ingress.summary);
   await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-workspace-${testInfo.project.name}.png`, fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+});
+
+test("directory reasons follow missing private identity and expired observed placement", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/products?fixture=products");
+  const { product, identity } = await page.evaluate(async () => {
+    const modulePath = "/ui/src/dev-fixtures.ts";
+    const module = await import(modulePath) as typeof import("../../src/dev-fixtures");
+    return { product: structuredClone(module.productsForFixture("products")[0]), identity: module.fixtureIdentity };
+  });
+  await setClockTime(page, product.provenance.refreshed_at);
+  const now = Date.parse(product.provenance.refreshed_at);
+  const future = new Date(now + 3_600_000).toISOString();
+  const testing = product.environments.find(lane => lane.environment === "testing")!;
+  testing.topology.desired.public_website = "none";
+  testing.topology.provider_recorded.authority_status = "missing";
+  testing.topology.provider_recorded.provenance.detail = "No public route record exists for this private product.";
+  testing.topology.provider_recorded.placement.trust_state = "recorded";
+  testing.topology.trust_state = "missing";
+  testing.topology.warnings = [];
+  testing.topology.observed.placement.runtime_identity_status = "unchecked";
+  testing.topology.observed.placement.runtime_identity_detail = "The private runtime has no identity observation.";
+  const production = product.environments.find(lane => lane.environment === "prod")!;
+  const topology = production.topology;
+  topology.trust_state = "recorded";
+  topology.warnings = [];
+  topology.provider_recorded.trust_state = "recorded";
+  topology.provider_recorded.provenance.detail = "The route binding is current.";
+  for (const evidence of [production, ...production.health_monitoring.checks, topology.provider_recorded,
+    topology.provider_recorded.placement, topology.provider_recorded.ingress, topology.provider_recorded.tls,
+    topology.observed.ingress, ...topology.observed.tls_domains]) {
+    evidence.provenance.stale_after = future;
+  }
+  const placement = topology.observed.placement;
+  placement.trust_state = "verified";
+  placement.provenance.freshness_status = "verified";
+  placement.provenance.stale_after = new Date(now + 1_000).toISOString();
+  placement.provenance.detail = "The runtime placement observation has its own deadline.";
+  await page.route("**/v1/**", route => route.fulfill({ status: 403, json: { error: { code: "unused_fixture_read" } } }));
+  await page.route("**/v1/auth/session", route => route.fulfill({ json: { status: "ok", identity, csrf_token: "fixture" } }));
+  await page.route("**/v1/products", route => route.fulfill({ json: { status: "ok", products: [product] } }));
+  await page.goto("/ui/products");
+  const row = page.locator(".product-directory-row");
+  const privateReason = row.locator('[data-lane="testing"] .directory-evidence-detail');
+  await expect(privateReason).toContainText(testing.topology.observed.placement.runtime_identity_detail);
+  await expect(privateReason).not.toContainText(testing.topology.provider_recorded.provenance.detail);
+  const publicReason = row.locator('[data-lane="prod"] .directory-evidence-detail');
+  await expect(publicReason).toContainText(topology.provider_recorded.provenance.detail);
+  await page.clock.fastForward(1_001);
+  await expect(row.locator('[data-lane="prod"] .evidence-badge')).toHaveAttribute("data-state", "stale");
+  await expect(publicReason).toContainText(placement.provenance.detail);
+  await expect(publicReason).not.toContainText(topology.provider_recorded.provenance.detail);
+  await page.screenshot({ path: `../tmp/browser-smoke/product-evidence-observation-${testInfo.project.name}.png`, fullPage: true });
 });

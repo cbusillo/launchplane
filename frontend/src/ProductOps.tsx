@@ -383,11 +383,25 @@ function DirectoryLane({
 function topologyEvidenceDetail(environment: ProductEnvironmentSummary): string {
   const topology = environment.topology;
   const details = topology.warnings.map(warning => warning.detail);
-  if (topology.trust_state !== "verified") {
-    details.unshift(topology.provider_recorded.provenance.detail);
+  const privateWithoutRoute = topology.desired.public_website === "none" &&
+    topology.provider_recorded.authority_status === "missing";
+  const components = [
+    { label: "Configured topology", evidence: topology.desired },
+    { label: privateWithoutRoute ? "Recorded placement" : "Route record",
+      evidence: privateWithoutRoute ? topology.provider_recorded.placement : topology.provider_recorded },
+    { label: "Runtime observation", evidence: topology.observed.placement },
+    ...(topology.desired.public_website === "none" ? [] : [
+      { label: "Public ingress", evidence: topology.observed.ingress },
+      ...topology.observed.tls_domains.map(domain => ({ label: `TLS ${domain.domain_name}`, evidence: domain })),
+    ]),
+  ];
+  for (const { label, evidence } of components) {
+    if (topology.trust_state !== "verified" && evidence.trust_state === topology.trust_state) {
+      details.push(`${label}: ${trustLabel(evidence.trust_state)}. ${evidence.provenance.detail}`);
+    }
   }
-  if (topology.trust_state === "stale") {
-    details.unshift("Topology evidence has expired; current health is evaluated separately.");
+  if (topology.observed.placement.runtime_identity_status === "unchecked") {
+    details.push(topology.observed.placement.runtime_identity_detail || "Runtime identity has not been verified.");
   }
   return [...new Set(details.filter(Boolean))].join(" ");
 }

@@ -16,7 +16,8 @@ export function previewInventoryPresentation(preview: ProductPreviewSummary) {
         detail: `Provider inventory verified. ${recorded} ${disagreements}`.trim() };
     }
     const headlines = { stale: "Inventory stale", failed: "Inventory scan failed", unsupported: "Inventory unsupported", unavailable: "Inventory unavailable", missing: "Inventory unknown" };
-    return { headline: preview.trust_state === "stale" ? "Inventory stale" : headlines[inventory.status as keyof typeof headlines] ?? "Inventory unknown", detail: `${recorded} ${inventory.provenance.detail}` };
+    const historical = preview.trust_state === "stale" ? "Scan counts are historical; current provider presence is unknown. " : "";
+    return { headline: preview.trust_state === "stale" ? "Inventory stale" : headlines[inventory.status as keyof typeof headlines] ?? "Inventory unknown", detail: `${recorded} ${historical}${inventory.provenance.detail}` };
   }
   const recorded = `Recorded count: ${preview.active_count}.`;
   switch (preview.trust_state) {
