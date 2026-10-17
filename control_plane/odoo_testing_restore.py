@@ -3,6 +3,7 @@
 import base64
 import json
 from control_plane._odoo_testing_storage_program import STORAGE_MAINTENANCE_LIBRARY
+from control_plane._odoo_copy_runtime_guard import COPY_RUNTIME_INSPECTION_LIBRARY
 from control_plane.contracts.odoo_testing_drill import OdooTestingDrillStorageBudget
 from typing import Literal, TypeVar, TypedDict
 from control_plane._odoo_website_settings_program import WEBSITE_SETTINGS_PROGRAM
@@ -134,6 +135,7 @@ def fresh_testing_mode_refusal(
 # connection rules run in that same transaction boundary and again after hooks.
 # A missing boundary is an unsupported artifact, never permission to run it.
 TESTING_COPY_COMPLETION_PARAMETER = "launchplane.testing_copy.restore_complete"
+TESTING_COPY_VERIFICATION_FRAME: dict[str, object] = {"type": "complete", "copy_verified": True}
 TESTING_COPY_RUNNER = (
     """import base64
 import logging
@@ -147,7 +149,8 @@ from run_odoo_data_workflows import LocalServerSettings, OdooDataWorkflowRunner
     + connection_isolation_library()
     + r"""
 logging.disable(logging.CRITICAL)
-if os.environ.get("PLATFORM_INSTANCE") != "testing":
+expected_copy_instance = globals().get("expected_copy_instance", "testing")
+if expected_copy_instance not in {"testing", "rehearsal"} or os.environ.get("PLATFORM_INSTANCE") != expected_copy_instance:
     raise SystemExit("Testing copy requires its exact instance")
 for key in tuple(os.environ):
     if key.startswith("ODOO_UPSTREAM_") or key.startswith("DATA_WORKFLOW_SSH_"):
@@ -193,7 +196,7 @@ class CopyRunner(OdooDataWorkflowRunner):
 if not callable(getattr(OdooDataWorkflowRunner, "prepare_credentials_before_registry", None)):
     raise SystemExit("Artifact lacks the pre-registry credential boundary")
 settings = LocalServerSettings()
-if settings.host != "database" or settings.db_name != sys.argv[2] or settings.platform_instance != "testing":
+if settings.host != "database" or settings.db_name != sys.argv[2] or settings.platform_instance != expected_copy_instance:
     raise SystemExit("Testing copy settings no longer name the isolated database")
 runner = CopyRunner(settings, None, None)
 runner.acquire_data_workflow_lock()
@@ -230,6 +233,32 @@ try:
     else:
         raise RuntimeError("Unknown fresh testing restore phase")
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
+    if globals().get("sanitize_source_only") is True:
+        # An upgrade rehearsal preserves this sanitized source-version state
+        # before any target-version registry or module update is allowed.
+        print("testing_copy_sanitized=true", flush=True)
+    else:
+        finish_copy_upgrade(runner)
+except BaseException:
+    if restored and sys.argv[5] == "fresh":
+        runner._drop_database_after_failed_restore()
+    raise
+finally:
+    runner.release_data_workflow_lock()
+"""
+)
+
+
+def rehearsal_copy_runner(*, sanitize_source_only: bool) -> str:
+    return (
+        "expected_copy_instance = 'rehearsal'\n"
+        + f"sanitize_source_only = {sanitize_source_only!r}\n"
+        + TESTING_COPY_RUNNER
+    )
+
+
+COPY_UPGRADE_FUNCTION = r"""
+def finish_copy_upgrade(runner):
     modules = [name.strip() for name in (os.environ.get("ODOO_UPDATE_MODULES") or "").split(",") if name.strip()]
     if not modules or "AUTO" in modules:
         raise RuntimeError("Fresh copy needs exact declared module intent")
@@ -245,14 +274,10 @@ try:
     runner.ensure_gpt_users()
     runner.prepare_credentials_before_registry(restored_copy=True, do_sanitize=True)
     print("testing_copy_sanitized=true", flush=True)
-except BaseException:
-    if restored and sys.argv[5] == "fresh":
-        runner._drop_database_after_failed_restore()
-    raise
-finally:
-    runner.release_data_workflow_lock()
 """
-)
+
+# Function definitions precede the runner's execution in both consumers.
+TESTING_COPY_RUNNER = COPY_UPGRADE_FUNCTION + TESTING_COPY_RUNNER
 
 
 def encoded_testing_copy_runner() -> str:
@@ -799,97 +824,9 @@ def restore_main():
     if not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}", database):
         raise RuntimeError("Testing database identity is invalid")
     modules = [name.strip() for name in str(spec.get("workflow_environment", {}).get("ODOO_UPDATE_MODULES", "")).split(",") if name.strip()]
-    if not (spec.get('storage_maintenance') or spec.get('usage_only')) and (not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules)):
+    if not (spec.get('storage_maintenance') or spec.get('usage_only') or spec.get('verification_only')) and (not modules or any(name.upper() == "AUTO" or not re.fullmatch(r"[a-z][a-z0-9_]*", name) for name in modules)):
         raise RuntimeError("Testing restore has no exact declared module update intent")
-    volumes = {namespace + "-data", namespace + "-db", namespace + "-logs"}
-    containers = {}
-    all_containers = []
-    for identifier in docker("ps", "-aq").decode().splitlines():
-        container = one_inspection(identifier)
-        all_containers.append(container)
-        labels = container.get("Config", {}).get("Labels") or {}
-        if labels.get("com.docker.compose.project") == project:
-            service = labels.get("com.docker.compose.service")
-            if service not in {"web", "database", "script-runner"} or service in containers:
-                raise RuntimeError("Testing compose has an unexpected container")
-            containers[service] = (identifier, container)
-    if set(containers) != {"web", "database", "script-runner"}:
-        raise RuntimeError("Testing compose inventory is incomplete")
-    for service, (identifier, container) in containers.items():
-        configuration = container["Config"]
-        if container.get("HostConfig", {}).get("Privileged") or container.get("HostConfig", {}).get("NetworkMode") == "host" or container.get("HostConfig", {}).get("PidMode") not in (None, "", "private"):
-            raise RuntimeError("Testing compose has host capabilities")
-        if any(container.get("HostConfig", {}).get("PortBindings", {}).values()):
-            raise RuntimeError("Testing compose publishes host ports")
-        expected = {namespace + "-db"} if service == "database" else {namespace + "-data", namespace + "-logs"}
-        mounts = container.get("Mounts")
-        if not isinstance(mounts, list) or {item.get("Name") for item in mounts} != expected or any(item.get("Type") != "volume" for item in mounts):
-            raise RuntimeError("Testing compose has unexpected writable or credential mounts")
-        if service == "database" and mounts[0].get("Destination") != spec["database_data_directory"]:
-            raise RuntimeError("Testing database storage is not mounted at its data directory")
-        if service != "database":
-            if configuration.get("Image") != spec["image_reference"]:
-                raise RuntimeError("Testing artifact identity changed")
-            environment = dict(item.split("=", 1) for item in configuration.get("Env", []) if "=" in item)
-            allowed_databases = spec.get('usage_database_names',[database]) if spec.get('usage_only') else [database]
-            if environment.get("PLATFORM_INSTANCE") != "testing" or environment.get("ODOO_DB_HOST") != "database" or environment.get("ODOO_DB_NAME") not in allowed_databases:
-                raise RuntimeError("Testing database endpoint is not local")
-            if not (spec.get('storage_maintenance') or spec.get('usage_only')) and environment.get("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", "") != spec["expected_overrides_payload"]:
-                raise RuntimeError("Testing settings changed after execution preflight")
-            if environment.get("ODOO_MAX_CRON_THREADS") != "0":
-                raise RuntimeError("Fresh testing must have no cron workers")
-            if container.get("HostConfig", {}).get("ExtraHosts"):
-                raise RuntimeError("Fresh testing has host gateway aliases")
-            if any(environment.get(key) for key in ("GITHUB_TOKEN", "GH_TOKEN", "SSH_AUTH_SOCK", "DATA_WORKFLOW_SSH_KEY", "ODOO_KEY", "ODOO_SMTP_PASSWORD")):
-                raise RuntimeError("Testing holds an execution credential")
-        if service != "web":
-            networks = container.get("NetworkSettings", {}).get("Networks")
-            if not isinstance(networks, dict) or len(networks) != 1:
-                raise RuntimeError("Testing data containers are not privately networked")
-            network = one_inspection(next(iter(networks)))
-            if network.get("Internal") is not True:
-                raise RuntimeError("Testing data network has outbound access")
-    data_networks = set(containers["database"][1]["NetworkSettings"]["Networks"])
-    if set(containers["script-runner"][1]["NetworkSettings"]["Networks"]) != data_networks or set(containers["web"][1]["NetworkSettings"]["Networks"]) != data_networks | {"dokploy-network"}:
-        raise RuntimeError("Fresh testing has unexpected network reach")
-    for container in all_containers:
-        if container in [item[1] for item in containers.values()]:
-            continue
-        if any(mount.get("Name") in volumes for mount in container.get("Mounts", [])):
-            raise RuntimeError("Testing storage is shared by another container")
-    # Resolve actual backing paths too: a bind alias of a named volume is
-    # storage sharing even when Docker reports different mount names.
-    paths = []
-    identities = set()
-    for name in volumes:
-        volume = json.loads(docker("volume", "inspect", name))[0]
-        if volume.get("Driver") != "local" or volume.get("Options") not in (None, {}) or volume.get("Labels", {}).get("io.launchplane.testing-resources") != gen["resources_binding_sha256"]:
-            raise RuntimeError("Testing backing storage changed")
-        backing = Path(volume["Mountpoint"]).resolve(strict=True)
-        identity = (backing.stat().st_dev, backing.stat().st_ino)
-        if identity in identities:
-            raise RuntimeError("Testing backing storage overlaps")
-        identities.add(identity)
-        paths.append(backing)
-    own = {item[1]["Id"] for item in containers.values()}
-    for container in all_containers:
-        if container.get("Id") in own:
-            continue
-        for mount in container.get("Mounts", []):
-            if not mount.get("Source"):
-                continue
-            source_path = Path(mount["Source"]).resolve(strict=False)
-            if any(source_path == path or source_path.is_relative_to(path)
-                   or (mount.get("RW", True) and path.is_relative_to(source_path))
-                   for path in paths):
-                raise RuntimeError("Testing storage has a bind consumer")
-    private_state = Path.home().resolve(strict=True) / '.local/state/launchplane-testing-disposal'
-    for container in all_containers:
-        for mount in container.get('Mounts', []):
-            if mount.get('RW', True) and mount.get('Source'):
-                source_path = Path(mount['Source']).resolve(strict=False)
-                if private_state.is_relative_to(source_path) or source_path.is_relative_to(private_state):
-                    raise RuntimeError('Disposal state is exposed to a container')
+    containers = inspect_copy_runtime(spec, expected_instance="testing")
     runner = containers["script-runner"][0]
     web = containers["web"][0]
     if spec.get('storage_maintenance'):
@@ -907,6 +844,27 @@ def restore_main():
             if marker!=spec['copy_binding_sha256']:
                 raise RuntimeError('Existing testing database lacks its generation witness')
         prefix=sys.argv[2]
+        if spec.get('verification_only'):
+            if present != '1' or any(item[1].get('State',{}).get('Status') != 'running' for item in containers.values()):
+                raise RuntimeError('The installed testing copy is not running')
+            if containers['web'][1]['Image'] != containers['script-runner'][1]['Image']:
+                raise RuntimeError('Testing runner and web images differ')
+            image=json.loads(docker('image','inspect',containers['web'][1]['Image']))[0]
+            if spec['image_reference'] not in image.get('RepoDigests',[]):
+                raise RuntimeError('The actual installed image digest differs')
+            for service in ('web','script-runner'):
+                environment=dict(item.split('=',1) for item in containers[service][1]['Config']['Env'] if '=' in item)
+                identity=json.loads(environment.get('LAUNCHPLANE_RUNTIME_IDENTITY_JSON','null'))
+                if not isinstance(identity,dict):
+                    raise RuntimeError('The installed runtime identity is unavailable')
+                identity.pop('deployed_at',None)
+                if identity != spec['runtime_identity']:
+                    raise RuntimeError('The installed deployment identity differs')
+            docker('exec',runner,'python3','-c',
+                "import hashlib,os,sys;from pathlib import Path;p=os.environ.get('ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64','');expected=hashlib.sha256((sys.argv[1]+'\\n'+p).encode()).hexdigest();assert Path(sys.argv[2]).read_text()==expected",
+                database,spec['web_gate_path'])
+            print(prefix+json.dumps(__LP_COPY_VERIFICATION_FRAME__),flush=True)
+            return
         if spec.get('task_account_cleanup') is True:
             if present != '1':
                 raise RuntimeError('Testing cleanup database is unavailable')
@@ -1088,11 +1046,13 @@ def main():
     namespace = spec["generation"]["namespace"]
     if not re.fullmatch(r"lp-testing-[a-f0-9]{32}", namespace):
         raise RuntimeError("Invalid testing host lock identity")
-    if spec.get('inspection_only'):
+    if spec.get('inspection_only') and not spec.get('verification_only'):
         restore_main()
         return
     path = str(Path(tempfile.gettempdir()) / (namespace + "-copy.lock"))
-    descriptor = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    # This coordination file is disposable across host reboot/tmp cleanup. Its
+    # existence is not copy evidence; every execution uses the same flock inode.
+    descriptor = os.open(path, os.O_CREAT | os.O_RDONLY | os.O_NOFOLLOW, 0o600) if spec.get('verification_only') else os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         restore_main()
@@ -1124,7 +1084,7 @@ except Exception:
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
     "__LP_COPY_WITNESS__", TESTING_COPY_COMPLETION_PARAMETER
-)
+).replace("__LP_COPY_VERIFICATION_FRAME__", repr(TESTING_COPY_VERIFICATION_FRAME))
 
 
 FRESH_TESTING_RESTORE_HOST_PROGRAM = FRESH_TESTING_RESTORE_HOST_PROGRAM.replace(
@@ -1464,3 +1424,8 @@ def fresh_testing_authority_sha256(
             else None,
         }
     )
+
+
+FRESH_TESTING_RESTORE_HOST_PROGRAM = (
+    COPY_RUNTIME_INSPECTION_LIBRARY + FRESH_TESTING_RESTORE_HOST_PROGRAM
+)

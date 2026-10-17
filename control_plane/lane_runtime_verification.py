@@ -12,7 +12,7 @@ from control_plane.contracts.product_profile_record import (
     product_lane_monitoring_probe_effective,
 )
 from control_plane.contracts.public_ingress_monitoring import (
-    health_monitor_interval_seconds,
+    health_monitor_freshness_seconds,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
 )
@@ -41,7 +41,7 @@ def monitor_observation_provenance(
     evaluated_at = now or datetime.now(timezone.utc)
     observed_at = _timestamp(observation.observed_at)
     stale_at = (
-        observed_at + timedelta(seconds=health_monitor_interval_seconds(observation.instance))
+        observed_at + timedelta(seconds=health_monitor_freshness_seconds(observation.instance))
         if observed_at is not None
         else None
     )
@@ -59,7 +59,7 @@ def monitor_observation_provenance(
         refreshed_at=observation.observed_at,
         freshness_status=status,
         stale_after=stale_at.isoformat().replace("+00:00", "Z") if stale_at else "",
-        detail="Launchplane monitor observation; freshness follows its declared cadence.",
+        detail="Launchplane monitor observation; cadence includes bounded scheduling/publication lag.",
     )
 
 
@@ -92,7 +92,7 @@ def read_lane_runtime_verification(
     )
     recorded_at = _timestamp(deployment_at)
     stale_at = (
-        recorded_at + timedelta(seconds=health_monitor_interval_seconds(lane.instance))
+        recorded_at + timedelta(seconds=health_monitor_freshness_seconds(lane.instance))
         if recorded_at is not None
         else None
     )

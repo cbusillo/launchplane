@@ -16,6 +16,7 @@ from control_plane.contracts.product_health_monitoring_migration import (
     canonical_health_check_record_token,
 )
 from control_plane.contracts.product_health_monitoring_migration import health_check_record_token
+from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthPolicy
 from control_plane.contracts.public_dns import PublicDnsExpectedTarget
 
 
@@ -252,6 +253,11 @@ class ProductLaneHealthMonitoringPolicy(BaseModel):
 
     monitoring_intent: ProductLaneMonitoringIntent = "prelaunch"
     checks: tuple[ProductLaneHealthCheck, ...] = ()
+    dependency_health: RuntimeDependencyHealthPolicy = Field(
+        default_factory=RuntimeDependencyHealthPolicy,
+        exclude_if=lambda value: value == RuntimeDependencyHealthPolicy(),
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "ProductLaneHealthMonitoringPolicy":
@@ -266,6 +272,10 @@ class ProductLaneHealthMonitoringPolicy(BaseModel):
                 raise ValueError("product lane health check names must be unique")
             tokens.append(token)
         enabled_kinds = {check.kind for check in self.checks if check.enabled}
+        if self.dependency_health.mode == "required" and not enabled_kinds.intersection(
+            {"public_http", "private_http"}
+        ):
+            raise ValueError("Required dependency health needs an enabled HTTP health check")
         if self.monitoring_intent == "public" and "public_http" not in enabled_kinds:
             raise ValueError(
                 "public monitoring intent requires an enabled public HTTP health check"
@@ -573,6 +583,11 @@ class ProductSecretConfigRequirement(BaseModel):
     context: str = ""
     instance: str = ""
     owner_input: ProductOwnerSecretInput | None = None
+    testing_local_credential: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_requirement(self) -> "ProductSecretConfigRequirement":
@@ -588,6 +603,12 @@ class ProductSecretConfigRequirement(BaseModel):
         self.integration = self.integration.strip()
         self.context = self.context.strip()
         self.instance = self.instance.strip()
+        if self.testing_local_credential and (
+            self.integration != "runtime_environment" or self.owner_input is not None
+        ):
+            raise ValueError(
+                "Testing local credentials require runtime storage and no external input"
+            )
         return self
 
 

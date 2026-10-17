@@ -47,6 +47,10 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                         "addresses": ["8.8.8.8"],
                     }
                 ]
+                if not creating:
+                    profile_payload["lanes"][0]["health_monitoring"]["dependency_health"] = {
+                        "mode": "required"
+                    }
                 store.write_product_profile_record(
                     LaunchplaneProductProfileRecord.model_validate(profile_payload)
                 )
@@ -56,6 +60,8 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                 plan = await _post_product_health_monitoring(app, payload)
                 self.assertEqual(plan.status_code, 202)
                 self.assertNotIn("current_private_endpoint_key", plan.json()["result"])
+                self.assertNotIn("current_dependency_health", plan.json()["result"])
+                self.assertNotIn("requested_dependency_health", plan.json()["result"])
                 self.assertNotIn("current_expected_dns_targets", plan.json()["result"])
                 self.assertNotIn("requested_expected_dns_targets", plan.json()["result"])
                 applied = {
@@ -69,6 +75,8 @@ class HealthMonitoringBrowserTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertEqual(response.status_code, 202)
                     self.assertNotIn("current_private_endpoint_key", response.json()["result"])
+                    self.assertNotIn("current_dependency_health", response.json()["result"])
+                    self.assertNotIn("requested_dependency_health", response.json()["result"])
                     self.assertNotIn("current_expected_dns_targets", response.json()["result"])
                     self.assertNotIn("requested_expected_dns_targets", response.json()["result"])
                     if creating:

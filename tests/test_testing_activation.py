@@ -132,6 +132,7 @@ class ComposeQualificationTests(unittest.TestCase):
 class ActivationTests(unittest.TestCase):
     database_url = ""
     private_product = True
+    local_credential_fixture = False
 
     def setUp(self) -> None:
         self.preparation = preparation.SeparationResourceTests()
@@ -162,6 +163,30 @@ class ActivationTests(unittest.TestCase):
             self.caller_scope(),
         )
         self.seed_runtime_fixture()
+        if self.local_credential_fixture:
+            from control_plane.contracts.product_profile_record import (
+                ProductSecretConfigRequirement,
+            )
+
+            local_profile = self.store.read_product_profile_record(self.product)
+            local_profile = local_profile.model_copy(
+                update={
+                    "expected_config": local_profile.expected_config.model_copy(
+                        update={
+                            "managed_secret_bindings": (
+                                ProductSecretConfigRequirement(
+                                    binding_key="DB_PASSWORD",
+                                    context=self.context,
+                                    instance="testing",
+                                    testing_local_credential=True,
+                                ),
+                            )
+                        }
+                    )
+                }
+            )
+            self.store.write_product_profile_record(local_profile)
+
         binding, _ = preparation_binding(
             self.store, fixture.product, fixture.context, fixture.actor, fixture.root
         )
@@ -446,6 +471,113 @@ class ActivationTests(unittest.TestCase):
             response_trace_id="launchplane_req_fixture",
             adapter=self.adapter,
         )
+
+    def test_generated_local_credentials_reach_recipient_and_survive_replay(self) -> None:
+        from control_plane import secrets
+        import os
+
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "activation-fixture-root"},
+            )
+        )
+        from control_plane.testing_activation import preparation_resources
+
+        local = ActivationTests()
+        local.local_credential_fixture = True
+        if self.database_url:
+            from tests.test_postgres_integration import _head_postgres_database
+
+            database = _head_postgres_database()
+            local.database_url = database.__enter__()
+            self.addCleanup(database.__exit__, None, None, None)
+        local.setUp()
+        self.addCleanup(local.doCleanups)
+
+        def current_values(store: Any, root: Any, record: Any, resources: Any) -> dict[str, str]:
+            values = local.values(store, root, record, resources)
+            secret = store.read_secret_record("testing-password")
+            if secret.current_version_id != "testing-version":
+                version = store.read_secret_version(secret.current_version_id)
+                values["DB_PASSWORD"] = secrets._decrypt_secret_value(
+                    version.ciphertext, version.key_id
+                )
+            return values
+
+        local.enterContext(
+            patch("control_plane.testing_activation.runtime_values", side_effect=current_values)
+        )
+        planned = local.adapter.current()
+        local.adapter.request = local.request.model_copy(
+            update={"reviewed_plan_sha256": planned.plan_sha256}
+        )
+        old_target = local.store.read_dokploy_target_record(
+            context_name=local.context, instance_name="testing"
+        )
+
+        def fail_configuration(**kwargs: Any) -> Any:
+            if kwargs.get("path") == "/api/compose.update":
+                raise RuntimeError("fixture interrupted configuration")
+            return local.provider(**kwargs)
+
+        with patch(
+            "control_plane.testing_activation.api.dokploy_request", side_effect=fail_configuration
+        ):
+            interrupted = local.run_activation()
+        local.assertEqual(interrupted.response_status_code, 409)
+        prepared = local.adapter.current()
+        local.assertTrue(prepared.generated_configuration_sha256)
+        local.assertEqual(
+            local.store.read_dokploy_target_record(
+                context_name=local.context, instance_name="testing"
+            ),
+            old_target,
+        )
+        from control_plane.testing_lane_hold import TestingHoldApplyRequest
+        from control_plane.testing_activation import require_activation_hold_lift
+
+        with local.assertRaises(TestingActivationRefusal):
+            require_activation_hold_lift(
+                local.store,
+                TestingHoldApplyRequest(
+                    product=local.product,
+                    context=local.context,
+                    instance="testing",
+                    purpose="isolation_staging",
+                    hold=False,
+                    reason="fixture continuation",
+                    activation_plan_sha256=prepared.plan_sha256,
+                ),
+                local.actor,
+                local.root,
+            )
+        with local.assertRaises(ValueError):
+            local.store.write_testing_activation(
+                expected=prepared.model_dump(mode="json"),
+                replacement=prepared.model_copy(
+                    update={"generated_configuration_sha256": "0" * 64}
+                ).model_dump(mode="json"),
+            )
+        prepared_versions = local.store.list_secret_versions(secret_id="testing-password")
+        result = local.run_activation()
+        local.assertEqual(result.response_status_code, 202, result.response_payload)
+        local.assertEqual(
+            local.store.list_secret_versions(secret_id="testing-password"), prepared_versions
+        )
+        current = local.adapter.current()
+        local.adapter.require_unchanged(current)
+        local.adapter.verify_provider(current)
+        password = current_values(
+            local.store,
+            local.root,
+            current,
+            preparation_resources(local.store, local.product, local.request, local.scope)[0],
+        )["DB_PASSWORD"]
+        local.assertNotEqual(password, "safe-test-password")
+        versions = local.store.list_secret_versions(secret_id="testing-password")
+        local.assertEqual(local.run_activation().response_status_code, 202)
+        local.assertEqual(local.store.list_secret_versions(secret_id="testing-password"), versions)
 
     def test_activation_and_original_key_replay_preserve_production_old_target_hold_and_fence(
         self,

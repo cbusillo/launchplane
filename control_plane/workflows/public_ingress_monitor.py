@@ -53,6 +53,8 @@ from control_plane.contracts.private_health_endpoint_record import (
     private_health_endpoint_record_sha256,
 )
 from control_plane.contracts.public_ingress_monitoring import (
+    HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS,
+    PRODUCTION_REQUEST_REFUSED,
     RETIRED_PRODUCTION_DELIVERY_LAG_CHECK,
     MONITOR_CADENCE_CHECK_PREFIX,
     monitored_check_identity,
@@ -103,6 +105,12 @@ from control_plane.contracts.runtime_identity import (
     RuntimeIdentityStatus,
     health_payload_runtime_identity_status,
 )
+from control_plane.contracts.runtime_dependency_health import (
+    RuntimeDependencyExpectations,
+    RuntimeDependencyHealthPolicy,
+    runtime_dependency_health_evidence,
+)
+from control_plane.runtime_dependency_health import derive_runtime_dependencies
 from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.lane_runtime_verification import lane_expected_runtime_identity
 from control_plane.notifications import (
@@ -261,6 +269,8 @@ class PublicIngressMonitorTarget:
     incident_eligible: bool
     expected_runtime_identity: RuntimeIdentity | None
     require_runtime_identity: bool
+    dependency_expectations: RuntimeDependencyExpectations | None = None
+    dependency_policy: RuntimeDependencyHealthPolicy | None = None
     expected_dns_targets: tuple[PublicDnsExpectedTarget, ...] = ()
     provider: str = ""
     provider_check: str = ""
@@ -641,6 +651,12 @@ def _health_check_monitor_target(
             instance_name=lane.instance,
         ),
         require_runtime_identity=check.require_runtime_identity,
+        dependency_expectations=derive_runtime_dependencies(
+            profile=profile, lane=lane, record_store=record_store
+        )
+        if check.kind in {"public_http", "private_http"}
+        else None,
+        dependency_policy=lane.health_monitoring.dependency_health,
         expected_dns_targets=check.expected_dns_targets,
         recovery_observation_threshold=check.recovery_observation_threshold,
         provider=check.provider,
@@ -749,7 +765,7 @@ def run_public_ingress_monitor_once(
     *,
     record_store: PublicIngressMonitorStore,
     checked_at: str = "",
-    timeout_seconds: int = 10,
+    timeout_seconds: int = HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS,
     notify: bool = True,
     http_get: HttpGet | None = None,
     private_http_get: HttpGet | None = None,
@@ -997,6 +1013,10 @@ def _store_monitor_observation(
     recovery_observation_threshold: int,
     notify: bool,
     notification_drivers: PublicIngressNotificationDrivers | None,
+    expected_incident_sha256: str = "",
+    reconciliation_reason: Literal[
+        "monitoring_intent_changed", "request_refused"
+    ] = "monitoring_intent_changed",
 ) -> _StoredMonitorTransition:
     transition_writer = getattr(record_store, "write_public_ingress_transition_with_outbox", None)
     plan: _PlannedIncidentTransition | None = None
@@ -1007,7 +1027,13 @@ def _store_monitor_observation(
             record=record,
             incident_eligible=incident_eligible,
             recovery_observation_threshold=recovery_observation_threshold,
+            reconciliation_reason=reconciliation_reason,
         )
+        if (
+            expected_incident_sha256
+            and plan.expected_open_incident_sha256 != expected_incident_sha256
+        ):
+            raise ValueError("Incident changed during reconciliation; read its evidence again.")
         outbox_deliveries = (
             _public_ingress_notification_outbox_deliveries(
                 record_store=record_store,
@@ -1421,6 +1447,9 @@ def _plan_public_ingress_incident_transition(
     record: PublicIngressObservationRecord,
     incident_eligible: bool,
     recovery_observation_threshold: int,
+    reconciliation_reason: Literal[
+        "monitoring_intent_changed", "request_refused"
+    ] = "monitoring_intent_changed",
 ) -> _PlannedIncidentTransition:
     open_incidents = _open_incidents(record_store=record_store, record=record)
     existing = min(
@@ -1477,11 +1506,8 @@ def _plan_public_ingress_incident_transition(
         incident, resolved_event = _resolve_incident(
             incident=existing,
             record=record,
-            reason="monitoring_intent_changed",
-            summary=(
-                "Monitoring intent changed; this check is no longer incident-eligible. "
-                f"Previous incident evidence: {existing.summary}"
-            ),
+            reason=reconciliation_reason,
+            summary=(f"{record.summary} Previous incident evidence: {existing.summary}"),
         )
         reminder_states = _resolved_reminder_states(
             record_store=record_store,
@@ -2028,7 +2054,7 @@ def _resolve_incident(
     *,
     incident: PublicIngressIncidentRecord,
     record: PublicIngressObservationRecord,
-    reason: Literal["recovered", "monitoring_intent_changed"],
+    reason: Literal["recovered", "monitoring_intent_changed", "request_refused"],
     summary: str,
     recovery_count: int = 0,
     recovery_observation_threshold: int | None = None,
@@ -2626,6 +2652,18 @@ def _check_url(
             code="unknown_error",
             summary=str(error),
         )
+    is_health_response = target_kind in {"health_url", "private_health_url"} or (
+        target_kind == "base_url" and url == target.health_url
+    )
+    dependency_health = (
+        runtime_dependency_health_evidence(
+            payload=observation.payload,
+            expectations=target.dependency_expectations,
+            policy=target.dependency_policy or RuntimeDependencyHealthPolicy(),
+        )
+        if is_health_response and target.dependency_expectations is not None
+        else None
+    )
     if not 200 <= observation.status_code < 300:
         return PublicIngressTargetObservation(
             target=target_kind,
@@ -2640,6 +2678,7 @@ def _check_url(
             final_url=observation.final_url,
             redirect_count=observation.redirect_count,
             summary=f"HTTP {observation.status_code}",
+            dependency_health=dependency_health,
         )
     runtime_status: RuntimeIdentityStatus = "unchecked"
     runtime_detail = ""
@@ -2662,6 +2701,7 @@ def _check_url(
                 "No expected runtime identity is recorded for this strict public health check."
             ),
             summary="Expected runtime identity is unavailable.",
+            dependency_health=dependency_health,
         )
     if (
         target_kind in {"health_url", "private_health_url"}
@@ -2690,18 +2730,31 @@ def _check_url(
                 runtime_identity_detail=runtime_detail,
                 observed_runtime_identity=observed_runtime_identity,
                 summary=runtime_detail or "Runtime identity did not match expected deployment.",
+                dependency_health=dependency_health,
             )
+    dependency_failure: PublicIngressFailureCode | None = None
+    summary = _successful_target_summary(target)
+    if dependency_health is not None:
+        if dependency_health.status == "fail":
+            dependency_failure = "dependency_failed"
+            summary = "A declared runtime dependency failed."
+        elif dependency_health.status == "not_covered":
+            summary += " Dependency health: not covered."
+            if dependency_health.mode == "required":
+                dependency_failure = "dependency_not_covered"
     return PublicIngressTargetObservation(
         target=target_kind,
         url=url,
-        status="pass",
+        status="fail" if dependency_failure else "pass",
+        failure_code=dependency_failure,
         http_status=observation.status_code,
         final_url=observation.final_url,
         redirect_count=observation.redirect_count,
         runtime_identity_status=runtime_status,
         runtime_identity_detail=runtime_detail,
         observed_runtime_identity=observed_runtime_identity,
-        summary=_successful_target_summary(target),
+        summary=summary,
+        dependency_health=dependency_health,
     )
 
 
@@ -2967,7 +3020,13 @@ def _record_summary(
     if status == "pass":
         if _is_deploy_fence_target(target):
             return f"No unresolved deploy is holding {target.product}/{target.instance}."
-        return f"{_check_label(target)} is reachable for {target.product}/{target.instance}."
+        coverage = next(
+            (item.dependency_health for item in observations if item.dependency_health), None
+        )
+        summary = f"{_check_label(target)} is reachable for {target.product}/{target.instance}."
+        if coverage is not None and coverage.status == "not_covered":
+            summary += " Dependency health: not covered (informational until adoption)."
+        return summary
     failing = next(
         (observation for observation in observations if observation.status == "fail"), None
     )
@@ -3420,7 +3479,11 @@ def deliver_public_ingress_notification_outbox_delivery(
         destination_payload = _dict_payload(payload.get("destination"))
         if record_store is not None:
             incident = record_store.read_public_ingress_incident_record(record.aggregate_id)
-            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK:
+            retired_refusal = (
+                incident.status == "resolved"
+                and incident.resolution_reason == PRODUCTION_REQUEST_REFUSED
+            )
+            if incident.check_name == RETIRED_PRODUCTION_DELIVERY_LAG_CHECK or retired_refusal:
                 # An earlier send may have happened; preserve its uncertain outcome.
                 if record.provider_operation_key:
                     return record.model_copy(
@@ -3435,13 +3498,17 @@ def deliver_public_ingress_notification_outbox_delivery(
                     {
                         **attempt_payload,
                         "delivery_status": "skipped",
-                        "action": "retired_source_lag",
+                        "action": "retired_production_refusal"
+                        if retired_refusal
+                        else "retired_source_lag",
                     }
                 )
                 return record.model_copy(
                     update={
                         "state": "delivered",
-                        "action": "skipped_retired_source_lag",
+                        "action": "skipped_retired_production_refusal"
+                        if retired_refusal
+                        else "skipped_retired_source_lag",
                         "error_code": "",
                         "lease_owner": "",
                         "lease_expires_at": "",

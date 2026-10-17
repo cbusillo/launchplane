@@ -15,10 +15,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import (
+    DisposableTestingResourcePreparation,
     DisposableLaneSafety,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
 )
-from control_plane.contracts.dokploy_target_record import PublicHostEffect
+from control_plane.contracts.dokploy_target_record import PublicHostEffect, DokployTargetRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.deploy_target import ProviderTargetRecord
 from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
@@ -61,6 +63,7 @@ from control_plane.storage.product_authority_bundle import (
 from control_plane.testing_replacement_resources import (
     TestingReplacementResourcesRequest,
     resource_context,
+    resource_preparation_payload,
     run_resource_schedule,
 )
 from control_plane.workflows.ship import utc_now_timestamp
@@ -82,16 +85,16 @@ class BootstrapPrerequisiteCode(StrEnum):
 
 _PREREQUISITE_MESSAGES: dict[BootstrapPrerequisiteCode, str] = {
     BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE: (
-        "Lane-local testing credential safety could not be verified against the active policy."
+        "Lane-local testing password safety could not be verified against the active policy."
     ),
     BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED: (
-        "Existing testing and production managed versions could not prove credential separation."
+        "Existing testing and production managed versions could not prove password separation."
     ),
     BootstrapPrerequisiteCode.CREDENTIAL_VERSIONS_MISSING: (
-        "Credential comparison needs all existing local testing and production managed versions."
+        "Password comparison needs all existing local testing and production managed versions."
     ),
     BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP: (
-        "An existing local testing credential equals a production source credential."
+        "An existing local testing password equals a production source password."
     ),
     BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED: (
         "The supported production-copy source could not be verified from its managed configuration."
@@ -102,8 +105,9 @@ _PREREQUISITE_MESSAGES: dict[BootstrapPrerequisiteCode, str] = {
 class TestingBootstrapPrerequisiteError(ValueError):
     """A fixed prerequisite classification, never a wrapped private exception."""
 
-    def __init__(self, code: BootstrapPrerequisiteCode) -> None:
+    def __init__(self, code: BootstrapPrerequisiteCode, *, unavailable: bool = False) -> None:
         self.code = code
+        self.unavailable = unavailable
         super().__init__(_PREREQUISITE_MESSAGES[code])
 
 
@@ -119,19 +123,22 @@ def _bootstrap_prerequisite(code: BootstrapPrerequisiteCode) -> Iterator[None]:
         raise TestingBootstrapPrerequisiteError(
             BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
         ) from None
+    except ValueError:
+        raise TestingBootstrapPrerequisiteError(code) from None
     except (
-        ValueError,
         FileNotFoundError,
         RuntimeError,
         OSError,
         click.ClickException,
         LiveTargetRuntimeError,
     ):
-        raise TestingBootstrapPrerequisiteError(code) from None
+        raise TestingBootstrapPrerequisiteError(code, unavailable=True) from None
 
 
 def bootstrap_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:
     payload = request.model_dump(mode="json")
+    if not request.initial_generation:
+        payload.pop("initial_generation")
     if payload.get("source_mode") == "ssh":
         payload.pop("source_mode")
     return payload
@@ -149,6 +156,8 @@ def bootstrap_request_sha256(request: TestingReplacementResourcesRequest) -> str
 
 
 class TestingReplacementBootstrapRequest(TestingReplacementResourcesRequest):
+    mode: Literal["dry-run", "apply", "readback"] = "dry-run"
+    operation_id: str = Field(min_length=1)
     domain_host: str = Field(pattern=r"^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$")
     certificate_type: Literal["none", "letsencrypt"] = "none"
     source_mode: Literal["ssh", "container-export"] = "ssh"
@@ -182,6 +191,122 @@ def bootstrap_plan_payload(plan: TestingReplacementBootstrapPlan) -> dict[str, o
     return payload
 
 
+def bootstrap_copy_prerequisites(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    target: DokployTargetRecord,
+    generation: FreshOdooTestingGeneration | None,
+    source_mode: Literal["ssh", "container-export"],
+) -> tuple[tuple[str, ...], str]:
+    require_testing_restore_policy(profile, context)
+    omitted = testing_credential_omissions(store, context, generation)
+    require_testing_credential_safety(store, context, omitted)
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED):
+        require_distinct_testing_credentials(store, profile, context)
+    source_binding = testing_restore_source_binding(
+        store, profile, context, target, generation, source_mode
+    )
+    return tuple(sorted(omitted)), source_binding
+
+
+def require_testing_restore_policy(profile: LaunchplaneProductProfileRecord, context: str) -> None:
+    lane = next(
+        lane for lane in profile.lanes if (lane.context, lane.instance) == (context, "testing")
+    )
+    production = [lane for lane in profile.lanes if lane.instance == "prod"]
+    if (
+        len(production) != 1
+        or not lane.odoo_data_policy.allows_rebuild_source("upstream_restore")
+        or lane.odoo_data_policy.upstream_source
+        != f"{profile.product}:{production[0].context}:prod"
+    ):
+        raise ValueError("Prepare the testing-only same-product production restore policy first.")
+
+
+def testing_credential_omissions(
+    store: PostgresRecordStore, context: str, generation: FreshOdooTestingGeneration | None
+) -> frozenset[str]:
+    bindings = site_delivered_secret_bindings_from_store(
+        record_store=store, context_name=context, instance_name="testing"
+    )
+    omitted = frozenset(
+        {
+            *FRESH_TESTING_OMITTED_SETTINGS,
+            *(key for key in bindings if key not in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS),
+        }
+    )
+    if generation is not None:
+        if omitted.difference(generation.omitted_runtime_keys):
+            raise ValueError("Fresh testing credential delivery changed after review.")
+        omitted = frozenset(generation.omitted_runtime_keys)
+    return omitted
+
+
+def require_testing_credential_safety(
+    store: PostgresRecordStore, context: str, omitted: frozenset[str]
+) -> None:
+    bindings = site_delivered_secret_bindings_from_store(
+        record_store=store, context_name=context, instance_name="testing"
+    )
+    bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE):
+        safety = evaluate_runtime_key_safety_for_live_target_sync(
+            record_store=store,
+            context_name=context,
+            instance_name="testing",
+            required_binding_keys=tuple(sorted(bindings)),
+        )
+        if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
+            raise ValueError("Testing credentials lack current non-production safety proof.")
+        for binding in bindings.values():
+            record = store.read_secret_record(binding.secret_id)
+            if (
+                record.scope != "context_instance"
+                or record.context != context
+                or record.instance != "testing"
+            ):
+                raise ValueError("Fresh testing cannot carry a shared or production credential.")
+
+
+def testing_restore_source_binding(
+    store: PostgresRecordStore,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    target: DokployTargetRecord,
+    generation: FreshOdooTestingGeneration | None,
+    source_mode: Literal["ssh", "container-export"],
+) -> str:
+    source_values: dict[str, str] = {}
+    for scope in ("context", "instance"):
+        for runtime_record in store.list_runtime_environment_records(context_name=context):
+            if runtime_record.scope == scope and runtime_record.instance == (
+                "testing" if scope == "instance" else ""
+            ):
+                source_values.update({key: str(value) for key, value in runtime_record.env.items()})
+    source_values.update({key: str(value) for key, value in target.env.items()})
+    source_binding = ""
+    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED):
+        if source_mode == "container-export":
+            captured = (
+                recorded_native_testing_capture(store, generation)
+                if generation is not None
+                else None
+            )
+            source_binding = (
+                captured.source_binding_sha256
+                if captured is not None
+                else native_testing_source_authority(
+                    store, profile=profile, testing_context=context
+                ).binding_sha256
+            )
+        else:
+            encoded_restore_source(source_values)
+    if generation is not None and source_binding != generation.source_binding_sha256:
+        raise ValueError("The reviewed production source authority changed.")
+    return source_binding
+
+
 def bootstrap_plan(
     store: PostgresRecordStore, product: str, request: TestingReplacementBootstrapRequest
 ) -> TestingReplacementBootstrapPlan:
@@ -212,13 +337,6 @@ def bootstrap_plan(
         or generation.request_sha256 != bootstrap_request_sha256(request)
     ):
         raise ValueError("Bootstrap request differs from its recorded generation.")
-    production = [lane for lane in profile.lanes if lane.instance == "prod"]
-    if (
-        len(production) != 1
-        or not lane.odoo_data_policy.allows_rebuild_source("upstream_restore")
-        or lane.odoo_data_policy.upstream_source != f"{product}:{production[0].context}:prod"
-    ):
-        raise ValueError("Prepare the testing-only same-product production restore policy first.")
     old_hosts = {urlsplit(value).hostname for value in (lane.base_url, lane.health_url)}
     old_hosts.update(target.domains)
     # The retained hostname is never moved or independently duplicated.
@@ -246,71 +364,14 @@ def bootstrap_plan(
         )
     ):
         raise ValueError("Fresh testing requires an independent, unbound hostname.")
-    bindings = site_delivered_secret_bindings_from_store(
-        record_store=store, context_name=request.context, instance_name="testing"
+    omitted, source_binding = bootstrap_copy_prerequisites(
+        store, profile, request.context, target, generation, request.source_mode
     )
-    omitted = frozenset(
-        {
-            *FRESH_TESTING_OMITTED_SETTINGS,
-            *(key for key in bindings if key not in FRESH_TESTING_LOCAL_CREDENTIAL_KEYS),
-        }
-    )
-    if generation is not None:
-        if omitted.difference(generation.omitted_runtime_keys):
-            raise ValueError("Fresh testing credential delivery changed after review.")
-        omitted = frozenset(generation.omitted_runtime_keys)
-    bindings = {key: binding for key, binding in bindings.items() if key not in omitted}
-    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNSAFE):
-        safety = evaluate_runtime_key_safety_for_live_target_sync(
-            record_store=store,
-            context_name=request.context,
-            instance_name="testing",
-            required_binding_keys=tuple(sorted(bindings)),
-        )
-        if safety.get("status") not in {"pass", "skipped"} or safety.get("reported"):
-            raise ValueError("Testing credentials lack current non-production safety proof.")
-        for binding in bindings.values():
-            record = store.read_secret_record(binding.secret_id)
-            if (
-                record.scope != "context_instance"
-                or record.context != request.context
-                or record.instance != "testing"
-            ):
-                raise ValueError("Fresh testing cannot carry a shared or production credential.")
-    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED):
-        require_distinct_testing_credentials(store, profile, request.context)
-    source_values: dict[str, str] = {}
-    for scope in ("context", "instance"):
-        for runtime_record in store.list_runtime_environment_records(context_name=request.context):
-            if runtime_record.scope == scope and runtime_record.instance == (
-                "testing" if scope == "instance" else ""
-            ):
-                source_values.update({key: str(value) for key, value in runtime_record.env.items()})
-    source_values.update({key: str(value) for key, value in target.env.items()})
-    source_binding = ""
-    with _bootstrap_prerequisite(BootstrapPrerequisiteCode.RESTORE_SOURCE_UNCONFIGURED):
-        if request.source_mode == "container-export":
-            captured = (
-                recorded_native_testing_capture(store, generation)
-                if generation is not None
-                else None
-            )
-            source_binding = (
-                captured.source_binding_sha256
-                if captured is not None
-                else native_testing_source_authority(
-                    store, profile=profile, testing_context=request.context
-                ).binding_sha256
-            )
-        else:
-            encoded_restore_source(source_values)
-    if generation is not None and source_binding != generation.source_binding_sha256:
-        raise ValueError("The reviewed production source authority changed.")
     digest = canonical_json_sha256(
         {
             "request": bootstrap_request_payload(request),
             "profile": profile.model_dump(mode="json"),
-            "allocation": allocation.model_dump(mode="json"),
+            "allocation": resource_preparation_payload(allocation),
             "configuration": [
                 item.model_dump(mode="json")
                 for item in disposable_lane_configuration(store, request.context, "testing")
@@ -437,15 +498,20 @@ class TestingReplacementBootstrapAdapter:
             or not self._domains(generation)
         ):
             raise ValueError("The independent testing route or queue is unverified.")
-        operation = self.store.read_odoo_stable_target_replacement_operation_record(
-            generation.operation_id
-        )
-        if (
-            operation.status != "superseded"
-            or operation.disposable_supersession is None
-            or operation.disposable_supersession.replacement_target_id != generation.target_id
-        ):
-            raise ValueError("Testing bootstrap supersession is incomplete.")
+        if self.request.initial_generation:
+            allocation = self.store.read_disposable_resource_preparation(generation.operation_id)
+            if allocation is None or not allocation.initial_reconcile_requested_at:
+                raise ValueError("Initial testing queue receipt is incomplete.")
+        else:
+            operation = self.store.read_odoo_stable_target_replacement_operation_record(
+                generation.operation_id
+            )
+            if (
+                operation.status != "superseded"
+                or operation.disposable_supersession is None
+                or operation.disposable_supersession.replacement_target_id != generation.target_id
+            ):
+                raise ValueError("Testing bootstrap supersession is incomplete.")
         return bootstrap_plan_payload(
             TestingReplacementBootstrapPlan(
                 product=self.product,
@@ -492,6 +558,10 @@ class TestingReplacementBootstrapAdapter:
             def check() -> None:
                 lease.assert_current()
                 old_check()
+                if self.request.initial_generation:
+                    from control_plane.testing_initial_generation import require_initial_usage
+
+                    require_initial_usage(self.root, self.store, self.product, self.request)
                 with self.store.serialize_disposable_testing_resources():
                     if bootstrap_plan(self.store, self.product, self.request) != plan:
                         raise ValueError("Testing bootstrap metadata changed.")
@@ -662,8 +732,24 @@ class TestingReplacementBootstrapAdapter:
                 checkpoint(generation.domain_host, domain_id, profile.runtime_port)
 
             check()
+            from control_plane.testing_local_credentials import with_generated_credentials
+
+            credential_bundle = with_generated_credentials(
+                ProductAuthorityBundle(),
+                self.store,
+                profile,
+                self.request.context,
+                actor="service:testing-bootstrap",
+                generation=generation.operation_id,
+                only_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+            )
             self.store.write_product_public_hosts_bundle(
                 ProductAuthorityBundle(
+                    secret_records=credential_bundle.secret_records,
+                    secret_versions=credential_bundle.secret_versions,
+                    secret_bindings=credential_bundle.secret_bindings,
+                    secret_audit_events=credential_bundle.secret_audit_events,
+                    secret_delivery_read_sets=credential_bundle.secret_delivery_read_sets,
                     required_context_owner=(self.product, self.request.context),
                     expected_product_profiles=(profile,),
                     product_profiles=(updated_profile,),
@@ -761,12 +847,20 @@ class TestingReplacementBootstrapAdapter:
             OdooStableTargetReplacementOperationRecord,
         )
 
-        assert isinstance(operation, OdooStableTargetReplacementOperationRecord)
-        if (
+        if isinstance(operation, DisposableTestingResourcePreparation):
+            if not self.request.initial_generation or not operation.initial_request_sha256:
+                raise ValueError("Initial generation preparation is unavailable.")
+        elif not isinstance(operation, OdooStableTargetReplacementOperationRecord):
+            raise ValueError("Testing preparation type is unavailable.")
+        elif (
             operation.status != "superseded"
             and not self.store.supersede_disposable_testing_replacement(operation)
         ):
             raise ValueError("The retained testing fence could not be superseded.")
+        if self.request.initial_generation:
+            from control_plane.testing_initial_generation import require_initial_usage
+
+            require_initial_usage(self.root, self.store, self.product, self.request)
         self.store.request_fresh_testing_reconcile(generation)
         return ProviderMutationOutcome(
             202,

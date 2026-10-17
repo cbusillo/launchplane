@@ -1641,10 +1641,19 @@ Persisted authority digests suppress duplicate change runs across replicas and
 restarts; a change during a probe remains due on the next pass. Sensor writes
 and scheduler receipts do not wake another probe. Probes retain their existing
 timeouts and the single runtime-identity confirmation wait, so a slow/failing
-batch can miss its deadline; expired evidence stays stale. Batch latency and
-polling drift can create stale intervals between completions: expiry is not
-extended to hide those gaps. Qualify actual completion latency and storage growth
+batch can miss its deadline; expired evidence stays stale. Health, runtime identity, DNS diagnostics
+and public-ingress projections share `health_monitor_freshness_seconds`: one
+configured lane interval plus two service polling ticks (scheduling jitter and
+publication lag), two probe timeout budgets and the identity-confirmation delay.
+The latter matters because one lane changing runtime can delay publication of the healthy lanes in
+its batch too. Reads never renew an observation, and watchdog
+completion deadlines remain unchanged. Failed probes and mismatched identities
+remain failures immediately, and stopped probes become stale at their original
+observation's deadline. Qualify actual completion latency and storage growth
 on the deployed service before starting a continuous-green observation clock.
+A long change-triggered run can still delay a subsequent scheduled slot; multiple
+probe waves can also exceed the publication budget. Those are scheduler latency
+limits, not permission to renew old proof or hide a missed completion.
 Probe leases expire after 30 seconds and renew every 10 seconds so a dead worker
 does not retain a production slot for two minutes. The watchdog reads lane
 profiles independently of the broader settings/secret authority digests.
@@ -1901,6 +1910,12 @@ material-event deliveries in the same transaction as the observation and inciden
 Production delivery has separate `production-delivery-*` provider incidents.
 Rejected production deploy/promotion requests record a bounded reason code and
 the caller's trace even when refusal precedes deployment-record creation.
+The pre-effect promotion guard's HTTP 409 `promotion_required` is a correct
+refusal, not a failed delivery: it records a skipped
+`production-request-refused-*` observation with the trace and sends no failure
+notification. It neither changes production nor resolves any existing incident.
+Failures after a deploy starts, other rejections, and uncertain outcomes remain
+delivery incidents.
 The service's independent delivery-monitor thread checks terminal deployment,
 promotion and queued Odoo release failures once per minute, including products
 without HTTP health checks. As with other incidents, existing matching
@@ -1964,6 +1979,37 @@ incident. A later verified source read resolves only that monitoring incident.
 Explicit lifecycle retirement resolves automatic delivery monitoring; prelaunch
 products have no automatic production deadline. This is notification evidence,
 never acceptance or a release gate.
+
+Historical promotion-guard incidents can be disposed of once their caller is
+retired and production remains healthy. Use the deployed service's existing
+`POST /v1/products/public-ingress-monitor/run-once` with its existing
+`public_ingress_monitor.run_once` authority and an `Idempotency-Key`. Add
+`refused_production_requests`, a list of objects containing `incident_id`,
+`caller_retired: true`, `caller_retired_at` (a timezone-aware timestamp), and
+`caller_retirement_evidence` (the merged change or other explicit evidence that
+the admin checked). Caller retirement is an admin attestation, never an
+inference from health or elapsed time. Verify all old callers/in-flight jobs have
+stopped before attesting it. No new grant, release, or hand-edited record is needed.
+
+That run first performs normal monitoring. Reconciliation then requires every
+effective production check to be fresh and passing after caller retirement,
+with current runtime identity verified. It rejects continuing refusal observations,
+non-refusal or mixed/uncertain incident history, changed lane authority, and
+concurrent incident changes. It shares the delivery monitor's lane lock. Each
+qualified occurrence resolves independently through the normal atomic incident,
+event and reminder transition, with “Production request refused, nothing changed”
+and the retirement evidence in its summary. Its original observations and trace
+remain linked; `resolution_reason=request_refused` records the refusal disposition,
+not a successful deployment. The safe incident API summary says “refused, nothing changed”. The response's
+`refused_production_requests_resolved` lists the disposed occurrences. A blocked
+entry returns 409 `refused_request_reconciliation_blocked`; earlier entries may
+already have resolved. Read back before retrying; entries already resolved as
+`request_refused` are harmless. Incidents resolved by another outcome keep that
+outcome and refuse reclassification. Reconciliation sends no recovery notification. The normal outbox worker
+skips its queued failure notices before resolving a destination; interrupted
+provider sends retain an unknown outcome. Read the incident list/detail APIs to
+verify the resulting disposition. Deploying the source alone does not clear the
+historical incidents.
 
 Exact replays of an unresolved candidate retain its original reason and trace and
 reuse the incident/outbox. A different failure stage updates that incident, and
@@ -3408,6 +3454,33 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   in the same transaction, and preserves pending website intent and apply snapshots.
   A conflicting destination's scope, status, or safety metadata requires explicit
   local/bootstrap repair before retry. No secret values or versions are copied.
+- For a former relabel that omitted metadata, use `odoo-overrides
+  migrate-secret-transport --context C --instance I
+  --repair-metadata-from-relabel-history` to review one exact lane without
+  writing. Add `--apply --allow-direct-db-mutation` only for an explicitly
+  authorized local/bootstrap repair; arbitrary-checkout live repair is unsupported.
+  This covers both partial and completed pointer transitions. It fills missing
+  classification, sharing evidence and value-source metadata from the retained
+  disabled source binding, preserving explicit destination fields. Sharing
+  evidence follows only an agreeing classification. It requires a unique
+  retained relabel audit naming both bindings and keys, matching secret and lane
+  identities, unchanged relabel timestamps, and current secret metadata no newer
+  than that audit. Missing, ambiguous, edited or rotated provenance refuses with
+  the binding id and the explicit local/bootstrap continuation; never infer safety
+  from a key name. The atomic write guards the override, whole binding set and
+  current secret metadata. It changes no value/version or source activation,
+  records a metadata-only audit, and is idempotent after repair. Historical
+  sources that never recorded classification or value origin cannot establish it.
+  Add repeatable `--repair-binding-id ID` to recover only selected referenced
+  destinations when unrelated legacy bindings have no relabel history. Unknown
+  destination ids refuse. Context-wide bindings, re-relabels and source metadata
+  missing classification or value origin are outside this bounded recovery.
+  For refused records, use the supported installed helper's
+  `product-config-dry-run` then `product-config-apply` value-writing path with
+  a separately authorized supplied value and `secret_class`; value origin is
+  established by that writer, never by a forced metadata edit. This issue grants
+  no value-write authority and asks for no credential. Current explicit edits
+  with later timestamps refuse and remain untouched.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
   persisted to the Dokploy compose target environment before the web container
@@ -4851,6 +4924,58 @@ failures do not hide other source observations. Responses, errors and logs
 contain no passwords, hashes, host/account values or raw grant rows. This read
 changes no configuration, binding, account, grants, runtime, source data or
 business data, and invokes no importer, deployment or synchronization.
+
+
+#### Runtime-origin source grants
+
+`GET /v1/products/{product}/environments/testing/odoo-source-grants` is the
+independent runtime-origin read. It requires the same existing product-scoped
+`operations.read` authority and accepts no query parameters, SQL, endpoints,
+usernames or credentials. It does not use an Odoo HTTP login or diagnostic
+service account. The login-based route above retains its identity guard and
+is not a prerequisite or fallback for this read.
+
+The response uses `applied_connection_grants` for the source account selected
+from the current verified web container. `managed_connection_grants` remains
+unknown because this read makes no service-origin source connection, and
+`parameters` stays empty: delivered-setting agreement is independently owned by
+import-override reconciliation. A read-only service-origin observation cannot
+substitute for runtime-origin privileges.
+
+The service verifies the testing lane, immutable artifact and container and
+requires already-delivered authentication settings to match the currently selected
+safe managed binding. Database-name keys differ by producer and are not required
+by this account-wide SHOW GRANTS read, which selects no default database; their
+agreement remains with import-override reconciliation. It sends only fixed code and non-secret identity metadata
+through its registered provider transport. Inside the container, a read-only
+PostgreSQL session reads only the fixed source parameter keys and requires
+those applied values to agree with installed settings. Source passwords never
+leave the container; isolated children consume them through stdin for the same
+fixed verified-TLS/SHOW GRANTS probe. No writer fallback, new account, password
+copy, import or production credential comparison is performed.
+
+The host resolves short IDs to full container IDs and verifies image, compose
+service and the observed runtime payload before exec. The canonical service
+comparator normalizes identity defaults/aliases and excludes finalized deployment
+timestamps. Drift snapshots cover configuration, image, mounts, networks and
+process/start identity, excluding routine healthcheck logs. Applied parameters
+are reread locally after source I/O; the service rechecks lane authority, current
+binding/version selection and delivered container settings before returning.
+
+Each source child has a ten-second deadline; container execution has a
+50-second timeout with forced cleanup, and the provider read has a 75-second
+budget. Runtime probes share the existing concurrency bound and unknown-result
+cooldown, keyed separately by binding/version and container. Successful results
+are never cached. An unreachable source does not hide other source results.
+Only the documented read privileges above are accepted; role grants, partial
+revokes, incomplete/unrecognized syntax and drift remain unknown.
+
+Actual image support for Python, psycopg2, PyMySQL, CA trust, timeout and the
+standard Odoo configuration must be qualified after delivery. Missing
+prerequisites remain unknown; no installation or identity workaround is tried.
+The observation covers only the selected web-container origin, not a separate
+script-runner or other container. It grants no importer authorization and does
+not prove production-credential inequality or finish deployed credential safety.
 
 ### Daily waiting-release digest
 

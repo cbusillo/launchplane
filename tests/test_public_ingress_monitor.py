@@ -57,9 +57,16 @@ from control_plane.contracts.public_ingress_monitoring import (
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.public_ingress_monitoring import (
     PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS,
+    health_monitor_freshness_seconds,
+    HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS,
+    HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS,
+    HEALTH_MONITOR_POLL_SECONDS,
 )
 from control_plane.drivers.registry import build_lane_summary_provenance
-from control_plane.lane_runtime_verification import read_lane_runtime_verification
+from control_plane.lane_runtime_verification import (
+    monitor_observation_provenance,
+    read_lane_runtime_verification,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.public_ingress_monitor import (
     HttpObservation,
@@ -742,8 +749,8 @@ class PublicIngressMonitorTests(unittest.TestCase):
         )
         for elapsed, expected in (
             (-1, "stale"),
-            (PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS, "verified"),
-            (PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + 1, "stale"),
+            (health_monitor_freshness_seconds(profile.lanes[0].instance), "verified"),
+            (health_monitor_freshness_seconds(profile.lanes[0].instance) + 1, "stale"),
         ):
             with self.subTest(elapsed=elapsed):
                 verification = read_lane_runtime_verification(
@@ -2203,6 +2210,81 @@ class PublicIngressMonitorTests(unittest.TestCase):
         self.assertEqual(len(store.records), 1)
         self.assertEqual(store.records[0].targets[-1].runtime_identity_status, "match")
         self.assertEqual(store.incidents, [])
+
+    def test_healthy_lane_stays_fresh_during_peer_identity_confirmation(self) -> None:
+        healthy_identity = _identity()
+        deploying_identity = healthy_identity.model_copy(update={"context": "deploying-site"})
+        healthy = _profile()
+        deploying = healthy.model_copy(
+            update={
+                "product": "deploying-site",
+                "lanes": (
+                    healthy.lanes[0].model_copy(
+                        update={
+                            "context": "deploying-site",
+                            "base_url": "",
+                            "health_url": "https://deploying.test/healthz",
+                        }
+                    ),
+                ),
+            }
+        )
+        store = _Store((healthy, deploying))
+        store.lane_summaries[(healthy_identity.context, "prod")] = _lane_summary(healthy_identity)
+        store.lane_summaries[(deploying_identity.context, "prod")] = _lane_summary(
+            deploying_identity
+        )
+        checked = datetime(2026, 5, 29, 12, 20, tzinfo=timezone.utc)
+        now = checked
+        changing = False
+        confirmed = False
+
+        def get(url: str, timeout: int) -> HttpObservation:
+            nonlocal now
+            identity = healthy_identity
+            if "deploying.test" in url:
+                identity = deploying_identity
+                if changing:
+                    now += timedelta(seconds=timeout)
+                    if not confirmed:
+                        identity = identity.model_copy(update={"deployment_record_id": "old"})
+            return HttpObservation(
+                status_code=200,
+                final_url=url,
+                redirect_count=0,
+                payload={"runtime_identity": identity.model_dump(mode="json")},
+            )
+
+        run_public_ingress_monitor_once(
+            record_store=store, checked_at=checked.isoformat(), http_get=get, notify=False
+        )
+        previous = next(record for record in store.records if record.product == healthy.product)
+        changing = True
+        now += timedelta(
+            seconds=PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS + HEALTH_MONITOR_POLL_SECONDS
+        )
+
+        def confirm(delay: float) -> None:
+            nonlocal now, confirmed
+            now += timedelta(seconds=delay)
+            confirmed = True
+
+        run_public_ingress_monitor_once(
+            record_store=store,
+            checked_at=now.isoformat(),
+            timeout_seconds=HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS,
+            http_get=get,
+            runtime_identity_confirmation_delay_seconds=HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS,
+            sleep=confirm,
+            notify=False,
+        )
+        self.assertTrue(confirmed)
+        self.assertEqual(store.incidents, [])
+        now += timedelta(seconds=HEALTH_MONITOR_POLL_SECONDS)
+        # The previous healthy proof covers the whole real batch publication delay.
+        self.assertEqual(
+            monitor_observation_provenance(previous, now=now).freshness_status, "verified"
+        )
 
     def test_runtime_identity_mismatch_that_persists_opens_incident(self) -> None:
         expected_identity = _identity()

@@ -819,6 +819,66 @@ the existing service checks. `public_health_verified` remains false in these
 configuration receipts; source tests or private HTTP success cannot clear the
 real incident.
 
+### Complete verification after public TLS repair
+
+A completed copy and post-deploy pass can precede a public TLS failure. Until
+public verification finishes, the generation remains incomplete and inventory
+still names the previous deployment. Repeating bootstrap or restore would not
+repair that publication gap. This applies to every fresh Odoo testing lane.
+
+`POST /v1/products/{product}/testing-verification` is the Director-agent
+continuation for the same generation and installed terminal deployment. It
+accepts only context, `instance: testing`, original generation operation ID,
+deployment record ID, reason, mode and reviewed plan digest. It derives the
+artifact, target, database, hostname and copy witness from service records.
+Production and slot-cutover lanes are excluded.
+
+```bash
+uv run python scripts/complete-testing-verification.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product example-odoo --context example \
+  --operation-id original-testing-generation-operation \
+  --deployment-record-id installed-terminal-deployment \
+  --reason 'Finish public verification after TLS repair' \
+  --evidence-file /private/operator-evidence/testing-verification.json
+```
+
+Review the private evidence, then repeat the identical arguments with `apply`,
+`--reviewed-dry-run` and one stable `--idempotency-key`. Use `readback` with
+the same evidence afterward. The service must already expose this capability;
+apply requires PostgreSQL. A newer local checkout does not activate the API.
+
+Both planning and application qualify the current target, actual running web
+and runner image digests and deployment identity, original database copy marker,
+isolated volumes/networks and payload-bound web gate. The fixed host inspection
+acquires the shared copy lock (recreating only its empty coordination file after
+host reboot or temporary-file cleanup) and performs no restore,
+registry initialization, setting change, container restart or provider schedule.
+All public HTTPS health, canonical, logo and runtime-identity checks must pass.
+A hold, active operation/fence, changed generation/authority, missing copy
+witness, wrong artifact or later deployment refuses publication.
+
+Application holds the generation executor lock and existing synchronous lane
+reservation, preventing another deploy from starting. After the live reads,
+a short authority comparison transaction preserves the failed deployment in a
+separate prior-evidence record, completes the original deployment, and publishes
+inventory, testing release tuple and generation completion atomically. Original
+operation requests, keys, terminal results, retry budgets, capture receipts,
+retained custody and the restored password are unchanged. The new deployment's
+`testing_verification_previous_record_id` links the preserved failure.
+
+Recovery uses the exact reviewed request and original key. Once the original
+request commits, a lost response replays its atomic receipt without another
+provider effect. An active original executor reports `testing_verification_in_progress`;
+observe its completion before same-key recovery. `readback` separately
+checks current records and live evidence. A failure before commit publishes
+nothing. Preserve evidence and record a refusal with its trace; never change
+records by hand, reset attempt budgets or restore again. If authority changed,
+review the changed evidence before planning further. Incidents resolve through
+normal monitor checks after truthful inventory publication; this endpoint never
+dismisses or edits an incident. Keep operational acceptance open until that
+monitor observation is recorded.
+
 ### Retire an incomplete legacy generation into custody
 
 When the original full authority preimage is unavailable, a Director agent can
@@ -1423,3 +1483,236 @@ down that connection and retains original-key uncertainty. Alert delivery writes
 only delivery fields for its original failure, and cannot overwrite worker
 storage/disposal evidence. A hold or positive use report arriving while a completed
 cleanup result is in flight preserves that result but skips the new activation.
+
+## Initial fresh Odoo testing generation
+
+An existing Odoo testing lane with no current fresh generation and no active or
+stranded lane operation uses the same resource and bootstrap producers with
+`initial_generation: true`. This is a separate preparation identity, not a
+replacement operation or a historical supersession. Completed operations,
+journals, old storage, target, hostname and credentials stay intact. It never
+qualifies the current database as a fresh copy.
+
+Start with the resource client, omitting `--operation-id`:
+
+```bash
+uv run python scripts/prepare-testing-replacement-resources.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --context <testing-context> --initial-generation \
+  --source-mode <ssh-or-container-export> \
+  --reason '<reason>' --idempotency-key <resource-key> \
+  --evidence-file <private-resource-review>
+```
+
+The service derives the preparation ID from the exact product, context,
+authenticated principal and original stable key; the receipt returns it as
+`operation_id`. Preserve that ID and key. Repeating the same dry run returns the
+same preparation while its recorded snapshot is unchanged; a changed intent or
+configuration requires a new key and new review. A refused, unactivated plan
+reserves neither an executor nor its original hostnames. Planning writes only
+its own custody/allocation evidence and reserves no executor. Before review it
+checks the existing bootstrap restore policy, distinct managed credentials and
+selected production source, then current original-lane usage through the existing
+read-only login/session probe or authoritative downtime rule. Missing evidence stays unknown. Holds,
+known use, production aliases and an existing generation or active operation
+refuse. Original copy custody is preserved by construction, not declared safe.
+
+An initial resource dry-run refusal identifies its first failed checkpoint:
+`testing_initial_preparation_unavailable` covers the original intent, lane,
+ownership, generation and operation admission (original intent/key validation
+also returns this code in apply, readback and release);
+`testing_initial_copy_prerequisite_unverified` covers copy prerequisites outside
+the classified bootstrap checks; and `testing_initial_usage_unverified` covers
+the original-lane usage decision. Classified bootstrap credential and restore
+source failures retain their existing fixed codes, such as
+`testing_credentials_unverified` and `testing_restore_source_unconfigured`.
+These codes include unreadable dependencies and do not establish a particular
+bad record or authorize changing it. Read current supported metadata and usage
+evidence for that checkpoint; preserve unknowns and the original intent. Provider
+authorization denial remains `authorization_denied`. No private exception text
+or provider payload is exposed. Older service images return the grouped
+`testing_resources_refused`; an old trace cannot identify its failed checkpoint.
+
+Review the receipt, then repeat with `apply --reviewed-dry-run` and exactly the
+same arguments/key/evidence file. Separately run `readback` with the same key.
+Only reviewed apply establishes the initial preparation's durable lane fence;
+competing synchronous and durable operations cannot start until its exact
+bootstrap queue transaction commits. Unknown or partial effects retain that
+fence and all resources. Recover through the original key and actual provider
+readback; do not create a replacement key to escape an uncertain effect.
+If apply refuses before any dispatch, its lane checks now precede activation.
+For an interrupted no-effect attempt that already took the fence, run the same
+resource client with `release --reviewed-dry-run`, the original resource key,
+intent and private review file. The service excludes its executor, independently
+reads that its named provider placement is absent, and atomically verifies no
+dispatch checkpoint, captured target, resource receipt or generation exists.
+It atomically records terminal release for both the lane fence and original
+provider reservation, without deleting custody or rewriting the original request.
+Repeated release is idempotent; that released intent can never apply. The client
+reports `released` explicitly if the original apply is replayed after release.
+The lane can continue normally, or a new initial intent can be reviewed with a
+new key. Any partial placement, recorded dispatch or unknown provider read keeps
+the original fence; use original-key reconciliation, never release to bypass it.
+
+Configuration drift before adoption refuses the reviewed plan. Each bounded
+provider effect and final publication rechecks current identity, holds, use and
+aliases. Independent resource readback is the same as stranded recovery.
+
+Next use `scripts/prepare-testing-replacement-bootstrap.py` with
+`--initial-generation --operation-id <returned-preparation-id>`, the same product
+and context, a new unbound hostname, and the same reviewed `--source-mode` (`ssh` or
+`container-export`) for the recorded same-product production source. Run its
+`dry-run --evidence-file <private-bootstrap-review>`, review, then
+`apply --reviewed-dry-run --idempotency-key <bootstrap-key>` and separate
+`readback`. Keep the complete original bootstrap intent and key for recovery.
+The existing testing-only upstream-restore policy and distinct managed testing
+credentials are prerequisites; this path creates no credential or grant.
+
+Bootstrap uses the existing isolated renderer and sanitized production-copy
+worker: live keys and outbound integrations are removed before any copied Odoo
+registry, module or web code runs. It commits only a generation and queue
+receipt, never copy completion. Its atomic queue releases the preparation fence
+without modifying any historical operation. Genuine copy completion, physical
+isolation, runtime identity, integration and usage checks remain required before
+walkthrough provisioning. Read back that completion through the supported lane
+and walkthrough paths after the worker finishes. A ready source PR does not
+establish those runtime facts.
+
+Keep the service image that understands initial preparation fences active while
+one is open; forward-fix an interrupted preparation. An older image cannot
+interpret its exclusion contract. Never roll back storage or erase custody to
+clear a fence. The stranded-operation procedure above retains its original
+admission and supersession meaning.
+
+## Standalone Odoo upgrade rehearsal
+
+`POST /v1/products/{product}/odoo-upgrade-rehearsal` and the repository client
+`scripts/odoo-upgrade-rehearsal.py` operate a separately identified rehearsal.
+This is not an initial testing generation. It has its own record, provider
+placement, private Docker network and storage; it writes no product profile,
+canonical target, runtime environment, production release or testing binding.
+Its runtime instance is `rehearsal`. The tenant's testing-only migration hook is
+not enabled by changing that name.
+
+The implementation reuses the disposable volume producer and actual backing
+checks, uniquely named placement discovery, the durable provider-operation
+journal, disabled manual schedules, the standard isolated Odoo Compose renderer,
+SQL-before-registry copy runner, connection isolation, integration readback and
+storage headroom checks. The existing local-password primitive supplies only the
+new rehearsal's own scope; no existing password or integration key is copied or
+rotated. It creates no credential that reaches a live system and grants nobody
+access. No workflow or alternate identity substitutes for a denied service call.
+The source and target copies use the same SQL boundary independently, with a
+sanitized source-version snapshot preserved before the target registry runs.
+
+The necessary new boundary is one additive rehearsal record, not another lane or
+release controller. Its compose is reserved under the new context in the existing
+physical-target registry, which prevents canonical lane aliases. The service derives its `lp-rehearsal-…` identity from the
+product, authenticated principal and original prepare key. Sizing comes from the
+product's production records; application, database and runner topology comes
+from the common Odoo renderer. Only explicit sizing keys are inherited. Routing,
+volumes, credentials, database names, cron and connections are isolated.
+
+Before planning, supply a private intent file outside the checkout. It contains
+`source_context` (the product's existing testing source-reader context),
+`source_odoo_version`, `target_artifact_id`, `storage` and `reason`. `storage` uses
+`database_bytes`, `filestore_bytes`, `staging_bytes` and `reserve_bytes`. The
+first two bound each streamed capture as well as supplying working headroom.
+Budget four database/filestore copies plus host staging and immutable recovery
+snapshots. Headroom checks group demands by actual backing filesystem; they are
+not filesystem quotas.
+
+The candidate artifact must already be registered, immutable, attributable to
+this product's repository, and declare its Odoo version and exact module intent.
+Its version must be newer than `source_odoo_version`; the restored database's
+actual base-module version must agree with that declared source version. The
+artifact must declare the supported source versions as a comma-separated
+`build_flags.values.sql_copy_source_versions` value. Missing source-major support
+refuses before a source read; this declaration must come from the artifact's
+qualification, not an agent inventing compatibility metadata.
+The existing SQL-only sanitizer runs on the old schema without loading a candidate
+registry. It preserves the sanitized old-version recovery tuple before any
+upgrade. No separate source-version application image is required.
+
+The candidate needs the native SQL-before-registry credential boundary,
+OpenUpgrade assets and module-update witnesses. Preparing the independent runtime
+checks its runner before any business source is read. Metadata planning alone
+does not qualify an image's executable behavior. Unsupported native contracts
+fail closed; before-registry and before-web readback remain mandatory on the
+actual copied data.
+
+The source reader must already have its service-recorded `ODOO_UPSTREAM_*` and
+`OPENUPGRADE_*` settings, existing host SSH identity, known-host trust and source
+read access. No command installs a key, changes source trust, grants access,
+freezes the business host or edits its database. Placement uses the testing
+source reader's already registered remote server, read-only. Only sizing comes
+from production. Local/unregistered placement
+is refused. A missing record or unavailable prerequisite is not authorization to
+infer coordinates from an issue or workstation file.
+
+Use the installed `launchplane-write-action.py` helper as the authenticated, redacted transport:
+
+```bash
+uv run python scripts/odoo-upgrade-rehearsal.py dry-run \
+  --operator-helper <installed-launchplane-skill>/scripts/launchplane-write-action.py \
+  --product <product> --payload-file <private-intent.json> \
+  --idempotency-key <original-prepare-key> --evidence-file <private-prepare-review>
+```
+
+Review its result, then repeat with `apply --reviewed-dry-run`, exactly the same
+intent, key and evidence file. Planning writes only its own rehearsal evidence.
+Apply is restricted to the authenticated Director agent and PostgreSQL-backed
+execution. Existing read authority covers planning and readback. It is a source
+capability until the completing PR is deployed; a missing route is unavailable,
+not a reason to invoke a local live-target command.
+
+After prepare, keep the returned `rehearsal_id` in the private intent and take
+each next `action` through its own dry-run/review/apply with a distinct stable
+key and new evidence file:
+
+1. `execute` captures the external source through fixed read-only SSH commands.
+   Database and filestore streams are bounded. Source-copy lineage is hashed,
+   referenced attachments are checked against the restored database, and raw
+   failure material stays outside all container mounts. The SQL-only
+   source phase sanitizes with no registry execution. The service preserves that
+   source recovery tuple, clones it, and runs OpenUpgrade under the target
+   artifact. Strict connection readback gates private web startup.
+2. `simulate-final` uses the already sanitized source copy. It simulates the
+   final capture and switches only the rehearsal web's database to the final
+   upgraded copy. It never recaptures or fences the real business system.
+3. `verify` probes health identity and the login page inside the private
+   network, stops the disposable web writer, and preserves the final upgraded
+   database/filestore tuple. Product business validation remains part of the
+   consuming rehearsal; health/login proof is not Client acceptance.
+4. `retire` stops web, runner and database and preserves all recovery custody.
+   It requires both final source and upgraded tuples. It does not delete
+   volumes, provider placement, snapshots or keys. Their custodian carries them
+   into the rollback rehearsal before a separately reviewed physical disposal.
+
+Use `readback` with the original intent/action to inspect its completed effect.
+Retirement readback verifies stopped containers and immutable files without
+starting the database. Snapshot hashes, source binding, copy witnesses,
+artifact identities and elapsed times are value-free receipts. Provider ids,
+source coordinates and local passwords never reach the client's output.
+
+An uncertain effect stays fenced under its original key. Readback is not replay;
+repeat the original apply only for the provider journal's observation of a completed host receipt,
+never with a new key. An incomplete provider create or partial host operation
+keeps its namespace, phase journal, raw failure custody and storage for diagnosis.
+The route does not guess that absence or a timeout permits another create,
+restore, capture or deletion. Fixed prerequisite codes and the trace identify
+unavailable source, artifact, placement, credentials, state or recovery evidence;
+no provider exception text is returned.
+An interrupted provider create has no automatic adoption path; its partial
+placement remains fenced for diagnosis, with no fresh-key abandonment inferred.
+
+Elapsed times describe this isolated simulation. Real source writer drain,
+public DNS/TLS switching, business integration resumption and the actual
+production downtime window remain unmeasured. The consuming product issue must
+keep those limits with its rehearsal evidence. Neither a ready existing-data
+production plan nor a successful rehearsal authorizes production promotion.
+
+A partial operation's readback reports `completed: false`, any independently
+verified snapshot receipts and whether raw source custody remains. It does not
+start a runtime or clear the provider journal. Missing terminal evidence never
+becomes a successful migration or retirement; keep the original operation key.

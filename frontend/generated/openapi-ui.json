@@ -6036,6 +6036,16 @@
                     "title": "Context",
                     "type": "string"
                   },
+                  "dependency_health": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "enabled": {
                     "default": true,
                     "title": "Enabled",
@@ -27323,6 +27333,19 @@
             ],
             "title": "Sharing Reason",
             "x-launchplane-optional-response": true
+          },
+          "value_source": {
+            "anyOf": [
+              {
+                "const": "generated",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Source",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -28221,6 +28244,17 @@
       "ProductHealthMonitoringCheckSummary": {
         "additionalProperties": false,
         "properties": {
+          "dependency_health": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyHealthEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -28452,6 +28486,10 @@
             ],
             "title": "Current Check Kind"
           },
+          "current_dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
+          },
           "current_enabled": {
             "anyOf": [
               {
@@ -28561,6 +28599,10 @@
             ],
             "title": "Requested Check Kind",
             "type": "string"
+          },
+          "requested_dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
           },
           "requested_enabled": {
             "title": "Requested Enabled",
@@ -28708,6 +28750,28 @@
             },
             "title": "Checks",
             "type": "array"
+          },
+          "dependency_expectations": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyExpectations"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "dependency_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "monitoring_intent": {
             "enum": [
@@ -28888,7 +28952,8 @@
               "recovered",
               "monitoring_intent_changed",
               "migration_baseline",
-              "duplicate_reconciled"
+              "duplicate_reconciled",
+              "request_refused"
             ],
             "title": "Reason",
             "type": "string"
@@ -28988,6 +29053,8 @@
           },
           "failure_code": {
             "enum": [
+              "dependency_failed",
+              "dependency_not_covered",
               "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
@@ -29177,6 +29244,8 @@
             "anyOf": [
               {
                 "enum": [
+                  "dependency_failed",
+                  "dependency_not_covered",
                   "production_delivery_failed",
                   "connection_timeout",
                   "deploy_fence_held",
@@ -29434,6 +29503,8 @@
           },
           "failure_code": {
             "enum": [
+              "dependency_failed",
+              "dependency_not_covered",
               "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
@@ -29574,7 +29645,8 @@
                 "enum": [
                   "recovered",
                   "monitoring_intent_changed",
-                  "duplicate_reconciled"
+                  "duplicate_reconciled",
+                  "request_refused"
                 ],
                 "type": "string"
               },
@@ -29760,6 +29832,10 @@
             },
             "title": "Checks",
             "type": "array"
+          },
+          "dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
           },
           "monitoring_intent": {
             "default": "prelaunch",
@@ -33285,8 +33361,16 @@
       },
       "ProductReviewCarry": {
         "additionalProperties": false,
-        "description": "The source acceptance and immutable evidence for an unchanged feature patch.",
+        "description": "The source acceptance and immutable evidence for carrying its decision.",
         "properties": {
+          "commits": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/ProductReviewCarryCommit"
+            },
+            "title": "Commits",
+            "type": "array"
+          },
           "comparison_base_sha": {
             "default": "",
             "title": "Comparison Base Sha",
@@ -33300,7 +33384,8 @@
             "default": "merge_train_base_refresh",
             "enum": [
               "merge_train_base_refresh",
-              "unchanged_patch_base_update"
+              "unchanged_patch_base_update",
+              "client_impact_none"
             ],
             "title": "Reason",
             "type": "string"
@@ -33319,6 +33404,7 @@
           }
         },
         "required": [
+          "commits",
           "comparison_base_sha",
           "head_sha",
           "reason",
@@ -33326,6 +33412,28 @@
           "refresh_record_ids"
         ],
         "title": "ProductReviewCarry",
+        "type": "object"
+      },
+      "ProductReviewCarryCommit": {
+        "additionalProperties": false,
+        "description": "An immutable commit and the Client-impact trailer used to carry acceptance.",
+        "properties": {
+          "client_impact": {
+            "const": "none",
+            "title": "Client Impact",
+            "type": "string"
+          },
+          "sha": {
+            "pattern": "^[0-9a-f]{40}$",
+            "title": "Sha",
+            "type": "string"
+          }
+        },
+        "required": [
+          "client_impact",
+          "sha"
+        ],
+        "title": "ProductReviewCarryCommit",
         "type": "object"
       },
       "ProductReviewDecisionEnvelope": {
@@ -33912,6 +34020,12 @@
                 "type": "null"
               }
             ]
+          },
+          "testing_local_credential": {
+            "default": false,
+            "title": "Testing Local Credential",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -37419,6 +37533,158 @@
           "target_deployment_record_id"
         ]
       },
+      "RuntimeDependencyExpectations": {
+        "additionalProperties": false,
+        "properties": {
+          "dependencies": {
+            "default": [],
+            "items": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ],
+              "type": "string"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "source": {
+            "default": "derived",
+            "enum": [
+              "derived",
+              "override",
+              "unavailable"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "title": "RuntimeDependencyExpectations",
+        "type": "object",
+        "required": [
+          "dependencies",
+          "source"
+        ]
+      },
+      "RuntimeDependencyHealthEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "enum": [
+              "informational",
+              "required"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "results": {
+            "additionalProperties": {
+              "enum": [
+                "pass",
+                "fail",
+                "not_covered"
+              ],
+              "type": "string"
+            },
+            "propertyNames": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ]
+            },
+            "title": "Results",
+            "type": "object"
+          },
+          "source": {
+            "enum": [
+              "derived",
+              "override",
+              "unavailable"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "not_covered",
+              "none"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "results",
+          "source",
+          "status"
+        ],
+        "title": "RuntimeDependencyHealthEvidence",
+        "type": "object"
+      },
+      "RuntimeDependencyHealthPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "informational",
+            "enum": [
+              "informational",
+              "required"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "RuntimeDependencyHealthPolicy",
+        "type": "object",
+        "required": [
+          "mode",
+          "override"
+        ]
+      },
+      "RuntimeDependencyOverride": {
+        "additionalProperties": false,
+        "properties": {
+          "dependencies": {
+            "items": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ],
+              "type": "string"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dependencies",
+          "reason"
+        ],
+        "title": "RuntimeDependencyOverride",
+        "type": "object"
+      },
       "RuntimeEnvironmentRecord": {
         "additionalProperties": false,
         "properties": {
@@ -37783,7 +38049,8 @@
                 "enum": [
                   "supplied",
                   "copy",
-                  "provider"
+                  "provider",
+                  "generated"
                 ],
                 "type": "string"
               },
@@ -39048,10 +39315,39 @@
         "additionalProperties": false,
         "description": "An admin's request to ask the Client about an engineering-only release now.",
         "properties": {
+          "adopt_comment_id": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adopt Comment Id"
+          },
+          "adopt_issue_number": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adopt Issue Number"
+          },
           "checklist_digest": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Checklist Digest",
             "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
           },
           "product": {
             "maxLength": 256,

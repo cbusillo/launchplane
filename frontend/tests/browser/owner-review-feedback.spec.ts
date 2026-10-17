@@ -1,5 +1,18 @@
 import { waitForState, expect, test } from "./state";
 
+test("a carried acceptance explains invisible follow-ups and can be replaced", { tag: "@responsive" }, async ({ page }, testInfo) => {
+  await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=carried-invisible-decision");
+  const decision = page.getByLabel("Recorded decision");
+  const carryNote = decision.locator('[data-carry-reason="client_impact_none"]');
+  await expect(carryNote).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("owner-acceptance-invisible.png"), fullPage: true });
+  await page.getByRole("textbox").fill("Please revise the feature.");
+  await page.getByRole("button", { name: "Request changes" }).click();
+  await expect(decision).toContainText("Changes requested");
+  await expect(carryNote).toHaveCount(0);
+});
+
 test("a carried acceptance applies to this preview and a new decision replaces it", async ({ page }, testInfo) => {
   await page.goto("/ui/owner-review?fixture=products&repository=example%2Fcontrol-plane&pull_request=308&scenario=carried-decision");
   const decision = page.getByLabel("Recorded decision");

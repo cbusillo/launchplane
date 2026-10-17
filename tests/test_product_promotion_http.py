@@ -42,7 +42,7 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 from control_plane.contracts.public_ingress_monitoring import (
-    health_monitor_interval_seconds,
+    health_monitor_freshness_seconds,
     PublicIngressObservationRecord,
     PublicIngressTargetObservation,
 )
@@ -506,7 +506,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
                     checked_at = (
                         NOW
                         - timedelta(
-                            seconds=health_monitor_interval_seconds(observation.instance) + 1
+                            seconds=health_monitor_freshness_seconds(observation.instance) + 1
                         )
                         if change == "expired"
                         else NOW + timedelta(minutes=1)
@@ -627,7 +627,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
         store.observations[0] = store.observations[0].model_copy(
             update={
                 "observed_at": (
-                    NOW - timedelta(seconds=health_monitor_interval_seconds(lane.instance) + 1)
+                    NOW - timedelta(seconds=health_monitor_freshness_seconds(lane.instance) + 1)
                 ).isoformat()
             }
         )
@@ -719,7 +719,7 @@ class ProductPromotionStatusTests(unittest.TestCase):
         store.observations[-1] = passed.model_copy(
             update={
                 "observed_at": (
-                    NOW - timedelta(seconds=health_monitor_interval_seconds(lane.instance) + 1)
+                    NOW - timedelta(seconds=health_monitor_freshness_seconds(lane.instance) + 1)
                 ).isoformat()
             }
         )

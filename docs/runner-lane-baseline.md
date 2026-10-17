@@ -238,6 +238,46 @@ registration roots reject explicit `..` path components rather than resolving
 them into a different path. Registration and retirement remain separate
 lifecycle contracts and are not covered by this planner validation.
 
+## Existing-runner relabel library
+
+`control_plane.workflows.runner_lane_relabel` provides the exact-existing-runner
+custom-label engine and typed audit contract. This is library support only:
+there is no relabel workflow, local live CLI, or service execution route. It
+adds no live authority, credential binding or supported dispatch path. Under
+[DIRECTION.md](../DIRECTION.md), a relabel requested by an admin or agent belongs in the
+service under the signed-in admin or agent identity. Native integration must
+record that actor, enforce the reviewed repository/runner policy, serialize
+conflicting updates, and use a purpose-bound runner-administration capability.
+Missing capability is an activation prerequisite, never permission to borrow a
+workflow's credential or identity. Existing register/retire workflow modes stay
+supported until their complete replacement is deployed.
+
+The engine takes an explicit repository/host/root policy, exact runner name/ID,
+reviewed prior custom labels and desired custom labels. It preserves automatic
+labels and caller-supplied protected operations labels/names. It reads identity
+and label types before planning, requires accepted pre-action audit before
+mutation, refreshes the prior state after that audit, attempts one label PUT,
+and reads identity and labels back independently. Dry-run never writes labels;
+no registration, service, filesystem or host operation is part of this engine.
+
+GitHub offers no conditional label replacement. The prior-state check is
+optimistic, not atomic compare-and-swap with an unrelated administrator. A
+native caller must coordinate external label writers. A job can start after an
+idle observation; relabeling never interrupts it. `mutation_reconciliation_required`
+means outcome/readback is uncertain: read the runner back and do not retry the
+write automatically. For an inverse, review the verified current custom labels
+as expected and the saved original custom labels as desired, with fresh identity
+checks. Empty custom-label sets are valid inverses.
+
+`audit_delivery_pending` retains the terminal audit, its original idempotency
+key and observed mutation status. `deliver_terminal_audit` validates that packet
+and sends only evidence through the injected poster; it cannot change labels.
+Validation is structural, not cryptographic provenance or a new provider
+observation. The native caller must bind packets to the original operation and
+actor, and retain uncertain outcomes for reconciliation. An absent result never
+proves that no provider write occurred. Audit acceptance is evidence acceptance,
+not execution authorization.
+
 ## Lifecycle Executors
 
 The narrow host adapters for creating and retiring a repo-scoped runner lane

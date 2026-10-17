@@ -3,7 +3,7 @@ import logging
 import unittest
 from collections.abc import Callable
 from pathlib import Path
-from threading import Event
+from threading import Event, current_thread
 from tempfile import TemporaryDirectory
 from typing import cast
 from unittest.mock import patch
@@ -248,6 +248,71 @@ def _restore_operation(
 
 
 class OdooStableOperationWorkerTests(unittest.TestCase):
+    def test_cold_invitation_reads_do_not_delay_the_next_accepted_release_pass(self) -> None:
+        from control_plane.workflows.odoo_stable_operation_worker import (
+            CLIENT_RELEASE_ADVANCE_SECONDS,
+        )
+
+        started, release, finished, stop = Event(), Event(), Event(), Event()
+        passes: list[float] = []
+        clock = [0.0]
+        advance_threads = []
+
+        def invite(**_kwargs: object) -> None:
+            started.set()
+            if not release.wait(10):
+                raise AssertionError("Accepted release passes waited for invitation reads")
+            finished.set()
+
+        def advance(**_kwargs: object) -> tuple[str, ...]:
+            advance_threads.append(current_thread())
+            passes.append(clock[0])
+            return ()
+
+        def poll(**_kwargs: object) -> object:
+            self.assertTrue(started.wait(10))
+            if advance_threads:
+                advance_threads[-1].join(timeout=1)
+            if len(passes) >= 2:
+                self.assertFalse(finished.is_set())
+                release.set()
+                stop.set()
+            clock[0] += CLIENT_RELEASE_ADVANCE_SECONDS
+            return type("Idle", (), {"status": "idle"})()
+
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            with (
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_release_invitations",
+                    side_effect=invite,
+                ) as invitations,
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.advance_client_releases",
+                    side_effect=advance,
+                ),
+                patch(
+                    "control_plane.workflows.odoo_stable_operation_worker.run_odoo_stable_operation_worker_once",
+                    side_effect=poll,
+                ),
+            ):
+                try:
+                    run_odoo_stable_operation_worker_loop(
+                        record_store=store,
+                        control_plane_root_path=Path(directory),
+                        lease_owner="worker",
+                        stop_event=stop,
+                        max_iterations=5,
+                        poll_seconds=1,
+                        monotonic=lambda: clock[0],
+                    )
+                finally:
+                    release.set()
+        self.assertGreaterEqual(len(passes), 2)
+        self.assertLessEqual(passes[1] - passes[0], CLIENT_RELEASE_ADVANCE_SECONDS)
+        self.assertEqual(invitations.call_count, 1)
+        self.assertTrue(finished.is_set())
+
     def test_source_history_outage_keeps_target_replacement_pending_without_a_failed_attempt(
         self,
     ) -> None:

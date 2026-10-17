@@ -18,10 +18,12 @@ from control_plane.contracts.route_binding_record import RouteBindingStatus
 from control_plane.contracts.route_binding_record import RouteBindingTerminationKind
 from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
+from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthEvidence
 
 
 # Historical source-age incidents are retained as evidence, never failure alerts.
 RETIRED_PRODUCTION_DELIVERY_LAG_CHECK = "production-delivery-lag"
+PRODUCTION_REQUEST_REFUSED: Literal["request_refused"] = "request_refused"
 
 PublicIngressObservationStatus = Literal["pass", "fail", "skipped"]
 PublicIngressObservationPurpose = Literal["probe", "reconciliation"]
@@ -30,6 +32,7 @@ PublicIngressIncidentResolutionReason = Literal[
     "recovered",
     "monitoring_intent_changed",
     "duplicate_reconciled",
+    "request_refused",
 ]
 PublicIngressIncidentEvent = Literal["opened", "updated", "reminder", "resolved"]
 PublicIngressIncidentEventKind = PublicIngressIncidentEvent | Literal["baseline"]
@@ -41,6 +44,7 @@ PublicIngressIncidentEventReason = Literal[
     "monitoring_intent_changed",
     "migration_baseline",
     "duplicate_reconciled",
+    "request_refused",
 ]
 PublicIngressIncidentSeverity = Literal["warning", "critical"]
 PublicIngressIncidentNotificationState = Literal["active", "acknowledged", "silenced"]
@@ -82,6 +86,8 @@ PublicIngressTargetKind = Literal[
     "tls_domain",
 ]
 PublicIngressFailureCode = Literal[
+    "dependency_failed",
+    "dependency_not_covered",
     "production_delivery_failed",
     "connection_timeout",
     "deploy_fence_held",
@@ -126,6 +132,9 @@ PublicIngressRouteBindingSourceKind = Literal["operator", "backfill", "service",
 PUBLIC_TLS_EXPIRING_DAYS = 14
 PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS = 60
 TESTING_HEALTH_MONITOR_INTERVAL_SECONDS = 5 * 60
+HEALTH_MONITOR_POLL_SECONDS = 5
+HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS = 10
+HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS = 30
 PUBLIC_TLS_STALE_AFTER_SECONDS = 2 * 60 * 60
 PUBLIC_INGRESS_DEFAULT_REMINDER_INTERVAL_SECONDS = 6 * 60 * 60
 PUBLIC_INGRESS_MIN_REMINDER_INTERVAL_SECONDS = 15 * 60
@@ -139,6 +148,16 @@ def health_monitor_interval_seconds(instance: str) -> int:
         TESTING_HEALTH_MONITOR_INTERVAL_SECONDS
         if instance == "testing"
         else PUBLIC_INGRESS_MONITOR_INTERVAL_SECONDS
+    )
+
+
+def health_monitor_freshness_seconds(instance: str) -> int:
+    """Cover polling/publication ticks, initial probe, identity wait and reprobe."""
+    return (
+        health_monitor_interval_seconds(instance)
+        + 2 * HEALTH_MONITOR_POLL_SECONDS
+        + 2 * HEALTH_MONITOR_PROBE_TIMEOUT_SECONDS
+        + HEALTH_MONITOR_IDENTITY_CONFIRMATION_SECONDS
     )
 
 
@@ -308,6 +327,11 @@ class PublicIngressTargetObservation(BaseModel):
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     summary: str
+    dependency_health: RuntimeDependencyHealthEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "PublicIngressTargetObservation":
@@ -1153,7 +1177,7 @@ def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngres
         return "network"
     if code in {"redirect_loop", "self_redirect"}:
         return "redirect"
-    if code in {"health_status_error", "http_error"}:
+    if code in {"health_status_error", "http_error", "dependency_failed"}:
         return "http"
     if code.startswith("tls_"):
         return "tls"
@@ -1165,6 +1189,7 @@ def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngres
         "private_endpoint_mismatch",
         "private_endpoint_not_found",
         "monitoring_intent_changed",
+        "dependency_not_covered",
     }:
         return "configuration"
     if code in {"deploy_fence_held", "provider_check_unavailable", "production_delivery_failed"}:
