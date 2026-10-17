@@ -791,9 +791,14 @@ policy and requires every named check, including any pinned GitHub App id, to be
 present and successful on the candidate SHA. Partial workflow evidence cannot
 promote a candidate. It reads the enforced required-check projection from
 GitHub's [Get a branch endpoint](https://docs.github.com/en/rest/branches/branches#get-a-branch),
-which requires `contents: read` for the repository. An unprotected branch,
-missing protection metadata, disabled enforcement, or an empty required-check
-list fails closed; observation does not request administration access. A pinned
+which requires `contents: read` for the repository. For a protected branch whose
+classic check projection has disabled enforcement, it reads the active rules
+applying to that branch through GitHub's effective branch-rules endpoint and
+uses their required checks, preserving any integration IDs. This endpoint needs
+only metadata read permission. Disabled and
+evaluate-only rulesets do not appear on that endpoint. Unprotected branches,
+missing protection metadata, unreadable or incomplete rule evidence, and empty
+enforced check lists fail closed; observation requests no administration access. A pinned
 app id must be proven by check-run evidence; commit statuses can satisfy only unpinned or
 GitHub `app_id = -1` any-app requirements. Once unrelated evidence is terminal,
 missing pinned or named evidence is surfaced explicitly instead of remaining an
