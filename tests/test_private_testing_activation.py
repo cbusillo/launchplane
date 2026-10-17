@@ -526,6 +526,16 @@ class PrivateTestingActivationTests(unittest.TestCase):
             self.execute(plan)
         self.assertFalse(self.calls)
 
+    def test_legacy_install_removal_refuses_missing_transport_fields_cleanly(self) -> None:
+        plan = self.prepare()
+        self.execute(plan)
+        legacy = deepcopy(plan.intent)
+        del legacy["request"]["endpoint_url"]
+        with patch.object(self.store, "read_original_mutation_intent", return_value=legacy):
+            with self.assertRaises(ValueError):
+                self.prepare(operation="remove", original_activation_key="install")
+        self.assertEqual(len(self.calls), 1)
+
     def test_removal_cannot_report_foreign_transport_and_refresh_needs_fresh_review(self) -> None:
         plan = self.prepare()
         self.execute(plan)

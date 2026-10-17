@@ -32,7 +32,7 @@ from control_plane.workflows.public_ingress_monitor import (
 )
 from tests import test_public_ingress_monitor as monitor_fixture
 from tests.support.tls import server_tls_context
-from control_plane.outbound_http import _ValidatedAddressConnector
+from control_plane.outbound_http import _ValidatedAddressConnector, PublicHttpDestinationError
 
 
 def certificate_fixture() -> tuple[str, bytes, bytes]:
@@ -200,6 +200,29 @@ class PrivateTestingTrustTests(unittest.TestCase):
             fetch_private_health_url(
                 self.url.removesuffix("/health") + "/redirect", 3, tls_ca_pem=self.ca
             )
+
+    def test_legacy_literal_records_stay_readable_but_non_rfc1918_probes_refuse(self) -> None:
+        for address in ("127.0.0.1", "100.64.0.1", "[fc00::1]", "169.254.169.254"):
+            with self.subTest(address=address):
+                endpoint = self.endpoint.model_copy(update={"url": f"https://{address}/health"})
+                loaded = PrivateHealthEndpointRecord.model_validate_json(endpoint.model_dump_json())
+                self.assertEqual(loaded.url, endpoint.url)
+                with patch("control_plane.outbound_http._private_http_connection") as connect:
+                    with patch(
+                        "control_plane.outbound_http._system_address_resolver",
+                        return_value=(
+                            (
+                                socket.AF_INET6 if ":" in address else socket.AF_INET,
+                                socket.SOCK_STREAM,
+                                socket.IPPROTO_TCP,
+                                "",
+                                (address.strip("[]"), 443),
+                            ),
+                        ),
+                    ):
+                        with self.assertRaises(PublicHttpDestinationError):
+                            fetch_private_health_url(loaded.url, 3)
+                    connect.assert_not_called()
 
     def test_edge_uses_normal_trust_with_original_dns_name(self) -> None:
         default_context = ssl.create_default_context

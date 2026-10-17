@@ -13,8 +13,8 @@ The product still owns its immutable runtime template and build.
 
 A private endpoint record accepts an HTTP(S) DNS hostname, including a name
 covered by an existing wildcard certificate. Registration validates URL syntax;
-it does not resolve DNS or claim reachability. Literal addresses must be RFC1918
-IPv4. At every check, the private HTTP client resolves the host again and accepts
+it does not resolve DNS or claim reachability. Existing non-public literal records remain readable, including loopback and
+tailnet addresses; this preserves record readback, not permission to connect. At every check, the private HTTP client resolves the host again and accepts
 only a nonempty answer set entirely within `10/8`, `172.16/12` or `192.168/16`.
 Public, mixed, loopback, link-local, CGNAT and IPv6 answers fail closed. Every
 redirect is checked again before opening its connection.
@@ -30,7 +30,12 @@ following redirects with that scoped CA.
 Private DNS alone does not prove private exposure. Before activation, qualify
 edge listener/access enforcement and **public denial**, service/client private
 reachability, normal certificate chain and hostname verification, and a
-private testing-only upstream. Proxy only `/health` and `/agent-session/connect`,
+private testing-only upstream. Restrict the upstream TCP port to the edge host
+using the supported host firewall/network controls; verify that an unrelated LAN
+peer and public source cannot reach it. The edge-to-upstream HTTP hop carries
+credentials in plaintext inside that restricted network, so private addressing
+alone is insufficient isolation. Path restrictions exist at the edge, not at the
+runtime bind. Proxy only `/health` and `/agent-session/connect`,
 preserving authorization and WebSocket upgrade. Do not fabricate a public website
 declaration to get past public-ingress scoping. Use the supported reviewed edge
 operation; if it cannot enforce the private route, record that missing capability
@@ -81,8 +86,8 @@ Docker Compose mode, `isolatedDeployment=false`, `randomize=false`, and empty
 `POST /v1/products/{product}/private-testing-transport/activation` uses
 `mode=dry-run|apply|readback` and `operation=install|refresh|remove`. Add
 `source_commit`, `source_path`, `host_review` and `reason` to the planner fields.
-`host_review` records the independent host/port, edge access, routing and TLS
-qualification. These are reviewed inputs, never measured live proof.
+`host_review` records the independent host/port, edge access, edge-only upstream
+network restriction, routing and TLS qualification. These are reviewed inputs, never measured live proof.
 
 ```sh
 launchplane ingress private-testing-activate \
@@ -141,7 +146,10 @@ keys or restarts the deleted product TLS proxy.
    private listener/access rules, public denial, testing-only upstream, TLS
    chain/name, HTTP authorization and WebSocket upgrade through supported paths.
    Verify the chosen upstream IP belongs to the testing host and its port is
-   unused, including wildcard listeners. Keep production resources unchanged.
+   unused, including wildcard listeners. Restrict that port to the edge and
+   verify denial from other peers before activating the source; if the supported
+   host/network operation is missing, record that prerequisite rather than
+   publishing an unrestricted upstream. Keep production resources unchanged.
 3. Prepare/review/apply/read back the private HTTP upstream source under the
    operational task's authority; this source session authorizes no live changes.
 4. Register/read back the exact HTTPS `/health` private endpoint without a custom

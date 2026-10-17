@@ -196,7 +196,9 @@ def private_url_error(url: str) -> Literal["invalid_url", "public_url", ""]:
         address = ip_address(hostname)
     except ValueError:
         return ""
-    return "" if is_rfc1918_address(address) else "public_url"
+    # Retain readability of existing non-public literal records. The actual
+    # connection policy below is stricter and requires RFC1918 answers.
+    return "public_url" if _is_public_address(address) else ""
 
 
 def resolve_public_http_destination(

@@ -310,6 +310,7 @@ def plan_private_testing_transport(
             "private_network_reachability_and_no_public_forwarding",
             "edge_certificate_hostname_and_chain",
             "edge_private_access_and_testing_only_upstream",
+            "upstream_restricted_to_edge",
             "reviewed_original_operation_and_readback",
             "live_https_and_authenticated_wss",
         ],

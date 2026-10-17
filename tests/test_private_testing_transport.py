@@ -158,19 +158,11 @@ class PrivateTestingTransportTests(unittest.TestCase):
         self.assertEqual(result["server_url"], "wss://bridge.example.test/agent-session/connect")
         self.assertEqual(set(result["overlay"]["services"]), {"bridge"})
         self.assertNotIn("secrets", result["overlay"])
-        self.assertEqual(
-            result["overlay"]["services"]["bridge"],
-            {
-                "ports": [
-                    {
-                        "host_ip": "10.77.0.9",
-                        "published": "18787",
-                        "target": 8787,
-                        "protocol": "tcp",
-                    }
-                ]
-            },
-        )
+        ports = result["overlay"]["services"][self.payload["runtime_service"]]["ports"]
+        self.assertEqual(len(ports), 1)
+        self.assertEqual(ports[0]["host_ip"], self.payload["private_ip"])
+        self.assertEqual(ports[0]["published"], str(self.payload["listener_port"]))
+        self.assertEqual(ports[0]["target"], self.profile.runtime_port)
         endpoint = PrivateHealthEndpointRecord.model_validate(
             {
                 **result["endpoint_proposal"],

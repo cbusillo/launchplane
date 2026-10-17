@@ -278,7 +278,7 @@ class PrivateTestingActivationAdapter:
                 "source_commit",
                 "source_path",
             )
-            if any(normalized[name] != installed["request"][name] for name in fields):
+            if any(normalized[name] != installed["request"].get(name) for name in fields):
                 raise PrivateTestingTransportRefused(
                     "Removal must reference the original transport and immutable source."
                 )

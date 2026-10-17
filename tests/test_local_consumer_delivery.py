@@ -514,9 +514,7 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
             .not_valid_after(now + timedelta(hours=1))
             .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
             .add_extension(
-                x509.SubjectAlternativeName(
-                    [x509.IPAddress(ipaddress.ip_address("127.0.0.1")), x509.DNSName("localhost")]
-                ),
+                x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
                 critical=False,
             )
             .sign(key, hashes.SHA256())
@@ -623,9 +621,9 @@ class LocalConsumerDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(control_thread.join, 3)
         self.addCleanup(control.shutdown)
         origin = f"https://127.0.0.1:{control.server_port}"
-        bridge = f"wss://localhost:{ws_port}/agent-session/connect"
+        bridge = f"wss://127.0.0.1:{ws_port}/agent-session/connect"
         self.store.write_private_health_endpoint_record(
-            self.endpoint.model_copy(update={"url": f"https://localhost:{ws_port}/health"})
+            self.endpoint.model_copy(update={"url": f"https://127.0.0.1:{ws_port}/health"})
         )
         self.directory = self.root / "tls-client"
         self.request = prepare_consumer(

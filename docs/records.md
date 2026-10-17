@@ -696,7 +696,7 @@ an ORM column/table or remains only in the evidence payload.
   validation, and cross-scope endpoint-key conflict protection. The service
   reads them through
   `GET /v1/private-health-endpoints/records` with
-  `private_health_endpoint.read`. The stored URL may use a DNS hostname or an RFC1918 IPv4 literal;
+  `private_health_endpoint.read`. The stored URL may use a DNS hostname or a non-public IP literal;
   each probe requires exclusively RFC1918 resolution and pins the connection to
   the validated addresses, preserving TLS hostname verification. See
   [private transport](private-testing-transport.md).
