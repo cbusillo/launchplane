@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyRequest,
+    OdooStableTargetReplacementApplyResult,
 )
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -235,6 +236,28 @@ class TestingDeliveryMonitorTests(unittest.TestCase):
         self.assertIn(operation.runner_trace_id, incident.summary)
         self.assertNotIn(operation.error_message, incident.summary)
         self.assertEqual(incident.severity, "warning")
+        self.now += timedelta(seconds=1)
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(
+                update={
+                    "error_code": "",
+                    "result": OdooStableTargetReplacementApplyResult(
+                        product=self.profile.product,
+                        context=self.lane.context,
+                        instance="testing",
+                        strategy="recreate-in-place",
+                        deploy_status="pass",
+                        post_deploy_status="pass",
+                        health_status="fail",
+                        target_id="example",
+                        target_name="example",
+                    ),
+                }
+            )
+        )
+        self.monitor()
+        latest = self.store.list_public_ingress_incident_records(status="open")[0]
+        self.assertIn("health_check_failed", latest.summary)
 
     def test_attention_persistence_failure_is_retried_after_restart(self) -> None:
         self.reconcile(last_failed_error_code="deployment_failed")

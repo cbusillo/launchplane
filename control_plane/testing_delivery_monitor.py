@@ -14,6 +14,7 @@ from control_plane.contracts.product_reconcile import (
     product_reconcile_target_key,
 )
 from control_plane.production_delivery_monitor import _candidate_key, _observe, _time
+from control_plane.product_reconcile import _testing_failure_reason
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -102,7 +103,7 @@ def _record_attention(
         if operation.status not in {"fail", "reconciliation_required"}:
             continue
         failed = True
-        reason = operation.error_code or "deployment_failed"
+        reason, _summary = _testing_failure_reason(operation)
         trace = operation.runner_trace_id or operation.operation_id
         failed_at = operation.finished_at or operation.updated_at
         break
