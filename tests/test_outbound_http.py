@@ -794,3 +794,92 @@ class PublicOutboundHttpTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrivateOutboundHttpTests(unittest.TestCase):
+    def test_edge_hostname_uses_only_resolved_private_addresses(self) -> None:
+        connection = _FakeConnection(_FakeResponse(status=200))
+        with patch.object(outbound_http, "_system_address_resolver", _resolver_for("10.77.0.9")):
+
+            def connect(destination: PublicHttpDestination, timeout: float) -> _FakeConnection:
+                self.assertEqual(destination.hostname, "bridge.example.test")
+                self.assertEqual(str(destination.addresses[0].ip), "10.77.0.9")
+                return connection
+
+            response = request_private_http(
+                "https://bridge.example.test/health",
+                timeout_seconds=3,
+                connection_factory=connect,
+            )
+        self.assertEqual(response.status_code, 200)
+
+    def test_public_mixed_and_non_rfc1918_resolution_never_opens_connection(self) -> None:
+        for ips in (
+            (_PUBLIC_IPV4,),
+            ("10.77.0.9", _PUBLIC_IPV4),
+            ("127.0.0.1",),
+            ("169.254.169.254",),
+            ("100.64.0.1",),
+            ("192.0.2.1",),
+            ("fc00::1",),
+            ("::ffff:10.77.0.9",),
+            ("0.0.0.0",),
+            ("224.0.0.1",),
+            (),
+        ):
+            with (
+                self.subTest(ips=ips),
+                patch.object(outbound_http, "_system_address_resolver", _resolver_for(*ips)),
+                patch.object(outbound_http, "_private_http_connection") as connect,
+            ):
+                with self.assertRaises(PublicHttpDestinationError):
+                    request_private_http("https://bridge.example.test/health", timeout_seconds=3)
+                connect.assert_not_called()
+
+    def test_private_dns_rebinding_cannot_change_the_socket_or_tls_hostname(self) -> None:
+        info = (_address_info("10.77.0.9", 443),)
+        sock = MagicMock(spec=socket.socket)
+        context = MagicMock(spec=ssl.SSLContext)
+        with patch.object(outbound_http, "_system_address_resolver", return_value=info) as resolve:
+
+            def connect(destination: PublicHttpDestination, timeout: float) -> _FakeConnection:
+                with (
+                    patch.object(socket, "socket", return_value=sock),
+                    patch.object(
+                        socket, "getaddrinfo", side_effect=AssertionError("must not resolve twice")
+                    ),
+                ):
+                    client = outbound_http._private_http_connection(destination, timeout, context)
+                    client.connect()  # type: ignore[attr-defined]
+                sock.connect.assert_called_once_with(("10.77.0.9", 443))
+                context.wrap_socket.assert_called_once_with(
+                    sock, server_hostname="bridge.example.test"
+                )
+                client.close()
+                return _FakeConnection(_FakeResponse(status=200))
+
+            request_private_http(
+                "https://bridge.example.test/health", timeout_seconds=3, connection_factory=connect
+            )
+            resolve.assert_called_once_with("bridge.example.test", 443)
+
+    def test_private_redirect_rechecks_dns_and_refuses_rebound_public_answer(self) -> None:
+        connection = _FakeConnection(_FakeResponse(status=302, headers=(("Location", "/ready"),)))
+        with (
+            patch.object(
+                outbound_http,
+                "_system_address_resolver",
+                side_effect=(
+                    (_address_info("10.77.0.9", 443),),
+                    (_address_info(_PUBLIC_IPV4, 443),),
+                ),
+            ) as resolve,
+            patch.object(
+                outbound_http, "_private_http_connection", return_value=connection
+            ) as connect,
+        ):
+            with self.assertRaises(PublicHttpDestinationError):
+                request_private_http("https://bridge.example.test/health", timeout_seconds=3)
+            self.assertEqual(resolve.call_count, 2)
+            connect.assert_called_once()
+        self.assertTrue(connection.closed)

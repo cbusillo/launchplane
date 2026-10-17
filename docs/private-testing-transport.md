@@ -1,21 +1,64 @@
 ---
-title: Private testing HTTPS and WSS preparation and activation
+title: Private testing HTTPS and WSS through an existing edge
 ---
 
-A no-website generic-web service can use a dedicated Nginx TLS listener inside
-its isolated testing Compose target. Launchplane owns the overlay and runtime
-source operation; the product owns its runtime template and immutable build.
-This does not require a public website, public domain or shared ingress change.
-The supported authority is an explicit RFC1918 IPv4 address, not split DNS,
-tailnet names or public IPs.
+A no-website generic-web service can use an existing TLS edge, including NPMplus,
+for its private testing HTTPS `/health` and WSS `/agent-session/connect` authority.
+The edge keeps its existing certificate, private key and renewal. Launchplane
+publishes the testing runtime's HTTP port on one RFC1918 interface; it generates
+no TLS sidecar, certificate mounts, private issuer or client trust-store changes.
+The product still owns its immutable runtime template and build.
 
-## Inert overlay planner
+## Endpoint and outbound boundary
+
+A testing private endpoint record accepts an HTTP(S) DNS hostname, including a name
+covered by an existing wildcard certificate. Other lane instances retain the existing internal-suffix/non-public-literal
+record rule; their credential-bearing consumers do not gain new DNS authorities.
+Registration validates URL syntax;
+it does not resolve DNS or claim reachability. Existing non-public literal records remain readable, including loopback and
+tailnet addresses; this preserves record readback, not permission to connect. At every check, the private HTTP client resolves the host again and accepts
+only a nonempty answer set entirely within `10/8`, `172.16/12` or `192.168/16`.
+Public, mixed, loopback, link-local, CGNAT and IPv6 answers fail closed. Every
+redirect is checked again before opening its connection.
+
+Connections use only the validated numeric socket addresses, without a second
+DNS lookup. HTTP Host, TLS SNI and certificate name verification retain the
+original hostname. Normal system certificate verification applies when the
+endpoint has no `tls_ca_pem`; omit that field for the existing publicly trusted
+edge certificate. The optional testing-only endpoint CA contract remains for
+other existing private endpoints, without changing process-wide trust or
+following redirects with that scoped CA.
+
+New edge transport plans reject non-RFC1918 literals even though legacy endpoint
+records remain readable. Private DNS alone does not prove private exposure. Before activation, qualify
+edge listener/access enforcement and **public denial**, service/client private
+reachability, normal certificate chain and hostname verification, and a
+private testing-only upstream. Restrict the upstream TCP port to the edge host
+using the supported host firewall/network controls; verify that an unrelated LAN
+peer and public source cannot reach it. The edge-to-upstream HTTP hop carries
+credentials in plaintext inside that restricted network, so private addressing
+alone is insufficient isolation. Path restrictions exist at the edge, not at the
+runtime bind. Proxy only `/health` and `/agent-session/connect`,
+preserving authorization and WebSocket upgrade. Do not fabricate a public website
+declaration to get past public-ingress scoping. Use the supported reviewed edge
+operation; if it cannot enforce the private route, record that missing capability
+on the operational item before changing the edge. This source capability does
+not configure or qualify an edge route.
+
+## Inert upstream planner
 
 `POST /v1/products/{product}/private-testing-transport/plan` accepts `dry-run`
-and `readback` only, using exact-lane `product_config.plan` and browser CSRF.
-It reads fresh tracked/provider placement and converted Compose, rechecks the
-records and binds the baseline, overlay, provider options and trust intent into
-`plan_sha256`. It never applies, deploys, reads a key or installs trust.
+and `readback` with exact-lane `product_config.plan` authority and browser CSRF.
+The metadata-only payload contains:
+
+- `context`, `instance=testing`, `endpoint_key`, and `mode`;
+- `endpoint_url`: the edge's exact HTTPS `/health` URL, without credentials,
+  query or fragment;
+- `private_ip`: the testing host's RFC1918 bind address;
+- `listener_port`: its unused dedicated HTTP upstream port (1024–65535);
+- `runtime_service`: the product template's existing service name.
+
+The edge's hostname and HTTPS port are independent of the upstream bind.
 
 ```sh
 launchplane ingress private-testing-plan \
@@ -23,65 +66,31 @@ launchplane ingress private-testing-plan \
   --payload-file /absolute/private/transport-plan.json
 ```
 
-The metadata-only payload contains `context`, `instance=testing`, `mode`,
-`endpoint_key`, `private_ip`, `listener_port`, `runtime_service`, immutable
-`nginx_image`, public `ca_bundle_sha256` and `certificate_sha256`, absolute
-`monitor_ca_bundle_path` and `receiver_ca_bundle_path`, and `trust_review`.
-Do not substitute fabricated hashes for actual reviewed public material.
-For example, an isolated fixture may select `10.77.0.9:9443`, service `bridge`
-and its own disposable certificate; those values are not runtime authority.
+The planner checks tracked/provider lane ownership, placement and converted
+Compose. It proposes only a `ports` addition to the selected runtime service,
+never another service or secret. It binds the input and unchanged baseline into
+`plan_sha256`. Readback requires that digest, the exact port binding and baseline;
+an absent, partial, public or changed binding refuses. A fresh dry-run can
+re-review an exact binding after a normal runtime redeploy. The planner writes
+nothing, leaves transport/certificate verification false, and does not activate
+an endpoint record or claim a healthy workload.
 
-The source must have only `services` and Compose-scoped named `volumes`, its own
-default network, and the planner's supported service fields. It excludes builds,
-global container/volume names, host/external networking, published upstream ports,
-host mounts/env files, shared namespaces, capabilities and security overrides.
-Dokploy's exact target/service metadata labels and unused root-only network
-annotation are normalized; foreign labels, actual attachments and public routes
-remain refused. Provider evidence must explicitly name Docker Compose mode,
-`isolatedDeployment=false`, `randomize=false`, and empty `serviceNetworks`,
-`mounts` and `domains`. Swarm and unknown provider options are unqualified.
-
-The generated unprivileged, read-only Nginx sidecar publishes only the reviewed
-private IP/TCP port. It forwards precisely `/health` and `/agent-session/connect`,
-including WebSocket upgrade and authorization, and returns 404 elsewhere.
-Docker DNS is refreshed after runtime container changes. Missing workloads fail
-the route. There is no HTTP redirect/admin listener, access logger or public
-routing label. See [Nginx WebSockets](https://nginx.org/en/docs/http/websocket.html).
-The entrypoint materializes the non-secret generated configuration on its own
-`/tmp` tmpfs and execs Nginx. Base64 transport preserves Nginx variables through
-Compose and shell parsing. It needs no inline Compose config injection into the
-read-only container and no additional host-managed configuration file.
-
-The original planner's overlay uses relative certificate references. Its readback
-requires the original intent and `expected_plan_sha256`, compares the exact
-installed overlay and unchanged baseline, and still reports certificate and
-transport verification false. A fresh dry-run can rebind an exact overlay after
-baseline drift; partial/different additions refuse. Uncertain inert plans are safe
-to repeat; provider read failures return 503, unqualified/stale inputs 409.
+Only an isolated no-website testing target is eligible. The baseline has only
+`services` and Compose-scoped named `volumes`, uses its own default network and
+has no published ports, host mounts, shared namespaces, external networks,
+privileged fields, build directives or public routing labels. Exact Dokploy
+metadata labels and an unused root network annotation are normalized; actual
+shared attachments remain refused. Provider evidence must explicitly identify
+Docker Compose mode, `isolatedDeployment=false`, `randomize=false`, and empty
+`serviceNetworks`, `mounts` and `domains`.
 
 ## Reviewed source installation and recovery
 
-`POST /v1/products/{product}/private-testing-transport/activation` fills the source
-installation gap. `mode=dry-run|apply|readback` and
-`operation=install|refresh|remove` operate on source configuration only. Existing
-immutable-artifact deployment starts the resulting services. This operation never
-changes provider env, deploys, creates a resource, reads a real key, installs trust,
-lifts a hold or claims that a workload is healthy.
-
-Initial tracked/provider Git source must agree on the product's repository,
-exact forty-character commit and Compose path, with automatic deployment off.
-The existing source reader fetches that immutable tree and the existing build
-verifier proves its artifact provenance at plan time; later deployments still
-verify/select their own artifact through the existing driver; SHA-shaped branch acceptance is not
-source delivery. Only the narrow isolated source shape above is supported.
-The runtime image consumes `DOCKER_IMAGE_REFERENCE` or the matching
-`LAUNCHPLANE_IMAGE_REFERENCE` projection supplied by the existing Compose deploy
-driver; auxiliary images are also
-immutable. Structural interpolation and credential literals/default values
-refuse. Managed inputs stay template references, so source planning needs no real
-token and never persists converted secret-bearing env into raw Compose.
-
-Use the installed client, configured service identity and a private payload:
+`POST /v1/products/{product}/private-testing-transport/activation` uses
+`mode=dry-run|apply|readback` and `operation=install|refresh|remove`. Add
+`source_commit`, `source_path`, `host_review` and `reason` to the planner fields.
+`host_review` records the independent host/port, edge access, edge-only upstream
+network restriction, routing and TLS qualification. These are reviewed inputs, never measured live proof.
 
 ```sh
 launchplane ingress private-testing-activate \
@@ -89,157 +98,74 @@ launchplane ingress private-testing-activate \
   --payload-file /absolute/private/source-install.json
 ```
 
-Add `source_commit`, `source_path`, `certificate_root`, `host_review`,
-`custody_review`, `reason` and `operation` to the planner intent fields.
-`certificate_root` is an absolute purpose-specific parent directory. The service
-appends its generated lane namespace and returns the exact `custody.directory`;
-use that returned directory for the Chris-only file step. No secret
-value, certificate private key or recipient file is accepted. Review references
-attest to the exact host/port, private routing, issuer and custody review; they
-are not measured file/host evidence. The source plan binds those references,
-public CA/leaf digests, immutable source, placement, provider options, the actual isolation/ownership binding and current
-runtime-input digest. Adding a health check or changing unrelated profile/display
-metadata does not invalidate original recovery/removal; changing the private
-listener facts or physical ownership still refuses. Its `plan_sha256` is distinct from the inert overlay digest.
+Tracked/provider Git source must agree on the repository, forty-character commit
+and Compose path with automatic deployment off. The existing source reader
+fetches that immutable template and the build verifier checks artifact provenance.
+The runtime consumes `DOCKER_IMAGE_REFERENCE` or `LAUNCHPLANE_IMAGE_REFERENCE`;
+auxiliary images are immutable. Structural interpolation and credential
+literals/default values refuse. Managed inputs remain references; planning reads
+no runtime token and never persists converted secret-bearing environment values.
 
-Retain and review that complete plan. Set `mode=apply`, its
-`expected_plan_sha256`, and supply the original `--idempotency-key`. Apply requires
-the authenticated Director agent, as existing independent testing activation
-does. Exact-lane `product_config.plan` callers may prepare an initial inert
-installation plan. Continuation plans, readback and recovery require the original
-Director identity/key; records are never borrowed across caller scopes. PostgreSQL, the physical-target reservation, existing testing
-executor lock and complete quiescent provider deployment/queue/schedule evidence
-protect execution. No grant or workflow is added.
+Retain and review the complete source plan, then apply its
+`expected_plan_sha256` with the original idempotency key. Existing Director-agent
+execution, physical-target reservation, testing executor lock, complete provider
+quiescence and current runtime-input binding still apply. Initial inert planning
+uses exact-lane `product_config.plan`; continuation and recovery keep the original
+identity and key. No grant, deployment or hold change is added.
 
-Installation writes only source settings: the immutable product template plus
-generated TLS additions with the reviewed absolute certificate paths. It preserves
-provider env, placement, bot state, records and holds. `mode=readback` with the
-same payload/key independently fetches and compares the whole provider source
-and placement. This readback owns the absolute-custody overlay; the original
-relative-file planner readback is not its receipt. `runtime_inputs_match_review`
-separately describes env drift after normal image/identity delivery.
+Installation changes only source settings: the immutable template with the
+selected service's private HTTP port binding. It preserves environment, placement,
+bot state and holds. Independent readback compares the entire source and
+placement. `runtime_inputs_match_review` separately reports environment drift;
 `certificate_verified`, `host_binding_verified`, `transport_verified` and
-`deployment_performed` stay false even when configuration matches.
-The returned `trust.reviewed_ca_bundle_sha256` remains reviewed intent and
-`trust.verified` stays false; it is not a measurement of a later endpoint record.
+`deployment_performed` stay false. There is no certificate custody directory.
 
-After a lost response, retain the original payload/key. An apply retry uses the
-durable runner to adopt an exact source match without repeating the update.
-Missing/partial/foreign/changed/unavailable evidence remains `reconcile_required`;
-a different key cannot bypass the physical-target fence. Readback diagnoses source
-but never releases an uncertain operation. Do not recreate resources, overwrite
-foreign source or switch identity to recover.
+After a lost response, retain the original payload/key. The durable runner can
+adopt an exact source match without repeating the update. Missing, partial,
+foreign, changed or unavailable evidence remains `reconcile_required`; another
+key or identity cannot bypass the physical-target fence. Readback never releases
+an uncertain operation.
 
-For source maintenance, plan `operation=refresh` with `original_activation_key`
-naming the completed install/refresh. It first matches that operation's current
-source and placement, then fetches/verifies the newly selected immutable source.
-Review and apply with a new operation key. Ordinary image upgrades already use
-the existing deployment driver: it updates both supported image references and runtime
-identity without rewriting the installed template/overlay. Host/certificate/trust
-changes still need fresh operational qualification and review. Preserve testing
-holds; use the existing supported hold operation if one must be lifted.
+For maintenance, plan `refresh` with `original_activation_key` naming the completed
+installation/refresh. It first matches its source and placement, then verifies
+the new immutable template. Apply the new reviewed plan with a new operation key.
+Ordinary artifact upgrades still use the existing deploy driver and preserve the
+private bind. Edge certificate renewal stays with the existing edge custodian.
 
-For rollback, plan `operation=remove` naming the original completed installation
-or refresh and its source commit/path. It refuses drift and restores exactly the
-previous source settings, retaining env/state. Review/apply under a distinct
-removal key, independently read back, then use the existing testing deploy and
-its original-key recovery to activate the restored source and stop the listener.
-Removal never deletes state, certificates, endpoint records or uncertain history.
-Retain operation receipts, public certificate metadata and original recovery keys
-until rollback is no longer needed.
+For rollback, plan `remove` against the original completed install/refresh and
+its exact transport/source inputs. It refuses drift and restores the preceding
+source settings, preserving environment and state. Review/apply with a distinct
+removal key, read back, then use normal testing deployment to remove the upstream
+binding. Disable the matching edge route and endpoint/check through supported
+operations. Keep original operation receipts until rollback is no longer needed.
+Old sidecar request fields are rejected, and refresh/remove refuse a legacy
+installation missing current transport fields. No compatibility path creates
+private keys or restarts the deleted product TLS proxy. Preserve such original
+operation evidence for separately supported source recovery; do not bypass its fence.
 
-## Host activation, certificate custody and scoped trust
+## Operational sequence
 
-Before the existing service-owned testing deployment, the operational session
-qualifies these facts independently. Source installation does not prove them:
+1. Verify the deployed service includes this source. Resolve the independent
+   immutable-source/hold prerequisites and recheck actual testing isolation.
+2. Select an edge-certified hostname with only RFC1918 DNS answers. Qualify its
+   private listener/access rules, public denial, testing-only upstream, TLS
+   chain/name, HTTP authorization and WebSocket upgrade through supported paths.
+   Verify the chosen upstream IP belongs to the testing host and its port is
+   unused, including wildcard listeners. Restrict that port to the edge and
+   verify denial from other peers before activating the source; if the supported
+   host/network operation is missing, record that prerequisite rather than
+   publishing an unrestricted upstream. Keep production resources unchanged.
+3. Prepare/review/apply/read back the private HTTP upstream source under the
+   operational task's authority; this source session authorizes no live changes.
+4. Register/read back the exact HTTPS `/health` private endpoint without a custom
+   CA, then plan/apply/read back its identity-required `private_http` check.
+5. Qualify the maintained local helper and give Chris the actual metadata-only
+   recipient command. Chris alone creates a private recipient generation, uploads
+   `request.json`, compares its fingerprint and runs signed-in destination dry-run
+   before first token entry. No agent handles real recipient/key/token material.
+6. After normal testing sync/deploy, verify actual TLS, runtime identity, health,
+   monitor cadence and authenticated WSS. Endpoint/destination metadata can precede
+   the token-backed deploy; it does not prove those runtime facts.
 
-1. The selected private address belongs to the testing host; the TCP port is free,
-   including wildcard listeners; both receiver and monitor can reach it, with no
-   public forwarding/NAT. RFC1918 syntax alone proves none of this.
-2. The selected immutable Nginx image supports the generated TLS/proxy/rewrite
-   configuration and its `/bin/sh`/`base64 -d` entrypoint as UID/GID 65534,
-   with all capabilities dropped, read-only root
-   and only its own tmpfs/network. No production port or storage is changed.
-3. Chris or an explicitly authorized existing custody mechanism supplies a private
-   issuer's server certificate with the exact IP SAN. Public CAs are not assumed
-   to issue for private IPs. Chris places `server.crt` and `server.key` in the exact
-   dedicated directory returned in `custody.directory`, with no symlinks/shared
-   production material. On the supported rootful engine, require both
-   `certificate_root` and its lane namespace directory to be root-owned mode
-   0700. The daemon can traverse these parents to create the read-only bind;
-   a host process sharing the proxy's UID cannot. The mounted key is owned by
-   UID/GID 65534, mode 0400, so the unprivileged proxy can read it inside its
-   container. UID 65534 is shared `nobody`, not a distinct host identity;
-   file mode alone does not isolate the host key. A rootless engine or different
-   custody mechanism needs its own qualified ownership/traversal path.
-   Verify CA/leaf public digests, chain, SAN, validity and key/certificate agreement
-   in the custodian's trusted environment. Do not print or transmit key bytes.
-   Compose mounts both files read-only as secrets. Missing/unreadable files stop
-   Nginx. Agents never generate, read, copy or upload real key material.
-4. Prefer the exact testing endpoint's optional `tls_ca_pem`: reviewed **public CA
-   certificates**, stored with that endpoint through its existing reviewed
-   dry-run/apply path. Its authority digest includes those bytes. The schema
-   refuses private keys, server-leaf-only trust, HTTP and production records.
-   The monitor creates a fresh normal-verification TLS context for this probe,
-   trusts only that CA bundle and follows no redirects using it. Other probes retain their own
-   trust; no CA store, process env or restart changes. Compare the public CA digest
-   with the source review before registration.
-5. The receiver separately selects an Director-reviewed private CA bundle covering
-   the private issuer **and Launchplane's HTTPS origin**, with normal hostname and
-   chain verification. The original planner's legacy `SSL_CERT_FILE` monitor intent
-   is process-wide, including production checks. Do not apply that option under
-   testing-only scope. Use endpoint-scoped public CA trust above; any shared-monitor
-   bundle/restart or new real issuer/trust setup needs its separate Director decision.
-
-Renew before expiry through the same custodian and directory, preserve the
-old certificate/key until rollback is no longer needed, re-review public hashes
-and source intent with `operation=refresh`, then use supported testing redeploy
-and live qualification. Proxy labels bind the reviewed public material and
-custody paths so a certificate-only renewal changes its Compose service hash
-and recreates the proxy through the existing deploy driver. Merely replacing
-files at the same path does not reload Nginx or rebind an atomically replaced
-file. Verify the actually served public leaf/chain after deployment.
-No service operation issues a CA or silently installs trust. A new trust/custody
-choice goes to Chris as one concrete question with a recommendation.
-
-## Endpoint, monitoring and recipient sequence
-
-After reviewed source/custody preparation, use the existing private endpoint
-reviewed dry-run/apply to record the exact testing `/health` authority, optionally
-with its public `tls_ca_pem`. Read that active record back before planning an
-identity-required `private_http` check with its endpoint key. Preserve private
-intent and the no-website declaration; do not fabricate a public origin or a
-healthy check against an absent workload.
-
-Endpoint and [local-consumer destination verification](testing-local-consumer.md)
-validate metadata and may precede the first token-backed deployment. Chris alone
-prepares a new private recipient generation, compares its fingerprint and runs
-signed-in destination dry-run before first token entry. No agent reads that
-directory or issues a real package during preparation. Actual host bindings,
-mounted bytes, TLS, identity, authenticated WSS and fresh monitor observations
-qualify after the existing testing deployment. There is no deployment-before-token
-cycle. The operational parent retains those facts and Chris's real handoff.
-
-After a rollback, disable only this listener's endpoint/check through their
-existing reviewed paths. Keep required recipient generations and original
-operation evidence. Never recover through shared ingress, production credentials,
-CA stores or the production client.
-
-## Fake-data qualification
-
-Behavior tests cover actual source operations, immutable-source/template binding,
-replay, lost-response adoption, foreign/partial state and production/shared-resource
-refusals. Separate real HTTPS tests prove endpoint-scoped trust and hostname/issuer
-refusal without process trust changes. The generated proxy rehearsal uses a
-specifically selected disposable Nginx binary:
-
-```sh
-uv run --extra dev python scripts/qualify-private-testing-transport.py \
-  --nginx-binary /absolute/task-artifact/nginx \
-  --compose-binary /absolute/compose-binary
-```
-
-It creates its own CA/leaf/keys and fake HTTP/WS runtime, exercises real monitor
-HTTPS and receiver authentication/WSS, and rejects unknown issuer, wrong hostname,
-wrong fictional credential, production identity and unrelated paths. It sends no
-bridge command, installs nothing and qualifies no real destination or token.
+The operational parent retains the exact service-backed coordinates and any
+missing edge capability. No source-only plan qualifies a real destination.

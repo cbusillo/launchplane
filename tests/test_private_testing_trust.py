@@ -2,10 +2,10 @@
 
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import ipaddress
 from pathlib import Path
 import os
 import ssl
+import socket
 from tempfile import TemporaryDirectory
 from threading import Thread
 from typing import Any
@@ -32,6 +32,7 @@ from control_plane.workflows.public_ingress_monitor import (
 )
 from tests import test_public_ingress_monitor as monitor_fixture
 from tests.support.tls import server_tls_context
+from control_plane.outbound_http import _ValidatedAddressConnector, PublicHttpDestinationError
 
 
 def certificate_fixture() -> tuple[str, bytes, bytes]:
@@ -80,7 +81,7 @@ def certificate_fixture() -> tuple[str, bytes, bytes]:
             x509.AuthorityKeyIdentifier.from_issuer_public_key(ca_key.public_key()), critical=False
         )
         .add_extension(
-            x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
+            x509.SubjectAlternativeName([x509.DNSName("bridge.example.test")]),
             critical=False,
         )
         .sign(ca_key, hashes.SHA256())
@@ -137,7 +138,36 @@ class PrivateTestingTrustTests(unittest.TestCase):
             thread.join()
 
         self.addCleanup(stop)
-        self.url = f"https://127.0.0.1:{self.server.server_port}/health"
+        self.url = f"https://bridge.example.test:{self.server.server_port}/health"
+        self.enterContext(
+            patch(
+                "control_plane.outbound_http._system_address_resolver",
+                return_value=(
+                    (
+                        socket.AF_INET,
+                        socket.SOCK_STREAM,
+                        socket.IPPROTO_TCP,
+                        "",
+                        ("10.77.0.9", self.server.server_port),
+                    ),
+                ),
+            )
+        )
+        # Test-only LAN routing: retain real TLS and the production pinned connector.
+        connector = _ValidatedAddressConnector.__call__
+
+        def loopback_route(instance: Any, *args: Any) -> socket.socket:
+            from dataclasses import replace
+
+            routed = _ValidatedAddressConnector(
+                tuple(
+                    replace(address, socket_address=("127.0.0.1", self.server.server_port))
+                    for address in instance.addresses
+                )
+            )
+            return connector(routed, *args)
+
+        self.enterContext(patch.object(_ValidatedAddressConnector, "__call__", loopback_route))
         self.endpoint = PrivateHealthEndpointRecord(
             endpoint_key="fixture-testing",
             product="example-site",
@@ -153,7 +183,7 @@ class PrivateTestingTrustTests(unittest.TestCase):
         self.assertEqual(fetch_private_health_url(self.url, 3, tls_ca_pem=self.ca).status_code, 200)
         for url, ca in (
             (self.url, ""),
-            (self.url.replace("127.0.0.1", "localhost"), self.ca),
+            (self.url.replace("bridge.example.test", "wrong.example.test"), self.ca),
             (self.url, certificate_fixture()[0]),
         ):
             with self.subTest(url=url), self.assertRaises(ssl.SSLError):
@@ -170,6 +200,59 @@ class PrivateTestingTrustTests(unittest.TestCase):
             fetch_private_health_url(
                 self.url.removesuffix("/health") + "/redirect", 3, tls_ca_pem=self.ca
             )
+
+    def test_new_edge_hostname_acceptance_is_testing_only(self) -> None:
+        payload = self.endpoint.model_dump(exclude={"tls_ca_pem"})
+        self.assertEqual(PrivateHealthEndpointRecord.model_validate(payload).url, self.url)
+        with self.assertRaises(ValueError):
+            PrivateHealthEndpointRecord.model_validate({**payload, "instance": "prod"})
+        legacy = PrivateHealthEndpointRecord.model_validate(
+            {
+                **payload,
+                "instance": "prod",
+                "url": "https://odoo.internal/health",
+            }
+        )
+        self.assertEqual(legacy.instance, "prod")
+
+    def test_legacy_literal_records_stay_readable_but_non_rfc1918_probes_refuse(self) -> None:
+        for address in ("127.0.0.1", "100.64.0.1", "[fc00::1]", "169.254.169.254"):
+            with self.subTest(address=address):
+                endpoint = self.endpoint.model_copy(update={"url": f"https://{address}/health"})
+                loaded = PrivateHealthEndpointRecord.model_validate_json(endpoint.model_dump_json())
+                self.assertEqual(loaded.url, endpoint.url)
+                with patch("control_plane.outbound_http._private_http_connection") as connect:
+                    with patch(
+                        "control_plane.outbound_http._system_address_resolver",
+                        return_value=(
+                            (
+                                socket.AF_INET6 if ":" in address else socket.AF_INET,
+                                socket.SOCK_STREAM,
+                                socket.IPPROTO_TCP,
+                                "",
+                                (address.strip("[]"), 443),
+                            ),
+                        ),
+                    ):
+                        with self.assertRaises(PublicHttpDestinationError):
+                            fetch_private_health_url(loaded.url, 3)
+                    connect.assert_not_called()
+
+    def test_edge_uses_normal_trust_with_original_dns_name(self) -> None:
+        default_context = ssl.create_default_context
+
+        def fixture_roots(*args: Any, **kwargs: Any) -> ssl.SSLContext:
+            context = default_context(*args, **kwargs)
+            context.load_verify_locations(cadata=self.ca)
+            return context
+
+        # Supply the fictional edge's root through the normal default-trust path.
+        with patch("ssl._create_default_https_context", side_effect=fixture_roots):
+            self.assertEqual(fetch_private_health_url(self.url, 3).status_code, 200)
+            with self.assertRaises(ssl.SSLError):
+                fetch_private_health_url(
+                    self.url.replace("bridge.example.test", "wrong.example.test"), 3
+                )
 
     def test_monitor_uses_the_exact_endpoint_ca_and_refuses_after_its_trust_is_cleared(
         self,
