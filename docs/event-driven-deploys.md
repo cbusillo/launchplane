@@ -248,16 +248,24 @@ reservation. The webhook request never waits on a deploy.
     A changed lifecycle record, product-profile revision, or destroy reason permits
     a new bounded run;
     reopening the PR resumes normal preview reconciliation.
-    For a legacy preview without runtime target evidence, the refusal remains:
-    an admin must establish whether its provider target still exists before
-    retirement. After fixing the underlying evidence/configuration, an admin
-    can request fresh destroy inputs through `POST /v1/drivers/odoo/preview-apply-inputs`
-    and apply a ready plan through `POST /v1/drivers/odoo/preview-apply`, or use
-    `POST /v1/drivers/generic-web/preview-destroy` for a generic-web preview.
-    These supported service paths retain their existing authorization and evidence
-    checks and do not use the automatic retry budget. This retry limit supplies
-    no evidence-free destroy or record deletion route, and does not authorize
-    live retirement.
+    Scheduled reconciliation applies the overall direction's disposable rule
+    to closed PR previews. Current disposable-lane observations must establish
+    unused, reproducible data and isolated resources. Missing, stale or changed
+    observations retain the preview, as do staff-testing holds and only-copy
+    data; the reconcile names the condition holding cleanup. The existing
+    disposable-lane observation service supplies those facts, without a new
+    recovery endpoint or access grant.
+    A qualified destroy may supersede a missing-original-intent reservation
+    under the same target execution lock, expired-lease grace and exact-record
+    compare-and-swap. It records the earlier operation as superseded, never as
+    successful. Current provider work must be quiescent; a provider-absent
+    target is checked against complete stable compose inventories, name search
+    and domain reads. A 404 or a successful deletion response alone is
+    insufficient. The normal destroy then persists the destroyed lifecycle;
+    the durable runner verifies its current record before reporting success.
+    The first qualified cleanup has its own bounded retry budget. Reopened PRs,
+    active executors and unknown provider outcomes remain protected. No
+    production or whole-product retirement is authorized by this behavior.
   - **Odoo:** the apply or destroy issues the same service plan as the preview
     inputs route and runs it through `run_odoo_preview_apply_operation`, under
     reservation scope `launchplane-reconcile:<product>`. Its key is the PR,

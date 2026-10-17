@@ -1495,10 +1495,38 @@ def reconcile_preview_target(
         recover_held_preview,
     )
 
+    decision = _plan_preview_target(
+        record_store=record_store,
+        profile=profile,
+        repository_id=repository_id,
+        transport=transport,
+        pull_request_number=pull_request_number,
+    )
+    cleanup = (
+        decision.plan.get("action") == "destroy"
+        and decision.plan.get("reason") == "pull_request_not_open"
+    )
+    if decision.plan.get("reason") == "preview_cleanup_pr_state_unknown":
+        return ReconcileOutcome(decision.plan)
+    if cleanup:
+        try:
+            _preview_cleanup_guard(record_store, profile, pull_request_number)
+        except ProductReconcileError as error:
+            decision.plan.update(action="wait", held=True, reason=error.code)
+            return ReconcileOutcome(decision.plan, error=str(error))
     held = held_preview_reservations(record_store, product=profile.product)
     recovery: list[dict[str, object]] = []
     for reservation in held[:100]:
         classified = classify_preview_reservation(reservation, profile=profile, store=record_store)
+        if (
+            cleanup
+            and not classified.get("original_action_available")
+            and classified.get("target_pull_request_number") == pull_request_number
+        ):
+            # A new authoritative destroy discards disposable output. It does not
+            # reconstruct or report success for an earlier unknown operation.
+            recovery.append(classified)
+            continue
         try:
             original = original_preview_intent(reservation, profile=profile, store=record_store)
         except ValueError:
@@ -1530,9 +1558,8 @@ def reconcile_preview_target(
         and entry.get("settlement") not in {"adopted", "completed", "replayed"}
     ]
     if (
-        any(entry.get("settlement") != "reconcile_required" for entry in unresolved)
-        or len(held) > 100
-    ):
+        not cleanup and any(entry.get("settlement") != "reconcile_required" for entry in unresolved)
+    ) or len(held) > 100:
         return ReconcileOutcome(
             {
                 "product": profile.product,
@@ -1556,20 +1583,21 @@ def reconcile_preview_target(
             },
             error="Held preview recovery requires original proof before settlement.",
         )
-    decision = _plan_preview_target(
-        record_store=record_store,
-        profile=profile,
-        repository_id=repository_id,
-        transport=transport,
-        pull_request_number=pull_request_number,
-    )
-    plan = decision.plan
-    plan["held_reservations"] = recovery
     settled = [
         entry
         for entry in recovery
         if entry.get("settlement") in {"adopted", "completed", "replayed"}
     ]
+    if settled:
+        decision = _plan_preview_target(
+            record_store=record_store,
+            profile=profile,
+            repository_id=repository_id,
+            transport=transport,
+            pull_request_number=pull_request_number,
+        )
+    plan = decision.plan
+    plan["held_reservations"] = recovery
     if settled:
         plan["preview_operation_status"] = settled[-1]["settlement"]
         plan["preview_result_status"] = settled[-1].get("result_status", "")
@@ -1592,6 +1620,7 @@ def reconcile_preview_target(
                 "profile_updated_at": profile.updated_at,
                 "context": plan["context"],
                 "reason": plan["reason"],
+                "disposable_cleanup": cleanup,
             }
         )
         if previous.get("destroy_retry_key") == retry_key:
@@ -1627,6 +1656,13 @@ def reconcile_preview_target(
                 previous_plan=previous,
             )
     except Exception as error:
+        if (
+            cleanup
+            and isinstance(error, ProductReconcileError)
+            and error.code.startswith("preview_cleanup_")
+        ):
+            plan.update(action="wait", held=True, reason=error.code)
+            return ReconcileOutcome(plan, error=str(error))
         if plan["action"] != "destroy" or (
             isinstance(error, ProductReconcileError) and error.code == "preview_lease_lost"
         ):
@@ -1652,6 +1688,44 @@ def reconcile_preview_target(
     ):
         plan["destroy_failed_attempts"] = failed_attempts + 1
     return outcome
+
+
+def _preview_cleanup_guard(
+    store: ProductReconcileStore, profile: LaunchplaneProductProfileRecord, number: int
+) -> None:
+    from control_plane.disposable_lanes import (
+        DisposableLaneSafetyUnknown,
+        DisposableLaneStore,
+        require_disposable_lane,
+    )
+
+    if store.read_product_profile_record(profile.product) != profile:
+        raise ProductReconcileError(
+            "Preview cleanup profile changed.", code="preview_cleanup_profile_changed"
+        )
+    instance = profile.preview.slug_template.format(number=number)
+    evidence = cast(DisposableLaneStore, store).read_disposable_lane_safety(
+        profile.product, profile.preview.context, instance
+    )
+    for condition, value, required in (
+        ("usage", evidence.usage if evidence else "unknown", "unused"),
+        ("data", evidence.data if evidence else "unknown", "reproducible"),
+        ("isolation", evidence.production_resources if evidence else "unknown", "isolated"),
+    ):
+        if value != required:
+            raise ProductReconcileError(
+                f"Preview cleanup held: {condition} is {value}.",
+                code=f"preview_cleanup_{condition}_{value}",
+            )
+    try:
+        require_disposable_lane(
+            cast(DisposableLaneStore, store),
+            product=profile.product,
+            context=profile.preview.context,
+            instance=instance,
+        )
+    except DisposableLaneSafetyUnknown as error:
+        raise ProductReconcileError(str(error), code="preview_cleanup_safety_unknown") from error
 
 
 def _plan_preview_target(
@@ -1697,7 +1771,11 @@ def _plan_preview_target(
     observed.update(
         head_sha=head_sha.lower(),
         eligible=_preview_eligible(pull_request),
+        state=pull_request.get("state"),
     )
+    if pull_request.get("state") not in {"open", "closed"}:
+        plan.update(action="wait", held=True, reason="preview_cleanup_pr_state_unknown")
+        return _PreviewDecision(plan=plan, lifecycle_token=lifecycle_token, observed=observed)
     if pull_request.get("state") != "open":
         return without_preview("pull_request_not_open")
     intent = change_client_review(
@@ -1829,6 +1907,8 @@ def _run_preview_operation(
         f"{RECONCILE_SOURCE}:{profile.product}:pr-{pull_request_number}:{build_token}:"
         f"{hashlib.sha256((decision.lifecycle_token + ':' + profile.updated_at).encode()).hexdigest()[:16]}"
     )
+    if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
+        operation_key += ":disposable-cleanup"
     reservation_scope = reconcile_reservation_scope(profile.product)
     plan_id = build_odoo_preview_plan_id(scope=reservation_scope, idempotency_key=operation_key)
     plan.update(preview_operation_key=operation_key, preview_plan_id=plan_id)
@@ -1859,6 +1939,8 @@ def _run_preview_operation(
             observed=decision.observed,
         ):
             raise _PullRequestMovedError
+        if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
+            _preview_cleanup_guard(record_store, profile, pull_request_number)
 
     def execute_apply(**kwargs: object) -> dict[str, object]:
         checkpoint = cast(Callable[[str], None], kwargs["provider_effect_checkpoint"])
@@ -1916,6 +1998,8 @@ def _run_preview_operation(
             observe_apply=preview_hooks.observe_apply,
             supersession_is_quiescent=preview_hooks.quiescence_check,
             pre_mutation_guard=pre_mutation_guard,
+            disposable_cleanup=operation == "destroy"
+            and plan.get("reason") == "pull_request_not_open",
             allow_mutation=allow_mutation,
         )
 
@@ -1926,6 +2010,8 @@ def _run_preview_operation(
         plan["preview_operation_status"] = operation_result.status
         if operation_result.status in {"in_progress", "target_busy"}:
             plan["deferred"] = "preview_operation_busy"
+            if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
+                plan.update(held=True, reason="preview_cleanup_executor_or_provider_work_unknown")
             return ReconcileOutcome(plan, deferred=True)
         driver_result = operation_result.response_payload.get("result")
         driver_result = driver_result if isinstance(driver_result, dict) else {}
@@ -2141,6 +2227,8 @@ def _run_generic_web_preview_operation(
         return ReconcileOutcome(plan, deferred=True)
     if not lease_held():
         raise ProductReconcileError(_LEASE_LOST, code="preview_lease_lost")
+    if operation == "destroy" and plan.get("reason") == "pull_request_not_open":
+        _preview_cleanup_guard(record_store, profile, pull_request_number)
     try:
         if isinstance(verified, VerifiedGenericWebBuild):
             _records, result = preview_hooks.refresh_generic_web(
@@ -2988,9 +3076,11 @@ def _pull_request_moved(
         "pull request",
     )
     head_sha = str(_object(pull_request.get("head"), "pull request head").get("sha") or "")
-    return head_sha.lower() != observed.get("head_sha") or _preview_eligible(
-        pull_request
-    ) != observed.get("eligible")
+    return (
+        ("state" in observed and pull_request.get("state") != observed["state"])
+        or head_sha.lower() != observed.get("head_sha")
+        or _preview_eligible(pull_request) != observed.get("eligible")
+    )
 
 
 def _preview_eligible(pull_request: dict[str, object]) -> bool:
