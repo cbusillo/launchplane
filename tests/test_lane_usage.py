@@ -60,7 +60,9 @@ class LaneUsageTests(unittest.TestCase):
                 )
             )
 
-    def decision(self, usage: str = "unknown", instance: str = "testing") -> LaneUsageDecision:
+    def decision(
+        self, usage: str = "unknown", instance: str = "testing", *, runtime_stopped: bool = False
+    ) -> LaneUsageDecision:
         return evaluate_lane_usage(
             self.store,
             profile=self.store.read_product_profile_record(self.product),
@@ -73,6 +75,7 @@ class LaneUsageTests(unittest.TestCase):
             instance=instance,
             usage=usage,
             now=self.now,
+            runtime_stopped=runtime_stopped,
         )
 
     def health(self, *, status: int = 503, instance: str = "testing") -> tuple[str, ...]:
@@ -240,6 +243,47 @@ class LaneUsageTests(unittest.TestCase):
             with self.subTest(status=status):
                 self.health(status=status)
                 self.assertTrue(self.decision().protected)
+
+    def test_stopped_odoo_runtime_and_consecutive_not_found_checks_qualify_repair(self) -> None:
+        self.seed(_odoo_profile_payload_with_prod_lane("example-odoo"))
+        ids = self.health(status=404)
+        self.assertTrue(self.decision().protected)
+        for usage in ("unknown", "in_use"):
+            decision = self.decision(usage, runtime_stopped=True)
+            self.assertFalse(decision.protected)
+            self.assertEqual(set(decision.observation_ids), set(ids))
+        for status in (200, 401, 403):
+            self.health(status=status)
+            self.assertTrue(self.decision(runtime_stopped=True).protected)
+        self.seed(_generic_site_profile_payload())
+        self.health(status=404)
+        self.assertTrue(self.decision(runtime_stopped=True).protected)
+
+    def test_stopped_runtime_never_overrides_hold_or_production_or_stale_checks(self) -> None:
+        self.seed(_odoo_profile_payload_with_prod_lane("example-odoo"))
+        self.health(status=404)
+        self.now += timedelta(minutes=15)
+        self.assertTrue(self.decision(runtime_stopped=True).protected)
+        self.health(status=404, instance="prod")
+        self.assertTrue(self.decision(instance="prod", runtime_stopped=True).protected)
+        self.health(status=404)
+        target = self.store.read_dokploy_target_record(
+            context_name=self.context, instance_name="testing"
+        )
+        self.store.write_dokploy_target_record(
+            target.model_copy(
+                update={
+                    "policies": target.policies.model_copy(
+                        update={
+                            "staff_testing_hold": DokployTargetStaffTestingHold(
+                                reason="Staff testing is protected"
+                            )
+                        }
+                    )
+                }
+            )
+        )
+        self.assertTrue(self.decision(runtime_stopped=True).protected)
 
     def test_adjacent_monitor_slots_qualify_despite_an_earlier_offset_in_the_later_slot(
         self,

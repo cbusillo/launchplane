@@ -366,6 +366,7 @@ class UsageReaderTests(unittest.TestCase):
             ("serving_process_absent", "serving_process_absent"),
             ("session_store_unavailable", "session_store_unavailable"),
             ("login_history_unavailable", "login_history_unavailable"),
+            ("serving_container_stopped", "serving_container_stopped"),
             ("private-fixture server password", "probe_result_invalid"),
             ("complete", "probe_result_invalid"),
             ("staff_testing_hold", "probe_result_invalid"),
@@ -480,6 +481,8 @@ class HostProbeTests(unittest.TestCase):
         wrong_context: bool = False,
         custom_command: bool = False,
         stopped: bool = False,
+        database_stopped: bool = False,
+        restarted: bool = False,
         empty: bool = False,
         inventory_fails: bool = False,
         probe_result: dict[str, Any] | None = None,
@@ -514,6 +517,8 @@ class HostProbeTests(unittest.TestCase):
         web["State"]["Health"] = {"Status": "unhealthy"}
         if stopped:
             web["State"]["Running"] = False
+        if database_stopped:
+            database["State"]["Running"] = False
         if wrong_context:
             web["Config"]["Env"][0] = "PLATFORM_CONTEXT=other"
         if custom_command:
@@ -537,8 +542,12 @@ class HostProbeTests(unittest.TestCase):
                 values = [web, database, {**web, "Id": "web2"}] if duplicate else [web, database]
                 if changed and len(calls) > 3:
                     web["State"]["StartedAt"] = "restarted"
+                if restarted and len(calls) > 3:
+                    web["State"]["Running"] = True
                 output = json.dumps(values).encode()
             elif command[1] == "exec":
+                if stopped:
+                    raise AssertionError("A stopped web must not be executed")
                 output = json.dumps(
                     probe_result
                     or {
@@ -586,6 +595,26 @@ class HostProbeTests(unittest.TestCase):
     def test_fixed_host_read_collects_without_provider_mutations(self) -> None:
         self.assertFalse(self.run_probe()["authenticated_sessions"])
 
+    def test_stopped_web_requires_unchanged_exact_testing_runtime(self) -> None:
+        result = self.run_probe(stopped=True)
+        self.assertEqual(result["reason_code"], "serving_container_stopped")
+        self.assertNotIn("recent_signins", result)
+        self.assertNotIn("authenticated_sessions", result)
+        scenarios: tuple[dict[str, Any], ...] = (
+            {"duplicate": True},
+            {"changed": True},
+            {"wrong_context": True},
+            {"custom_command": True},
+            {"database_stopped": True},
+            {"restarted": True},
+        )
+        for changes in scenarios:
+            with self.subTest(changes=changes):
+                self.assertNotEqual(
+                    self.run_probe(stopped=True, **changes)["reason_code"],
+                    "serving_container_stopped",
+                )
+
     def test_duplicate_services_and_container_restarts_leave_usage_unknown(self) -> None:
         self.assertTrue(self.run_probe(duplicate=True)["unavailable"])
         self.assertTrue(self.run_probe(changed=True)["unavailable"])
@@ -595,7 +624,7 @@ class HostProbeTests(unittest.TestCase):
     def test_host_reports_the_actual_failed_checkpoint_without_private_values(self) -> None:
         for options, reason in (
             ({"duplicate": True}, "service_ambiguous_or_stopped"),
-            ({"stopped": True}, "service_ambiguous_or_stopped"),
+            ({"stopped": True}, "serving_container_stopped"),
             ({"changed": True}, "runtime_changed"),
             ({"wrong_context": True}, "testing_identity_mismatch"),
             ({"custom_command": True}, "web_command_unsupported"),
