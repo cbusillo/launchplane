@@ -87,7 +87,11 @@ for the Client to accept or reject after deployment.
 
 Checklist compilation replaces links to preview hostnames (including hosts in
 the product's retained preview records) and per-PR `/ui/owner-review` pages with
-the fixed line `Check this on the testing site.`. Other notes and links remain;
+the fixed line `Check this on the testing site.`. It also removes instructions
+to accept a Launchplane release only after internal cleanup or memory work;
+the concrete testing check before such a clause remains. If no testing
+instructions remain, the usual missing-notes gate still blocks the checklist.
+Other notes and links remain;
 the source PR body is never edited. Affected items carry `preview_era_notes: true`
 in the response, and the admin/read-only view identifies their PR numbers.
 The digest includes the displayed notes and this marker: sanitizing old notes
