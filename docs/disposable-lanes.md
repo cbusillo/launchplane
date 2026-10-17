@@ -1219,7 +1219,17 @@ fresh-resource bootstrap. It requires all of the following:
 
 Only their conjunction produces `usage=unused`, reason `never_served`. Session
 and login booleans remain null: this is a separate proof, not an empty-session
-claim. Source reads are complete DB queries, without a history limit. Pure collection
+claim. Source reads are complete DB queries, without a history limit. Every
+undated, malformed, offset or payload-mismatched timestamp still reaches the
+full rule. A deployment or check whose indexed time and payload time are the same
+canonical UTC text, from a calendar date the filter can verify, in a whole second
+before preparation, cannot defeat the proof. The service still validates that
+record's whole payload; it skips revalidation only when the same process has
+already validated the identical payload, matched by SHA-256 digest. An
+invalid payload anywhere in the history still leaves the read UNKNOWN. A long
+history therefore costs a per-row timestamp and digest pass in the database under
+the lock once the collection read has validated it, not a decoded record each; a
+fresh process pays full validation once. Pure collection
 reads do not hold the global authority write lock; revoked generations return
 early. Publication and consumption use their existing locked transaction. The proof
 binds to the generation rather than a growing list of failed checks. Failed checks
