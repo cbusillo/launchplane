@@ -261,6 +261,7 @@ def execute_testing_rebuild(
             try:
                 _serving(observation, plan, plan.new, clock())
             except TestingRebuildHealthFailure:
+                recovery = None
                 if record.retirement_started:
                     recovery = provider.unstarted_retirement(plan)
                     if recovery is None or (recovery.copy_id, recovery.host) != (
@@ -274,8 +275,12 @@ def execute_testing_rebuild(
                         actual=recovery.runtime_identity,
                         expected=plan.old.runtime_identity,
                     )
-                    save(retirement_recovery=recovery)
-                save(step="rolling_back", error="candidate_public_health_failed", route=observation)
+                save(
+                    step="rolling_back",
+                    error="candidate_public_health_failed",
+                    route=observation,
+                    retirement_recovery=recovery,
+                )
 
         if record.step == "rolling_back":
             provider.guard(plan)

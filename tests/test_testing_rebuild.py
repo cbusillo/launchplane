@@ -336,6 +336,66 @@ class TestingRebuildTests(unittest.TestCase):
         self.provider.pending_switch = False
         self.assertEqual(self.run_rebuild().step, "complete")
 
+    def test_pending_inverse_switch_reconciles_without_second_dispatch(self) -> None:
+        self.provider.bad_public = True
+        original_switch = self.provider.switch
+
+        def switch(*args: object, **kwargs: object) -> None:
+            self.provider.pending_switch = args[2] == self.plan.old
+            original_switch(*args, **kwargs)
+
+        with patch.object(self.provider, "switch", side_effect=switch):
+            for _ in range(2):
+                with self.assertRaises(TimeoutError):
+                    self.run_rebuild()
+        self.assertEqual(self.provider.actions.count("switch:old"), 1)
+        self.assertTrue(self.store.load(self.plan).rollback_started)
+        self.provider.serving = self.plan.old
+        self.provider.pending_switch = False
+        self.assertEqual(self.run_rebuild().step, "failed")
+        self.assertTrue(self.provider.old_running)
+
+    def test_store_preserves_terminal_receipt_against_stale_writer(self) -> None:
+        terminal = self.run_rebuild()
+        stale = terminal.model_copy(update={"step": "retiring", "ended_at": None})
+        with self.assertRaises(ValueError):
+            self.store.save(stale)
+        self.assertEqual(self.store.load(self.plan), terminal)
+        self.store.save(terminal)
+
+    def test_store_never_clears_effect_intents_or_regresses_progress(self) -> None:
+        self.provider.lose_publish_reply = True
+        with self.assertRaises(TimeoutError):
+            self.run_rebuild()
+        record = self.store.load(self.plan)
+        for flag in ("publication_started", "retirement_started", "rollback_started"):
+            with self.subTest(flag=flag):
+                record = record.model_copy(update={flag: True})
+                self.store.save(record)
+                with self.assertRaises(ValueError):
+                    self.store.save(record.model_copy(update={flag: False}))
+                self.assertEqual(self.store.load(self.plan), record)
+        with self.assertRaises(ValueError):
+            self.store.save(record.model_copy(update={"step": "switching"}))
+        self.assertEqual(self.store.load(self.plan), record)
+
+    def test_undispatched_retirement_proof_and_rollback_are_saved_together(self) -> None:
+        self.provider.refuse_stop = True
+        with self.assertRaises(PermissionError):
+            self.run_rebuild()
+        self.provider.bad_public = True
+        original_save = self.store.save
+        checkpoints = []
+
+        def save(record: TestingRebuildRecord) -> None:
+            checkpoints.append(record)
+            original_save(record)
+
+        with patch.object(self.store, "save", side_effect=save):
+            self.assertEqual(self.run_rebuild().step, "failed")
+        recovery = next(record for record in checkpoints if record.retirement_recovery)
+        self.assertEqual(recovery.step, "rolling_back")
+
     def test_stable_address_change_is_refused_against_existing_route_observation(self) -> None:
         self.plan = self.plan.model_copy(update={"base_url": "https://another.invalid"})
         with self.assertRaises(ValueError):
