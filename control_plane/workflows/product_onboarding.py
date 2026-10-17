@@ -1,6 +1,6 @@
 import hashlib
 import re
-from typing import Protocol
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict
 
@@ -432,6 +432,7 @@ def apply_product_onboarding_manifest(
         record_store=record_store,
         manifest=manifest,
         updated_at=updated_at,
+        generate_testing_credentials=True,
     )
     record_store.write_product_authority_bundle(bundle)
     return result
@@ -442,6 +443,7 @@ def plan_product_onboarding_authority_bundle(
     record_store: ProductOnboardingRecordStore,
     manifest: ProductOnboardingManifest,
     updated_at: str = "",
+    generate_testing_credentials: bool = False,
 ) -> tuple[ProductOnboardingApplyResult, ProductAuthorityBundle]:
     recorded_at = updated_at.strip() or manifest.updated_at.strip() or utc_now_timestamp()
     existing_product_profile = _read_existing_product_profile(
@@ -609,6 +611,36 @@ def plan_product_onboarding_authority_bundle(
         ),
         secret_bindings=(*secret_bindings, *secret_binding_plan.retired_bindings),
     )
+    if generate_testing_credentials:
+        from control_plane.testing_local_credentials import (
+            TestingCredentialStore,
+            with_generated_credentials,
+        )
+
+        existing_lanes = (
+            {(lane.context, lane.instance) for lane in existing_product_profile.lanes}
+            if existing_product_profile
+            else set()
+        )
+        for lane in product_profile.lanes:
+            if lane.instance == "testing" and (lane.context, lane.instance) not in existing_lanes:
+                bundle = with_generated_credentials(
+                    bundle,
+                    cast(TestingCredentialStore, record_store),
+                    product_profile,
+                    lane.context,
+                    actor="service:onboarding",
+                    generation="onboarding:" + recorded_at,
+                )
+        result = result.model_copy(
+            update={
+                "secret_bindings": tuple(
+                    binding
+                    for binding in bundle.secret_bindings
+                    if not binding.integration.startswith("retired:")
+                )
+            }
+        )
     return result, bundle
 
 

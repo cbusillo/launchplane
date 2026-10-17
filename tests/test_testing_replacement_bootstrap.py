@@ -1,6 +1,7 @@
 """Fresh generation continuation against real record transactions and fake provider IO."""
 
 from pathlib import Path
+import os
 from datetime import datetime, timedelta
 from typing import Any
 import unittest
@@ -44,6 +45,16 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         fixture = self.fixture
         self.store = fixture.store
+        from tests.support.stores import _write_runtime_key_safety_policy
+        from control_plane import secrets
+
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "testing-bootstrap-fixture-key"},
+            )
+        )
+        _write_runtime_key_safety_policy(database_url=self.store.database_url)
         profile = self.store.read_product_profile_record(fixture.profile.product)
         source_lane = next(lane for lane in profile.lanes if lane.instance == "prod")
         self.profile = profile.model_copy(

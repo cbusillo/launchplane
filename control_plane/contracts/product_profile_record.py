@@ -583,6 +583,7 @@ class ProductSecretConfigRequirement(BaseModel):
     context: str = ""
     instance: str = ""
     owner_input: ProductOwnerSecretInput | None = None
+    testing_local_credential: bool = Field(default=False, exclude_if=lambda value: not value)
 
     @model_validator(mode="after")
     def _validate_requirement(self) -> "ProductSecretConfigRequirement":
@@ -598,6 +599,12 @@ class ProductSecretConfigRequirement(BaseModel):
         self.integration = self.integration.strip()
         self.context = self.context.strip()
         self.instance = self.instance.strip()
+        if self.testing_local_credential and (
+            self.integration != "runtime_environment" or self.owner_input is not None
+        ):
+            raise ValueError(
+                "Testing local credentials require runtime storage and no external input"
+            )
         return self
 
 

@@ -18320,6 +18320,7 @@ def create_launchplane_fastapi_app(
             onboarding_result, authority_bundle = plan_product_onboarding_authority_bundle(
                 record_store=database_store,
                 manifest=onboarding_manifest,
+                generate_testing_credentials=onboarding_request.mode == "apply",
             )
         except ValueError as error:
             raise _launchplane_http_error(
@@ -29673,6 +29674,11 @@ def create_launchplane_fastapi_app(
         ),
     )
     register_managed_secret_read_routes(app, dependencies=read_route_dependencies)
+    from control_plane.http_routes.testing_local_credentials import (
+        register_testing_credential_routes,
+    )
+
+    register_testing_credential_routes(app, dependencies=read_route_dependencies)
 
     app.add_api_route(
         _PUBLIC_INGRESS_MONITOR_RUN_ONCE_ROUTE,

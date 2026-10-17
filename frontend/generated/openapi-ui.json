@@ -27200,6 +27200,19 @@
             ],
             "title": "Sharing Reason",
             "x-launchplane-optional-response": true
+          },
+          "value_source": {
+            "anyOf": [
+              {
+                "const": "generated",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Source",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -33842,6 +33855,11 @@
                 "type": "null"
               }
             ]
+          },
+          "testing_local_credential": {
+            "default": false,
+            "title": "Testing Local Credential",
+            "type": "boolean"
           }
         },
         "required": [
@@ -33849,7 +33867,8 @@
           "context",
           "instance",
           "integration",
-          "owner_input"
+          "owner_input",
+          "testing_local_credential"
         ],
         "title": "ProductSecretConfigRequirement",
         "type": "object"
@@ -37865,7 +37884,8 @@
                 "enum": [
                   "supplied",
                   "copy",
-                  "provider"
+                  "provider",
+                  "generated"
                 ],
                 "type": "string"
               },

@@ -2244,6 +2244,13 @@ key. The accepted response preserves the legacy private-health apply envelope:
 the endpoint key/status remain in `result`, while `records` stays empty for
 compatibility with existing replays.
 
+[Testing local credential generation](testing-local-credentials.md) uses this
+same product-config route with `generate: "testing_local"` instead of a value.
+`GET /v1/testing-credentials` and
+`GET /v1/products/{product}/testing-credentials` provide names-only overlap
+audit and provenance readback; they authorize all participating product lanes
+before inspecting values. Neither route returns a value or value fingerprint.
+
 Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the

@@ -1079,21 +1079,38 @@ class TestingActivationAdapter:
             self.store.write_testing_activation(
                 expected=record.model_dump(mode="json"),
                 replacement=published.model_dump(mode="json"),
-                bundle=ProductAuthorityBundle(
-                    required_context_owner=(self.product, record.context),
-                    expected_product_profiles=(
-                        self.store.read_product_profile_record(self.product),
-                    ),
-                    dokploy_targets=(new_target,),
-                    dokploy_target_ids=(new_id,),
-                    provider_target_writes=(
-                        ProviderTargetWrite(
-                            record=new_provider, expected_record=record.retained_provider
+                bundle=self._with_credentials(
+                    ProductAuthorityBundle(
+                        required_context_owner=(self.product, record.context),
+                        expected_product_profiles=(
+                            self.store.read_product_profile_record(self.product),
+                        ),
+                        dokploy_targets=(new_target,),
+                        dokploy_target_ids=(new_id,),
+                        provider_target_writes=(
+                            ProviderTargetWrite(
+                                record=new_provider, expected_record=record.retained_provider
+                            ),
                         ),
                     ),
+                    record,
                 ),
             )
         return published
+
+    def _with_credentials(
+        self, bundle: ProductAuthorityBundle, record: TestingActivationRecord
+    ) -> ProductAuthorityBundle:
+        from control_plane.testing_local_credentials import with_generated_credentials
+
+        return with_generated_credentials(
+            bundle,
+            self.store,
+            self.store.read_product_profile_record(self.product),
+            record.context,
+            actor="service:testing-activation",
+            generation=record.preparation_record_id,
+        )
 
     def observe(
         self, provider_operation_key: str, provider_effect_phase: str, reconciliation_key: str

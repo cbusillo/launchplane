@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets as random_secrets
 from json import JSONDecodeError
 from collections.abc import Callable
 from pathlib import Path
@@ -38,6 +39,7 @@ from control_plane.storage.product_authority_bundle import ProductAuthorityBundl
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundleStore
 from control_plane.storage.product_authority_bundle import RuntimeEnvironmentWrite
 from control_plane.storage.product_authority_bundle import SecretCopySourceExpectation
+from control_plane.storage.product_authority_bundle import SecretDeliverySetExpectation
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -250,6 +252,39 @@ def plan_product_config_authority_bundle(
     copy_contexts: set[tuple[str, str]] = set()
     copy_expectations: list[SecretCopySourceExpectation] = []
     copy_profile = None
+    generated_entries = tuple(secret for secret in secrets if secret.get("generate") is not None)
+    generation_read_sets: tuple[SecretDeliverySetExpectation, ...] = ()
+    if generated_entries:
+        from control_plane.testing_local_credentials import (
+            TestingCredentialStore,
+            validate_generation,
+        )
+
+        try:
+            copy_profile = validate_generation(
+                cast(TestingCredentialStore, record_store),
+                product=product,
+                context=context_name,
+                instance=instance_name,
+                entries=generated_entries,
+            )
+        except (ValueError, FileNotFoundError) as error:
+            raise ProductConfigError(
+                "Generation requires declared local credentials on an owned testing lane."
+            ) from error
+        generation_read_sets = (
+            SecretDeliverySetExpectation(
+                integration="runtime_environment",
+                context=context_name,
+                instance=instance_name,
+                records=record_store.list_secret_records(
+                    integration="runtime_environment", context_name=context_name, limit=None
+                ),
+                bindings=record_store.list_secret_bindings(
+                    integration="runtime_environment", context_name=context_name, limit=None
+                ),
+            ),
+        )
     for index, secret in enumerate(secrets):
         if secret.get("copy_from") is None:
             continue
@@ -347,6 +382,8 @@ def plan_product_config_authority_bundle(
                     plaintext_value = product_secret_copy.copy_source_value(copy_sources[index])
                 elif index in adopted_secret_values:
                     plaintext_value = adopted_secret_values[index]
+                elif secret.get("generate") == "testing_local":
+                    plaintext_value = random_secrets.token_urlsafe(32)
                 else:
                     plaintext_value = str(secret["value"])
             except product_secret_copy.ProductSecretCopyError as error:
@@ -380,6 +417,9 @@ def plan_product_config_authority_bundle(
                 adopted_secret_ids.append(secret_id)
                 for event in secret_plan["secret_audit_events"]:
                     event.metadata.update({"value_source": "provider_env"})
+            if secret.get("generate") == "testing_local":
+                for event in secret_plan["secret_audit_events"]:
+                    event.metadata.update({"value_source": "service_generated"})
             secret_versions.extend(secret_plan["secret_versions"])
             secret_records.extend(secret_plan["secret_records"])
             secret_bindings.extend(secret_plan["secret_bindings"])
@@ -452,6 +492,7 @@ def plan_product_config_authority_bundle(
     bundle = ProductAuthorityBundle(
         expected_product_profiles=(copy_profile,) if copy_profile is not None else (),
         secret_copy_sources=tuple(copy_expectations),
+        secret_delivery_read_sets=generation_read_sets,
         absent_secret_ids=tuple(adopted_secret_ids),
         required_context_owners=tuple(sorted(copy_contexts | {(product, context_name)}))
         if copy_profile is not None
@@ -721,7 +762,15 @@ def _product_config_secret_inputs(
             raise ProductConfigError(f"Product config secret #{index} requires name.")
         copy_from = raw_secret.get("copy_from")
         adopt_from_provider = raw_secret.get("adopt_from_provider")
-        if adopt_from_provider is not None:
+        generate = raw_secret.get("generate")
+        if generate is not None:
+            if generate != "testing_local" or any(
+                source is not None for source in (plaintext_value, copy_from, adopt_from_provider)
+            ):
+                raise ProductConfigError(
+                    "Generated testing credentials cannot accept another value source."
+                )
+        elif adopt_from_provider is not None:
             if not isinstance(adopt_from_provider, bool) or not adopt_from_provider:
                 raise ProductConfigError(
                     f"Product config secret #{index} adopt_from_provider must be true."
@@ -799,6 +848,16 @@ def _product_config_secret_inputs(
             instance_name=secret_instance,
             index=index,
         )
+        if generate is not None and (
+            instance_name != "testing"
+            or validated_scope != "context_instance"
+            or integration != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+            or secret_class != "testing"
+            or sharing_reason is not None
+        ):
+            raise ProductConfigError(
+                "Generation requires a lane-exact testing runtime credential with testing class."
+            )
         if copy_from is not None and (
             validated_scope != "context_instance"
             or integration != control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
@@ -826,6 +885,7 @@ def _product_config_secret_inputs(
                 "binding_key": binding_key,
                 "value": plaintext_value,
                 **({"copy_from": copy_from} if copy_from is not None else {}),
+                **({"generate": generate} if generate is not None else {}),
                 **({"adopt_from_provider": True} if adopt_from_provider is not None else {}),
                 "context": secret_context,
                 "instance": secret_instance,
@@ -833,7 +893,9 @@ def _product_config_secret_inputs(
                 "secret_class": secret_class,
                 "sharing_reason": sharing_reason,
                 "value_source": (
-                    "copy"
+                    "generated"
+                    if generate is not None
+                    else "copy"
                     if copy_from is not None
                     else "provider"
                     if adopt_from_provider
@@ -1322,6 +1384,8 @@ def _summarize_product_config_secret_input(
         summary["sharing_reason"] = secret["sharing_reason"]
     if secret.get("copy_from") is not None:
         summary["copy_from"] = secret["copy_from"]
+    if secret.get("generate") == "testing_local":
+        summary["value_source"] = "generated"
     if secret_id:
         summary["secret_id"] = secret_id
     return summary
