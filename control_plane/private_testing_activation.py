@@ -25,6 +25,7 @@ from control_plane.private_testing_transport import (
     _object,
     _validate_compose,
     transport_overlay,
+    edge_server_url,
 )
 from control_plane.provider_operations import (
     ProviderMutationOutcome,
@@ -71,12 +72,10 @@ class PrivateTestingActivationRequest(PrivateTestingTransportIntent):
     original_activation_key: str = ""
     source_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     source_path: str = Field(pattern=r"^[A-Za-z0-9._/-]+$")
-    certificate_root: str = Field(pattern=r"^/[A-Za-z0-9._/-]+$")
     host_review: str = Field(min_length=1, max_length=1000)
-    custody_review: str = Field(min_length=1, max_length=1000)
     reason: str = Field(min_length=1, max_length=1000)
 
-    @field_validator("source_path", "certificate_root")
+    @field_validator("source_path")
     @classmethod
     def _paths(cls, value: str) -> str:
         if ".." in value.split("/") or "//" in value or value.endswith("/"):
@@ -252,13 +251,6 @@ class PrivateTestingActivationAdapter:
         )
         placement = _placement(payload, target_id.target_id)
         before = _source_settings(payload)
-        overlay_namespace = (
-            "lp-private-tls-"
-            + canonical_json_sha256(
-                {"product": product, "context": request.context, "instance": request.instance}
-            )[:16]
-        )
-        certificate_directory = request.certificate_root + "/" + overlay_namespace
         installed: dict[str, Any] = {}
         if request.operation in {"remove", "refresh"}:
             original = store.read_idempotency_record(
@@ -280,14 +272,19 @@ class PrivateTestingActivationAdapter:
                 raise PrivateTestingTransportRefused(
                     "Removal cannot overwrite changed or foreign source."
                 )
+        if request.operation in {"remove", "refresh"} and any(
+            name not in installed["request"] for name in PrivateTestingTransportIntent.model_fields
+        ):
+            raise PrivateTestingTransportRefused(
+                "Legacy transport requires separate source recovery."
+            )
         if request.operation == "remove":
             fields = (
                 *PrivateTestingTransportIntent.model_fields,
                 "source_commit",
                 "source_path",
-                "certificate_root",
             )
-            if any(normalized[name] != installed["request"][name] for name in fields):
+            if any(normalized[name] != installed["request"].get(name) for name in fields):
                 raise PrivateTestingTransportRefused(
                     "Removal must reference the original transport and immutable source."
                 )
@@ -321,22 +318,15 @@ class PrivateTestingActivationAdapter:
                     "Immutable artifact provenance is unavailable."
                 )
             source_digest = canonical_json_sha256(template)
-            overlay = transport_overlay(
-                request, namespace=overlay_namespace, runtime_port=profile.runtime_port
-            )
-            for name, filename in (("certificate", "server.crt"), ("key", "server.key")):
-                cast(dict[str, Any], overlay["secrets"])[overlay_namespace + "-" + name]["file"] = (
-                    certificate_directory + "/" + filename
-                )
-            proxy = cast(dict[str, Any], overlay["services"])[overlay_namespace]
-            proxy["labels"]["org.launchplane.private-tls-custody"] = canonical_json_sha256(
-                {"files": overlay["secrets"], "review": normalized}
-            )
+            overlay = transport_overlay(request, runtime_port=profile.runtime_port)
             desired: dict[str, Any] = deepcopy(template)
-            for section, additions in overlay.items():
-                if set(_object(additions)) & set(_object(desired.get(section, {}))):
-                    raise PrivateTestingTransportRefused("Listener namespace is already in use.")
-                desired.setdefault(section, {}).update(_object(additions))
+            for service_name, additions in _object(overlay["services"]).items():
+                service = desired["services"][service_name]
+                if set(service) & set(_object(additions)):
+                    raise PrivateTestingTransportRefused(
+                        "Private upstream fields are already in use."
+                    )
+                service.update(_object(additions))
             _qualify_structural_interpolation(desired)
             after = {
                 **before,
@@ -362,7 +352,6 @@ class PrivateTestingActivationAdapter:
             "before": before,
             "after": after,
             "environment_sha256": canonical_json_sha256(payload.get("env")),
-            "certificate_directory": certificate_directory,
             "source_sha256": source_digest,
             "image": image,
         }
@@ -372,7 +361,6 @@ class PrivateTestingActivationAdapter:
         return cls(root, store, product, request, scope, trace_id, intent)
 
     def result(self, *, matches: bool) -> dict[str, object]:
-        authority = f"{self.request.private_ip}:{self.request.listener_port}"
         return {
             "product": self.product,
             "context": self.request.context,
@@ -391,20 +379,10 @@ class PrivateTestingActivationAdapter:
                 "product": self.product,
                 "context": self.request.context,
                 "instance": "testing",
-                "url": f"https://{authority}/health",
+                "url": self.request.endpoint_url,
             },
-            "server_url": f"wss://{authority}/agent-session/connect",
-            "trust": {
-                "monitor_trust_scope": "endpoint",
-                "reviewed_ca_bundle_sha256": self.request.ca_bundle_sha256,
-                "verified": False,
-                "required_ip_san": str(self.request.private_ip),
-                "receiver_ca_bundle_path": self.request.receiver_ca_bundle_path,
-            },
-            "custody": {
-                "directory": self.intent["certificate_directory"],
-                "review": self.request.custody_review,
-            },
+            "server_url": edge_server_url(self.request.endpoint_url),
+            "tls_termination": "edge",
             "next_action": "Use the existing reviewed immutable-artifact testing deployment after runtime inputs and host/TLS prerequisites qualify.",
         }
 

@@ -29761,35 +29761,18 @@
       "PrivateTestingActivationRequest": {
         "additionalProperties": false,
         "properties": {
-          "ca_bundle_sha256": {
-            "pattern": "^[a-f0-9]{64}$",
-            "title": "Ca Bundle Sha256",
-            "type": "string"
-          },
-          "certificate_root": {
-            "pattern": "^/[A-Za-z0-9._/-]+$",
-            "title": "Certificate Root",
-            "type": "string"
-          },
-          "certificate_sha256": {
-            "pattern": "^[a-f0-9]{64}$",
-            "title": "Certificate Sha256",
-            "type": "string"
-          },
           "context": {
             "minLength": 1,
             "title": "Context",
             "type": "string"
           },
-          "custody_review": {
-            "maxLength": 1000,
-            "minLength": 1,
-            "title": "Custody Review",
-            "type": "string"
-          },
           "endpoint_key": {
             "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
             "title": "Endpoint Key",
+            "type": "string"
+          },
+          "endpoint_url": {
+            "title": "Endpoint Url",
             "type": "string"
           },
           "expected_plan_sha256": {
@@ -29826,15 +29809,6 @@
             "title": "Mode",
             "type": "string"
           },
-          "monitor_ca_bundle_path": {
-            "title": "Monitor Ca Bundle Path",
-            "type": "string"
-          },
-          "nginx_image": {
-            "pattern": "^[a-z0-9][a-z0-9./:_-]+@sha256:[a-f0-9]{64}$",
-            "title": "Nginx Image",
-            "type": "string"
-          },
           "operation": {
             "default": "install",
             "enum": [
@@ -29861,10 +29835,6 @@
             "title": "Reason",
             "type": "string"
           },
-          "receiver_ca_bundle_path": {
-            "title": "Receiver Ca Bundle Path",
-            "type": "string"
-          },
           "runtime_service": {
             "pattern": "^[a-z][a-z0-9_-]{0,62}$",
             "title": "Runtime Service",
@@ -29879,12 +29849,6 @@
             "pattern": "^[A-Za-z0-9._/-]+$",
             "title": "Source Path",
             "type": "string"
-          },
-          "trust_review": {
-            "maxLength": 1000,
-            "minLength": 1,
-            "title": "Trust Review",
-            "type": "string"
           }
         },
         "required": [
@@ -29893,17 +29857,10 @@
           "private_ip",
           "listener_port",
           "runtime_service",
-          "nginx_image",
-          "ca_bundle_sha256",
-          "certificate_sha256",
-          "monitor_ca_bundle_path",
-          "receiver_ca_bundle_path",
-          "trust_review",
+          "endpoint_url",
           "source_commit",
           "source_path",
-          "certificate_root",
           "host_review",
-          "custody_review",
           "reason"
         ],
         "title": "PrivateTestingActivationRequest",
@@ -29912,16 +29869,6 @@
       "PrivateTestingTransportRequest": {
         "additionalProperties": false,
         "properties": {
-          "ca_bundle_sha256": {
-            "pattern": "^[a-f0-9]{64}$",
-            "title": "Ca Bundle Sha256",
-            "type": "string"
-          },
-          "certificate_sha256": {
-            "pattern": "^[a-f0-9]{64}$",
-            "title": "Certificate Sha256",
-            "type": "string"
-          },
           "context": {
             "minLength": 1,
             "title": "Context",
@@ -29930,6 +29877,10 @@
           "endpoint_key": {
             "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
             "title": "Endpoint Key",
+            "type": "string"
+          },
+          "endpoint_url": {
+            "title": "Endpoint Url",
             "type": "string"
           },
           "expected_plan_sha256": {
@@ -29959,33 +29910,14 @@
             "title": "Mode",
             "type": "string"
           },
-          "monitor_ca_bundle_path": {
-            "title": "Monitor Ca Bundle Path",
-            "type": "string"
-          },
-          "nginx_image": {
-            "pattern": "^[a-z0-9][a-z0-9./:_-]+@sha256:[a-f0-9]{64}$",
-            "title": "Nginx Image",
-            "type": "string"
-          },
           "private_ip": {
             "format": "ipv4",
             "title": "Private Ip",
             "type": "string"
           },
-          "receiver_ca_bundle_path": {
-            "title": "Receiver Ca Bundle Path",
-            "type": "string"
-          },
           "runtime_service": {
             "pattern": "^[a-z][a-z0-9_-]{0,62}$",
             "title": "Runtime Service",
-            "type": "string"
-          },
-          "trust_review": {
-            "maxLength": 1000,
-            "minLength": 1,
-            "title": "Trust Review",
             "type": "string"
           }
         },
@@ -29995,12 +29927,7 @@
           "private_ip",
           "listener_port",
           "runtime_service",
-          "nginx_image",
-          "ca_bundle_sha256",
-          "certificate_sha256",
-          "monitor_ca_bundle_path",
-          "receiver_ca_bundle_path",
-          "trust_review"
+          "endpoint_url"
         ],
         "title": "PrivateTestingTransportRequest",
         "type": "object"
