@@ -163,7 +163,7 @@ failed deploy's `error_detail_keys` and `path-check` name the affected
 `ODOO_OVERRIDE_SECRET__CONFIG_PARAM__*` keys. A reference that cannot resolve
 at all keeps `compose_or_override_render_failed`, with the same key names.
 
-From a terminal, run the correction through the installed operator helper:
+From a terminal, run the correction through the installed Launchplane admin helper:
 
 ```bash
 uv run python scripts/reconcile-odoo-secret-references.py read \
