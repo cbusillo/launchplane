@@ -46821,7 +46821,8 @@
             "default": "register",
             "enum": [
               "register",
-              "retire"
+              "retire",
+              "relabel"
             ],
             "title": "Operation",
             "type": "string"
@@ -46888,6 +46889,26 @@
             "title": "Audit Record Key",
             "type": "string"
           },
+          "expected_custom_labels": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Expected Custom Labels",
+            "type": "array"
+          },
+          "expected_runner_id": {
+            "anyOf": [
+              {
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Runner Id"
+          },
           "host_name": {
             "title": "Host Name",
             "type": "string"
@@ -46912,7 +46933,8 @@
             "default": "register",
             "enum": [
               "register",
-              "retire"
+              "retire",
+              "relabel"
             ],
             "title": "Operation",
             "type": "string"

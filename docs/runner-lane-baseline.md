@@ -240,6 +240,55 @@ lifecycle contracts and are not covered by this planner validation.
 
 ## Lifecycle Executors
 
+### Existing runner custom labels
+
+The lifecycle workflow also accepts `operation=relabel`. This changes only an
+existing runner's custom scheduling labels, without registering, retiring,
+stopping or restarting it. It uses the existing administration credential in
+place and the existing `runner_lane_registration_audit.write` action; it creates
+no credential or grant. The deployed audit service must support the `relabel`
+operation before apply. A rejected pre-action audit prevents the label write.
+
+For relabel, the workflow's `labels` input is a JSON object containing
+`runner_id`, `expected_custom_labels`, and `labels` (the desired custom labels).
+Read the exact runner name/ID and label **types** from GitHub first. Automatic
+labels such as `self-hosted` are not custom labels and must be omitted from both
+lists. Supply one exact `lane_name`; the operations execution lane is protected.
+Run `mutate=false`, inspect the prior/desired/automatic labels in the result,
+then use the same reviewed input with `mutate=true` and
+`confirmation="relabel <owner/repo> <lane_name>"`, under the task's recorded
+authority. Each apply has its own audit key. Do not dispatch apply merely to
+qualify a source PR.
+
+The supported terminal consumer is
+`launchplane work-graph runner-lane-relabel-executor --help`. It accepts a typed
+`--request-file` with lifecycle operation `relabel`, repository, host, lane,
+registration root, expected runner ID/custom labels, desired `labels`, audit
+key and `mutate`. Explicit allowed repository/host/root inputs are required.
+Mutating use additionally requires the approved operations execution identity,
+matching actual hostname, and service-backed audit. A dry run writes only local
+evidence and reads GitHub. The existing workflow supplies these inputs and holds
+its normal per-lane concurrency and host lock.
+
+Apply refreshes the runner identity and custom labels after the planned audit,
+sends at most one label replacement, then independently reads identity and label
+types back. GitHub offers no conditional label replacement: this is an optimistic
+prior-state check, not atomic compare-and-swap against an unrelated manual
+administrator. Coordinate external label writers during apply. A job can start
+after the idle observation; relabeling does not interrupt that job.
+
+`mutation_reconciliation_required` means the write's outcome or independent
+readback is uncertain. Read the exact runner back before deciding any next
+operation; never replay it automatically. `audit_delivery_pending` retains the
+complete terminal audit and the observed mutation outcome in the uploaded result;
+reconcile that evidence rather than repeating a successful label update.
+For an inverse, review a new request with expected labels equal to the verified
+current custom labels and desired labels equal to the saved original custom
+labels. Check identity again; never overwrite intervening label changes. The
+operation never changes service configuration or runner registrations.
+
+### Registration and retirement
+
 The narrow host adapters for creating and retiring a repo-scoped runner lane
 share the manual ops-lane workflow
 `.github/workflows/runner-lane-registration.yml`. The filename remains stable so

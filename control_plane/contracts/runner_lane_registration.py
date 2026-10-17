@@ -10,7 +10,7 @@ from control_plane.contracts.runner_lane_inventory import RunnerLaneInventory
 
 RunnerLaneRegistrationPlanStatus = Literal["ready", "blocked"]
 RunnerLaneRegistrationAuditStatus = Literal["planned", "completed", "failed"]
-RunnerLaneLifecycleOperation = Literal["register", "retire"]
+RunnerLaneLifecycleOperation = Literal["register", "retire", "relabel"]
 RunnerLaneRegistrationBlockerCode = Literal[
     "audit_record_key_missing",
     "host_not_allowed",
@@ -63,6 +63,8 @@ class RunnerLaneRegistrationRequest(BaseModel):
     lane_name: str
     registration_root: str
     labels: tuple[str, ...]
+    expected_runner_id: int | None = Field(default=None, ge=1)
+    expected_custom_labels: tuple[str, ...] = ()
     active_run_ids: tuple[int, ...] = ()
     target_worker_active: bool = False
     mutate: bool = False
@@ -91,6 +93,13 @@ class RunnerLaneRegistrationRequest(BaseModel):
                 "runner lane registration requires registration_root",
             )
         )
+        if self.operation == "relabel":
+            for values in (self.labels, self.expected_custom_labels):
+                normalized = [value.strip().lower() for value in values]
+                if any(not value for value in normalized) or len(set(normalized)) != len(
+                    normalized
+                ):
+                    raise ValueError("custom labels must be nonempty and unique")
         self.labels = _normalized_labels(self.labels)
         self.active_run_ids = tuple(sorted(set(self.active_run_ids)))
         if any(run_id <= 0 for run_id in self.active_run_ids):
@@ -100,6 +109,8 @@ class RunnerLaneRegistrationRequest(BaseModel):
             raise ValueError("runner lane registration requires repository")
         if self.operation == "register" and not self.labels:
             raise ValueError("runner lane registration requires labels")
+        if self.operation == "relabel" and self.expected_runner_id is None:
+            raise ValueError("runner lane relabel requires expected_runner_id")
         return self
 
 

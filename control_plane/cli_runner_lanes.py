@@ -101,6 +101,9 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 def register_runner_lane_commands(work_graph: click.Group) -> None:
+    from control_plane.cli_runner_relabel import runner_lane_relabel_executor
+
+    work_graph.add_command(runner_lane_relabel_executor)
     work_graph.add_command(runner_inventory, name="runner-inventory")
     work_graph.add_command(runner_queue_wait, name="runner-queue-wait")
     work_graph.add_command(runner_baseline_observe, name="runner-baseline-observe")
