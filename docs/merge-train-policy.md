@@ -2130,16 +2130,23 @@ feedback reads and writes, so delivery does not require a second pooled connecti
 The lock affects comment delivery only, and does not replace merge authority or
 the controller lease.
 
-Completed feedback also reconciles planning metadata for the change's native
-closing references, without depending on a workstation driver. For a managed
+Both native controller and standalone batch landings persist pending completed
+feedback before candidate cleanup or returning to the caller. The existing
+terminal-feedback recovery drains it even during an otherwise idle worker pass;
+repeated cleanup does not queue the same landing again. Queueing performs no
+provider calls under the controller lease. Completed feedback reconciles
+planning metadata for the change's native closing references. For a managed
 issue authored by an identity already trusted by the repository's enqueue
 policy, it requires completed closure, a reviewed clear wait, and closed native
 blockers and sub-issues. It preserves open finish lines and reporter-owned
 issues. It never closes or reopens an issue. The repository's
 `.github/github.json` planning labels and configured Project select the metadata;
 otherwise the planning protocol's standard labels apply. Unrelated labels and
-the issue body remain intact. A successful saved feedback record carries
-`planning_reconciliation`, including the landing SHA and issue readbacks.
+the issue body remain intact. Its saved comment carries a hidden
+`launchplane-planning-reconciliation` receipt with the landing SHA and issue
+readbacks. The persisted record schema stays compatible with older workers
+during rolling deployment and rollback. A receipt is evidence, never authority;
+each retry uses the current policy's trusted identities.
 
 Provider failures use terminal feedback's existing retry and quota backoff.
 GitHub's delayed keyword-closure projection also waits for a later feedback
@@ -2151,8 +2158,8 @@ a credential or identity fallback. Configured Projects require the existing
 token's Projects capability; no new grant is requested by this path.
 An owning agent can review these cases and use the catalog's supported
 `gh-plan.py reconcile-landing --pr N --apply` for retrospective repair.
-Historical feedback records without trusted planning identities retain their
-existing delivery semantics; they are not proof that planning was reconciled.
+Historical feedback records without a planning receipt are not proof that
+planning was reconciled.
 
 ## Original review recovery
 

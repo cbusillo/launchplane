@@ -46,8 +46,6 @@ class MergeTrainPrFeedbackRecord(BaseModel):
     retryable: bool = True
     retry_at: str = ""
     provider_retry_at: str = ""
-    planning_author_ids: tuple[int, ...] = ()
-    planning_reconciliation: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_record(self) -> "MergeTrainPrFeedbackRecord":

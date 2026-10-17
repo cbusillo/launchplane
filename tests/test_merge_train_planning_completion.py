@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import copy
 import json
-from typing import Any
+from typing import Any, cast
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import URLError
 
 import click
@@ -14,12 +14,16 @@ from control_plane.merge_train_pr_feedback import (
     MergeTrainPrFeedbackEnvelope,
     build_merge_train_pr_feedback_record,
     deliver_merge_train_pr_feedback_record,
+    PLANNING_RECEIPT_PREFIX,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.contracts.merge_train_pr_feedback_record import MergeTrainPrFeedbackRecord
 from control_plane.contracts.merge_train_policy import MergeTrainSchedulerPolicy
 from control_plane.merge_train_scheduler import _deliver_controller_feedback
 from tests.test_merge_train_scheduler import _policy_record
+from tests.test_merge_train_structural_provenance import _entry, _records
+from control_plane import merge_train_controller_run_once as controller
+from control_plane import merge_train_batch_landing as standalone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -42,6 +46,17 @@ def _wait(state: str = "clear") -> str:
             }
         )
         + " -->"
+    )
+
+
+def _receipt(record: MergeTrainPrFeedbackRecord) -> dict[str, Any]:
+    line = next(
+        line
+        for line in record.comment_markdown.splitlines()
+        if line.startswith(PLANNING_RECEIPT_PREFIX)
+    )
+    return cast(
+        dict[str, Any], json.loads(line.removeprefix(PLANNING_RECEIPT_PREFIX).removesuffix(" -->"))
     )
 
 
@@ -202,16 +217,18 @@ class PlanningCompletionTests(TestCase):
         )
         self.assertEqual(self.provider.issue["state"], before["state"])
         self.assertEqual(self.provider.issue["body"], before["body"])
-        self.assertTrue(record.planning_reconciliation["ok"])
+        self.assertTrue(_receipt(record)["ok"])
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(Path(directory))
             store.write_merge_train_pr_feedback_record(record)
             saved = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
-            self.assertEqual(saved.planning_reconciliation, record.planning_reconciliation)
-            self.assertEqual(saved.planning_author_ids, (_BOT,))
+            self.assertEqual(_receipt(saved), _receipt(record))
         writes = list(self.provider.writes)
         retry = deliver_merge_train_pr_feedback_record(
-            record=record, token="fixture", attempted_at="2026-10-01T00:02:00Z"
+            record=record,
+            token="fixture",
+            attempted_at="2026-10-01T00:02:00Z",
+            planning_author_ids=(_BOT,),
         )
         self.assertEqual(retry.delivery_status, "delivered")
         self.assertEqual(self.provider.writes, writes)
@@ -251,11 +268,150 @@ class PlanningCompletionTests(TestCase):
             )
             self.assertEqual((delivered, failed), (1, 0))
             record = store.list_merge_train_pr_feedback_records(repository=_REPO)[0]
-            self.assertTrue(record.planning_reconciliation["ok"])
+            self.assertTrue(_receipt(record)["ok"])
             self.assertEqual(
                 {label["name"] for label in self.provider.issue["labels"]},
                 {"plan", "plan:done", "bug"},
             )
+
+    def test_direct_controller_landing_queues_cleanup_for_idle_worker_without_caller_return(
+        self,
+    ) -> None:
+        policy_record = _policy_record(
+            (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        )
+        policy = policy_record.policy.policies[0]
+        policy = policy.model_copy(
+            update={
+                "enqueue": policy.enqueue.model_copy(
+                    update={"trusted_automation_github_user_ids": (_BOT,)}
+                )
+            }
+        )
+        _, record = _records((_entry(9, 1),), repository=_REPO)
+        record = record.model_copy(
+            update={
+                "landing_plan": record.landing_plan.model_copy(
+                    update={
+                        "entries": tuple(
+                            entry.model_copy(
+                                update={"status": "merged", "merge_commit_sha": "landed"}
+                            )
+                            for entry in record.landing_plan.entries
+                        )
+                    }
+                )
+            }
+        )
+        lease = Mock()
+        lease.record.step_payload = {}
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            with patch.multiple(
+                controller,
+                validate_merge_train_landing_record_for_controller=Mock(),
+                stack_collapse_records_for_completed_landing=Mock(return_value=()),
+                cleanup_merge_train_batch_candidate_ref=Mock(
+                    return_value={"candidate_ref_cleanup_status": "deleted"}
+                ),
+                _annotate_historical_closed_stack_children=Mock(),
+            ):
+                for _ in range(2):
+                    controller._finish_landed_merge_train_batch(
+                        request=controller.MergeTrainControllerRunOnceEnvelope(
+                            repository=_REPO, mutate=True
+                        ),
+                        policy_sha256=record.landing_plan.policy_sha256,
+                        repository_policy=policy,
+                        trace_id="native",
+                        recorded_at=record.updated_at,
+                        github_client=Mock(),
+                        stack_collapse_store=store,
+                        landed_record=record,
+                        lease=lease,
+                    )
+            saved = store.list_merge_train_pr_feedback_records(repository=_REPO)
+            self.assertEqual(len(saved), 1)
+            self.assertTrue(saved[0].retryable)
+            self.assertFalse(_receipt(saved[0])["ok"])
+            self.assertFalse(self.provider.writes)
+            self.comment_mock.assert_not_called()
+            delivered, failed = _deliver_controller_feedback(
+                record_store=store,
+                policy_record=policy_record,
+                repository_policy=policy,
+                token="fixture",
+                trace_id="idle",
+                now=lambda: "2026-10-17T00:00:00Z",
+                response={
+                    "result": {
+                        "repository": _REPO,
+                        "base_branch": "main",
+                        "controller_action": "idle",
+                    }
+                },
+            )
+            self.assertEqual((delivered, failed), (1, 0))
+            saved = store.list_merge_train_pr_feedback_records(repository=_REPO)
+            self.assertTrue(_receipt(saved[0])["ok"])
+            self.assertNotIn(
+                "plan:active", {label["name"] for label in self.provider.issue["labels"]}
+            )
+
+    def test_standalone_landing_persists_completion_before_returning(self) -> None:
+        policy = _policy_record(
+            (_REPO, MergeTrainSchedulerPolicy(enabled=True, mutate=True))
+        ).policy.policies[0]
+        policy = policy.model_copy(
+            update={
+                "enqueue": policy.enqueue.model_copy(
+                    update={"trusted_automation_github_user_ids": (_BOT,)}
+                )
+            }
+        )
+        candidate, record = _records((_entry(9, 1),), repository=_REPO)
+        landed = record.landing_plan.model_copy(
+            update={
+                "entries": tuple(
+                    entry.model_copy(update={"status": "merged", "merge_commit_sha": "landed"})
+                    for entry in record.landing_plan.entries
+                )
+            }
+        )
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(Path(directory))
+            store.write_merge_train_batch_candidate_record(candidate)
+            store.write_merge_train_batch_landing_plan_record(record)
+            with (
+                patch.object(standalone, "GitHubMergeTrainClient") as client,
+                patch.object(standalone, "GuardedMergeAdmission"),
+                patch.object(
+                    standalone, "_cleanup_merge_train_batch_candidate_ref", return_value={}
+                ),
+            ):
+                client.return_value.land_batch_candidate.return_value = landed
+                standalone._execute_land_mode(
+                    request=standalone.MergeTrainBatchLandingRunOnceEnvelope(
+                        repository=_REPO, mode="land", landing_plan_record_id=record.record_id
+                    ),
+                    repository_policy=policy,
+                    policy_sha256=candidate.candidate.policy_sha256,
+                    token="fixture",
+                    trace_id="standalone",
+                    recorded_at=record.updated_at,
+                    candidate_store=store,
+                    landing_store=store,
+                    stack_collapse_store=store,
+                    admission_store=store,
+                    admission_evaluator=Mock(),
+                    controller_state_provider=Mock(),
+                    mutation_checkpoint=None,
+                )
+            saved = store.list_merge_train_pr_feedback_records(repository=_REPO)
+            self.assertEqual(len(saved), 1)
+            self.assertTrue(saved[0].retryable)
+            self.assertFalse(self.provider.writes)
+            self.comment_mock.assert_not_called()
 
     def test_configured_status_labels_and_all_stale_statuses_are_reconciled(self) -> None:
         self.provider.config = {
@@ -287,10 +443,13 @@ class PlanningCompletionTests(TestCase):
         self.comment_mock.assert_not_called()
         self.provider.fail_labels = False
         retry = deliver_merge_train_pr_feedback_record(
-            record=record, token="fixture", attempted_at="2026-10-01T00:02:00Z"
+            record=record,
+            token="fixture",
+            attempted_at="2026-10-01T00:02:00Z",
+            planning_author_ids=(_BOT,),
         )
         self.assertEqual(retry.delivery_status, "delivered")
-        self.assertTrue(retry.planning_reconciliation["ok"])
+        self.assertTrue(_receipt(retry)["ok"])
         self.assertNotIn("plan:active", {label["name"] for label in self.provider.issue["labels"]})
 
     def test_retry_cannot_reuse_an_author_retired_by_current_policy(self) -> None:

@@ -46,6 +46,7 @@ from control_plane.merge_train_stack_collapse import (
 from control_plane.workflows.merge_train_controller import (
     latest_merge_train_batch_candidate_progress_record,
 )
+from control_plane.merge_train_pr_feedback import queue_landing_planning_feedback
 
 
 _LOGGER = logging.getLogger(__name__)
@@ -369,6 +370,12 @@ def _execute_land_mode(
         updated_at=recorded_at,
     )
     landing_store.write_merge_train_batch_landing_plan_record(landing_record)
+    queue_landing_planning_feedback(
+        store=landing_store,
+        landing_record=landing_record,
+        repository_policy=repository_policy,
+        trace_id=trace_id,
+    )
     if mutation_checkpoint is not None:
         mutation_checkpoint(
             "cleanup_candidate_ref",
