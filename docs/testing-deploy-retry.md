@@ -16,7 +16,7 @@ admin deploy is not an automatic reconcile and the worker treats it as a manual
 operation. Do not run it during someone else's testing session. A hold appearing
 after the client's preflight is not a worker interlock for an admin operation.
 
-Use the repository client with the installed operator transport and existing
+Use the repository client with the installed admin transport and existing
 identity:
 
 ```bash

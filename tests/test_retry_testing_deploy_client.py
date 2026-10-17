@@ -21,6 +21,7 @@ from control_plane.odoo_target_replacement_apply_http import (
     enqueue_odoo_target_replacement_apply_operation,
 )
 from control_plane.odoo_target_replacement_plan_http import ODOO_TARGET_REPLACEMENT_PLAN_ROUTE
+from control_plane.product_reconcile import TESTING_DEPLOY_MAX_FAILED_ATTEMPTS
 from tests import test_product_reconcile as fixtures
 from tests.support.durable_operations import durable_operation_authorization_payload
 
@@ -150,9 +151,9 @@ class TestingRetryClientTests(fixtures.ProductReconcileTestCase):
             return code, json.loads(output.getvalue())
 
     def test_retry_after_exhaustion_uses_same_artifact_without_rebuild_and_replays(self) -> None:
-        for attempt in range(3):
+        for attempt in range(TESTING_DEPLOY_MAX_FAILED_ATTEMPTS):
             self.finish(self.auto_operation_id, "fail")
-            if attempt < 2:
+            if attempt + 1 < TESTING_DEPLOY_MAX_FAILED_ATTEMPTS:
                 self.request()
                 self.auto_operation_id = str(self.reconcile()["queued_operation_id"])
         self.request()
@@ -169,7 +170,10 @@ class TestingRetryClientTests(fixtures.ProductReconcileTestCase):
         self.assertEqual(retry.request.source_git_ref, fixtures.DEPLOYABLE)
         self.assertEqual(retry.request.data_source_mode, "existing")
         self.assertFalse(retry.request.allow_empty_data)
-        self.assertEqual(len(self.store.list_odoo_stable_target_replacement_operation_records()), 4)
+        self.assertEqual(
+            len(self.store.list_odoo_stable_target_replacement_operation_records()),
+            TESTING_DEPLOY_MAX_FAILED_ATTEMPTS + 1,
+        )
 
     def test_rerunning_push_build_admits_new_attempt_without_new_source_commit(self) -> None:
         self.finish(self.auto_operation_id, "fail")
