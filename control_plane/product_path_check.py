@@ -11,13 +11,14 @@ returned.
 """
 
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from dataclasses import dataclass
 import re
 from typing import Literal, Protocol, cast
 
 import click
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.odoo_target_replacement_failures import (
     DEPLOY_BLOCKED_PREFIX,
@@ -59,6 +60,7 @@ from control_plane.production_backup_authority import (
 )
 from control_plane.drivers.registry import effective_driver_actions, read_driver_descriptor
 from control_plane.contracts.driver_descriptor import DriverDescriptor
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.testing_lane_hold import TestingHoldReader, read_staff_testing_hold
 from control_plane.workflows.production_promotion_backup import (
     GENERIC_WEB_PROMOTION_BACKUP_ACTION,
@@ -70,6 +72,7 @@ GENERIC_WEB_PROMOTION_ACTION = "generic_web_prod_promotion.dispatch"
 
 PathName = Literal["testing", "promote", "rollback"]
 PATH_NAMES: tuple[PathName, ...] = ("testing", "promote", "rollback")
+TestingIntent = Literal["provision", "generation", "testing-replacement"]
 StepState = Literal["clear", "blocked", "unknown"]
 FixKind = Literal["none", "code", "grant", "owner_approval", "client_acceptance", "by_hand", "wait"]
 
@@ -90,6 +93,11 @@ class ProductPathCheck(BaseModel):
 
     product: str
     path: PathName
+    intent: TestingIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     state: StepState
     blocked_count: int
     unknown_count: int
@@ -116,6 +124,7 @@ class PathCheckInputs:
     backup_authority: ProductionBackupAuthorityReadModel | Unread | None = None
     latest_promotion: PromotionRecord | None | Unread = None
     rollback_steps: tuple[PathCheckStep, ...] = ()
+    testing_prerequisites: tuple[PathCheckStep, ...] = ()
 
 
 _TRANSIENT_DEPLOY_CHECKS = frozenset(
@@ -308,6 +317,7 @@ def _testing_steps(inputs: PathCheckInputs) -> list[PathCheckStep]:
     else:
         steps.append(_step("testing_hold", "clear", "no_hold", "The testing lane is not held."))
     steps.append(_testing_attempt_step(inputs.testing_reconcile_plan))
+    steps.extend(inputs.testing_prerequisites)
     return steps
 
 
@@ -454,7 +464,7 @@ _PATH_STEPS: dict[PathName, Callable[[PathCheckInputs], list[PathCheckStep]]] = 
 
 
 def build_product_path_check(
-    *, product: str, path: PathName, inputs: PathCheckInputs
+    *, product: str, path: PathName, inputs: PathCheckInputs, intent: TestingIntent | None = None
 ) -> ProductPathCheck:
     steps = tuple(_PATH_STEPS[path](inputs))
     blocked = sum(step.state == "blocked" for step in steps)
@@ -463,6 +473,7 @@ def build_product_path_check(
     return ProductPathCheck(
         product=product,
         path=path,
+        intent=intent,
         state=state,
         blocked_count=blocked,
         unknown_count=unknown,
@@ -492,8 +503,55 @@ def read_path_check_inputs(
     read_release_review: Callable[[], ReleaseReviewStatus],
     generated_at: str,
     caller_can_use_generic_rollback: bool = False,
+    control_plane_root: Path | None = None,
+    intent: Literal["provision", "generation", "testing-replacement"] | None = None,
+    source_mode: Literal["ssh", "container-export"] = "container-export",
+    task_id: str | None = None,
+    operation_id: str | None = None,
+    caller_can_provision: bool = False,
+    caller_can_generate: bool = False,
 ) -> PathCheckInputs:
     """Read the evidence ``path`` needs, each read independent of the others."""
+    prerequisites: tuple[PathCheckStep, ...] = ()
+    if (
+        intent is not None
+        and profile.driver_id == "odoo"
+        and path == "testing"
+        and _lane(profile, "testing")
+    ):
+        from control_plane.testing_path_check import read_testing_prerequisites
+
+        result = _read(
+            "testing_prerequisites_unread",
+            lambda: read_testing_prerequisites(
+                intent=intent,
+                store=cast(PostgresRecordStore, record_store),
+                profile=profile,
+                root=control_plane_root,
+                source_mode=source_mode,
+                task_id=task_id,
+                operation_id=operation_id,
+                action_allowed=action_allowed,
+                caller_can_provision=caller_can_provision,
+                caller_can_generate=caller_can_generate,
+            ),
+        )
+        prerequisites = (
+            (_unread("testing_prerequisites", result),)
+            if isinstance(result, Unread)
+            else cast(tuple[PathCheckStep, ...], result)
+        )
+
+    if intent is not None and path == "testing" and profile.driver_id != "odoo":
+        prerequisites = (
+            _step(
+                "testing_prerequisites",
+                "unknown",
+                "testing_intent_not_supported",
+                "Operation prerequisites are not implemented for this driver.",
+                "code",
+            ),
+        )
     if path == "testing":
         testing_lane = _lane(profile, "testing")
         if testing_lane is None:
@@ -514,6 +572,7 @@ def read_path_check_inputs(
             profile=profile,
             testing_hold_active=cast(bool | Unread, hold),
             testing_reconcile_plan=cast(dict[str, object] | None | Unread, plan),
+            testing_prerequisites=prerequisites,
         )
     prod_lane = _lane(profile, "prod")
     if prod_lane is None:

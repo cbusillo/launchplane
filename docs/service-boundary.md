@@ -4319,6 +4319,29 @@ plan is not held. It cites the artifact id without inventing a deploy operation.
 Missing or inconsistent provenance, or a request that is not done, stays unknown.
 This cites saved reconciliation evidence, not a fresh provider observation;
 a later manual deployment requires reconciliation before this evidence is current.
+For Odoo, select `intent=provision|generation|testing-replacement` on the testing
+path to report the prerequisites for task provisioning, initial
+fresh generation, and testing replacement together. It independently reads restore
+policy, opaque credential separation and lane-local safety, selected copy source,
+target bindings, resource qualification, current use, and every walkthrough
+checkpoint. The default copy source is `container-export`; use `source_mode=ssh`
+to inspect that source instead. Supply `operation_id` for the original resource
+preparation/replacement and `task_id` for the exact provision task when available.
+Unselected operation/task evidence and checks that depend on unavailable evidence
+are explicitly unknown. A missing generation does not hide a policy, resource,
+credential or current-use failure. `intent=provision` checks the current generation
+and all walkthrough checkpoints; when the generation is not qualified it also
+reports copy prerequisites. A qualified generation needs no new copy preparation.
+`generation` and `testing-replacement` check copy/resource eligibility without
+requiring a task account. The default testing deploy path is unchanged. A selected
+intent is echoed in the response; ordinary reads omit that optional field. The
+helper exposes the same optional arguments after the companion helper update.
+
+These reads reuse execution validators and perform only observations: they do not
+reserve resources, issue credentials, create accounts, acquire an execution fence,
+or persist a dry-run plan. A passing diagnostic never substitutes for the action's
+own reviewed intent, concurrency checks, authorization or live safety gates.
+
 `promote` checks the caller's own promotion grant, Client acceptance, the prod
 lane's backup authority and the last promotion's failure. A step whose evidence
 cannot be read is `unknown`, never `clear`, and the response never carries
