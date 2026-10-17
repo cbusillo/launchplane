@@ -657,8 +657,14 @@ temporary paths and fails when the checked schema or generated types drift from
 the backend contract. The canonical `x-launchplane-ui-read-operations` and
 `x-launchplane-ui-write-operations` manifests own each selected GET or accepted
 browser-safe POST path and stable operation id; slicing fails closed when a
-route, method, operation id, success response, or referenced schema drifts. The
-write slice currently covers work-graph ranking, product-config dry-run/apply,
+route, method, operation id, success response, or referenced schema drifts. A
+new browser-called route reaches `openapi-ui.json` and the generated types only
+after it is added to `UI_OPENAPI_WRITE_OPERATIONS` (or
+`UI_OPENAPI_READ_OPERATIONS` for a GET) in `control_plane/openapi_export.py`. A
+write route also goes in `BROWSER_WRITE_ROUTES` in
+`frontend/src/browser-write-contract.ts`;
+`frontend/tests/action-model.test.mjs` checks that those routes match the write
+manifest. The write slice currently covers work-graph ranking, product-config dry-run/apply,
 generic-web promotion dry-runs, and generic-web promotion workflow dispatches.
 It also covers browser-human privileged-operation approval and revocation; the
 service-internal execution path is intentionally absent.
