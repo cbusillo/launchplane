@@ -705,6 +705,82 @@ class DisposableRuntimeAuthorityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
         self.assertEqual(self.store.read_product_profile_record("example-site"), profile)
 
+        recorded = await self.observe(
+            context=preview.context,
+            instance="pr-1",
+            preview_id=preview.preview_id,
+            mode="record",
+            expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+            usage="unused",
+            data="reproducible",
+            production_resources="isolated",
+            usage_evidence="agent:observed-no-human-use",
+            data_evidence="agent:reproducible-test-copy",
+            isolation_evidence="agent:inspected-independent-resources",
+        )
+        self.assertEqual(recorded.status_code, 202, recorded.text)
+        evidence = self.store.read_disposable_lane_safety(profile.product, preview.context, "pr-1")
+        assert evidence is not None
+        self.assertEqual(
+            (evidence.usage, evidence.data, evidence.production_resources),
+            ("unused", "reproducible", "isolated"),
+        )
+        self.assertEqual(self.store.read_preview_record(preview.preview_id), preview)
+
+        self.assertTrue(recorded.json()["result"]["reconcile_requested"])
+        self.assertTrue(self.store.list_product_reconcile_requests(product=profile.product))
+        from control_plane.disposable_lanes import (
+            require_disposable_lane,
+            DisposableLaneSafetyUnknown,
+        )
+
+        with self.assertRaises(DisposableLaneSafetyUnknown):
+            require_disposable_lane(
+                self.store, product=profile.product, context=preview.context, instance="pr-1"
+            )
+        require_disposable_lane(
+            self.store,
+            product=profile.product,
+            context=preview.context,
+            instance="pr-1",
+            preview_cleanup=True,
+        )
+        safe_facts = dict(
+            usage="unused",
+            data="reproducible",
+            production_resources="isolated",
+            usage_evidence="observed usage",
+            data_evidence="observed data",
+            isolation_evidence="observed resources",
+        )
+        scope = dict(context=preview.context, instance="pr-1", preview_id=preview.preview_id)
+        for field, value in (
+            ("usage", "in_use"),
+            ("data", "only_copy"),
+            ("production_resources", "shared"),
+        ):
+            with self.subTest(field=field):
+                await self.observe(mode="clear", **scope)
+                protected = await self.observe(
+                    **scope,
+                    mode="record",
+                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                    **{**safe_facts, field: value},
+                )
+                self.assertEqual(protected.status_code, 202, protected.text)
+                refused = await self.observe(
+                    **scope,
+                    mode="record",
+                    expected_binding_sha256=inspected.json()["result"]["binding_sha256"],
+                    **safe_facts,
+                )
+                self.assertEqual(refused.status_code, 409, refused.text)
+                evidence = self.store.read_disposable_lane_safety(
+                    profile.product, preview.context, "pr-1"
+                )
+                assert evidence is not None
+                self.assertEqual(getattr(evidence, field), value)
+
     async def test_collection_missing_product_and_invalid_request_keep_structured_refusals(
         self,
     ) -> None:

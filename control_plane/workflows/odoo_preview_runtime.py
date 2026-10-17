@@ -344,6 +344,31 @@ def build_odoo_preview_apply_inputs(
             required_runtime_keys=ODOO_PREVIEW_REQUIRED_ENV_KEYS,
         )
     )
+    if request.operation == "destroy" and target is None and not discovery_error:
+        # A 404 or empty discovery is not absence. Check complete stable provider
+        # inventories before allowing a record-only destroy to converge.
+        provisional = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=runtime_plan, compose_name=compose_name
+            )
+        )
+        try:
+            host, token = dokploy_source.read_dokploy_config(
+                control_plane_root=control_plane_root,
+                database_url=database_url,
+            )
+            absent = _recorded_preview_matches_absence(
+                record_store, profile, request.pr_number, provisional
+            ) and _destroyed_preview_absence_verified(host=host, token=token, plan=provisional)
+        except (FileNotFoundError, ValueError, click.ClickException):
+            absent = False
+        if absent:
+            blockers = tuple(
+                item for item in runtime_plan.blockers if item.code != "destroy_target_missing"
+            )
+            runtime_plan = runtime_plan.model_copy(
+                update={"blockers": blockers, "status": "blocked" if blockers else "ready"}
+            )
     if preview_url_error:
         runtime_plan = _with_runtime_blocker(
             runtime_plan=runtime_plan,
@@ -1162,7 +1187,9 @@ def observe_odoo_preview_dokploy_apply(
             database_url=database_url,
         )
         if plan.operation == "destroy":
-            compose_still_exists = _compose_exists_by_id(
+            compose_still_exists = not plan.compose_ref.startswith(
+                "${created."
+            ) and _compose_exists_by_id(
                 host=host,
                 token=token,
                 compose_id=plan.compose_ref,
@@ -1254,6 +1281,8 @@ def odoo_preview_target_is_quiescent(
             control_plane_root=control_plane_root,
             database_url=database_url,
         )
+        if plan.operation == "destroy" and plan.compose_ref.startswith("${created."):
+            return _destroyed_preview_absence_verified(host=host, token=token, plan=plan)
         compose_id = plan.compose_ref
         if compose_id.startswith("${created."):
             compose_id = _original_compose_id_from_complete_inventory(
@@ -1429,12 +1458,45 @@ def _destroyed_preview_absence_verified(
         for _, identifier, name in inventory
     ):
         return False
+    searched = dokploy_api.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/compose.search",
+        query={"q": plan.compose_name, "limit": 25},
+    )
+    if isinstance(searched, dict):
+        total = searched.get("total", searched.get("total_count"))
+        wrappers = [
+            searched[key] for key in ("composes", "items", "results", "data") if key in searched
+        ]
+        searched = wrappers[0] if len(wrappers) == 1 else None
+        if total is not None and (
+            type(total) is not int or not isinstance(searched, list) or total != len(searched)
+        ):
+            return False
+    if (
+        not isinstance(searched, list)
+        or len(searched) >= 25
+        or any(
+            not isinstance(item, dict)
+            or not item.get("composeId")
+            or not item.get("name")
+            or item["composeId"] == plan.compose_ref
+            or item["name"] == plan.compose_name
+            for item in searched
+        )
+    ):
+        return False
     try:
-        domains = dokploy_api.dokploy_request(
-            host=host,
-            token=token,
-            path="/api/domain.byComposeId",
-            query={"composeId": plan.compose_ref},
+        domains = (
+            []
+            if plan.compose_ref.startswith("${created.")
+            else dokploy_api.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/domain.byComposeId",
+                query={"composeId": plan.compose_ref},
+            )
         )
     except dokploy_api.DokployRequestFailed as error:
         if error.status_code != 404:
@@ -1459,6 +1521,35 @@ def _destroyed_preview_absence_verified(
             if domain_host.strip().lower() == plan.domain_host.lower():
                 return False
     return _complete_preview_compose_inventory(host=host, token=token) == inventory
+
+
+def _recorded_preview_matches_absence(
+    store: object,
+    profile: LaunchplaneProductProfileRecord,
+    number: int,
+    plan: OdooPreviewDokployDryRunPlan,
+) -> bool:
+    # Current naming alone cannot erase a preview created under older settings.
+    reader = getattr(store, "list_preview_records", None)
+    generation_reader = getattr(store, "read_preview_generation_record", None)
+    if not callable(reader) or not callable(generation_reader):
+        return False
+    previews = [
+        item
+        for item in reader(context_name=profile.preview.context)
+        if item.anchor_pr_number == number
+        and item.anchor_repo in {profile.repository, profile.repository.partition("/")[2]}
+    ]
+    if len(previews) != 1 or previews[0].canonical_url != plan.preview_url:
+        return False
+    generation = generation_reader(
+        previews[0].serving_generation_id or previews[0].active_generation_id
+    )
+    identity = generation.runtime_identity
+    return identity is not None and (identity.context, identity.instance) == (
+        profile.preview.context,
+        plan.compose_name,
+    )
 
 
 def _missing_endpoint_paths(*, request: OdooPreviewDokployDryRunRequest) -> tuple[str, ...]:
@@ -1806,6 +1897,14 @@ def _execute_destroy(
 ) -> OdooPreviewDokployApplyResult:
     plan = request.dry_run_plan
     compose_id = plan.compose_ref
+    if compose_id.startswith("${created."):
+        absent = _destroyed_preview_absence_verified(host=host, token=token, plan=plan)
+        return _apply_result(
+            request=request,
+            status="pass" if absent else "blocked",
+            compose_id="",
+            error_message="" if absent else "Preview provider absence is unknown.",
+        )
     destroy_result = destroy_dokploy_preview_resource(
         host=host,
         token=token,
@@ -1823,7 +1922,13 @@ def _execute_destroy(
         for step in destroy_result.steps
     )
     domain_id = destroy_result.domain_ids[0] if destroy_result.domain_ids else ""
+    absent = False
     if destroy_result.status == "pass":
+        try:
+            absent = _destroyed_preview_absence_verified(host=host, token=token, plan=plan)
+        except click.ClickException:
+            pass
+    if absent:
         return _apply_result(
             request=request,
             status="pass",
@@ -1835,7 +1940,8 @@ def _execute_destroy(
     return _apply_result(
         request=request,
         status="fail",
-        error_message="; ".join(destroy_result.cleanup_errors),
+        error_message="; ".join(destroy_result.cleanup_errors)
+        or "Preview provider absence is unknown.",
         compose_id=compose_id,
         domain_id=domain_id,
         provider_effect_attempted=True,
