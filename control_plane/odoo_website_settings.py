@@ -112,15 +112,10 @@ def plan_website_settings(store: Any, request: OdooWebsiteSettingsRequest) -> di
     }
 
 
-def _validate_candidate(
-    store: Any,
-    request: OdooWebsiteSettingsRequest,
-    profile: LaunchplaneProductProfileRecord,
-    production: ProductLaneProfile | None,
-) -> None:
-    assert request.website_settings is not None
-    if production is None:
-        raise ValueError("Website settings require the product's production lane.")
+def matches_production_origin(
+    store: Any, production: ProductLaneProfile, intent: OdooWebsiteSettingsIntent
+) -> bool:
+    """Compare with the first production public host, else the profile URL."""
     try:
         target = store.read_dokploy_target_record(
             context_name=production.context, instance_name=production.instance
@@ -131,7 +126,19 @@ def _validate_candidate(
     public_origin = resolve_public_base_url(
         instance=production.instance, public_hosts=public_hosts
     ) or production.base_url.rstrip("/")
-    if request.website_settings.settings.public_origin.rstrip("/") != public_origin:
+    return intent.settings.public_origin.rstrip("/") == public_origin
+
+
+def _validate_candidate(
+    store: Any,
+    request: OdooWebsiteSettingsRequest,
+    profile: LaunchplaneProductProfileRecord,
+    production: ProductLaneProfile | None,
+) -> None:
+    assert request.website_settings is not None
+    if production is None:
+        raise ValueError("Website settings require the product's production lane.")
+    if not matches_production_origin(store, production, request.website_settings):
         raise ValueError(
             "Website settings origin must match the product's resolved production URL."
         )
