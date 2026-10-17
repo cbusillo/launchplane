@@ -3,6 +3,7 @@ from contextlib import redirect_stdout
 from datetime import UTC, datetime, timedelta
 import io
 import json
+import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
@@ -52,9 +53,12 @@ from control_plane.release_invitation import (
     publish_release_invitation,
     release_invitation_marker,
     release_request_issue_marker,
+    adopt_release_invitation,
+    advance_release_invitations,
+    _pages,
+    ADOPTED_ORIGINAL_PREFIX,
 )
 from control_plane.release_review import ReleaseReviewStore, build_release_review
-from control_plane.client_release import advance_client_releases
 from control_plane.release_invitation_changes import (
     ReleaseInvitationNotesUnavailable,
     ReleaseInvitationProvenanceUnavailable,
@@ -70,6 +74,165 @@ from tests.test_release_review import decision, github_read, profile, seed
 
 
 class ReleaseInvitationTests(unittest.TestCase):
+    def test_manual_request_adoption_is_receipt_only_and_preserves_original(self) -> None:
+        assert self.review.checklist is not None
+        candidate_marker = release_invitation_marker(
+            self.profile.product, self.review.checklist.candidate
+        )
+        self.issues.append(
+            {
+                "number": 91,
+                "state": "open",
+                "body": release_request_issue_marker(self.profile.product),
+                "performed_via_github_app": {"id": 88},
+            }
+        )
+        original = {
+            "id": 600,
+            "created_at": self.now.isoformat(),
+            "body": candidate_marker + "\nManual request already sent.",
+            "performed_via_github_app": {"id": 88},
+        }
+        self.comments.append(original.copy())
+        kwargs: dict[str, Any] = dict(
+            store=cast(ReleaseReviewStore, self.store),
+            control_plane_root=self.root,
+            profile=self.profile,
+            checklist_digest=self.review.checklist_digest,
+            issue_number=91,
+            comment_id=600,
+            reason="Preserve already sent request.",
+        )
+        self.assertTrue(adopt_release_invitation(**kwargs, dry_run=True))
+        self.assertEqual(self.posts, [])
+        self.assertTrue(adopt_release_invitation(**kwargs, dry_run=False))
+        self.assertTrue(adopt_release_invitation(**kwargs, dry_run=False))
+        self.assertEqual(len(self.posts), 1)
+        self.assertNotIn("@site-owner", self.posts[0]["body"])
+        self.assertTrue(self.publish())
+        self.assertTrue(self.publish())
+        self.assertTrue(adopt_release_invitation(**kwargs, dry_run=False))
+        self.assertEqual(len(self.posts), 1)
+        self.assertEqual(self.comments[0], original)
+        self.assertIn(json.dumps(kwargs["reason"]), self.comments[1]["body"])
+        self.assertEqual(
+            [
+                item["number"]
+                for item in _pages(
+                    "/repos/example/site/issues?state=all",
+                    "delivery-token",
+                    app_id=77,
+                    marker=release_request_issue_marker(self.profile.product),
+                    issues_only=True,
+                )
+            ],
+            [91],
+        )
+        self.now += timedelta(days=4)
+        self.assertTrue(self.publish())
+        self.assertEqual(len(self.posts), 2)
+        self.assertTrue(adopt_release_invitation(**kwargs, dry_run=False))
+        self.assertEqual(len(self.posts), 2)
+        self.complete_release()
+        self.assertFalse(self.publish())
+        self.assertEqual(self.comments[0], original)
+
+    def test_foreign_adoption_marker_cannot_prevent_completion(self) -> None:
+        self.publish()
+        request_id = self.comments[0]["id"]
+        self.comments.append(
+            {
+                "id": 600,
+                "created_at": self.now.isoformat(),
+                "body": ADOPTED_ORIGINAL_PREFIX + str(request_id) + " -->",
+                "performed_via_github_app": {"id": 88},
+            }
+        )
+        accepted, _ = self.complete_release()
+        self.assertFalse(self.publish())
+        self.assertEqual(self.issues[0]["state"], "closed")
+        self.assertIn(accepted.release_issue_url, self.comments[0]["body"])
+
+    def test_manual_adoption_refuses_other_candidate_and_changed_checklist(self) -> None:
+        self.issues.append(
+            {
+                "number": 91,
+                "state": "open",
+                "body": release_request_issue_marker(self.profile.product),
+            }
+        )
+        self.comments.append({"id": 600, "body": "unrelated", "created_at": self.now.isoformat()})
+        for digest in (self.review.checklist_digest, "0" * 64):
+            with self.subTest(digest=digest):
+                self.assertFalse(
+                    adopt_release_invitation(
+                        store=cast(ReleaseReviewStore, self.store),
+                        control_plane_root=self.root,
+                        profile=self.profile,
+                        checklist_digest=digest,
+                        issue_number=91,
+                        comment_id=600,
+                        dry_run=False,
+                    )
+                )
+        self.assertEqual(self.posts, [])
+
+    def test_missing_lane_diagnostics_are_bounded_without_hiding_recovery(self) -> None:
+        backoff = ReleaseInvitationBackoff()
+        with patch(
+            "control_plane.release_invitation.publish_release_invitation",
+            side_effect=FileNotFoundError,
+        ):
+            with self.assertLogs("control_plane.release_invitation", level="WARNING") as logs:
+                for _ in range(3):
+                    advance_release_invitations(
+                        store=self.store, control_plane_root=self.root, backoff=backoff
+                    )
+            self.assertEqual(len(logs.records), 1)
+        with patch(
+            "control_plane.release_invitation.publish_release_invitation", return_value=False
+        ):
+            advance_release_invitations(
+                store=self.store, control_plane_root=self.root, backoff=backoff
+            )
+        self.assertFalse(backoff.diagnostics)
+
+    def test_adoption_cannot_create_a_second_trusted_destination(self) -> None:
+        self.publish()
+        assert self.review.checklist is not None
+        self.issues.append(
+            {
+                "number": 92,
+                "state": "open",
+                "performed_via_github_app": {"id": 88},
+                "body": release_request_issue_marker(self.profile.product),
+            }
+        )
+        self.comments.append(
+            {
+                "id": 600,
+                "created_at": self.now.isoformat(),
+                "performed_via_github_app": {"id": 88},
+                "issue_url": "https://api.github.com/repos/example/site/issues/92",
+                "body": release_invitation_marker(
+                    self.profile.product, self.review.checklist.candidate
+                ),
+            }
+        )
+        posts = len(self.posts)
+        self.assertFalse(
+            adopt_release_invitation(
+                store=cast(ReleaseReviewStore, self.store),
+                control_plane_root=self.root,
+                profile=self.profile,
+                checklist_digest=self.review.checklist_digest,
+                issue_number=92,
+                comment_id=600,
+                dry_run=False,
+            )
+        )
+        self.assertEqual(len(self.posts), posts)
+
     def setUp(self) -> None:
         directory = TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -98,6 +261,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             ("launchplane_public_origin_from_env", lambda: "https://launchplane.example.invalid"),
             ("current_release_review", self.read_review),
             ("resolve_launchplane_github_token", lambda **kwargs: "delivery-token"),
+            ("resolve_delivery_github_app_id", lambda **kwargs: 77),
             ("github_api_request", self.github),
         ):
             patcher = patch(f"control_plane.release_invitation.{target}", replacement)
@@ -694,10 +858,10 @@ class ReleaseInvitationTests(unittest.TestCase):
         self.assertIn("#43", self.review.invitation_notes_error)
         self.assertNotIn(self.review.invitation_notes_error, self.review.blockers)
         backoff = ReleaseInvitationBackoff()
-        with self.assertLogs("control_plane.client_release", level="WARNING") as logs:
+        with self.assertLogs("control_plane.release_invitation", level="WARNING") as logs:
             for _ in range(3):
-                advance_client_releases(
-                    store=self.store, control_plane_root=self.root, invitation_backoff=backoff
+                advance_release_invitations(
+                    store=self.store, control_plane_root=self.root, backoff=backoff
                 )
         self.assertEqual(len(logs.output), 1)
         self.assertIn(self.review.invitation_notes_error, logs.output[0])
@@ -1004,16 +1168,34 @@ class ReleaseInvitationTests(unittest.TestCase):
             body = kwargs["body"]
             self.posts.append(body)
             if path.endswith("/comments"):
-                result = {"id": len(self.comments) + 1, "created_at": self.now.isoformat(), **body}
+                result = {
+                    "id": len(self.comments) + 1,
+                    "created_at": self.now.isoformat(),
+                    "performed_via_github_app": {"id": 77},
+                    **body,
+                }
                 self.comments.append(result)
                 if self.lose_response:
                     self.lose_response = False
                     raise TimeoutError("response lost after publication")
                 return result
-            issue = {"number": 91, "state": "open", **body}
+            issue = {"number": 91, "state": "open", "performed_via_github_app": {"id": 77}, **body}
             self.issues.append(issue)
             return issue
-        return self.comments.copy() if "/comments?" in path else self.issues.copy()
+        if "/comments/" in path:
+            result = next(
+                comment for comment in self.comments if path.endswith(f"/{comment['id']}")
+            )
+            return {"issue_url": "https://api.github.com/repos/example/site/issues/91", **result}
+        if re.fullmatch(r"/repos/example/site/issues/[0-9]+", path):
+            return next(
+                issue.copy() for issue in self.issues if path.endswith(f"/{issue['number']}")
+            )
+        # Existing fixtures model records emitted by this fake Delivery App.
+        return [
+            {"performed_via_github_app": {"id": 77}, **item}
+            for item in (self.comments if "/comments?" in path else self.issues)
+        ]
 
     def publish(
         self,
@@ -1310,7 +1492,7 @@ class ReleaseInvitationTests(unittest.TestCase):
             {
                 "id": 1,
                 "created_at": self.now.isoformat(),
-                "body": "Existing manual request\n"
+                "body": "Existing manual request\n```\n"
                 + release_invitation_marker(self.profile.product, self.review.checklist.candidate),
             }
         ]
@@ -1907,7 +2089,7 @@ class ReleaseInvitationTests(unittest.TestCase):
                     {"number": number, "pull_request": {}, "body": marker} for number in range(100)
                 ]
             if path.endswith("page=2"):
-                return [{"number": 91, "body": marker}] + [
+                return [{"number": 91, "body": marker, "performed_via_github_app": {"id": 77}}] + [
                     {"number": number, "body": "Old issue"} for number in range(99)
                 ]
             raise AssertionError("Lookup continued after the destination was found")

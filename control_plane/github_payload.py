@@ -1,6 +1,26 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+import re
+
+
+def github_app_authored(
+    record: dict[str, object], app_id: int, *, lookup_app: Callable[[str], object] | None = None
+) -> bool:
+    """Match provider-attested provenance, never a copied author name or marker."""
+    if app_id < 1:
+        return False
+    app = record.get("performed_via_github_app")
+    if isinstance(app, dict):
+        return app.get("id") == app_id
+    author = record.get("user")
+    if not isinstance(author, dict) or author.get("type") != "Bot" or lookup_app is None:
+        return False
+    login = author.get("login")
+    if not isinstance(login, str) or not re.fullmatch(r"[a-zA-Z0-9-]+\[bot]", login):
+        return False
+    resolved = lookup_app(login.removesuffix("[bot]"))
+    return isinstance(resolved, dict) and resolved.get("id") == app_id
 
 
 def json_object(

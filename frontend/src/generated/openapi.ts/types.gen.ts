@@ -3381,7 +3381,7 @@ export type ProductIncidentEventSummary = {
     observation_id: string;
     occurred_at: string;
     previous_material_fingerprint_sha256: string;
-    reason: 'incident_opened' | 'material_change' | 'reminder_due' | 'recovered' | 'monitoring_intent_changed' | 'migration_baseline' | 'duplicate_reconciled';
+    reason: 'incident_opened' | 'material_change' | 'reminder_due' | 'recovered' | 'monitoring_intent_changed' | 'migration_baseline' | 'duplicate_reconciled' | 'request_refused';
     reminder_window_ended_at: string;
     reminder_window_index: number | null;
     reminder_window_started_at: string;
@@ -3475,7 +3475,7 @@ export type ProductIncidentSummary = {
     product: string;
     provenance: DataProvenance;
     recovery_observation_threshold: number;
-    resolution_reason: 'recovered' | 'monitoring_intent_changed' | 'duplicate_reconciled' | '';
+    resolution_reason: 'recovered' | 'monitoring_intent_changed' | 'duplicate_reconciled' | 'request_refused' | '';
     resolved_at: string;
     schema_version: number;
     severity: 'warning' | 'critical';
@@ -5102,7 +5102,10 @@ export type TestingHoldRehearsal = {
 };
 
 export type UrgentReleaseReviewEnvelope = {
+    adopt_comment_id?: number | null;
+    adopt_issue_number?: number | null;
     checklist_digest: string;
+    dry_run?: boolean;
     product: string;
     reason: string;
 };
