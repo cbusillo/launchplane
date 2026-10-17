@@ -4801,8 +4801,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             {
                 "ODOO_DB_NAME": "test_db",
                 "ODOO_DB_USER": "test_user",
-                # The retained database already runs with the managed password.
-                "ODOO_DB_PASSWORD": "managed-secret-value",
                 "ODOO_DATA_VOLUME": "cm_testing_odoo_data",
                 "ODOO_LOG_VOLUME": "cm_testing_odoo_logs",
                 "ODOO_DB_VOLUME": "cm_testing_odoo_db",

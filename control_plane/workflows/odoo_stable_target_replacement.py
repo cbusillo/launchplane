@@ -2428,14 +2428,11 @@ def execute_odoo_stable_target_replacement_apply(
                 + ", ".join(missing_compose_keys),
                 tuple(missing_compose_keys),
             )
-        # Postgres sets the role password only when it creates its volume, so a
-        # testing deploy onto retained data must not deliver a newer password than
-        # the one the running target has; a fresh testing generation brings its own
-        # database instead.
         if (
             plan.data_source_mode == "existing"
-            and plan.instance == "testing"
-            and application_env.get("ODOO_DB_PASSWORD") != current_env_map.get("ODOO_DB_PASSWORD")
+            and control_plane_live_target_runtime.retained_database_password_changed(
+                instance_name=plan.instance, desired_env=application_env, live_env=current_env_map
+            )
         ):
             code = deploy_blocked_code("retained_database_credential_changed")
             raise OdooTargetReplacementStageError(

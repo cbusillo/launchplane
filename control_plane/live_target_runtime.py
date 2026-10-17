@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import AbstractContextManager, nullcontext
 from pathlib import Path
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from typing import Protocol, cast
 
 import click
@@ -163,6 +163,23 @@ def provider_key_retirement_blocked(key: str, declared: set[str]) -> bool:
         key in declared
         or key in _RETIREMENT_PROTECTED_KEYS
         or key.startswith(ODOO_OVERRIDE_SECRET_ENV_PREFIX)
+    )
+
+
+def retained_database_password_changed(
+    *, instance_name: str, desired_env: Mapping[str, str], live_env: Mapping[str, str]
+) -> bool:
+    """Whether a testing write would hand the running database a different password.
+
+    Postgres sets the role password only when it creates its volume, so the running
+    target's ``ODOO_DB_PASSWORD`` is the one its retained database still accepts; a
+    fresh testing generation brings its own database instead.
+    """
+    live_value = live_env.get("ODOO_DB_PASSWORD", "")
+    return (
+        instance_name == "testing"
+        and bool(live_value)
+        and desired_env.get("ODOO_DB_PASSWORD", live_value) != live_value
     )
 
 
@@ -759,6 +776,14 @@ def apply_live_target_runtime_environment(
     except click.ClickException as error:
         raise LiveTargetRuntimeError(str(error), code="dokploy_target_read_failed") from error
     live_env_map = dokploy_api.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    if retained_database_password_changed(
+        instance_name=instance_name, desired_env=desired_env_map, live_env=live_env_map
+    ):
+        raise LiveTargetRuntimeError(
+            "The stored ODOO_DB_PASSWORD differs from the one the running testing database "
+            "was created with; replace the lane through a fresh testing generation.",
+            code="retained_database_credential_changed",
+        )
     provider_env_platform_credentials = provider_env_platform_credential_report(
         live_env_map=live_env_map, retired_keys=retired_keys
     )
