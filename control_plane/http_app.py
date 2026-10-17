@@ -25909,6 +25909,9 @@ def create_launchplane_fastapi_app(
         first_testing_setup = first_testing_setup and (
             isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
         )
+        director_source_completion = director_source_completion and (
+            isinstance(identity, TerminalAgentIdentity) or not (service_scoped or lane_scoped_only)
+        )
         can_setup_target = (
             service_scoped
             or lane_scoped_only

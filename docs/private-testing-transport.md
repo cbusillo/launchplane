@@ -168,6 +168,13 @@ or shared target, public route, provider drift or active/unknown work refuses.
 Existing scoped workflow source-completion authority is unchanged. A partial
 provider result retains the existing reconciliation requirement; never retry
 under a new key or identity.
+The source transaction also excludes active or unresolved lane operations and
+retained-target custody. With no source, the provider's automatic-deploy default
+is inert; the source update disables it atomically and verifies it off afterward.
+Completion changes the safety binding, so collect fresh usage/data/isolation
+evidence before any later operation that requires it. Provider requests have
+bounded timeouts; the final exclusion reads hold the product-authority lock and
+can delay other authority writers while a slow provider responds.
 
 1. Verify the deployed service includes this source. Resolve the independent
    immutable-source/hold prerequisites and recheck actual testing isolation.

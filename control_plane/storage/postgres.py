@@ -28269,8 +28269,30 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             raise ValueError("Source completion cannot change other target fields.")
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            self._lock_odoo_stable_lane(
+                session,
+                product=expected_profile.product,
+                context=expected_record.context,
+                instance=expected_record.instance,
+            )
             self._lock_product_authority_bundle_write(session)
+            if (
+                self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=expected_profile.product,
+                    context=expected_record.context,
+                    instance=expected_record.instance,
+                )
+                is not None
+            ):
+                raise ValueError("A lane operation still owns testing source or recovery.")
+            if any(
+                row.payload.get("retained_target_id") == expected_target_id.target_id
+                for row in session.scalars(
+                    select(LaunchplaneDisposableReplacementPreparationRow)
+                ).all()
+            ):
+                raise ValueError("Testing source remains reserved by retained-target custody.")
             self._lock_landing_authority(
                 session, landing_authority.product_profile(expected_profile.product)
             )

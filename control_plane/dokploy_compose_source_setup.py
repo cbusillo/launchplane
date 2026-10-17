@@ -2,6 +2,7 @@ from pathlib import Path
 from contextlib import nullcontext
 from collections.abc import Callable
 import re
+from sqlalchemy.exc import SQLAlchemyError
 from typing import TYPE_CHECKING
 
 from control_plane.contracts.deploy_target import ProviderTargetRecord
@@ -14,6 +15,7 @@ from control_plane.dokploy import source as dokploy_source
 from control_plane.dokploy.api import JsonObject
 from control_plane.dokploy.target_source_setup import (
     configure_empty_compose_source,
+    DokployComposeSourcePartialError,
     repository_source_url,
     require_empty_compose_source,
 )
@@ -128,7 +130,9 @@ def complete_compose_source(
         from control_plane.private_testing_activation import _placement
         from control_plane.dokploy import api
 
-        _placement(before, target_id.target_id)
+        # An empty source cannot auto-deploy. The single source update disables
+        # that provider default atomically, and its readback requires False.
+        _placement({**before, "autoDeploy": False}, target_id.target_id)
         if before != live:
             raise ValueError("Provider source or placement changed after completion review.")
         safety_binding = require_disposable_lane(
@@ -183,6 +187,13 @@ def complete_compose_source(
             raise ValueError("Testing safety changed during source exclusion reads.")
         check()
 
+    effect_started = False
+
+    def mutate_source(host: str, token: str, path: str, payload: JsonObject) -> JsonObject:
+        nonlocal effect_started
+        effect_started = True
+        return mutate_dokploy_payload_for_target_setup(host, token, path, payload)
+
     def apply_provider() -> None:
         configure_empty_compose_source(
             host=host,
@@ -192,7 +203,7 @@ def complete_compose_source(
             branch=request.custom_git_branch,
             compose_path=request.compose_path,
             fetch_target_payload=fetch_dokploy_target_payload_for_setup,
-            mutate_provider=mutate_dokploy_payload_for_target_setup,
+            mutate_provider=mutate_source,
             before_update=checkpoint if director_agent else None,
         )
 
@@ -213,21 +224,28 @@ def complete_compose_source(
         if director_agent
         else nullcontext(lambda: None)
     )
-    with lock as held_check:
-        if held_check is None:
-            raise ValueError("Testing executor is still active.")
-        check: Callable[[], None] = held_check
-        if director_agent:
-            checkpoint(live)
-        if request.mode == "apply":
-            record_store.complete_dokploy_compose_source(
-                expected_profile=profile,
-                expected_record=target,
-                expected_target_id=target_id,
-                expected_provider_target=provider,
-                replacement_record=replacement,
-                apply_provider=apply_provider,
-            )
+    try:
+        with lock as held_check:
+            if held_check is None:
+                raise ValueError("Testing executor is still active.")
+            check: Callable[[], None] = held_check
+            if director_agent:
+                checkpoint(live)
+            if request.mode == "apply":
+                record_store.complete_dokploy_compose_source(
+                    expected_profile=profile,
+                    expected_record=target,
+                    expected_target_id=target_id,
+                    expected_provider_target=provider,
+                    replacement_record=replacement,
+                    apply_provider=apply_provider,
+                )
+    except (RuntimeError, SQLAlchemyError) as error:
+        if effect_started:
+            raise DokployComposeSourcePartialError(
+                "Source effects began before exclusion failed; preserve the original key and reconcile."
+            ) from error
+        raise ValueError("Source exclusion unavailable before provider effects.") from error
     return {
         "mode": request.mode,
         "operation": request.operation,

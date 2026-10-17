@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.dokploy_target_setup_http import DokployTargetSetupEnvelope
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
 from tests.support.auth import scoped_agent_transport
@@ -39,37 +40,6 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
             authz_policy=LaunchplaneAuthzPolicy(),
-            bearer_identity_config=_local_operator_bearer_config(),
-            record_store_factory=lambda: self.store,
-            control_plane_root_path=self.fixture.root,
-        )
-        self.payload: dict[str, Any] = {
-            "operation": "complete-compose-source",
-            "context": "sample",
-            "instance": "testing",
-            "custom_git_branch": "a" * 40,
-            "compose_path": "compose.runtime.yml",
-            "mode": "apply",
-            "confirmation": "APPLY DOKPLOY TARGET SETUP",
-            "reason": "Complete isolated source",
-        }
-
-    async def post(self, **changes: Any) -> Any:
-        return await request(
-            self.app,
-            "POST",
-            "/v1/dokploy-targets/setup",
-            payload={**self.payload, **changes},
-            headers={
-                "Authorization": "Bearer local-operator-token",
-                "Idempotency-Key": "source-test",
-            },
-        )
-
-    async def test_director_completes_immutable_source_and_replays_without_deployment(self) -> None:
-        self.app = create_launchplane_fastapi_app(
-            verifier=_RejectingVerifier(),
-            authz_policy=LaunchplaneAuthzPolicy(),
             bearer_identity_config=_local_operator_bearer_config().model_copy(
                 update={
                     "local_operator_token": "",
@@ -81,12 +51,52 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.fixture.root,
         )
+        self.payload: dict[str, Any] = {
+            "operation": "complete-compose-source",
+            "context": "sample",
+            "instance": "testing",
+            "custom_git_branch": "a" * 40,
+            "compose_path": "compose.runtime.yml",
+            "mode": "apply",
+            "reason": "Complete isolated source",
+        }
+        self.payload["confirmation"] = DokployTargetSetupEnvelope.model_validate(
+            self.payload
+        ).expected_confirmation
+        self.in_source_transaction = False
+        complete = self.store.complete_dokploy_compose_source
+
+        def commit(**kwargs: Any) -> None:
+            self.in_source_transaction = True
+            try:
+                complete(**kwargs)
+            finally:
+                self.in_source_transaction = False
+
+        self.enterContext(
+            patch.object(self.store, "complete_dokploy_compose_source", side_effect=commit)
+        )
+
+    async def post(self, *, key: str = "source-test", **changes: Any) -> Any:
+        return await request(
+            self.app,
+            "POST",
+            "/v1/dokploy-targets/setup",
+            payload={**self.payload, **changes},
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Idempotency-Key": key,
+            },
+        )
+
+    async def test_director_completes_immutable_source_and_replays_without_deployment(self) -> None:
+        self.fixture.live["autoDeploy"] = True
         dry = await self.post(mode="dry-run")
         self.assertEqual(dry.status_code, 202, dry.text)
         self.assertEqual(self.fixture.calls, [])
         applied = await self.post()
         self.assertEqual(applied.status_code, 202, applied.text)
-        self.assertEqual([path for path, _ in self.fixture.calls], ["/api/compose.update"])
+        self.assertEqual(len(self.fixture.calls), 1)
         self.assertEqual(self.fixture.live["customGitBranch"], self.payload["custom_git_branch"])
         self.assertIs(self.fixture.live["autoDeploy"], False)
         replay = await self.post()
@@ -117,7 +127,6 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
         baseline = deepcopy(self.fixture.live)
         for changes in (
             {"mounts": [{"type": "bind"}]},
-            {"autoDeploy": True},
             {"composeStatus": "running"},
             {"domains": [{"host": "public.invalid"}]},
         ):
@@ -142,12 +151,8 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.calls, [])
 
     async def test_provider_drift_during_inventory_refuses_update(self) -> None:
-        count = 0
-
         def inventory(**_kwargs: Any) -> list[Any]:
-            nonlocal count
-            count += 1
-            if count > 3:
+            if self.in_source_transaction:
                 self.fixture.live["serverId"] = "moved-server"
             return []
 
@@ -157,19 +162,103 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.calls, [])
 
     async def test_safety_drift_before_effect_refuses_update(self) -> None:
-        count = 0
+        read_safety = self.store.read_disposable_lane_safety
 
-        def inventory(**_kwargs: Any) -> list[Any]:
-            nonlocal count
-            count += 1
-            if count == 3:
-                record_safety(self.store, "sample", "sample", "testing", data="only_copy")
-            return []
+        def safety(*args: Any, **kwargs: Any) -> Any:
+            result = read_safety(*args, **kwargs)
+            if self.in_source_transaction:
+                return result.model_copy(update={"data": "only_copy"})
+            return result
 
-        self.inventory.side_effect = inventory
+        self.enterContext(
+            patch.object(self.store, "read_disposable_lane_safety", side_effect=safety)
+        )
         response = await self.post()
         self.assertEqual(response.status_code, 409, response.text)
         self.assertEqual(self.fixture.calls, [])
+
+    async def test_unresolved_lane_operation_refuses_source_update(self) -> None:
+        from tests.support.disposable_lanes import prepare_held_rebuild
+
+        prepare_held_rebuild(self.store, "sample", "sample", prepare=False)
+        response = await self.post()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.fixture.calls, [])
+
+    async def test_matching_physical_reservation_refuses_update(self) -> None:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            generic_web_provider_target_key,
+        )
+
+        target_key = generic_web_provider_target_key(
+            provider_id="dokploy",
+            context="sample",
+            instance="testing",
+            target_type="compose",
+            target_id=self.fixture.target_id.target_id,
+        )
+        reserved = self.store.reserve_mutation(
+            scope="fixture",
+            route_path="/fixture",
+            idempotency_key="other-operation",
+            request_fingerprint="fixture",
+            lease_owner="worker",
+            reconciliation_key="fixture",
+            provider_target_key=target_key,
+        )
+        self.assertEqual(reserved.status, "acquired")
+        response = await self.post()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.fixture.calls, [])
+
+    async def test_active_provider_work_refuses_update(self) -> None:
+        for inventory in (
+            [
+                {
+                    "composeId": self.fixture.target_id.target_id,
+                    "deploymentId": "running",
+                    "status": "running",
+                }
+            ],
+            [{"data": {"composeId": self.fixture.target_id.target_id}, "state": "active"}],
+            [{"enabled": False}],
+        ):
+            with self.subTest(inventory=inventory):
+                self.inventory.return_value = inventory
+                response = await self.post()
+                self.assertEqual(response.status_code, 400, response.text)
+                self.assertEqual(self.fixture.calls, [])
+
+    async def test_exclusion_failure_is_coded_before_any_write(self) -> None:
+        self.inventory.side_effect = RuntimeError("fixture lost exclusion connection")
+        response = await self.post()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.fixture.calls, [])
+
+    async def test_partial_provider_write_keeps_records_and_refuses_duplicate_effect(self) -> None:
+        before = self.store.read_dokploy_target_record(
+            context_name="sample", instance_name="testing"
+        )
+
+        def lost_response(*args: Any) -> Any:
+            self.fixture.mutate(*args)
+            raise RuntimeError("fixture lost response after source change")
+
+        with patch(
+            "control_plane.dokploy_target_setup_http.mutate_dokploy_payload_for_target_setup",
+            side_effect=lost_response,
+        ):
+            response = await self.post()
+        self.assertEqual(response.status_code, 502, response.text)
+        self.assertEqual(response.json()["error"]["code"], "dokploy_source_partial_outcome")
+        self.assertEqual(
+            self.store.read_dokploy_target_record(context_name="sample", instance_name="testing"),
+            before,
+        )
+        for key in ("source-test", "different-key"):
+            refused = await self.post(key=key)
+            self.assertEqual(refused.status_code, 400, refused.text)
+        self.assertEqual(len(self.fixture.calls), 1)
 
     async def test_active_testing_executor_refuses_without_writes(self) -> None:
         from contextlib import nullcontext
