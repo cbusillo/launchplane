@@ -165,7 +165,8 @@ checks complete provider deployment/queue/schedule inventories and isolated
 placement, and repeats these checks immediately before the source update inside
 the existing ownership/binding transaction. A configured/partial source, foreign
 or shared target, public route, provider drift or active/unknown work refuses.
-Existing scoped workflow source-completion authority is unchanged. A partial
+Existing scoped workflow source-completion authority is unchanged; all source
+completions now wait for unresolved lane operations and retained custody. A partial
 provider result retains the existing reconciliation requirement; never retry
 under a new key or identity.
 The source transaction also excludes active or unresolved lane operations and

@@ -25868,7 +25868,6 @@ def create_launchplane_fastapi_app(
         )
         director_source_completion = (
             director_agent_identity(identity)
-            and setup_request.mode == "apply"
             and setup_request.operation == "complete-compose-source"
             and setup_request.instance == "testing"
             and bool(lane_owner)

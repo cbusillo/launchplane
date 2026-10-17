@@ -122,6 +122,8 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.fixture.calls, [])
 
     async def test_branch_or_shared_provider_placement_is_refused(self) -> None:
+        dry = await self.post(mode="dry-run", custom_git_branch="main")
+        self.assertEqual(dry.status_code, 400, dry.text)
         response = await self.post(custom_git_branch="main")
         self.assertEqual(response.status_code, 400, response.text)
         baseline = deepcopy(self.fixture.live)
@@ -163,10 +165,18 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_safety_drift_before_effect_refuses_update(self) -> None:
         read_safety = self.store.read_disposable_lane_safety
+        inventory_observed = False
+
+        def inventory(**_kwargs: Any) -> list[Any]:
+            nonlocal inventory_observed
+            inventory_observed = self.in_source_transaction
+            return []
+
+        self.inventory.side_effect = inventory
 
         def safety(*args: Any, **kwargs: Any) -> Any:
             result = read_safety(*args, **kwargs)
-            if self.in_source_transaction:
+            if self.in_source_transaction and inventory_observed:
                 assert result is not None
                 return result.model_copy(update={"data": "only_copy"})
             return result
@@ -213,22 +223,97 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fixture.calls, [])
 
     async def test_active_provider_work_refuses_update(self) -> None:
-        for inventory in (
-            [
-                {
-                    "composeId": self.fixture.target_id.target_id,
-                    "deploymentId": "running",
-                    "status": "running",
-                }
-            ],
-            [{"data": {"composeId": self.fixture.target_id.target_id}, "state": "active"}],
-            [{"enabled": False}],
+        for blocked_path, inventory in (
+            (
+                "/api/deployment.allByType",
+                [
+                    {
+                        "composeId": self.fixture.target_id.target_id,
+                        "deploymentId": "running",
+                        "status": "running",
+                    }
+                ],
+            ),
+            (
+                "/api/deployment.queueList",
+                [{"data": {"composeId": self.fixture.target_id.target_id}, "state": "active"}],
+            ),
+            ("/api/schedule.list", [{"enabled": False}]),
         ):
             with self.subTest(inventory=inventory):
-                self.inventory.return_value = inventory
+                self.inventory.side_effect = lambda **kwargs: (
+                    inventory if kwargs["path"] == blocked_path else []
+                )
                 response = await self.post()
                 self.assertEqual(response.status_code, 400, response.text)
                 self.assertEqual(self.fixture.calls, [])
+
+    async def test_reservation_appearing_during_final_inventory_refuses_update(self) -> None:
+        from control_plane.workflows.generic_web_deploy_provider import (
+            generic_web_provider_target_key,
+        )
+
+        target_key = generic_web_provider_target_key(
+            provider_id="dokploy",
+            context="sample",
+            instance="testing",
+            target_type="compose",
+            target_id=self.fixture.target_id.target_id,
+        )
+        self.store.reserve_mutation(
+            scope="fixture",
+            route_path="/fixture",
+            idempotency_key="racing-operation",
+            request_fingerprint="fixture",
+            lease_owner="worker",
+            reconciliation_key="fixture",
+            provider_target_key=target_key,
+        )
+        held = self.store.list_held_provider_target_reservations()
+        visible = False
+
+        def inventory(**_kwargs: Any) -> list[Any]:
+            nonlocal visible
+            visible = self.in_source_transaction
+            return []
+
+        self.inventory.side_effect = inventory
+        with patch.object(
+            self.store,
+            "list_held_provider_target_reservations",
+            side_effect=lambda: held if visible else (),
+        ):
+            response = await self.post()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.fixture.calls, [])
+
+    async def test_lost_executor_lock_is_coded_without_source_write(self) -> None:
+        from contextlib import contextmanager
+        from collections.abc import Iterator, Callable
+
+        @contextmanager
+        def lock(_name: str) -> Iterator[Callable[[], None]]:
+            def check() -> None:
+                if self.in_source_transaction:
+                    raise RuntimeError("fixture lost executor lock")
+
+            yield check
+
+        with patch.object(self.store, "testing_replacement_execution_lock", side_effect=lock):
+            response = await self.post()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.fixture.calls, [])
+
+    async def test_retained_custody_outlives_nonblocking_operation(self) -> None:
+        from tests.support.disposable_lanes import prepare_held_rebuild
+
+        operation = prepare_held_rebuild(self.store, "sample", "sample")
+        self.store.write_odoo_stable_target_replacement_operation_record(
+            operation.model_copy(update={"status": "completed"})
+        )
+        response = await self.post()
+        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(self.fixture.calls, [])
 
     async def test_exclusion_failure_is_coded_before_any_write(self) -> None:
         self.inventory.side_effect = RuntimeError("fixture lost exclusion connection")

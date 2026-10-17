@@ -105,12 +105,16 @@ def complete_compose_source(
     live = fetch_dokploy_target_payload_for_setup(host, token, "compose", target_id.target_id)
     require_empty_compose_source(live, target_id.target_id)
     if director_agent:
+        from control_plane.private_testing_activation import _placement
+
         if not profile.is_active or not re.fullmatch(r"[a-f0-9]{40}", request.custom_git_branch):
             raise ValueError(
                 "Director source completion requires active ownership and an immutable commit."
             )
         if target.domains or target.public_hosts or target.pending_public_host_effects:
             raise ValueError("Director source completion requires an unpublished testing target.")
+        _placement({**live, "autoDeploy": False}, target_id.target_id)
+    director_apply = director_agent and request.mode == "apply"
     replacement = target.model_copy(
         update={
             "source_type": "git",
@@ -123,7 +127,7 @@ def complete_compose_source(
     )
 
     def checkpoint(before: JsonObject) -> None:
-        if not director_agent:
+        if not director_apply:
             return
         from control_plane.disposable_lanes import require_disposable_lane
         from control_plane.generic_web_testing_exclusion import _inventory, _target_reservations
@@ -185,6 +189,14 @@ def complete_compose_source(
             != safety_binding
         ):
             raise ValueError("Testing safety changed during source exclusion reads.")
+        if _target_reservations(
+            record_store,
+            product=profile.product,
+            context=request.context,
+            target_key=target_key,
+            target_id=target_id.target_id,
+        ):
+            raise ValueError("Provider ownership changed during source exclusion reads.")
         check()
 
     effect_started = False
@@ -204,7 +216,7 @@ def complete_compose_source(
             compose_path=request.compose_path,
             fetch_target_payload=fetch_dokploy_target_payload_for_setup,
             mutate_provider=mutate_source,
-            before_update=checkpoint if director_agent else None,
+            before_update=checkpoint if director_apply else None,
         )
 
     from control_plane.workflows.generic_web_deploy_provider import generic_web_provider_target_key
@@ -221,7 +233,7 @@ def complete_compose_source(
         record_store.testing_replacement_execution_lock(
             testing_event_execution_lock_name(target_key)
         )
-        if director_agent
+        if director_apply
         else nullcontext(lambda: None)
     )
     try:
@@ -229,7 +241,7 @@ def complete_compose_source(
             if held_check is None:
                 raise ValueError("Testing executor is still active.")
             check: Callable[[], None] = held_check
-            if director_agent:
+            if director_apply:
                 checkpoint(live)
             if request.mode == "apply":
                 record_store.complete_dokploy_compose_source(
