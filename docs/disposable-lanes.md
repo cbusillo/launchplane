@@ -564,6 +564,85 @@ An older image cannot continue the new resource route. After activation, retain
 the qualifying image and forward-fix rather than erasing custody or restoring
 an old database to clear the fence.
 
+## Testing candidate storage before adoption
+
+The rebuild candidate allocator keeps custody in
+`launchplane_testing_candidates`, keyed by its service-generated namespace and
+bound to the original operation, intent and serving target. This record is
+separate from the lane's current generation. Allocation creates a private
+project/environment/compose and independent local volumes without changing
+the lane profile, target records, runtime values, inventory or public address.
+The target is reserved in the existing physical provider registry in the same
+transaction as its candidate custody; another lane cannot adopt it.
+Compatibility target-ID records are also fenced, both at capture and before
+subsequent provider effects; an older lane reference cannot become permission
+to qualify or change its target as a candidate.
+
+The caller must hold the authorized lane operation and recheck its authority,
+holds, use, custody and isolation at every checkpoint. Provider effect intent
+and each returned identity are recorded before proceeding. Lost creation
+responses require original-key observation of the complete uniquely named
+placement. Confirmed parents can continue; absent uncertain creates remain
+unknown. Storage retries inspect the original empty, labelled resources and
+refuse changed or in-use storage. Nothing is deleted to make a retry work.
+
+This source component reuses the isolated placement creator used by upgrade
+rehearsals and the existing testing backing-store readback program. It removes
+the need to adopt a candidate as the serving target merely to qualify its
+storage. It does not activate a rebuild endpoint, restore data, move traffic,
+publish a generation or retire the serving copy. Those stages remain part of
+the stable-address rebuild work in [#3963](https://github.com/cbusillo/launchplane/issues/3963)
+and [#3968](https://github.com/cbusillo/launchplane/issues/3968).
+
+The schema migration adds custody without modifying existing lane records.
+Use the normal service schema-migration procedure on delivery. Rolling back
+code retains the candidate table and physical reservations, including uncertain
+effects; recover with the original operation rather than clearing custody or
+reusing its target. Local SQLite tests exercise record semantics; the matching
+PostgreSQL integration cases qualify the actual database path in CI.
+
+## Private candidate build and copy preparation
+
+Candidate application preparation binds an admitted artifact and source to the
+allocation before provider configuration. It reads the existing three generated
+testing-local credentials. Secret selection happens before version lookup and
+decryption, so other managed runtime secrets are never materialized for this
+copy. It does not rotate passwords or write the serving runtime, profile,
+overrides, inventory, target or current-generation records.
+
+The rendered candidate has independent storage, a pinned image, no public
+hostname/router or host ports, and a namespace-qualified private ingress alias.
+Its database and runner remain on the internal data network. The existing
+SQL-before-registry restore runner handles production copies and upstream
+copies; the existing bootstrap handles an empty database. Projected overrides
+remove integration connections and retain the lane's public address. A candidate
+uses its own manual host schedule, so preparation cannot replace the serving
+lane's data-workflow schedule.
+
+Before each provider effect the caller rechecks its exclusive operation lease,
+authority, holds, usage and physical custody. Configuration and deployment
+intent are persisted first. A continuation only accepts the exact configuration
+or the uniquely titled original deployment. An absent or ambiguous effect stays
+unknown. Restore dispatch records the original schedule and prior job IDs;
+continuation observes that one terminal job instead of triggering another.
+Private readiness then checks actual storage/network isolation, pinned installed
+images, runtime and copy identity, integration settings and the web-start gate,
+and authenticates with the testing-local credentials. Passwords and raw program
+output stay private to the provider transport.
+
+A failed terminal restore may be marked abandoned while keeping its candidate
+and custody records. This action does not stop or remove either copy. Running,
+absent and ambiguous provider jobs cannot be abandoned or redispatched. The
+service worker must preserve their original-key recovery path. A prepared copy
+is still private: stable-route switching, atomic serving publication, old-copy
+retirement and the service/UI action are separate stages under #3963. This
+source component does not activate them or establish live CM proof.
+
+Maintenance uses the original candidate operation and its stored receipts.
+Rollback retains candidate application intent, storage and physical reservations;
+it does not clear fences or adopt a candidate as the serving lane. No schema
+migration is added beyond the candidate custody table.
+
 ## Service collection
 
 `collect` on the observation API resolves existing service sources itself:
