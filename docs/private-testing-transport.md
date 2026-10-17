@@ -151,7 +151,7 @@ its source through `POST /v1/dokploy-targets/setup` with
 `dokploy-target-complete-compose-source-dry-run` and `-apply` helpers, with the
 saved plan, reviewed digest and original idempotency key. Supply a forty-character
 commit and its relative Compose path; the service derives the repository from
-the exclusive active product owner. This writes only source settings, leaves
+the exclusive active product profile. This writes only source settings, leaves
 automatic deployment off and starts no deployment. The later activation still
 fetches and qualifies the immutable template and artifact provenance.
 
