@@ -2899,7 +2899,7 @@ export function productReviewForFixture(
               reason: scenario === "carried-invisible-decision" ? "client_impact_none" : "unchanged_patch_base_update",
               commits: scenario === "carried-invisible-decision" ? [{ sha: "a".repeat(40), client_impact: "none" }] : [],
               refresh_record_ids: [],
-              comparison_base_sha: "c".repeat(40),
+              comparison_base_sha: scenario === "carried-invisible-decision" ? "" : "c".repeat(40),
             },
           }
         : scenario === "decided"

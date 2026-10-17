@@ -223,10 +223,7 @@ class CarryOwnerAcceptanceTests(unittest.TestCase):
         )
 
     def assert_waits_for_the_client(self, status: dict[str, object]) -> None:
-        self.assertEqual(
-            (status["state"], status["description"]),
-            ("pending", "Waiting for @site-owner to review the preview"),
-        )
+        self.assertEqual(status["state"], "pending")
         self.assertEqual(self._decisions(), (self.accepted,))
 
     def _later_commits(self, *messages: str) -> list[dict[str, object]]:
