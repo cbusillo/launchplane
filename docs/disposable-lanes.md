@@ -8,6 +8,58 @@ the only needed copy of data, production resources and live credentials remain
 protected. A label, missing staff hold, distinct volume name or distinct secret
 version is not proof of those facts.
 
+## Stable-address rebuild lifecycle
+
+`workflows/testing_rebuild.py` provides the service-side lifecycle for a testing
+lane with one stable HTTPS address and a separate candidate copy. It is a source
+component: the existing resource/bootstrap endpoints below do not yet call it.
+It exposes no new HTTP operation, UI control or permission. Its tests qualify the
+controller and checkpoint storage, not a real provider, restored data or a live
+lane.
+
+The immutable plan binds the existing route/address, old and new target/resource
+identities, the candidate build and a managed source reference. Empty rebuilds,
+production-copy restores and configured upstream restores use the same lifecycle.
+The service adapter resolves those references from admitted records; these are
+not caller-supplied provider coordinates. Production destinations and shared
+copy identities are rejected. Different resource names are only a contract
+check; the adapter must independently inspect actual backing resources.
+
+Preparation leaves the serving copy and lane metadata authoritative. A bound
+receipt must verify independent resources, local credentials and removal of live
+connections before candidate startup. Fresh private health and exact runtime
+identity precede switching the existing route. Applied/public health and identity
+at the original address precede metadata adoption and old-copy retirement.
+Retirement drains/stops the old runtime and preserves its storage and custody;
+physical deletion is outside this operation.
+
+Failed preparation or private readiness leaves the old copy serving. Failed
+public verification, including immediately before metadata adoption or before
+the old stop begins, persists an inverse route intent. The controller verifies
+the original copy at the same address and restores its original metadata before
+reporting failure. Publication is a DB-only atomic compare/write/readback under
+the original operation and authority-writer lock. An unavailable publication
+outcome cannot be replaced with an assertion that the old metadata still wins.
+
+`testing_rebuild_storage.py` stores checkpoints in the existing DB-backed record
+payloads. The envelope is completed checkpoint evidence, while the payload keeps
+the actual rebuild stage. It is not an execution lease or a replacement for a
+durable provider fence. The adapter must hold the existing lane/worker lease and
+recheck authorization, holds/use, custody and production isolation before effects.
+Provider calls reconcile their original dispatch keys before any replay. A
+foreign route, changed plan or inaccessible authority refuses continuation.
+Permission and transport exceptions propagate without a fallback or automatic
+retry.
+
+After an interrupted route switch, read actual applied authority and public
+identity; never issue a second switch merely because its acknowledgement was
+lost. After an interrupted stop, preserve the retirement intent: the old copy
+may already be stopped, so it cannot be advertised as a healthy rollback target.
+An interrupted preparation retains its candidate, copy receipt and original key.
+Use a compatible controller/adapter for continuation and preserve unresolved
+provider effects, rather than deleting checkpoints or replaying a legacy
+bootstrap against that copy.
+
 ## Repair usage rule
 
 `control_plane/lane_usage.py` owns the usage decision for disposable repair.
