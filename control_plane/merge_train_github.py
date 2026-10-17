@@ -22,6 +22,8 @@ from control_plane.config_authority_comparison import (
     is_config_authority_check,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_review import ProductReviewDecisionRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import (
     MergeTrainHeadCheckReuse,
@@ -106,6 +108,15 @@ from control_plane.merge_train import CODE_SCANNING_REVIEW_AUTHOR
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _ClientVetoReadStore(Protocol):
+    def list_product_profile_records(self) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+    def list_product_review_decision_records(
+        self, *, repository: str, pull_request_number: int, limit: int | None = None
+    ) -> tuple[ProductReviewDecisionRecord, ...]: ...
 
 
 class MergeTrainBranchRefreshReadStore(Protocol):
@@ -2304,6 +2315,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         if intent.error:
             raise MergeAdmissionDeniedError(intent.error, reason_code="client_test_notes_required")
+        if require_client_review and review_reader.client_veto(
+            repository=repository_path,
+            pull_request_number=entry.pull_request_number,
+            head_sha=head_sha,
+        ):
+            raise MergeAdmissionDeniedError(
+                f"Client requested changes on pull request #{entry.pull_request_number}.",
+                reason_code="client_changes_requested",
+            )
         if require_client_review and intent.review_required:
             review_status = _owner_review_status(
                 _list_check_runs(
@@ -2515,6 +2535,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         )
         if intent.error:
             raise MergeTrainGitHubStaleHeadError(intent.error, status_code=409)
+        if review_reader.client_veto(
+            repository=repository_path, pull_request_number=pull_request_number, head_sha=head_sha
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                f"Client requested changes on pull request #{pull_request_number}.", status_code=409
+            )
         if not intent.review_required:
             return
         review_status = _owner_review_status(
@@ -3391,7 +3417,10 @@ class GitHubMergeTrainSnapshotReader:
             base_branch=str(base.get("ref") or ""),
         ):
             review_intent = ClientTestNotes(False)
-        owner_review_required = review_intent.review_required
+        vetoed = self.client_veto(
+            repository=base_repository, pull_request_number=pull_request_number, head_sha=head_sha
+        )
+        owner_review_required = review_intent.review_required or vetoed
         ready_handoff = self._ready_handoffs.get(pull_request_number)
         policy = self._repository_policy
         if (
@@ -3409,6 +3438,25 @@ class GitHubMergeTrainSnapshotReader:
                 base_branch=str(base.get("ref") or ""),
                 base_sha=str(base.get("sha") or ""),
             )
+        checks_status = (
+            "fail"
+            if review_intent.error
+            else self._required_checks_status(
+                repository_path=repository_path,
+                head_sha=head_sha,
+                owner_review_required=owner_review_required,
+                config_comparison=_config_comparison(
+                    self._branch_refresh_store,
+                    repository=base_repository,
+                    base_branch=_required_text(base.get("ref"), "Source base branch is required."),
+                    base_sha=_required_text(base.get("sha"), "Source base SHA is required."),
+                    head_sha=head_sha,
+                    policy=self._repository_policy,
+                ),
+            )
+            if enrich
+            else "unknown"
+        )
         return MergeTrainPullRequestSnapshot(
             ready_handoff=ready_handoff,
             owner_review_required=owner_review_required,
@@ -3432,23 +3480,7 @@ class GitHubMergeTrainSnapshotReader:
             base_ref=_required_text(base.get("ref"), "GitHub pull request base requires ref."),
             base_repository=base_repository,
             mergeable=_mergeable_state(source) if enrich else "unknown",
-            required_checks_status="fail"
-            if review_intent.error
-            else self._required_checks_status(
-                repository_path=repository_path,
-                head_sha=head_sha,
-                owner_review_required=owner_review_required,
-                config_comparison=_config_comparison(
-                    self._branch_refresh_store,
-                    repository=base_repository,
-                    base_branch=_required_text(base.get("ref"), "Source base branch is required."),
-                    base_sha=_required_text(base.get("sha"), "Source base SHA is required."),
-                    head_sha=head_sha,
-                    policy=self._repository_policy,
-                ),
-            )
-            if enrich
-            else "unknown",
+            required_checks_status="fail" if vetoed else checks_status,
             branch_update_required=_branch_update_required(source),
             dependency_update_class=dependency_update_class,
         )
@@ -4110,6 +4142,40 @@ class GitHubMergeTrainSnapshotReader:
         return self.client_review_intent(
             labels=labels, repository=repository, body=body
         ).review_required
+
+    def client_veto(self, *, repository: str, pull_request_number: int, head_sha: str) -> bool:
+        """Saved current-head Client decisions survive edited notes and projection lag."""
+        store = self._branch_refresh_store
+        if not isinstance(store, _ClientVetoReadStore):
+            return False
+        profiles = tuple(
+            profile
+            for profile in store.list_product_profile_records()
+            if profile.is_active
+            and profile.owner.is_set
+            and repository_key(profile.repository) == repository_key(repository)
+        )
+        if not profiles:
+            return False
+        for profile in profiles:
+            decisions = store.list_product_review_decision_records(
+                repository=profile.repository, pull_request_number=pull_request_number
+            )
+            current = next(
+                (
+                    decision
+                    for decision in decisions
+                    if decision.product == profile.product
+                    and repository_key(decision.repository) == repository_key(repository)
+                    and decision.pull_request_number == pull_request_number
+                    and decision.head_sha.strip().casefold() == head_sha.strip().casefold()
+                    and decision.owner_github_id == profile.owner.github_id
+                ),
+                None,
+            )
+            if current is not None and current.decision == "changes_requested":
+                return True
+        return False
 
     def _required_checks_status(
         self,
