@@ -11,13 +11,10 @@ PRIVILEGED_OPERATION_WORKER_STATEMENT_TIMEOUT_MILLISECONDS = 30_000
 PRIVILEGED_OPERATION_WORKER_REQUIRED_RELATIONS = (
     "launchplane_repository_inventory_records",
     "launchplane_ordinary_agent_principals",
-    "launchplane_ordinary_agent_session_operations",
     "launchplane_ordinary_agent_sessions",
     "launchplane_ordinary_agent_leases",
     "launchplane_ordinary_agent_finite_requests",
     "launchplane_ordinary_agent_authentication_credentials",
-    "launchplane_ordinary_agent_credential_custody",
-    "launchplane_ordinary_agent_lifecycle_audits",
     "launchplane_privileged_operations",
     "launchplane_privileged_operations_status_idx",
     "launchplane_privileged_operations_descriptor_idx",
