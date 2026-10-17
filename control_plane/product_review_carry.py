@@ -1,4 +1,4 @@
-"""Carry a Client's acceptance when a base update preserves the feature patch.
+"""Carry a Client's acceptance across unchanged patches or declared invisible commits.
 
 The Client accepts a change, seen on its preview. When the merge train only merges
 the base branch into the pull request, the change is the same, so asking again
@@ -15,9 +15,12 @@ protects nothing. The acceptance carries to the new head only when all hold:
 3. The carry is saved as its own decision record naming the decision and head it
    came from and the comparison base, so it reads as carried, not re-decided.
 
-Anything that changes the feature patch (including conflict resolution), a
-different base, a new Client, or an unreadable or truncated diff leaves
-the new head waiting for a decision.
+A linear descendant instead carries when every commit after the acceptance has
+one `Client-impact: none` trailer. Save those commits and trailers as evidence.
+Visible or missing trailers and unproven merges need a new decision, even if the
+final feature patch matches. Recorded train-only refreshes retain the patch proof
+above. Rewritten history still needs the strict unchanged-patch rebase proof.
+A different base, a new Client, or unreadable or truncated evidence never carries.
 """
 
 from collections.abc import Callable
@@ -35,6 +38,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_review import (
     ProductReviewCarry,
     ProductReviewCarryReason,
+    ProductReviewCarryCommit,
     ProductReviewDecisionRecord,
 )
 from control_plane.merge_train_branch_refresh import (
@@ -77,6 +81,7 @@ def carry_owner_acceptance(
     if not _carryable(accepted, profile) or accepted.base_branch != base_branch.strip():
         # Accepted on another base (or one never recorded): the change is not the same.
         return None
+    accepted_head = accepted.head_sha.strip().lower()
     refreshes = (
         refresh_store.list_merge_train_branch_refresh_records(
             repository=profile.repository, pull_request_number=pull_request_number
@@ -86,83 +91,97 @@ def carry_owner_acceptance(
     )
     carry = _base_only_refresh(
         repository=profile.repository,
-        accepted_head=accepted.head_sha.strip().lower(),
+        accepted_head=accepted_head,
         head=head,
         base_branch=base_branch.strip(),
         refreshes=refreshes,
         read=read,
     )
     reason: ProductReviewCarryReason
+    commits: tuple[ProductReviewCarryCommit, ...] = ()
     if carry is not None:
         refresh_record_ids, base_commit = carry
         reason = "merge_train_base_refresh"
     else:
+        comparison = _object(
+            read(f"/repos/{_path(profile.repository)}/compare/{accepted_head}...{head}")
+        )
         refresh_record_ids = ()
-        branch = quote(base_branch.strip(), safe="")
-        base_commit = _text(
-            _object(read(f"/repos/{_path(profile.repository)}/branches/{branch}"), "commit").get(
-                "sha"
-            )
-        ).lower()
-        if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
+        if comparison.get("status") == "ahead":
+            commits = _client_impact_commits(comparison, accepted_head, head)
+            if not commits:
+                return None
+            base_commit = ""
+            reason = "client_impact_none"
+        elif comparison.get("status") == "diverged":
+            branch = quote(base_branch.strip(), safe="")
+            base_commit = _text(
+                _object(
+                    read(f"/repos/{_path(profile.repository)}/branches/{branch}"), "commit"
+                ).get("sha")
+            ).lower()
+            if re.fullmatch(r"[0-9a-f]{40}", base_commit) is None:
+                return None
+            reason = "unchanged_patch_base_update"
+        else:
             return None
-        reason = "unchanged_patch_base_update"
-    responses: dict[str, object] = {}
+    if reason != "client_impact_none":
+        responses: dict[str, object] = {}
 
-    def comparison_read(path: str) -> object:
-        # These comparisons and trees are bound to immutable commits. Reuse the
-        # comparisons; trees are needed only after text and positions match.
-        if path not in responses:
-            responses[path] = read(path)
-        return responses[path]
+        def comparison_read(path: str) -> object:
+            # These comparisons and trees are bound to immutable commits. Reuse the
+            # comparisons; trees are needed only after text and positions match.
+            if path not in responses:
+                responses[path] = read(path)
+            return responses[path]
 
-    accepted_change = _change_fingerprint(
-        repository=profile.repository,
-        base=base_commit,
-        head=accepted.head_sha,
-        read=comparison_read,
-        include_blobs=False,
-        changed_lines_only=reason == "merge_train_base_refresh",
-        ignore_hunk_positions=reason == "unchanged_patch_base_update",
-    )
-    if not accepted_change or accepted_change != _change_fingerprint(
-        repository=profile.repository,
-        base=base_commit,
-        head=head,
-        read=comparison_read,
-        include_blobs=False,
-        changed_lines_only=reason == "merge_train_base_refresh",
-        ignore_hunk_positions=reason == "unchanged_patch_base_update",
-    ):
-        return None
-    if reason == "unchanged_patch_base_update":
-        if not patch_positions_match_base_update(
-            repository=profile.repository,
-            base=base_commit,
-            accepted_head=accepted.head_sha,
-            head=head,
-            read=comparison_read,
-        ):
-            return None
-        accepted_modes = _change_fingerprint(
+        accepted_change = _change_fingerprint(
             repository=profile.repository,
             base=base_commit,
             head=accepted.head_sha,
             read=comparison_read,
             include_blobs=False,
-            ignore_hunk_positions=True,
-            include_file_modes=True,
+            changed_lines_only=reason == "merge_train_base_refresh",
+            ignore_hunk_positions=reason == "unchanged_patch_base_update",
         )
-        if accepted_modes is None or accepted_modes != _change_fingerprint(
+        if not accepted_change or accepted_change != _change_fingerprint(
             repository=profile.repository,
             base=base_commit,
             head=head,
             read=comparison_read,
             include_blobs=False,
-            ignore_hunk_positions=True,
-            include_file_modes=True,
+            changed_lines_only=reason == "merge_train_base_refresh",
+            ignore_hunk_positions=reason == "unchanged_patch_base_update",
         ):
             return None
+        if reason == "unchanged_patch_base_update":
+            if not patch_positions_match_base_update(
+                repository=profile.repository,
+                base=base_commit,
+                accepted_head=accepted.head_sha,
+                head=head,
+                read=comparison_read,
+            ):
+                return None
+            accepted_modes = _change_fingerprint(
+                repository=profile.repository,
+                base=base_commit,
+                head=accepted.head_sha,
+                read=comparison_read,
+                include_blobs=False,
+                ignore_hunk_positions=True,
+                include_file_modes=True,
+            )
+            if accepted_modes is None or accepted_modes != _change_fingerprint(
+                repository=profile.repository,
+                base=base_commit,
+                head=head,
+                read=comparison_read,
+                include_blobs=False,
+                ignore_hunk_positions=True,
+                include_file_modes=True,
+            ):
+                return None
     with store.product_review_lock(
         repository=profile.repository, pull_request_number=pull_request_number
     ):
@@ -185,16 +204,17 @@ def carry_owner_acceptance(
                 .replace("+00:00", "Z"),
                 "carried_from": ProductReviewCarry(
                     record_id=accepted.record_id,
-                    head_sha=accepted.head_sha.strip().lower(),
+                    head_sha=accepted_head,
                     reason=reason,
                     refresh_record_ids=refresh_record_ids,
                     comparison_base_sha=base_commit,
+                    commits=commits,
                 ),
             }
         )
         store.write_product_review_decision_record(record)
     _LOGGER.info(
-        "Carried a Client acceptance across an unchanged-patch base update.",
+        "Carried a Client acceptance to a later change head.",
         extra={
             "repository": profile.repository,
             "pull_request_number": pull_request_number,
@@ -203,6 +223,72 @@ def carry_owner_acceptance(
         },
     )
     return record
+
+
+def _client_impact_commits(
+    comparison: dict[str, object], accepted_head: str, head: str
+) -> tuple[ProductReviewCarryCommit, ...]:
+    """Require the complete, ordered single-parent chain, not a truncated compare.
+
+    A merge's message cannot prove it did not resolve conflicts. Only the existing
+    recorded train refresh and patch proof can carry such a base merge.
+    """
+
+    commits = comparison.get("commits")
+    if not isinstance(commits, list) or not 0 < len(commits) <= 250:
+        return ()
+    if (
+        any(
+            type(comparison.get(key)) is not int or comparison[key] != expected
+            for key, expected in (
+                ("total_commits", len(commits)),
+                ("ahead_by", len(commits)),
+                ("behind_by", 0),
+            )
+        )
+        or _object(comparison.get("merge_base_commit")).get("sha") != accepted_head
+    ):
+        return ()
+    previous = accepted_head
+    evidence: list[ProductReviewCarryCommit] = []
+    seen = {accepted_head}
+    for value in commits:
+        commit = _object(value)
+        sha = _text(commit.get("sha"))
+        parents = commit.get("parents")
+        message = _object(commit.get("commit")).get("message")
+        if (
+            re.fullmatch(r"[0-9a-f]{40}", sha) is None
+            or sha in seen
+            or not isinstance(parents, list)
+            or len(parents) != 1
+            or _object(parents[0]).get("sha") != previous
+            or not _has_none_trailer(message)
+        ):
+            return ()
+        evidence.append(ProductReviewCarryCommit(sha=sha, client_impact="none"))
+        seen.add(sha)
+        previous = sha
+    return tuple(evidence) if previous == head else ()
+
+
+def _has_none_trailer(message: object) -> bool:
+    if not isinstance(message, str):
+        return False
+    # Trailers are the final paragraph, not a matching phrase in the body.
+    paragraphs = message.rstrip().split("\n\n")
+    if len(paragraphs) < 2:
+        return False
+    lines = paragraphs[-1].splitlines()
+    trailers = [re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*):[ \t]*(.+)", line) for line in lines]
+    if not trailers or any(trailer is None for trailer in trailers):
+        return False
+    impacts = [
+        trailer.group(2).strip()
+        for trailer in trailers
+        if trailer is not None and trailer.group(1).lower() == "client-impact"
+    ]
+    return impacts == ["none"]
 
 
 def _carryable(

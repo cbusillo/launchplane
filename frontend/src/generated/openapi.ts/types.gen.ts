@@ -4066,11 +4066,17 @@ export type ProductRetirementRequest = {
 };
 
 export type ProductReviewCarry = {
+    commits: Array<ProductReviewCarryCommit>;
     comparison_base_sha: string;
     head_sha: string;
-    reason: 'merge_train_base_refresh' | 'unchanged_patch_base_update';
+    reason: 'merge_train_base_refresh' | 'unchanged_patch_base_update' | 'client_impact_none';
     record_id: string;
     refresh_record_ids: Array<string>;
+};
+
+export type ProductReviewCarryCommit = {
+    client_impact: 'none';
+    sha: string;
 };
 
 export type ProductReviewDecisionEnvelope = {
