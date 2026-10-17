@@ -4,9 +4,10 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
+import click
 from pydantic import ValidationError
 
 from control_plane.contracts.odoo_instance_override_record import (
@@ -33,6 +34,10 @@ from control_plane.release_review import build_release_review
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.product_authority_bundle import OdooInstanceOverrideConflictError
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
+from control_plane.workflows.odoo_prod_promotion import (
+    OdooProdPromotionRequest,
+    execute_odoo_prod_promotion,
+)
 from tests.test_release_review import (
     seed as release_seed,
     profile as release_profile,
@@ -158,6 +163,76 @@ class WebsiteSettingsTests(unittest.TestCase):
             self.assertEqual(
                 store.read_dokploy_target_record(context_name=target.context, instance_name="prod"),
                 target,
+            )
+
+    def test_accepted_origin_drift_refuses_release_before_provider_effects(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            target = DokployTargetRecord(
+                context="example-site",
+                instance="prod",
+                public_hosts=("public.example", "www.public.example"),
+                updated_at=profile().updated_at,
+            )
+            store.write_dokploy_target_record(target)
+            value = request().model_copy(
+                update={"website_settings": intent(public_origin="https://public.example")}
+            )
+            plan = plan_website_settings(store, value)
+            prepare_website_settings(
+                store,
+                value.model_copy(
+                    update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
+                ),
+            )
+            accepted = decision(store)
+            store.create_release_review_decision_record_if_absent(accepted)
+
+            def promote() -> None:
+                with (
+                    patch(
+                        "control_plane.release_review.current_release_review",
+                        side_effect=lambda **_: build_release_review(
+                            store=store, profile=profile(), read=github_read
+                        ),
+                    ),
+                    patch(
+                        "control_plane.workflows.odoo_prod_promotion.require_production_promotion_backup",
+                        side_effect=AssertionError("provider effects began"),
+                    ),
+                ):
+                    execute_odoo_prod_promotion(
+                        control_plane_root=Path(directory),
+                        state_dir=Path(directory),
+                        database_url=None,
+                        record_store=cast(Any, store),
+                        request=OdooProdPromotionRequest(
+                            context="example-site",
+                            product="example-site",
+                            artifact_id="artifact-testing",
+                            backup_record_id="backup-gate-example",
+                        ),
+                    )
+
+            # Unchanged hosts pass approval and reach the first provider effect.
+            with self.assertRaisesRegex(AssertionError, "provider effects began"):
+                promote()
+            store.write_dokploy_target_record(
+                target.model_copy(update={"public_hosts": tuple(reversed(target.public_hosts))})
+            )
+            drifted = build_release_review(store=store, profile=profile(), read=github_read)
+            self.assertEqual(drifted.checklist_digest, accepted.checklist_digest)
+            self.assertFalse(drifted.approved)
+            self.assertTrue(drifted.blockers)
+            with self.assertRaises(click.ClickException):
+                promote()
+            stored = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            self.assertEqual(stored.website_settings, accepted.checklist.website_settings)
+            self.assertEqual(
+                store.list_release_review_decision_records(product="example-site"), (accepted,)
             )
 
     def test_no_public_hosts_preserves_the_profile_origin(self) -> None:

@@ -15,7 +15,11 @@ precedence, using the same public-host resolver as stable deployment. Without
 public hostnames, the recorded product-profile base URL remains the fallback.
 The profile's internal origin and health URLs need no rewrite to prepare public
 settings. Preparation rechecks this resolution on apply; it changes no target,
-profile or live website setting. Settings contain the native `website_id`,
+profile or live website setting. Release review rechecks it too: if the
+resolved origin changes after preparation, the release is blocked before any
+backup or deploy until the settings are prepared again for the new origin and
+the Client accepts the updated release. Accepted intent is never rewritten.
+Settings contain the native `website_id`,
 `public_origin` (HTTPS), `public_indexing_enabled`, `google_analytics_key`
 (`G-…` or empty), `cookies_bar` and `block_third_party_domains`. Empty analytics
 supports preparing indexing before the stream is supplied. GA4 requires both

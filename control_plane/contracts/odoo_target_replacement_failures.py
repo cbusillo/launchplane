@@ -71,6 +71,10 @@ DEPLOY_BLOCKED_DESCRIPTIONS: dict[str, str] = {
     "fresh_testing_intent_invalid": (
         "The fresh testing restore intent must use exact modules and keep live connections disabled."
     ),
+    "retained_database_credential_changed": (
+        "The lane's stored database password differs from the one its retained database "
+        "was created with; replace the lane through a fresh testing generation."
+    ),
 }
 
 # LiveTargetRuntimeError codes, mapped onto the checks above.

@@ -35,6 +35,7 @@ from control_plane.release_review_github import (
     read_release_changes,
 )
 from control_plane.release_review_shared import read_shared_source_changes, repository_key
+from control_plane.odoo_website_settings import matches_production_origin
 from control_plane.release_compatibility import classify_release_database_compatibility
 from control_plane.workflows.launchplane import (
     github_api_request,
@@ -476,6 +477,17 @@ def build_release_review(
     if stale_settings:
         blockers += (
             "Website settings were prepared for an older testing build. Prepare them for the current artifact before release.",
+        )
+        approved = False
+    if (
+        checklist.website_settings is not None
+        and prod_lane is not None
+        and not matches_production_origin(store, prod_lane, checklist.website_settings)
+    ):
+        # A public-host change after preparation leaves the checklist digest
+        # unchanged; refuse before any backup or deploy rather than in maintenance.
+        blockers += (
+            "Website settings name a public origin that production no longer resolves to. Prepare them again for the current origin; the Client then accepts the updated release.",
         )
         approved = False
     if settings_readback_failed:

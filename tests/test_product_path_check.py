@@ -158,6 +158,19 @@ class ProductPathCheckTests(unittest.TestCase):
                     "blocked",
                 )
 
+    def test_digest_only_noop_reports_incomplete_provenance(self) -> None:
+        plan = _completed_noop_plan()
+        for incomplete in (
+            {**plan, "desired_artifact_id": "artifact-example-site-run-37499907207-1"},
+            {**plan, "current_commit": ""},
+        ):
+            with self.subTest(plan=incomplete):
+                step = self._testing_check(incomplete).steps[-1]
+                self.assertEqual(step.state, "unknown")
+                self.assertEqual(step.code, "testing_provenance_incomplete")
+                self.assertEqual(step.fix, "wait")
+                self.assertEqual(step.record_ids, ())
+
     def test_testing_reader_preserves_only_valid_matching_artifact_provenance(self) -> None:
         odoo_id = _completed_noop_plan()["current_artifact_id"]
         assert isinstance(odoo_id, str)

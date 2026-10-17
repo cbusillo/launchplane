@@ -534,6 +534,18 @@ class ProductReconcileTestCase(unittest.TestCase):
         return self.store.request_product_reconcile(target, "2026-09-29T12:00:00Z").target_key
 
     def run_once(self) -> ProductReconcileRequestRecord:
+        # The fake provider's previews are unused, reproducible and isolated.
+        from tests.support.disposable_lanes import record_safety
+
+        profile = self.store.read_product_profile_record("site")
+        for preview in self.store.list_preview_records():
+            record_safety(
+                self.store,
+                profile.product,
+                preview.context,
+                profile.preview.slug_template.format(number=preview.anchor_pr_number),
+                preview=preview,
+            )
         if getattr(self, "advance_preview_recovery_grace", False):
             from control_plane.storage.postgres import LaunchplaneIdempotencyRow
             from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -3035,9 +3047,11 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
 
         # A missing compose with domains still present cannot complete cleanup.
         self.request("preview", 5)
-        with patch(
-            "control_plane.dokploy.api.fetch_dokploy_target_payload",
-            side_effect=click.ClickException("Dokploy request failed (404): missing compose"),
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                side_effect=click.ClickException("Dokploy request failed (404): missing compose"),
+            ),
         ):
             unproven = self.run_once()
         self.assertEqual(unproven.last_plan["preview_operation_status"], "reconcile_required")
@@ -3133,9 +3147,12 @@ class ProductReconcilePreviewTests(ProductReconcileTestCase):
             )
         )
         self.request("preview", 5)
-        with patch(
-            "control_plane.dokploy.api.fetch_dokploy_target_payload",
-            side_effect=click.ClickException("Dokploy request failed (404): missing compose"),
+        with (
+            patch(
+                "control_plane.dokploy.api.fetch_dokploy_target_payload",
+                side_effect=click.ClickException("Dokploy request failed (404): missing compose"),
+            ),
+            patch("control_plane.dokploy.api.dokploy_request", return_value=[]),
         ):
             completed = self.run_once()
         self.assertEqual(completed.last_plan["preview_operation_status"], "adopted")

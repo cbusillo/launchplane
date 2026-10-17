@@ -554,6 +554,128 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             "destroy_target_missing", {blocker.code for blocker in result.runtime_plan.blockers}
         )
 
+    def test_destroy_converges_when_independent_inventory_proves_absence(self) -> None:
+        profile = _profile()
+        store = Mock(wraps=_OdooApplyInputsStore())
+        store.list_preview_records = Mock(
+            return_value=(
+                Mock(
+                    anchor_pr_number=45,
+                    anchor_repo=profile.repository,
+                    canonical_url="https://pr-45.cm-preview.example.test",
+                    serving_generation_id="saved-generation",
+                ),
+            )
+        )
+        store.read_preview_generation_record = Mock(
+            return_value=Mock(
+                runtime_identity=Mock(
+                    context=profile.preview.context, instance="cm-odoo-preview-pr-45"
+                )
+            )
+        )
+
+        def provider_read(*, path: str, **_: object) -> object:
+            return {"items": [], "total": 0} if path == "/api/compose.search" else []
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.example", "test"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                side_effect=provider_read,
+            ) as provider,
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"DOKPLOY_ENVIRONMENT_ID": "env-cm-preview"},
+            ),
+        ):
+            inputs = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=store,
+                profile=profile,
+                request=OdooPreviewApplyInputsRequest(
+                    product="odoo-tenant-cm",
+                    operation="destroy",
+                    pr_number=45,
+                    preview_url="https://pr-45.cm-preview.example.test",
+                ),
+            )
+            self.assertEqual(inputs.status, "ready")
+            moved = build_odoo_preview_apply_inputs(
+                control_plane_root=Path("."),
+                record_store=store,
+                profile=profile.model_copy(
+                    update={
+                        "preview": profile.preview.model_copy(
+                            update={"app_name_prefix": "changed-preview"}
+                        )
+                    }
+                ),
+                request=inputs.plan_request,
+            )
+            self.assertEqual(moved.status, "blocked")
+
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                request=OdooPreviewDokployApplyRequest(dry_run_plan=inputs.dry_run_plan),
+            )
+        self.assertEqual(result.status, "pass")
+        self.assertFalse(
+            any(call.kwargs.get("method", "GET") != "GET" for call in provider.call_args_list)
+        )
+
+    def test_delete_receipt_does_not_prove_provider_absence(self) -> None:
+        dry_run = build_odoo_preview_dokploy_dry_run(
+            request=OdooPreviewDokployDryRunRequest(
+                runtime_plan=_runtime_plan(operation="destroy", target=_target())
+            )
+        )
+
+        def provider_read(*, path: str, **_: object) -> object:
+            if path == "/api/project.all":
+                target = _target()
+                return [
+                    {
+                        "environments": [
+                            {
+                                "environmentId": "preview-env",
+                                "composes": [
+                                    {"composeId": target.target_id, "name": target.target_name}
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            if path == "/api/domain.byComposeId":
+                return []
+            if path == "/api/compose.delete":
+                return {}
+            raise AssertionError(path)
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_source.read_dokploy_config",
+                return_value=("https://provider.example", "test"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_preview_runtime.dokploy_api.dokploy_request",
+                side_effect=provider_read,
+            ),
+        ):
+            result = execute_odoo_preview_dokploy_apply(
+                control_plane_root=Path("."),
+                request=OdooPreviewDokployApplyRequest(dry_run_plan=dry_run),
+            )
+        self.assertEqual(result.status, "fail")
+        self.assertTrue(result.provider_effect_attempted)
+
     def test_apply_inputs_destroy_blocks_without_matching_preview_compose(self) -> None:
         with (
             patch(
@@ -1873,7 +1995,7 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         for status, expected in ((404, "present"), (403, "unknown"), (503, "unknown")):
 
             def provider_read(*, path: str, **_: object) -> object:
-                if path == "/api/project.all":
+                if path in {"/api/project.all", "/api/compose.search"}:
                     return []
                 raise dokploy_api.DokployRequestFailed(
                     method="GET", path=path, detail="Unavailable parent", status_code=status
@@ -1964,6 +2086,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
                 *, path: str, query: dict[str, str] | None = None, **_: object
             ) -> object:
                 nonlocal reads
+                if path == "/api/compose.search":
+                    return []
                 if path == "/api/project.all":
                     result = snapshots[min(reads, len(snapshots) - 1)]
                     reads += 1
@@ -2407,10 +2531,19 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
         )
         requests: list[dict[str, object]] = []
+        domain_deleted = False
 
         def _fake_dokploy_request(**kwargs: object) -> object:
+            nonlocal domain_deleted
             requests.append(dict(kwargs))
+            if kwargs["path"] in {"/api/project.all", "/api/compose.search"}:
+                return []
+            if kwargs["path"] == "/api/domain.delete":
+                domain_deleted = True
+                return {}
             if kwargs["path"] == "/api/domain.byComposeId":
+                if domain_deleted:
+                    return []
                 return [
                     {
                         "domainId": "domain-cm-pr-45",
@@ -2440,10 +2573,12 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
 
         self.assertEqual(result.status, "pass")
         self.assertEqual(
-            [request["path"] for request in requests],
-            ["/api/domain.byComposeId", "/api/domain.delete", "/api/compose.delete"],
+            [request["path"] for request in requests if request.get("method") == "POST"],
+            ["/api/domain.delete", "/api/compose.delete"],
         )
-        delete_payload = requests[-1]["payload"]
+        delete_payload = next(
+            item["payload"] for item in requests if item["path"] == "/api/compose.delete"
+        )
         self.assertIsInstance(delete_payload, dict)
         assert isinstance(delete_payload, dict)
         self.assertEqual(delete_payload["composeId"], "compose-cm-pr-45")
@@ -2457,10 +2592,19 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
         )
         requests: list[dict[str, object]] = []
+        domain_deleted = False
 
         def _fake_dokploy_request(**kwargs: object) -> object:
+            nonlocal domain_deleted
             requests.append(dict(kwargs))
+            if kwargs["path"] in {"/api/project.all", "/api/compose.search"}:
+                return []
+            if kwargs["path"] == "/api/domain.delete":
+                domain_deleted = True
+                return {}
             if kwargs["path"] == "/api/domain.byComposeId":
+                if domain_deleted:
+                    return []
                 return []
             if kwargs["path"] == "/api/compose.delete":
                 raise click.ClickException(
@@ -2490,8 +2634,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertEqual(result.error_message, "")
         self.assertEqual(
-            [request["path"] for request in requests],
-            ["/api/domain.byComposeId", "/api/compose.delete"],
+            [request["path"] for request in requests if request.get("method") == "POST"],
+            ["/api/compose.delete"],
         )
 
     def test_apply_destroy_treats_missing_compose_after_domain_delete_as_clean(self) -> None:
@@ -2502,10 +2646,19 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
             )
         )
         requests: list[dict[str, object]] = []
+        domain_deleted = False
 
         def _fake_dokploy_request(**kwargs: object) -> object:
+            nonlocal domain_deleted
             requests.append(dict(kwargs))
+            if kwargs["path"] in {"/api/project.all", "/api/compose.search"}:
+                return []
+            if kwargs["path"] == "/api/domain.delete":
+                domain_deleted = True
+                return {}
             if kwargs["path"] == "/api/domain.byComposeId":
+                if domain_deleted:
+                    return []
                 return [
                     {
                         "domainId": "domain-pr-45",
@@ -2541,8 +2694,8 @@ class OdooPreviewDokployDryRunTests(unittest.TestCase):
         self.assertEqual(result.domain_id, "domain-pr-45")
         self.assertEqual(result.error_message, "")
         self.assertEqual(
-            [request["path"] for request in requests],
-            ["/api/domain.byComposeId", "/api/domain.delete", "/api/compose.delete"],
+            [request["path"] for request in requests if request.get("method") == "POST"],
+            ["/api/domain.delete", "/api/compose.delete"],
         )
 
     def test_smoke_check_retries_transient_http_404(self) -> None:
