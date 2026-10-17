@@ -557,13 +557,23 @@ class PreviewReservationRecoveryTests(unittest.TestCase):
         preview = preview.model_copy(update={"serving_generation_id": generation.generation_id})
         self.store.write_preview_record(preview)
         from control_plane.http_app import create_launchplane_fastapi_app
+        from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
         from control_plane.service_auth import LaunchplaneAuthzPolicy
         from tests.http_app_test_support import _RejectingVerifier, _local_operator_bearer_config
         from tests.support.http import request as http_request
 
+        policy = LaunchplaneAuthzPolicy()
+        self.store.seed_authz_policy_if_absent(
+            LaunchplaneAuthzPolicyRecord(
+                record_id="preview-cleanup-fixture-policy",
+                source="test",
+                updated_at=self.profile.updated_at,
+                policy=policy,
+            )
+        )
         app = create_launchplane_fastapi_app(
             verifier=_RejectingVerifier(),
-            authz_policy=LaunchplaneAuthzPolicy(),
+            authz_policy=policy,
             bearer_identity_config=_local_operator_bearer_config(token_label="local-owner-write"),
             record_store_factory=lambda: self.store,
             control_plane_root_path=self.root,
