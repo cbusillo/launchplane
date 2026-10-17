@@ -770,6 +770,17 @@ pass rebuilds with full CI. Landing uses fresh structural admission evidence
 and the protected expected-head merge; no
 checks are copied to a new SHA and no provider requirement is changed.
 
+All adapter check reads supersede attempts within their provider check suite.
+Push and PR workflows can publish identical job names from the same App on one
+SHA; a passing job in one suite cannot erase a failing or pending job in another.
+This applies to PR-head screening, candidate observation, base verification,
+head-check reuse and failure diagnostics. Failed suites on a source head can
+prevent reuse and require full candidate CI. A failing candidate enters the
+existing recovery path instead of planning a landing that fresh admission will
+refuse. A passing rerun in the failed suite can establish exact-SHA recovery
+under the existing retry budget; a new suite alone cannot clear the failure.
+When that suite cannot be rerun, recovery needs a new candidate SHA.
+
 Repositories using batch candidates must run their required workflows for
 pushes to `launchplane/train/**` and exclude `launchplane/construct/**` from
 those triggers. A workflow matching every branch would still run intermediate

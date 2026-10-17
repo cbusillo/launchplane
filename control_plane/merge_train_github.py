@@ -5483,17 +5483,22 @@ def _list_check_runs(
 
 
 def _latest_check_runs(check_runs: list[object]) -> list[object]:
-    """Keep only the most recent run of each check, as GitHub's own merge box does.
+    """Keep the latest attempt of each check within its provider suite.
 
-    A rerun is a new check run on the same commit; the superseded run must not
-    decide the result. GitHub issues increasing ids, so the highest id wins.
+    Push and PR workflows can use the same job name and App on one commit.
+    Success in one suite must not erase failure in another. A rerun within
+    the same suite supersedes its earlier attempt; the highest check id wins.
     """
-    latest: dict[tuple[str, object], dict[str, object]] = {}
+    latest: dict[tuple[str, object, int | None], dict[str, object]] = {}
     for item in check_runs:
         check_run = _json_object(item, "GitHub check run")
         app = check_run.get("app")
         app_id = app.get("id") if isinstance(app, dict) else None
-        key = (str(check_run.get("name") or "").casefold(), app_id)
+        suite = check_run.get("check_suite")
+        suite_id = suite.get("id") if isinstance(suite, dict) else None
+        if not isinstance(suite_id, int) or isinstance(suite_id, bool):
+            suite_id = None
+        key = (str(check_run.get("name") or "").casefold(), app_id, suite_id)
         current = latest.get(key)
         if current is None or _check_run_order(check_run) > _check_run_order(current):
             latest[key] = check_run
