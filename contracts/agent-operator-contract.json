@@ -110,6 +110,36 @@
         ]
       },
       {
+        "idempotency": "apply",
+        "identity_dependencies": [
+          "read_browser_mutation_identity"
+        ],
+        "method": "POST",
+        "modes": [
+          "dry-run",
+          "apply",
+          "readback"
+        ],
+        "operation_id": "complete_testing_verification",
+        "path": "/v1/products/{product}/testing-verification",
+        "purpose": "Verify the installed Odoo testing copy and finish its deployment and inventory publication without another deployment or restore.",
+        "response_statuses": [
+          "202",
+          "400",
+          "401",
+          "403",
+          "409",
+          "503"
+        ],
+        "reviewed_evidence": [
+          "reviewed_plan_sha256"
+        ],
+        "schema_fingerprint_sha256": "6b47a49547415639977863d2d2747e5fb896ebfef965f4cd6703e881f0abc8d3",
+        "supported_surfaces": [
+          "service_api"
+        ]
+      },
+      {
         "idempotency": "none",
         "identity_dependencies": [
           "read_browser_mutation_identity"
@@ -223,7 +253,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "9134cab96df9a3cb4e4032fd367a57118aa86252ba051af0212dec862f75c941",
+        "schema_fingerprint_sha256": "c511c140ac67b2921121dc599c8a086983925b6e7edf23daf9c041b437521c6d",
         "supported_surfaces": [
           "service_api"
         ]
@@ -254,7 +284,7 @@
         "reviewed_evidence": [
           "reviewed_plan_sha256"
         ],
-        "schema_fingerprint_sha256": "e276d8778bb63a5a90a42f957fee3c63adb089ad2a5fc3affb737dc2ba8ec52b",
+        "schema_fingerprint_sha256": "57325f6b33cfc755a4dcc4f1f11e6b2dd0e11a315083c3ffe2a70099503595ce",
         "supported_surfaces": [
           "service_api"
         ]
@@ -778,8 +808,8 @@
   },
   "normalization_version": 1,
   "provenance": {
-    "source_commit_sha": "25076e0e1a45fb60be2a593928017ec78bae8cd9"
+    "source_commit_sha": "ab2bd305b9cd332debfaaa54cd4f0fb82ae2e05e"
   },
   "schema_version": 1,
-  "semantic_digest_sha256": "a7bea1cb5ac802c5ce633e50099fdcb9fb5e6ac7fe762fb1b522a82b10913c58"
+  "semantic_digest_sha256": "7386fdf5409eb891d89f6b11a1613e6c4ff3c529aa7a0273730e81f1688d40e5"
 }

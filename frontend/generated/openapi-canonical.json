@@ -33547,6 +33547,17 @@
       "ProductHealthMonitoringCheckSummary": {
         "additionalProperties": false,
         "properties": {
+          "dependency_health": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyHealthEvidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
           "enabled": {
             "title": "Enabled",
             "type": "boolean"
@@ -33761,6 +33772,10 @@
             ],
             "title": "Current Check Kind"
           },
+          "current_dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
+          },
           "current_enabled": {
             "anyOf": [
               {
@@ -33870,6 +33885,10 @@
             ],
             "title": "Requested Check Kind",
             "type": "string"
+          },
+          "requested_dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
           },
           "requested_enabled": {
             "title": "Requested Enabled",
@@ -34004,6 +34023,28 @@
             },
             "title": "Checks",
             "type": "array"
+          },
+          "dependency_expectations": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyExpectations"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
+          },
+          "dependency_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-launchplane-optional-response": true
           },
           "monitoring_intent": {
             "enum": [
@@ -34268,6 +34309,8 @@
           },
           "failure_code": {
             "enum": [
+              "dependency_failed",
+              "dependency_not_covered",
               "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
@@ -34448,6 +34491,8 @@
             "anyOf": [
               {
                 "enum": [
+                  "dependency_failed",
+                  "dependency_not_covered",
                   "production_delivery_failed",
                   "connection_timeout",
                   "deploy_fence_held",
@@ -34696,6 +34741,8 @@
           },
           "failure_code": {
             "enum": [
+              "dependency_failed",
+              "dependency_not_covered",
               "production_delivery_failed",
               "connection_timeout",
               "deploy_fence_held",
@@ -35002,6 +35049,10 @@
             },
             "title": "Checks",
             "type": "array"
+          },
+          "dependency_health": {
+            "$ref": "#/components/schemas/RuntimeDependencyHealthPolicy",
+            "x-launchplane-optional-response": true
           },
           "monitoring_intent": {
             "default": "prelaunch",
@@ -46896,6 +46947,149 @@
         "title": "RunnerLaneRegistrationRequest",
         "type": "object"
       },
+      "RuntimeDependencyExpectations": {
+        "additionalProperties": false,
+        "properties": {
+          "dependencies": {
+            "default": [],
+            "items": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ],
+              "type": "string"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "source": {
+            "default": "derived",
+            "enum": [
+              "derived",
+              "override",
+              "unavailable"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "title": "RuntimeDependencyExpectations",
+        "type": "object"
+      },
+      "RuntimeDependencyHealthEvidence": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "enum": [
+              "informational",
+              "required"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "results": {
+            "additionalProperties": {
+              "enum": [
+                "pass",
+                "fail",
+                "not_covered"
+              ],
+              "type": "string"
+            },
+            "propertyNames": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ]
+            },
+            "title": "Results",
+            "type": "object"
+          },
+          "source": {
+            "enum": [
+              "derived",
+              "override",
+              "unavailable"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "fail",
+              "not_covered",
+              "none"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "source",
+          "mode"
+        ],
+        "title": "RuntimeDependencyHealthEvidence",
+        "type": "object"
+      },
+      "RuntimeDependencyHealthPolicy": {
+        "additionalProperties": false,
+        "properties": {
+          "mode": {
+            "default": "informational",
+            "enum": [
+              "informational",
+              "required"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "override": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RuntimeDependencyOverride"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "title": "RuntimeDependencyHealthPolicy",
+        "type": "object"
+      },
+      "RuntimeDependencyOverride": {
+        "additionalProperties": false,
+        "properties": {
+          "dependencies": {
+            "items": {
+              "enum": [
+                "database",
+                "email",
+                "cache"
+              ],
+              "type": "string"
+            },
+            "title": "Dependencies",
+            "type": "array"
+          },
+          "reason": {
+            "maxLength": 1000,
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "dependencies",
+          "reason"
+        ],
+        "title": "RuntimeDependencyOverride",
+        "type": "object"
+      },
       "RuntimeEnvironmentRecord": {
         "additionalProperties": false,
         "properties": {
@@ -50453,6 +50647,11 @@
             "title": "Domain Host",
             "type": "string"
           },
+          "initial_generation": {
+            "default": false,
+            "title": "Initial Generation",
+            "type": "boolean"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -50625,6 +50824,11 @@
             "title": "Context",
             "type": "string"
           },
+          "initial_generation": {
+            "default": false,
+            "title": "Initial Generation",
+            "type": "boolean"
+          },
           "instance": {
             "const": "testing",
             "default": "testing",
@@ -50636,13 +50840,14 @@
             "enum": [
               "dry-run",
               "apply",
-              "readback"
+              "readback",
+              "release"
             ],
             "title": "Mode",
             "type": "string"
           },
           "operation_id": {
-            "minLength": 1,
+            "default": "",
             "title": "Operation Id",
             "type": "string"
           },
@@ -50656,11 +50861,19 @@
             "pattern": "^(?:[a-f0-9]{64})?$",
             "title": "Reviewed Plan Sha256",
             "type": "string"
+          },
+          "source_mode": {
+            "default": "ssh",
+            "enum": [
+              "ssh",
+              "container-export"
+            ],
+            "title": "Source Mode",
+            "type": "string"
           }
         },
         "required": [
           "context",
-          "operation_id",
           "reason"
         ],
         "title": "TestingReplacementResourcesRequest",
@@ -50705,6 +50918,61 @@
           "reason"
         ],
         "title": "TestingRestorePolicyRequest",
+        "type": "object"
+      },
+      "TestingVerificationRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "minLength": 1,
+            "title": "Context",
+            "type": "string"
+          },
+          "deployment_record_id": {
+            "minLength": 1,
+            "title": "Deployment Record Id",
+            "type": "string"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "mode": {
+            "default": "dry-run",
+            "enum": [
+              "dry-run",
+              "apply",
+              "readback"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "operation_id": {
+            "minLength": 1,
+            "title": "Operation Id",
+            "type": "string"
+          },
+          "reason": {
+            "minLength": 1,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reviewed_plan_sha256": {
+            "default": "",
+            "pattern": "^(?:[a-f0-9]{64})?$",
+            "title": "Reviewed Plan Sha256",
+            "type": "string"
+          }
+        },
+        "required": [
+          "context",
+          "operation_id",
+          "deployment_record_id",
+          "reason"
+        ],
+        "title": "TestingVerificationRequest",
         "type": "object"
       },
       "TrackedTargetLogDeploymentResponse": {
@@ -82190,6 +82458,10 @@
                         "title": "Checks",
                         "type": "array"
                       },
+                      "dependency_health": {
+                        "$ref": "#/$defs/RuntimeDependencyHealthPolicy",
+                        "x-launchplane-optional-response": true
+                      },
                       "monitoring_intent": {
                         "default": "prelaunch",
                         "enum": [
@@ -83048,6 +83320,61 @@
                     ],
                     "title": "PublicDnsExpectedTarget",
                     "type": "object"
+                  },
+                  "RuntimeDependencyHealthPolicy": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "mode": {
+                        "default": "informational",
+                        "enum": [
+                          "informational",
+                          "required"
+                        ],
+                        "title": "Mode",
+                        "type": "string"
+                      },
+                      "override": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/RuntimeDependencyOverride"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "title": "RuntimeDependencyHealthPolicy",
+                    "type": "object"
+                  },
+                  "RuntimeDependencyOverride": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "dependencies": {
+                        "items": {
+                          "enum": [
+                            "database",
+                            "email",
+                            "cache"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "Dependencies",
+                        "type": "array"
+                      },
+                      "reason": {
+                        "maxLength": 1000,
+                        "minLength": 1,
+                        "title": "Reason",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "dependencies",
+                      "reason"
+                    ],
+                    "title": "RuntimeDependencyOverride",
+                    "type": "object"
                   }
                 },
                 "additionalProperties": false,
@@ -83733,6 +84060,61 @@
                     ],
                     "title": "PublicDnsExpectedTarget",
                     "type": "object"
+                  },
+                  "RuntimeDependencyHealthPolicy": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "mode": {
+                        "default": "informational",
+                        "enum": [
+                          "informational",
+                          "required"
+                        ],
+                        "title": "Mode",
+                        "type": "string"
+                      },
+                      "override": {
+                        "anyOf": [
+                          {
+                            "$ref": "#/$defs/RuntimeDependencyOverride"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      }
+                    },
+                    "title": "RuntimeDependencyHealthPolicy",
+                    "type": "object"
+                  },
+                  "RuntimeDependencyOverride": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "dependencies": {
+                        "items": {
+                          "enum": [
+                            "database",
+                            "email",
+                            "cache"
+                          ],
+                          "type": "string"
+                        },
+                        "title": "Dependencies",
+                        "type": "array"
+                      },
+                      "reason": {
+                        "maxLength": 1000,
+                        "minLength": 1,
+                        "title": "Reason",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "dependencies",
+                      "reason"
+                    ],
+                    "title": "RuntimeDependencyOverride",
+                    "type": "object"
                   }
                 },
                 "additionalProperties": false,
@@ -83753,6 +84135,16 @@
                   "context": {
                     "title": "Context",
                     "type": "string"
+                  },
+                  "dependency_health": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/RuntimeDependencyHealthPolicy"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   },
                   "enabled": {
                     "default": true,
@@ -92725,6 +93117,127 @@
           }
         },
         "summary": "Prepare independent empty testing storage while preserving the retained lane"
+      }
+    },
+    "/v1/products/{product}/testing-verification": {
+      "post": {
+        "operationId": "complete_testing_verification",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "minLength": 1,
+              "pattern": "^\\S+$",
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Idempotency-Key",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestingVerificationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptedEvidenceResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Verify and publish the installed Odoo testing copy without another deployment"
       }
     },
     "/v1/promotions/{record_id}": {

@@ -968,6 +968,7 @@ from control_plane.http_routes.testing_replacement_bootstrap import (
     register_testing_replacement_bootstrap_routes,
 )
 from control_plane.http_routes.testing_public_ingress import register_testing_public_ingress_routes
+from control_plane.http_routes.testing_verification import register_testing_verification_routes
 from control_plane.http_routes.testing_generation_retirement import (
     register_testing_generation_retirement_routes,
 )
@@ -13770,6 +13771,9 @@ def create_launchplane_fastapi_app(
             payload = response.model_dump(mode="json", exclude_none=True)
             if isinstance(payload.get("result"), dict):
                 payload["result"].pop("current_private_endpoint_key", None)
+                if "dependency_health" not in raw_payload:
+                    payload["result"].pop("current_dependency_health", None)
+                    payload["result"].pop("requested_dependency_health", None)
                 if "expected_dns_targets" not in raw_payload:
                     payload["result"].pop("current_expected_dns_targets", None)
                     payload["result"].pop("requested_expected_dns_targets", None)
@@ -29792,6 +29796,12 @@ def create_launchplane_fastapi_app(
         app,
         dependencies=read_route_dependencies,
         mutation_identity=read_browser_mutation_identity,
+    )
+    register_testing_verification_routes(
+        app,
+        dependencies=read_route_dependencies,
+        mutation_identity=read_browser_mutation_identity,
+        root=resolved_control_plane_root,
     )
 
     register_product_website_cleanup_routes(

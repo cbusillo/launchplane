@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -11,7 +12,13 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.http_app import create_launchplane_fastapi_app
 from control_plane.service_auth import LaunchplaneAuthzPolicy
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.testing_replacement_resources import ROUTE
+from control_plane.contracts.canonical_json import canonical_json_sha256
+from control_plane.testing_replacement_resources import (
+    ROUTE,
+    TestingReplacementResourcesRequest,
+    resource_request_payload,
+    resource_wire_payload,
+)
 from control_plane.workflows.dokploy_target_adoption import (
     PROJECT_CREATE_PATH,
     ENVIRONMENT_CREATE_PATH,
@@ -24,8 +31,24 @@ from tests.support.http import request
 from tests.support.profiles import _odoo_profile_payload_with_prod_lane
 
 
+class LegacyResourceRequestTests(unittest.TestCase):
+    def test_historical_wire_and_identity_preserve_recovery_keys(self) -> None:
+        artifact = json.loads(
+            (
+                Path(__file__).parent / "fixtures" / "legacy_testing_resource_request.json"
+            ).read_text()
+        )
+        request = TestingReplacementResourcesRequest.model_validate(artifact["wire_payload"])
+        self.assertEqual(resource_wire_payload(request), artifact["wire_payload"])
+        self.assertEqual(resource_request_payload(request), artifact["request_payload"])
+        self.assertEqual(
+            canonical_json_sha256(resource_request_payload(request)), artifact["request_sha256"]
+        )
+
+
 class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
     database_url = ""
+    idempotency_key = "resource-fixture"
 
     def setUp(self) -> None:
         temporary = TemporaryDirectory()
@@ -82,7 +105,7 @@ class TestingReplacementResourceHttpTests(unittest.IsolatedAsyncioTestCase):
             ROUTE.format(product=self.profile.product),
             headers={
                 "Authorization": "Bearer local-operator-token",
-                "Idempotency-Key": "resource-fixture",
+                "Idempotency-Key": self.idempotency_key,
             },
             payload={
                 "context": self.context,

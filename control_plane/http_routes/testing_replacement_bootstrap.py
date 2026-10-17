@@ -7,6 +7,7 @@ from typing import Annotated, NoReturn
 import click
 from fastapi import Depends, Header, Path as PathParameter
 
+from control_plane.durable_operation_authorization import DurableOperationAuthorizationDeniedError
 from control_plane.http_routes.mutation_support import (
     AcceptedEvidenceResponse,
     accepted_evidence_response,
@@ -92,6 +93,12 @@ def register_testing_replacement_bootstrap_routes(
                     in_progress_message="Fresh testing bootstrap is running under its original key.",
                     reconcile_message="Bootstrap has an unknown outcome; inspect the retained generation with its original key.",
                 )
+        except DurableOperationAuthorizationDeniedError:
+            refuse(
+                403,
+                "authorization_denied",
+                "The provider refused the Odoo testing usage read. Preserve the trace and original bootstrap key.",
+            )
         except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
             refuse(
                 409,

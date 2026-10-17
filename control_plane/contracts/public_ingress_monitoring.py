@@ -18,6 +18,7 @@ from control_plane.contracts.route_binding_record import RouteBindingStatus
 from control_plane.contracts.route_binding_record import RouteBindingTerminationKind
 from control_plane.contracts.route_binding_record import RouteBindingTlsOwner
 from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
+from control_plane.contracts.runtime_dependency_health import RuntimeDependencyHealthEvidence
 
 
 # Historical source-age incidents are retained as evidence, never failure alerts.
@@ -82,6 +83,8 @@ PublicIngressTargetKind = Literal[
     "tls_domain",
 ]
 PublicIngressFailureCode = Literal[
+    "dependency_failed",
+    "dependency_not_covered",
     "production_delivery_failed",
     "connection_timeout",
     "deploy_fence_held",
@@ -321,6 +324,11 @@ class PublicIngressTargetObservation(BaseModel):
         json_schema_extra={"x-launchplane-optional-response": True},
     )
     summary: str
+    dependency_health: RuntimeDependencyHealthEvidence | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_observation(self) -> "PublicIngressTargetObservation":
@@ -1166,7 +1174,7 @@ def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngres
         return "network"
     if code in {"redirect_loop", "self_redirect"}:
         return "redirect"
-    if code in {"health_status_error", "http_error"}:
+    if code in {"health_status_error", "http_error", "dependency_failed"}:
         return "http"
     if code.startswith("tls_"):
         return "tls"
@@ -1178,6 +1186,7 @@ def public_ingress_failure_layer(code: PublicIngressFailureCode) -> PublicIngres
         "private_endpoint_mismatch",
         "private_endpoint_not_found",
         "monitoring_intent_changed",
+        "dependency_not_covered",
     }:
         return "configuration"
     if code in {"deploy_fence_held", "provider_check_unavailable", "production_delivery_failed"}:

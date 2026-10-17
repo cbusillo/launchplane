@@ -10,8 +10,12 @@ ownership. Preparation changes no Odoo database, deployment or access grant.
 The request names the product/context, `instance: prod`, a reason, and
 `website_settings: {artifact_id, settings}`. The artifact must be the product's
 current recorded testing artifact. The origin must match the production lane's
-recorded HTTPS base URL; configure that URL through the existing product-profile
-service API/UI before preparing settings if it is absent. Settings contain the native `website_id`,
+resolved HTTPS base URL: the first public hostname on its tracked target takes
+precedence, using the same public-host resolver as stable deployment. Without
+public hostnames, the recorded product-profile base URL remains the fallback.
+The profile's internal origin and health URLs need no rewrite to prepare public
+settings. Preparation rechecks this resolution on apply; it changes no target,
+profile or live website setting. Settings contain the native `website_id`,
 `public_origin` (HTTPS), `public_indexing_enabled`, `google_analytics_key`
 (`G-…` or empty), `cookies_bar` and `block_third_party_domains`. Empty analytics
 supports preparing indexing before the stream is supplied. GA4 requires both

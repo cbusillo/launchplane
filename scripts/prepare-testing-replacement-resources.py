@@ -12,7 +12,9 @@ from urllib.parse import quote
 
 from control_plane.testing_replacement_resources import (
     ROUTE,
+    resource_wire_payload,
     TestingReplacementResourcesPlan,
+    TestingInitialPreparationRelease,
     TestingReplacementResourcesRequest,
     TestingReplacementResourcesReadback,
     TestingReplacementResourcesResult,
@@ -21,10 +23,13 @@ from control_plane.testing_replacement_resources import (
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "apply", "readback"))
+    parser.add_argument("mode", choices=("dry-run", "apply", "readback", "release"))
     parser.add_argument("--operator-helper", type=Path, required=True)
-    for field in ("product", "context", "operation-id", "reason"):
+    for field in ("product", "context", "reason"):
         parser.add_argument(f"--{field}", required=True)
+    parser.add_argument("--operation-id", default="")
+    parser.add_argument("--initial-generation", action="store_true")
+    parser.add_argument("--source-mode", choices=("ssh", "container-export"), default="ssh")
     parser.add_argument("--evidence-file", type=Path)
     parser.add_argument("--reviewed-dry-run", action="store_true")
     parser.add_argument("--idempotency-key", default="")
@@ -40,7 +45,9 @@ def main() -> int:
         or args.evidence_file.is_symlink()
     ):
         parser.error("Use a private evidence file outside the repository.")
-    if args.mode == "apply" and (not args.reviewed_dry_run or not args.idempotency_key.strip()):
+    if args.mode in {"apply", "release"} and (
+        not args.reviewed_dry_run or not args.idempotency_key.strip()
+    ):
         parser.error("Apply requires a reviewed dry run and the original stable key.")
     if args.mode == "dry-run" and evidence_path is not None and evidence_path.exists():
         parser.error("Choose new evidence; existing review evidence is preserved.")
@@ -56,14 +63,22 @@ def main() -> int:
         context=args.context,
         operation_id=args.operation_id,
         reason=args.reason,
+        initial_generation=args.initial_generation,
+        source_mode=args.source_mode,
     )
-    review_request = {"product": args.product, **draft.model_dump(mode="json")}
+    if args.initial_generation and not args.idempotency_key.strip():
+        parser.error("Initial generation requires the original stable key in every mode.")
+    if args.mode == "release" and not args.initial_generation:
+        parser.error("Only initial preparation supports no-effect release.")
+    if not args.initial_generation and not args.operation_id:
+        parser.error("Stranded recovery requires its retained operation.")
+    review_request = {"product": args.product, **resource_wire_payload(draft)}
     submitted = False
     accepted = False
     trace = ""
     try:
-        body = draft.model_dump(mode="json")
-        if args.mode == "apply":
+        body = resource_wire_payload(draft)
+        if args.mode in {"apply", "release"}:
             assert evidence_path is not None
             saved = json.loads(evidence_path.read_text())
             if saved["request"] != review_request:
@@ -71,17 +86,21 @@ def main() -> int:
             plan = TestingReplacementResourcesPlan.model_validate(saved["plan"])
             if plan.applied:
                 raise ValueError("The review is not a dry run.")
-            body.update(mode="apply", reviewed_plan_sha256=plan.plan_sha256)
+            body.update(mode=args.mode, reviewed_plan_sha256=plan.plan_sha256)
         elif args.mode == "readback":
             body.update(mode="readback")
-        submitted = args.mode == "apply"
+        submitted = args.mode in {"apply", "release"}
         response = transport["request_launchplane"](
             service_url=settings["service_url"],
             path=ROUTE.format(product=quote(args.product, safe="")),
             settings=settings,
             body=body,
             timeout=600,
-            **({"idempotency_key": args.idempotency_key} if submitted else {}),
+            **(
+                {"idempotency_key": args.idempotency_key}
+                if submitted or args.initial_generation
+                else {}
+            ),
         )
         if response["status"] != "accepted":
             raise ValueError("The service did not accept the operation.")
@@ -92,9 +111,28 @@ def main() -> int:
             args.product,
             args.context,
             "testing",
-            args.operation_id,
+            result["operation_id"]
+            if args.initial_generation and not args.operation_id
+            else args.operation_id,
         ):
             raise ValueError("The receipt belongs to another lane or operation.")
+        if args.mode == "apply" and result.get("released") is True:
+            if not args.initial_generation or result["operation_id"] != plan.operation_id:
+                raise ValueError("The released receipt belongs to another reviewed intent.")
+            TestingInitialPreparationRelease.model_validate(result)
+            print(
+                json.dumps(
+                    {
+                        "status": "released",
+                        "mode": args.mode,
+                        "trace_id": trace,
+                        "operation_id": result["operation_id"],
+                        "resources_verified": False,
+                        "released": True,
+                    }
+                )
+            )
+            return 1
         if args.mode == "dry-run":
             plan = TestingReplacementResourcesPlan.model_validate(result)
             if plan.applied:
@@ -104,6 +142,10 @@ def main() -> int:
                 os.open(evidence_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "w"
             ) as output:
                 json.dump({"request": review_request, "plan": plan.model_dump(mode="json")}, output)
+        elif args.mode == "release":
+            if result["operation_id"] != plan.operation_id:
+                raise ValueError("The released receipt belongs to another reviewed intent.")
+            TestingInitialPreparationRelease.model_validate(result)
         elif args.mode == "apply":
             applied = TestingReplacementResourcesResult.model_validate(result)
             if (
@@ -119,8 +161,9 @@ def main() -> int:
                     "status": "verified",
                     "mode": args.mode,
                     "trace_id": trace,
-                    "operation_id": args.operation_id,
-                    "resources_verified": args.mode != "dry-run",
+                    "operation_id": result["operation_id"],
+                    "resources_verified": args.mode in {"apply", "readback"},
+                    "released": args.mode == "release",
                     "restore_started": False,
                     "plan_sha256": result.get("plan_sha256"),
                     "resources_binding_sha256": result.get("resources_binding_sha256"),

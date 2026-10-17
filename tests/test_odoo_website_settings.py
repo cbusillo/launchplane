@@ -16,6 +16,7 @@ from control_plane.contracts.odoo_instance_override_record import (
 )
 from control_plane.odoo_instance_overrides import build_post_deploy_environment
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.odoo_website_settings import (
     OdooWebsiteSettings,
     OdooWebsiteSettingsIntent,
@@ -60,14 +61,15 @@ def seed(store: FilesystemRecordStore) -> None:
     store.write_product_profile_record(profile())
 
 
-def intent(*, key: str = "G-TEST123") -> OdooWebsiteSettingsIntent:
+def intent(
+    *, key: str = "G-TEST123", public_origin: str | None = None
+) -> OdooWebsiteSettingsIntent:
     return OdooWebsiteSettingsIntent(
         artifact_id="artifact-testing",
         settings=OdooWebsiteSettings(
             website_id=1,
-            public_origin=next(
-                lane.base_url for lane in profile().lanes if lane.instance == "prod"
-            ),
+            public_origin=public_origin
+            or next(lane.base_url for lane in profile().lanes if lane.instance == "prod"),
             public_indexing_enabled=True,
             google_analytics_key=key,
         ),
@@ -93,6 +95,90 @@ def prepare(store: FilesystemRecordStore) -> None:
 
 
 class WebsiteSettingsTests(unittest.TestCase):
+    def test_preparation_uses_only_the_first_production_public_host(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            target = DokployTargetRecord(
+                context="example-site",
+                instance="prod",
+                public_hosts=("public.example", "www.public.example"),
+                updated_at=profile().updated_at,
+            )
+            store.write_dokploy_target_record(target)
+            for analytics_key in ("", intent().settings.google_analytics_key):
+                with self.subTest(analytics_key=analytics_key):
+                    value = request().model_copy(
+                        update={
+                            "website_settings": intent(
+                                key=analytics_key, public_origin="https://public.example"
+                            )
+                        }
+                    )
+                    plan = plan_website_settings(store, value)
+                    self.assertFalse(plan["applied"])
+                    with self.assertRaises(FileNotFoundError):
+                        store.read_odoo_instance_override_record(
+                            context_name=target.context, instance_name=target.instance
+                        )
+            for rejected_origin in (
+                intent().settings.public_origin,
+                "https://www.public.example",
+                "https://unrelated.example",
+            ):
+                with self.subTest(rejected_origin=rejected_origin):
+                    bad = request().model_copy(
+                        update={"website_settings": intent(public_origin=rejected_origin)}
+                    )
+                    with self.assertRaises(ValueError):
+                        plan_website_settings(store, bad)
+            store.write_dokploy_target_record(
+                target.model_copy(update={"public_hosts": tuple(reversed(target.public_hosts))})
+            )
+            with self.assertRaises(ValueError):
+                prepare_website_settings(
+                    store,
+                    value.model_copy(
+                        update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
+                    ),
+                )
+            with self.assertRaises(FileNotFoundError):
+                store.read_odoo_instance_override_record(
+                    context_name=target.context, instance_name=target.instance
+                )
+            store.write_dokploy_target_record(target)
+            result = prepare_website_settings(
+                store,
+                value.model_copy(
+                    update={"mode": "apply", "reviewed_plan_sha256": plan["plan_sha256"]}
+                ),
+            )
+            self.assertTrue(result["read_back_matches"])
+            self.assertEqual(store.read_product_profile_record(profile().product), profile())
+            self.assertEqual(
+                store.read_dokploy_target_record(context_name=target.context, instance_name="prod"),
+                target,
+            )
+
+    def test_no_public_hosts_preserves_the_profile_origin(self) -> None:
+        with TemporaryDirectory() as directory:
+            store = FilesystemRecordStore(state_dir=Path(directory))
+            seed(store)
+            for instance, hosts in (("testing", ("testing.example",)), ("prod", ())):
+                store.write_dokploy_target_record(
+                    DokployTargetRecord(
+                        context="example-site",
+                        instance=instance,
+                        public_hosts=hosts,
+                        updated_at=profile().updated_at,
+                    )
+                )
+            prepare(store)
+            stored = store.read_odoo_instance_override_record(
+                context_name="example-site", instance_name="prod"
+            )
+            self.assertEqual(stored.website_settings, intent())
+
     def test_concurrent_first_preparation_cannot_overwrite_a_new_record(self) -> None:
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
@@ -677,6 +763,26 @@ class WebsiteSettingsRouteTests(unittest.IsolatedAsyncioTestCase):
             root = Path(directory)
             store = FilesystemRecordStore(state_dir=root / "state")
             seed(store)
+            store.write_product_profile_record(
+                profile().model_copy(
+                    update={
+                        "lanes": tuple(
+                            lane.model_copy(update={"base_url": "https://origin.example"})
+                            if lane.instance == "prod"
+                            else lane
+                            for lane in profile().lanes
+                        )
+                    }
+                )
+            )
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="example-site",
+                    instance="prod",
+                    public_hosts=("site.example", "www.site.example"),
+                    updated_at=profile().updated_at,
+                )
+            )
             app = create_launchplane_fastapi_app(
                 verifier=_StubVerifier(identity),
                 authz_policy=policy(["product_profile.read"]),
