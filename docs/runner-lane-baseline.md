@@ -244,7 +244,7 @@ lifecycle contracts and are not covered by this planner validation.
 custom-label engine and typed audit contract. This is library support only:
 there is no relabel workflow, local live CLI, or service execution route. It
 adds no live authority, credential binding or supported dispatch path. Under
-[DIRECTION.md](../DIRECTION.md), an operator-decided relabel belongs in the
+[DIRECTION.md](../DIRECTION.md), a relabel requested by an admin or agent belongs in the
 service under the signed-in admin or agent identity. Native integration must
 record that actor, enforce the reviewed repository/runner policy, serialize
 conflicting updates, and use a purpose-bound runner-administration capability.
