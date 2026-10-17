@@ -5234,7 +5234,7 @@ def _required_ruleset_checks(
             if error.status_code in {403, 404}:
                 raise MergeTrainGitHubError(
                     "Merge train candidate validation requires readable active branch rules "
-                    "and GitHub contents: read permission.",
+                    "and GitHub metadata: read permission.",
                     status_code=error.status_code,
                 ) from error
             raise

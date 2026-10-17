@@ -794,7 +794,8 @@ GitHub's [Get a branch endpoint](https://docs.github.com/en/rest/branches/branch
 which requires `contents: read` for the repository. For a protected branch whose
 classic check projection has disabled enforcement, it reads the active rules
 applying to that branch through GitHub's effective branch-rules endpoint and
-uses their required checks, preserving any integration IDs. Disabled and
+uses their required checks, preserving any integration IDs. This endpoint needs
+only metadata read permission. Disabled and
 evaluate-only rulesets do not appear on that endpoint. Unprotected branches,
 missing protection metadata, unreadable or incomplete rule evidence, and empty
 enforced check lists fail closed; observation requests no administration access. A pinned

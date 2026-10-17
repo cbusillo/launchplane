@@ -2071,6 +2071,8 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     )
 
     def test_ruleset_checks_include_later_pages_and_multiple_publishers(self) -> None:
+        from urllib.parse import parse_qs, urlsplit
+
         from control_plane.merge_train_github import _required_branch_checks
 
         branch = {
@@ -2103,6 +2105,13 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             transport=transport, repository_path="owner/repo", base_branch="release/v1"
         )
         self.assertEqual(set(checks), {("formula", 15368), ("formula", 99999), ("audit", None)})
+        self.assertEqual(
+            [
+                parse_qs(urlsplit(request.path).query).get("page")
+                for request in transport.requests[1:]
+            ],
+            [["1"], ["2"]],
+        )
 
     def test_observe_batch_candidate_checks_requires_pinned_check_app(self) -> None:
         candidate = _batch_candidate().model_copy(
