@@ -80,6 +80,53 @@ class FailedBatchRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
         self._prepare()
 
+    def test_concurrent_workflow_success_does_not_hide_failed_candidate_recovery(self) -> None:
+        original_request = self.provider.request
+
+        def request(**kwargs: Any) -> object:
+            if kwargs["method"] == "GET" and "/annotations?" in kwargs["path"]:
+                return []
+            result = original_request(**kwargs)
+            if kwargs["method"] == "GET" and "/check-runs?" in kwargs["path"]:
+                payload = cast(dict[str, Any], result)
+                for check in payload["check_runs"]:
+                    check["check_suite"] = {"id": 10}
+                    if check["id"] == 2:
+                        check["id"] = 4
+                payload["check_runs"].append(
+                    {
+                        **_required_check_run("ci-gate", "completed", "success"),
+                        "id": 3,
+                        "check_suite": {"id": 20},
+                    }
+                )
+            return result
+
+        with patch.object(self.provider, "request", side_effect=request):
+            failed = self.client.observe_batch_candidate_checks(candidate=self.candidate)
+            self.assertEqual(failed.status, "failed")
+            self.assertEqual(failed.required_checks_status, "fail")
+            failures = self.client.read_candidate_check_failures(candidate=failed)
+            self.assertTrue(failures.conclusive)
+            self.assertEqual(failures.check_names, ("ci-gate",))
+            self.provider.checks_failed = False
+            self.provider.checks_pass = True
+            with TemporaryDirectory() as directory:
+                result = self._reflow(
+                    FilesystemRecordStore(state_dir=Path(directory)), failed, observe_checks=True
+                )
+                self.assertEqual(result["reason_code"], "candidate_checks_recovered")
+                replacement = MergeTrainBatchCandidate.model_validate(result["candidate"])
+                restarted = FilesystemRecordStore(state_dir=Path(directory))
+                persisted = restarted.list_merge_train_batch_candidate_records()
+                self.assertTrue(
+                    any(
+                        record.candidate.check_retry_of == replacement.check_retry_of
+                        for record in persisted
+                    )
+                )
+                self.assertTrue(replacement.check_retry_of)
+
     def _prepare(self, *, singleton: bool = False) -> None:
         self.snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()

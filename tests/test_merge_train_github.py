@@ -1848,6 +1848,53 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
                 self.assertEqual(observed_candidate.required_checks_status, expected)
 
+    def test_candidate_keeps_failures_from_other_workflow_suites(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        for failed_suite_rerun, expected in (
+            (None, "fail"),
+            ("queued", "pending"),
+            ("success", "pass"),
+        ):
+            with self.subTest(failed_suite_rerun=failed_suite_rerun):
+                checks = [
+                    {
+                        **_required_check_run("ci-gate", "completed", "failure"),
+                        "id": 1,
+                        "check_suite": {"id": 10},
+                    },
+                    {
+                        **_required_check_run("ci-gate", "completed", "success"),
+                        "id": 2,
+                        "check_suite": {"id": 20},
+                    },
+                    _required_check_run("security-gate", "completed", "success"),
+                ]
+                if failed_suite_rerun is not None:
+                    checks.append(
+                        {
+                            **_required_check_run(
+                                "ci-gate",
+                                "queued" if failed_suite_rerun == "queued" else "completed",
+                                None if failed_suite_rerun == "queued" else failed_suite_rerun,
+                            ),
+                            "id": 3,
+                            "check_suite": {"id": 10},
+                        }
+                    )
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        _protected_branch_with_checks(),
+                        _combined_status(),
+                        {"check_runs": checks},
+                    )
+                )
+                observed = GitHubMergeTrainClient(
+                    transport=transport
+                ).observe_batch_candidate_checks(candidate=candidate)
+                self.assertEqual(observed.required_checks_status, expected)
+
     def test_observe_batch_candidate_checks_keeps_latest_duplicate_pending(self) -> None:
         candidate = _batch_candidate().model_copy(
             update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}

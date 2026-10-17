@@ -757,6 +757,14 @@ screening evidence, but they do not prove the combined tree is safe to land.
 Launchplane must fail closed when candidate check evidence is missing, pending,
 failed, stale, or attached to a different commit SHA.
 
+Check attempts are superseded within their provider check suite. Push and PR
+workflows can publish identical job names from the same App on one candidate;
+a passing job in one suite cannot erase a failing or pending job in another.
+Candidate observation and failure diagnostics retain those independent results,
+so the controller enters its existing failed-candidate recovery instead of
+planning a landing that fresh admission will refuse. A passing rerun in the
+failed suite can establish exact-SHA recovery under the existing retry budget.
+
 The single-entry tree-identity proof above is the only exception. Before planning
 its landing, the controller calls observation, which
 re-reads its head checks and live required-check policy rather than treating the
