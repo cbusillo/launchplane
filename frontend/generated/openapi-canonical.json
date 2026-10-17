@@ -100165,6 +100165,7 @@
     "/v1/owner-secret-inputs/submit": "submit_owner_secret_input",
     "/v1/privileged-operations/authorization-candidates/prepare": "prepare_authorization_candidate",
     "/v1/privileged-operations/plans/{operation_id}/approve": "approve_human_privileged_operation",
+    "/v1/privileged-operations/plans/{operation_id}/cancel": "cancel_human_privileged_operation",
     "/v1/privileged-operations/plans/{operation_id}/revoke": "revoke_human_privileged_operation",
     "/v1/product-profiles/expected-config/apply": "apply_product_expected_config",
     "/v1/product-profiles/health-monitoring/apply": "apply_product_health_monitoring",
