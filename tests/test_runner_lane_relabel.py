@@ -111,6 +111,7 @@ class RunnerRelabelTests(unittest.TestCase):
             inventory_reader=inventory,
             audit_poster=self.audit,
             protected_lane_names=protected_lane_names,
+            protected_labels=(),
         )
 
     def test_replaces_only_custom_labels_after_audit_and_fresh_review(self) -> None:
@@ -130,6 +131,8 @@ class RunnerRelabelTests(unittest.TestCase):
             transport=self.transport,
             inventory_reader=read,
             audit_poster=self.audit,
+            protected_lane_names=(),
+            protected_labels=(),
         )
         self.assertEqual(result["status"], "completed")
         writes = [call for call in self.transport.calls if call[0] != "GET"]
@@ -167,6 +170,8 @@ class RunnerRelabelTests(unittest.TestCase):
                     transport=self.transport,
                     inventory_reader=reader,
                     audit_poster=self.audit,
+                    protected_lane_names=(),
+                    protected_labels=(),
                 )
         self.assertFalse(self.transport.written)
 
@@ -179,6 +184,8 @@ class RunnerRelabelTests(unittest.TestCase):
                     transport=self.transport,
                     inventory_reader=inventory,
                     audit_poster=self.audit,
+                    protected_lane_names=(),
+                    protected_labels=(),
                 )
         self.assertFalse(self.transport.written)
 
@@ -193,6 +200,8 @@ class RunnerRelabelTests(unittest.TestCase):
                 transport=self.transport,
                 inventory_reader=inventory,
                 audit_poster=fail_audit,
+                protected_lane_names=(),
+                protected_labels=(),
             )
         reads = 0
 
@@ -207,6 +216,8 @@ class RunnerRelabelTests(unittest.TestCase):
             transport=self.transport,
             inventory_reader=changed,
             audit_poster=self.audit,
+            protected_lane_names=(),
+            protected_labels=(),
         )
         self.assertEqual(result["status"], "refused_before_write")
         self.assertEqual(self.audits[-1].status, "failed")
@@ -221,6 +232,8 @@ class RunnerRelabelTests(unittest.TestCase):
                     transport=transport,
                     inventory_reader=inventory,
                     audit_poster=self.audit,
+                    protected_lane_names=(),
+                    protected_labels=(),
                 )
                 self.assertEqual(result["status"], "mutation_reconciliation_required")
                 self.assertEqual(sum(call[0] == "PUT" for call in transport.calls), 1)
@@ -241,6 +254,8 @@ class RunnerRelabelTests(unittest.TestCase):
             transport=self.transport,
             inventory_reader=inventory,
             audit_poster=audit,
+            protected_lane_names=(),
+            protected_labels=(),
         )
         self.assertEqual(result["status"], "audit_delivery_pending")
         self.assertEqual(result["mutation_status"], "completed")
@@ -254,7 +269,7 @@ class RunnerRelabelTests(unittest.TestCase):
 
     def test_operations_lane_is_preserved(self) -> None:
         with self.assertRaises(ValueError):
-            self.run_change(protected_lane_names=("general-1",))
+            self.run_change(protected_lane_names=(" GENERAL-1 ",))
         self.assertFalse(self.transport.written)
 
     def test_operations_labels_cannot_be_added_or_changed_using_case(self) -> None:
@@ -286,7 +301,8 @@ class RunnerRelabelTests(unittest.TestCase):
                     transport=self.transport,
                     inventory_reader=reader,
                     audit_poster=self.audit,
-                    protected_labels=("ops",),
+                    protected_labels=(" OpS ",),
+                    protected_lane_names=(),
                 )
         self.assertFalse(self.transport.written)
 
@@ -302,6 +318,8 @@ class RunnerRelabelTests(unittest.TestCase):
             transport=self.transport,
             inventory_reader=inventory,
             audit_poster=self.audit,
+            protected_lane_names=(),
+            protected_labels=(),
         )
         self.assertEqual(result["status"], "completed")
         inverse = self.request.model_copy(
@@ -317,6 +335,8 @@ class RunnerRelabelTests(unittest.TestCase):
             transport=self.transport,
             inventory_reader=inventory,
             audit_poster=self.audit,
+            protected_lane_names=(),
+            protected_labels=(),
         )
         self.assertEqual(result["status"], "completed")
         self.assertEqual(set(self.transport.current), set(original))
@@ -350,3 +370,19 @@ class RunnerRelabelTests(unittest.TestCase):
         for planner in (plan_runner_lane_registration, plan_runner_lane_retirement):
             with self.subTest(planner=planner.__name__), self.assertRaises(ValueError):
                 planner(policy=self.policy, request=self.request, inventory=inventory())
+
+    def test_legacy_operations_refuse_relabel_only_expectations(self) -> None:
+        for operation in ("register", "retire"):
+            for field, value in (
+                ("expected_runner_id", 7),
+                ("expected_custom_labels", ("general",)),
+            ):
+                payload = {
+                    **self.request.model_dump(),
+                    "operation": operation,
+                    "expected_runner_id": None,
+                    "expected_custom_labels": (),
+                }
+                payload[field] = value
+                with self.subTest(operation=operation, field=field), self.assertRaises(ValueError):
+                    RunnerLaneRegistrationRequest.model_validate(payload)

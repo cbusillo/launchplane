@@ -104,6 +104,10 @@ class RunnerLaneRegistrationRequest(BaseModel):
                     normalized
                 ):
                     raise ValueError("custom labels must be nonempty and unique")
+        if self.operation != "relabel" and (
+            self.expected_runner_id is not None or self.expected_custom_labels
+        ):
+            raise ValueError("relabel-only expectations require the relabel operation")
         self.labels = _normalized_labels(self.labels)
         self.active_run_ids = tuple(sorted(set(self.active_run_ids)))
         if any(run_id <= 0 for run_id in self.active_run_ids):

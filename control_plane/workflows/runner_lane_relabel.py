@@ -87,8 +87,8 @@ def execute_relabel(
     transport: MergeTrainGitHubTransport,
     inventory_reader: Callable[[], RunnerLaneInventory],
     audit_poster: AuditPoster,
-    protected_lane_names: tuple[str, ...] = (),
-    protected_labels: tuple[str, ...] = (),
+    protected_lane_names: tuple[str, ...],
+    protected_labels: tuple[str, ...],
 ) -> dict[str, object]:
     """Write at most once. Any uncertain result requires readback, never replay."""
     if request.operation != "relabel":
@@ -104,7 +104,7 @@ def execute_relabel(
         raise ValueError("relabel requires an audit key")
     desired = _expected_labels(request.labels)
     expected = _expected_labels(request.expected_custom_labels)
-    protected = {value.lower() for value in protected_labels}
+    protected = {value.strip().lower() for value in protected_labels}
     if set(desired) & protected:
         raise ValueError("operations routing labels cannot be added")
     path = f"/repos/{request.repository}/actions/runners/{request.expected_runner_id}/labels"
@@ -129,7 +129,7 @@ def execute_relabel(
         if len(matches) != 1 or matches[0].github_id != request.expected_runner_id:
             raise ValueError("runner name/ID changed or is ambiguous")
         if (
-            matches[0].name.lower() in {name.lower() for name in protected_lane_names}
+            matches[0].name.lower() in {name.strip().lower() for name in protected_lane_names}
             or {label.lower() for label in matches[0].labels} & protected
         ):
             raise ValueError("operations execution lane must remain unchanged")
