@@ -95,6 +95,10 @@ class DirectorTestingSourceCompletionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.list_deployment_records(), ())
 
     async def test_unknown_use_data_or_isolation_never_reaches_provider_write(self) -> None:
+        record_safety(self.store, "sample", "sample", "testing", usage="unknown")
+        dry = await self.post(mode="dry-run")
+        self.assertEqual(dry.status_code, 202, dry.text)
+        self.assertEqual(self.fixture.calls, [])
         for changes in (
             {"usage": "unknown"},
             {"usage": "in_use"},
