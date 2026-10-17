@@ -551,6 +551,7 @@ def _deliver_controller_feedback(
                 record=record,
                 token=token,
                 attempted_at=attempted_at,
+                planning_author_ids=repository_policy.enqueue.trusted_automation_github_user_ids,
             )
             feedback_store.write_merge_train_pr_feedback_record(recovered)
         if recovered.delivery_status == "delivered":

@@ -180,7 +180,11 @@ def build_merge_train_pr_feedback_record(
 
 
 def deliver_merge_train_pr_feedback_record(
-    *, record: MergeTrainPrFeedbackRecord, token: str, attempted_at: str
+    *,
+    record: MergeTrainPrFeedbackRecord,
+    token: str,
+    attempted_at: str,
+    planning_author_ids: tuple[int, ...] | None = None,
 ) -> MergeTrainPrFeedbackRecord:
     """Deliver the saved body; retry metadata never changes its evidence chronology."""
     attempts = record.delivery_attempts + (record.delivery_status == "failed")
@@ -208,7 +212,11 @@ def deliver_merge_train_pr_feedback_record(
                     base_branch=record.base_branch,
                     number=record.pull_request_number,
                     token=token,
-                    trusted_author_ids=record.planning_author_ids,
+                    trusted_author_ids=(
+                        record.planning_author_ids
+                        if planning_author_ids is None
+                        else planning_author_ids
+                    ),
                 )
             comment = upsert_github_issue_comment(
                 owner=owner,

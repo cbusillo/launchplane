@@ -351,6 +351,10 @@ def reconcile_completed_change(
                     "Planning completion needs owning-agent review for a cross-repository closing reference."
                 )
             references.append(int(issue["number"]))
+        if len(set(references)) > 100:
+            raise PlanningCompletionReview(
+                "Planning completion references exceeded their coverage bound."
+            )
         page = _object(connection.get("pageInfo"))
         if page.get("hasNextPage") is False:
             break

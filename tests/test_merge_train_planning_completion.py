@@ -293,6 +293,22 @@ class PlanningCompletionTests(TestCase):
         self.assertTrue(retry.planning_reconciliation["ok"])
         self.assertNotIn("plan:active", {label["name"] for label in self.provider.issue["labels"]})
 
+    def test_retry_cannot_reuse_an_author_retired_by_current_policy(self) -> None:
+        self.provider.fail_labels = True
+        record = self.record()
+        self.provider.fail_labels = False
+        self.provider.writes.clear()
+        retry = deliver_merge_train_pr_feedback_record(
+            record=record,
+            token="fixture",
+            attempted_at="2026-10-01T00:02:00Z",
+            planning_author_ids=(),
+        )
+        self.assertEqual(retry.delivery_status, "failed")
+        self.assertFalse(retry.retryable)
+        self.assertFalse(self.provider.writes)
+        self.assertIn("plan:active", {label["name"] for label in self.provider.issue["labels"]})
+
     def test_waits_reporters_and_unfinished_native_prerequisites_are_preserved(self) -> None:
         original = copy.deepcopy(self.provider.issue)
         for change in ("open", "reporter", "waiting", "unreviewed", "blocker", "child"):
