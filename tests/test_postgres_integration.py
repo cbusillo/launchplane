@@ -13698,3 +13698,24 @@ class RealPostgresOdooUpgradeRehearsalTests(unittest.TestCase):
         fixture.setUp()
         self.addCleanup(fixture.doCleanups)
         fixture.test_lifecycle_preserves_both_recovery_states_and_all_original_lanes()
+
+
+@unittest.skipUnless(os.environ.get(POSTGRES_TEST_URL_ENV), "PostgreSQL integration URL required")
+class RealPostgresTestingCandidateTests(unittest.TestCase):
+    def test_candidate_custody_preserves_serving_authority_and_fences_aliases(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+
+        fixture = TestingCandidateTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_independent_storage_never_publishes_candidate_as_serving()
+
+    def test_original_creation_can_be_observed_and_continued_without_repeating(self) -> None:
+        from tests.test_testing_candidate_allocation import TestingCandidateTests
+
+        fixture = TestingCandidateTests()
+        fixture.database_url = self.enterContext(_head_postgres_database())
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        fixture.test_lost_creation_reply_preserves_old_copy_and_never_repeats_effect()

@@ -225,6 +225,7 @@ class TestingResourceScheduleTests(unittest.TestCase):
         project = resources.namespace + "-abc123"
         payload = {
             "composeId": resources.target_id,
+            "serverId": "new-server",
             "environmentId": "new-environment",
             "appName": project,
             "sourceType": "github",
@@ -283,6 +284,65 @@ class TestingResourceScheduleTests(unittest.TestCase):
             # The executed artifact carries the actual provider project identity.
             script = run.call_args.kwargs["schedule_payload"]["script"]
             self.assertEqual(script, resources.script("readback", compose_project=project))
+            from control_plane.dokploy.source import DokployTargetDefinition
+
+            candidate = DokployTargetDefinition(
+                context=resources.context,
+                instance="testing",
+                target_id=resources.target_id,
+                project_name=resources.namespace,
+                target_name=resources.namespace,
+            )
+            store.reset_mock()
+            run.reset_mock()
+            self.assertEqual(
+                run_resource_schedule(
+                    root=Path("."),
+                    store=store,
+                    resources=resources,
+                    mode="prepare",
+                    checkpoint=lambda: None,
+                    candidate_target=candidate,
+                    candidate_server_id="new-server",
+                ),
+                evidence,
+            )
+            store.assert_not_called()
+            self.assertFalse(store.mock_calls)
+            self.assertEqual(run.call_args.kwargs["target_definition"], candidate)
+            for changes in (
+                {"target_id": "serving-target"},
+                {"instance": "prod"},
+                {"context": "another-lane"},
+                {"env": {"ODOO_DB_VOLUME": "retained-db"}},
+                {"domains": ("serving.example.invalid",)},
+                {"public_hosts": ("serving.example.invalid",)},
+            ):
+                with self.subTest(candidate=changes):
+                    run.reset_mock()
+                    with self.assertRaisesRegex(ValueError, "exact empty, unrouted"):
+                        run_resource_schedule(
+                            root=Path("."),
+                            store=store,
+                            resources=resources,
+                            mode="prepare",
+                            checkpoint=lambda: None,
+                            candidate_target=candidate.model_copy(update=changes),
+                            candidate_server_id="new-server",
+                        )
+                    run.assert_not_called()
+            run.reset_mock()
+            with self.assertRaisesRegex(ValueError, "placement changed"):
+                run_resource_schedule(
+                    root=Path("."),
+                    store=store,
+                    resources=resources,
+                    mode="prepare",
+                    checkpoint=lambda: None,
+                    candidate_target=candidate,
+                    candidate_server_id="another-server",
+                )
+            run.assert_not_called()
             for field, value in (
                 ("customGitSSHKeyId", "existing-key"),
                 ("composeFile", "services: {}"),
