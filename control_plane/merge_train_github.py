@@ -5226,8 +5226,10 @@ def _required_branch_checks(
         protection.get("required_status_checks"), "GitHub required status checks response"
     )
     if payload.get("enforcement_level") not in {"everyone", "non_admins"}:
-        raise MergeTrainGitHubError(
-            "Merge train candidate validation requires enforced protected-branch status checks."
+        return _required_ruleset_checks(
+            transport=transport,
+            repository_path=repository_path,
+            encoded_base_branch=encoded_base_branch,
         )
     required_checks: dict[tuple[str, int | None], tuple[str, int | None]] = {}
     raw_checks = payload.get("checks")
@@ -5272,6 +5274,70 @@ def _required_branch_checks(
             required_checks,
             key=lambda binding: (binding[0], binding[1] if binding[1] is not None else -1),
         )
+    )
+
+
+def _required_ruleset_checks(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    encoded_base_branch: str,
+) -> tuple[tuple[str, int | None], ...]:
+    # This endpoint returns active rules applying to this branch, excluding
+    # disabled and evaluate-only rulesets. Repository ruleset catalogs do not.
+    rules: list[object] = []
+    page = 1
+    while True:
+        try:
+            payload = transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/rules/branches/{encoded_base_branch}"
+                f"?per_page=100&page={page}",
+            )
+        except MergeTrainGitHubError as error:
+            if error.rate_limited:
+                raise
+            if error.status_code in {403, 404}:
+                raise MergeTrainGitHubError(
+                    "Merge train candidate validation requires readable active branch rules "
+                    "and GitHub metadata: read permission.",
+                    status_code=error.status_code,
+                ) from error
+            raise
+        if not isinstance(payload, list):
+            raise MergeTrainGitHubError("GitHub effective branch rules must be a list.")
+        rules.extend(payload)
+        if len(payload) < 100:
+            break
+        page += 1
+    checks: dict[tuple[str, int | None], tuple[str, int | None]] = {}
+    for value in rules:
+        rule = _json_object(value, "GitHub effective branch rule")
+        if rule.get("type") != "required_status_checks":
+            continue
+        parameters = _json_object(rule.get("parameters"), "GitHub required check rule parameters")
+        required = parameters.get("required_status_checks")
+        if not isinstance(required, list):
+            raise MergeTrainGitHubError("GitHub ruleset required status checks must be a list.")
+        for value in required:
+            check = _json_object(value, "GitHub ruleset required status check")
+            context = _required_text(
+                check.get("context"), "GitHub required check requires context."
+            )
+            app_id = check.get("integration_id")
+            if app_id is not None and (
+                isinstance(app_id, bool) or not isinstance(app_id, int) or app_id <= 0
+            ):
+                raise MergeTrainGitHubError(
+                    "GitHub ruleset integration_id must be positive or null."
+                )
+            checks[(context.casefold(), app_id)] = (context, app_id)
+    if not checks:
+        raise MergeTrainGitHubError(
+            "Merge train candidate validation requires enforced protected-branch status checks."
+        )
+    return tuple(
+        checks[key] for key in sorted(checks, key=lambda check: (check[0], check[1] or -1))
     )
 
 
