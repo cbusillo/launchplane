@@ -350,14 +350,32 @@ def _migrate_odoo_override_secret_transport_record(
     record: OdooInstanceOverrideRecord,
     apply_changes: bool,
     source_label: str,
+    repair_metadata: bool = False,
+    repair_binding_ids: frozenset[str] = frozenset(),
 ) -> tuple[OdooInstanceOverrideRecord, list[dict[str, str]]]:
     records = record_store.list_odoo_instance_override_records()
     try:
+        bindings = record_store.list_secret_bindings(limit=None)
+        secret_ids = {
+            binding.secret_id
+            for binding in bindings
+            if binding.context == record.context and binding.instance == record.instance
+        }
         plan = plan_odoo_secret_transport(
             record=record,
             records=records,
-            bindings=record_store.list_secret_bindings(limit=None),
+            bindings=bindings,
             source_label=source_label,
+            repair_metadata=repair_metadata,
+            repair_binding_ids=repair_binding_ids,
+            secret_records=record_store.list_secret_records(limit=None) if repair_metadata else (),
+            audit_events=tuple(
+                event
+                for secret_id in sorted(secret_ids)
+                for event in record_store.list_secret_audit_events(secret_id=secret_id)
+            )
+            if repair_metadata
+            else (),
         )
         if apply_changes:
             record_store.write_odoo_secret_transport_migration(
@@ -375,6 +393,8 @@ def _migrate_odoo_override_secret_transport_record(
         for change in plan.changes:
             if change["action"] == "pending":
                 change["action"] = "relabelled"
+            elif change["action"] == "metadata_pending":
+                change["action"] = "metadata_repaired"
     return plan.record if apply_changes else record, plan.changes
 
 
@@ -761,6 +781,18 @@ def odoo_overrides_put_website_bootstrap(
 @click.option("--instance", "instance_name", default="")
 @click.option("--apply", "apply_changes", is_flag=True, help="Persist binding relabels.")
 @click.option(
+    "--repair-metadata-from-relabel-history",
+    "repair_metadata",
+    is_flag=True,
+    help="Recover omitted metadata only when retained relabel provenance is unchanged.",
+)
+@click.option(
+    "--repair-binding-id",
+    "repair_binding_ids",
+    multiple=True,
+    help="Limit metadata recovery to these referenced destination binding ids.",
+)
+@click.option(
     "--source-label",
     default="odoo-secret-transport-migration",
     show_default=True,
@@ -771,11 +803,22 @@ def odoo_overrides_migrate_secret_transport(
     context_name: str,
     instance_name: str,
     apply_changes: bool,
+    repair_metadata: bool,
+    repair_binding_ids: tuple[str, ...],
     source_label: str,
     allow_direct_db_mutation: bool,
 ) -> None:
     normalized_context = context_name.strip().lower()
     normalized_instance = instance_name.strip().lower()
+    normalized_binding_ids = frozenset(item.strip() for item in repair_binding_ids)
+    if "" in normalized_binding_ids:
+        raise click.ClickException("--repair-binding-id must not be blank.")
+    if repair_metadata and not (normalized_context and normalized_instance):
+        raise click.ClickException("Metadata recovery requires exact --context and --instance.")
+    if repair_binding_ids and not repair_metadata:
+        raise click.ClickException(
+            "--repair-binding-id requires --repair-metadata-from-relabel-history."
+        )
     if normalized_instance and not normalized_context:
         raise click.ClickException("--instance requires --context.")
     if apply_changes:
@@ -792,6 +835,8 @@ def odoo_overrides_migrate_secret_transport(
             if (not normalized_context or record.context == normalized_context)
             and (not normalized_instance or record.instance == normalized_instance)
         ]
+        if normalized_binding_ids and not selected_records:
+            raise click.ClickException("Metadata recovery found no override record for this lane.")
         migrations: list[dict[str, object]] = []
         changed_records = 0
         for record in selected_records:
@@ -800,10 +845,10 @@ def odoo_overrides_migrate_secret_transport(
                 record=record,
                 apply_changes=apply_changes,
                 source_label=source_label,
+                repair_metadata=repair_metadata,
+                repair_binding_ids=normalized_binding_ids,
             )
-            changed = any(
-                change["old_binding_id"] != change["new_binding_id"] for change in changes
-            )
+            changed = any(change["action"] != "unchanged" for change in changes)
             if apply_changes and changed:
                 changed_records += 1
             migrations.append(
