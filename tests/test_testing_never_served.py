@@ -3,7 +3,8 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import unittest
-from typing import cast
+from typing import Any, cast
+from unittest.mock import patch
 
 from sqlalchemy import delete
 
@@ -340,12 +341,57 @@ class NeverServedTestingTests(unittest.TestCase):
 
     def test_locked_snapshot_loads_only_history_that_could_defeat_the_proof(self) -> None:
         self.add_history(deployments=40, checks=40)
-        records = self.snapshot()
+        # The unlocked collection read validates the whole history once.
+        self.assertEqual(self.read().usage, "unused")
+        with (
+            patch.object(
+                DeploymentRecord, "model_validate", wraps=DeploymentRecord.model_validate
+            ) as deployments,
+            patch.object(
+                PublicIngressObservationRecord,
+                "model_validate",
+                wraps=PublicIngressObservationRecord.model_validate,
+            ) as checks,
+        ):
+            records = self.snapshot()
+        self.assertEqual(deployments.call_count, 0)
+        self.assertEqual(checks.call_count, 2)
         self.assertEqual(records.deployments, ())
         self.assertEqual(
             {check.record_id for check in records.checks}, {"public_http-fail", "private_http-fail"}
         )
+
+    def test_invalid_prior_payloads_still_withhold_the_proof(self) -> None:
+        self.add_history(deployments=1, checks=1)
         self.assertEqual(self.read().usage, "unused")
+        for model, record_id, damage in (
+            (
+                LaunchplaneDeploymentRow,
+                "old-deploy-0",
+                lambda payload: {**payload, "source_git_ref": ""},
+            ),
+            (
+                LaunchplanePublicIngressObservationRow,
+                "old-check-0",
+                lambda payload: {key: value for key, value in payload.items() if key != "summary"},
+            ),
+        ):
+            with self.subTest(record_id=record_id):
+                original = self.replace_payload(model, record_id, damage)
+                try:
+                    self.assertEqual(self.read().usage, "unknown")
+                finally:
+                    self.replace_payload(model, record_id, lambda _payload: original)
+        self.assertEqual(self.read().usage, "unused")
+
+    def replace_payload(self, model: Any, record_id: str, change: Any) -> dict[str, Any]:
+        with self.store._session_factory() as session:
+            row = session.get(model, record_id)
+            assert row is not None
+            original = dict(row.payload)
+            row.payload = change(original)
+            session.commit()
+        return original
 
     def test_history_text_that_cannot_prove_its_order_still_reaches_the_qualifier(self) -> None:
         later = self.at + timedelta(minutes=30)

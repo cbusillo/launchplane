@@ -52,8 +52,10 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     and_,
+    case,
     create_engine,
     delete,
     desc,
@@ -65,6 +67,7 @@ from sqlalchemy import (
     text,
     select,
     true,
+    type_coerce,
     union_all,
 )
 from sqlalchemy import cast as sql_cast
@@ -1043,6 +1046,10 @@ def _utc_history_bound(value: str) -> str | None:
     if parsed.utcoffset() is None:
         return None
     return parsed.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat()
+
+
+# Only an exact repeat of a payload already validated may skip validation.
+_VALIDATED_HISTORY_PAYLOAD_LIMIT = 1_000_000
 
 
 class _PayloadRow(Protocol):
@@ -5452,6 +5459,7 @@ class PostgresRecordStore(HumanSessionStore):
         self._merge_train_feedback_context = local()
         self._preview_execution_context = local()
         self._disposable_authority_context = local()
+        self._validated_history_payloads: set[tuple[str, str]] = set()
 
     @property
     def backend_name(self) -> str:
@@ -10447,7 +10455,7 @@ class PostgresRecordStore(HumanSessionStore):
         """True only for canonical UTC text whose whole second is before ``bound``.
 
         Undated, malformed, offset, leap-day or payload-mismatched text stays a
-        candidate for the caller's own parse, so nothing incomplete is hidden.
+        candidate for the qualifier's own parse, so no incomplete timestamp is hidden.
         """
         seconds: Any = func.substr(column, 1, 19)
         if self.database_dialect_name == "postgresql":
@@ -10459,6 +10467,65 @@ class PostgresRecordStore(HumanSessionStore):
             payload_text == column,
             seconds < bound,
         )
+
+    def _never_served_history(
+        self,
+        session: Any,
+        row_model: Any,
+        record_type: type[RecordModel],
+        filters: tuple[Any, ...],
+        predates: Any,
+    ) -> tuple[RecordModel, ...]:
+        """Every record that could defeat the proof; every other one stays validated.
+
+        A record that provably predates the generation is left out only when this
+        process has already validated the exact same payload. Any other payload,
+        including a changed one, is validated here and still fails the read.
+        """
+        if self.database_dialect_name == "postgresql":
+            digest: Any = func.encode(
+                func.sha256(func.convert_to(sql_cast(row_model.payload, Text), "UTF8")), "hex"
+            )
+        else:
+            digest = sql_cast(row_model.payload, Text)
+
+        def validated_key(value: str) -> tuple[str, str]:
+            if self.database_dialect_name != "postgresql":
+                value = hashlib.sha256(value.encode()).hexdigest()
+            return record_type.__name__, value
+
+        records: list[RecordModel] = []
+        unvalidated: list[str] = []
+        for record_id, payload_digest, payload in session.execute(
+            select(
+                row_model.record_id,
+                digest,
+                type_coerce(
+                    case((predates.is_(true()), None), else_=row_model.payload), PayloadJsonType
+                ),
+            ).where(*filters)
+        ):
+            if payload is not None:
+                records.append(record_type.model_validate(payload))
+            elif validated_key(payload_digest) not in self._validated_history_payloads:
+                unvalidated.append(record_id)
+        # Primary-key reads keep a cold process linear in the lane history.
+        for start in range(0, len(unvalidated), 1000):
+            for in_lane, payload_digest, still_predates, payload in session.execute(
+                select(and_(*filters), digest, predates, row_model.payload).where(
+                    row_model.record_id.in_(unvalidated[start : start + 1000])
+                )
+            ):
+                if not in_lane:
+                    continue
+                record = record_type.model_validate(payload)
+                if not still_predates:
+                    records.append(record)
+                    continue
+                if len(self._validated_history_payloads) >= _VALIDATED_HISTORY_PAYLOAD_LIMIT:
+                    self._validated_history_payloads.clear()
+                self._validated_history_payloads.add(validated_key(payload_digest))
+        return tuple(records)
 
     def read_testing_non_use_records(
         self, product: str, context: str, target_id: str, *, shared_session: Any = None
@@ -10519,8 +10586,8 @@ class PostgresRecordStore(HumanSessionStore):
                 or operation is None
             ):
                 return None
-            # Under the authority lock, load only history that could defeat the
-            # proof; the qualifier still parses every returned timestamp.
+            # Under the authority lock, decode only history that could defeat the
+            # proof or has not been validated; the qualifier parses every timestamp.
             deployments_before = observations_before = false()
             bound = _utc_history_bound(generation.prepared_at)
             if bound is not None:
@@ -10550,26 +10617,26 @@ class PostgresRecordStore(HumanSessionStore):
                     if (inventory := session.get(LaunchplaneInventoryRow, (context, "testing")))
                     else None
                 ),
-                deployments=tuple(
-                    DeploymentRecord.model_validate(row.payload)
-                    for row in session.scalars(
-                        select(LaunchplaneDeploymentRow).where(
-                            LaunchplaneDeploymentRow.context == context,
-                            LaunchplaneDeploymentRow.instance == "testing",
-                            deployments_before.is_not(true()),
-                        )
-                    ).all()
+                deployments=self._never_served_history(
+                    session,
+                    LaunchplaneDeploymentRow,
+                    DeploymentRecord,
+                    (
+                        LaunchplaneDeploymentRow.context == context,
+                        LaunchplaneDeploymentRow.instance == "testing",
+                    ),
+                    deployments_before,
                 ),
-                checks=tuple(
-                    PublicIngressObservationRecord.model_validate(row.payload)
-                    for row in session.scalars(
-                        select(LaunchplanePublicIngressObservationRow).where(
-                            LaunchplanePublicIngressObservationRow.product == product,
-                            LaunchplanePublicIngressObservationRow.context == context,
-                            LaunchplanePublicIngressObservationRow.instance == "testing",
-                            observations_before.is_not(true()),
-                        )
-                    ).all()
+                checks=self._never_served_history(
+                    session,
+                    LaunchplanePublicIngressObservationRow,
+                    PublicIngressObservationRecord,
+                    (
+                        LaunchplanePublicIngressObservationRow.product == product,
+                        LaunchplanePublicIngressObservationRow.context == context,
+                        LaunchplanePublicIngressObservationRow.instance == "testing",
+                    ),
+                    observations_before,
                 ),
             )
 
