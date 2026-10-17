@@ -1517,6 +1517,21 @@ read-only login/session probe or authoritative downtime rule. Missing evidence s
 known use, production aliases and an existing generation or active operation
 refuse. Original copy custody is preserved by construction, not declared safe.
 
+An initial resource dry-run refusal identifies its first failed checkpoint:
+`testing_initial_preparation_unavailable` covers the original intent, lane,
+ownership, generation and operation admission;
+`testing_initial_copy_prerequisite_unverified` covers copy prerequisites outside
+the classified bootstrap checks; and `testing_initial_usage_unverified` covers
+the original-lane usage decision. Classified bootstrap credential and restore
+source failures retain their existing fixed codes, such as
+`testing_credentials_unverified` and `testing_restore_source_unconfigured`.
+These codes include unreadable dependencies and do not establish a particular
+bad record or authorize changing it. Read current supported metadata and usage
+evidence for that checkpoint; preserve unknowns and the original intent. Provider
+authorization denial remains `authorization_denied`. No private exception text
+or provider payload is exposed. Older service images return the grouped
+`testing_resources_refused`; an old trace cannot identify its failed checkpoint.
+
 Review the receipt, then repeat with `apply --reviewed-dry-run` and exactly the
 same arguments/key/evidence file. Separately run `readback` with the same key.
 Only reviewed apply establishes the initial preparation's durable lane fence;

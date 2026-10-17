@@ -1,5 +1,6 @@
 """Initial testing custody, separate from stranded replacement operation history."""
 
+from enum import StrEnum
 from pathlib import Path
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
@@ -16,6 +17,12 @@ from control_plane.testing_replacement_resources import (
     TestingReplacementResourcesRequest,
     resource_request_payload,
 )
+
+
+class InitialTestingPrerequisiteCode(StrEnum):
+    PREPARATION_UNAVAILABLE = "testing_initial_preparation_unavailable"
+    COPY_PREREQUISITE_UNVERIFIED = "testing_initial_copy_prerequisite_unverified"
+    USAGE_UNVERIFIED = "testing_initial_usage_unverified"
 
 
 def initial_preparation_id(product: str, context: str, scope: str, key: str) -> str:
