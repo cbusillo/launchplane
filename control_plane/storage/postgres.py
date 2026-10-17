@@ -52,8 +52,10 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     and_,
+    case,
     create_engine,
     delete,
     desc,
@@ -64,6 +66,8 @@ from sqlalchemy import (
     or_,
     text,
     select,
+    true,
+    type_coerce,
     union_all,
 )
 from sqlalchemy import cast as sql_cast
@@ -1022,6 +1026,30 @@ def _try_odoo_synchronous_lane_lock(
 
 def _utc_now_timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# Every match is a real calendar instant: February 29 and days past 28 in
+# shorter months are left to the caller's parser rather than encoded here.
+_CANONICAL_UTC_TIMESTAMP_PATTERN = (
+    r"^[1-9][0-9]{3}-((0[1-9]|1[0-2])-(0[1-9]|1[0-9]|2[0-8])|(0[13-9]|1[0-2])-(29|30)"
+    r"|(0[13578]|1[02])-31)T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?"
+    r"(Z|\+00:00)$"
+)
+
+
+def _utc_history_bound(value: str) -> str | None:
+    """The UTC whole second of an aware timestamp, comparable as canonical text."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat()
+
+
+# Only an exact repeat of a payload already validated may skip validation.
+_VALIDATED_HISTORY_PAYLOAD_LIMIT = 1_000_000
 
 
 class _PayloadRow(Protocol):
@@ -5431,6 +5459,7 @@ class PostgresRecordStore(HumanSessionStore):
         self._merge_train_feedback_context = local()
         self._preview_execution_context = local()
         self._disposable_authority_context = local()
+        self._validated_history_payloads: set[tuple[str, str]] = set()
 
     @property
     def backend_name(self) -> str:
@@ -10422,6 +10451,82 @@ class PostgresRecordStore(HumanSessionStore):
         if record.instance == "testing" and record.policies.staff_testing_hold is not None:
             self._invalidate_testing_non_use_in_session(session, context=record.context)
 
+    def _predates_history_bound(self, column: Any, payload_text: Any, bound: str) -> Any:
+        """True only for canonical UTC text whose whole second is before ``bound``.
+
+        Undated, malformed, offset, leap-day or payload-mismatched text stays a
+        candidate for the qualifier's own parse, so no incomplete timestamp is hidden.
+        """
+        seconds: Any = func.substr(column, 1, 19)
+        if self.database_dialect_name == "postgresql":
+            seconds = seconds.collate("C")
+        return and_(
+            column.regexp_match(_CANONICAL_UTC_TIMESTAMP_PATTERN),
+            # The suffix test also refuses a trailing newline that ``$`` admits.
+            or_(column.like("%Z"), column.like("%+00:00")),
+            payload_text == column,
+            seconds < bound,
+        )
+
+    def _never_served_history(
+        self,
+        session: Any,
+        row_model: Any,
+        record_type: type[RecordModel],
+        filters: tuple[Any, ...],
+        predates: Any,
+    ) -> tuple[RecordModel, ...]:
+        """Every record that could defeat the proof; every other one stays validated.
+
+        A record that provably predates the generation is left out only when this
+        process has already validated the exact same payload. Any other payload,
+        including a changed one, is validated here and still fails the read.
+        """
+        if self.database_dialect_name == "postgresql":
+            digest: Any = func.encode(
+                func.sha256(func.convert_to(sql_cast(row_model.payload, Text), "UTF8")), "hex"
+            )
+        else:
+            digest = sql_cast(row_model.payload, Text)
+
+        def validated_key(value: str) -> tuple[str, str]:
+            if self.database_dialect_name != "postgresql":
+                value = hashlib.sha256(value.encode()).hexdigest()
+            return record_type.__name__, value
+
+        records: list[RecordModel] = []
+        unvalidated: list[str] = []
+        for record_id, payload_digest, payload in session.execute(
+            select(
+                row_model.record_id,
+                digest,
+                type_coerce(
+                    case((predates.is_(true()), None), else_=row_model.payload), PayloadJsonType
+                ),
+            ).where(*filters)
+        ):
+            if payload is not None:
+                records.append(record_type.model_validate(payload))
+            elif validated_key(payload_digest) not in self._validated_history_payloads:
+                unvalidated.append(record_id)
+        # Primary-key reads keep a cold process linear in the lane history.
+        for start in range(0, len(unvalidated), 1000):
+            for in_lane, payload_digest, still_predates, payload in session.execute(
+                select(and_(*filters), digest, predates, row_model.payload).where(
+                    row_model.record_id.in_(unvalidated[start : start + 1000])
+                )
+            ):
+                if not in_lane:
+                    continue
+                record = record_type.model_validate(payload)
+                if not still_predates:
+                    records.append(record)
+                    continue
+                if len(self._validated_history_payloads) >= _VALIDATED_HISTORY_PAYLOAD_LIMIT:
+                    self._validated_history_payloads.clear()
+                self._validated_history_payloads.add(validated_key(payload_digest))
+        return tuple(records)
+
     def read_testing_non_use_records(
         self, product: str, context: str, target_id: str, *, shared_session: Any = None
     ) -> NeverServedRecords | None:
@@ -10481,6 +10586,21 @@ class PostgresRecordStore(HumanSessionStore):
                 or operation is None
             ):
                 return None
+            # Under the authority lock, decode only history that could defeat the
+            # proof or has not been validated; the qualifier parses every timestamp.
+            deployments_before = observations_before = false()
+            bound = _utc_history_bound(generation.prepared_at)
+            if bound is not None:
+                deployments_before = self._predates_history_bound(
+                    LaunchplaneDeploymentRow.deploy_started_at,
+                    LaunchplaneDeploymentRow.payload[("deploy", "started_at")].as_string(),
+                    bound,
+                )
+                observations_before = self._predates_history_bound(
+                    LaunchplanePublicIngressObservationRow.observed_at,
+                    LaunchplanePublicIngressObservationRow.payload["observed_at"].as_string(),
+                    bound,
+                )
             return NeverServedRecords(
                 generation=generation,
                 allocation=DisposableTestingResourcePreparation.model_validate(
@@ -10497,24 +10617,26 @@ class PostgresRecordStore(HumanSessionStore):
                     if (inventory := session.get(LaunchplaneInventoryRow, (context, "testing")))
                     else None
                 ),
-                deployments=tuple(
-                    DeploymentRecord.model_validate(row.payload)
-                    for row in session.scalars(
-                        select(LaunchplaneDeploymentRow).where(
-                            LaunchplaneDeploymentRow.context == context,
-                            LaunchplaneDeploymentRow.instance == "testing",
-                        )
-                    ).all()
+                deployments=self._never_served_history(
+                    session,
+                    LaunchplaneDeploymentRow,
+                    DeploymentRecord,
+                    (
+                        LaunchplaneDeploymentRow.context == context,
+                        LaunchplaneDeploymentRow.instance == "testing",
+                    ),
+                    deployments_before,
                 ),
-                checks=tuple(
-                    PublicIngressObservationRecord.model_validate(row.payload)
-                    for row in session.scalars(
-                        select(LaunchplanePublicIngressObservationRow).where(
-                            LaunchplanePublicIngressObservationRow.product == product,
-                            LaunchplanePublicIngressObservationRow.context == context,
-                            LaunchplanePublicIngressObservationRow.instance == "testing",
-                        )
-                    ).all()
+                checks=self._never_served_history(
+                    session,
+                    LaunchplanePublicIngressObservationRow,
+                    PublicIngressObservationRecord,
+                    (
+                        LaunchplanePublicIngressObservationRow.product == product,
+                        LaunchplanePublicIngressObservationRow.context == context,
+                        LaunchplanePublicIngressObservationRow.instance == "testing",
+                    ),
+                    observations_before,
                 ),
             )
 

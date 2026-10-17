@@ -13546,6 +13546,54 @@ class RealPostgresNeverServedTests(unittest.TestCase):
                 finally:
                     fixture.doCleanups()
 
+    def test_large_prior_history_stays_outside_the_locked_snapshot(self) -> None:
+        from control_plane.storage.postgres import LaunchplaneDeploymentRow
+        from tests.test_testing_never_served import NeverServedTestingTests
+        from tests.support.disposable_lanes import record_safety
+        from control_plane.testing_never_served import NON_USE_EVIDENCE_PREFIX
+
+        with _head_postgres_database() as url:
+            fixture = NeverServedTestingTests()
+            fixture.database_url = url
+            fixture.setUp()
+            self.addCleanup(fixture.doCleanups)
+            fixture.add_history(deployments=5000, checks=5000)
+            records = fixture.snapshot()
+            self.assertEqual(records.deployments, ())
+            self.assertEqual(len(records.checks), 2)
+            proof = fixture.read()
+            self.assertEqual(proof.usage, "unused")
+            record_safety(
+                fixture.store,
+                fixture.product,
+                fixture.context,
+                "testing",
+                usage_evidence=NON_USE_EVIDENCE_PREFIX + proof.proof_sha256,
+            )
+            evidence = fixture.store.read_disposable_lane_safety(
+                fixture.product, fixture.context, "testing"
+            )
+            assert evidence is not None
+            self.assertTrue(fixture.store.publish_collected_disposable_lane_safety(evidence))
+            # One undated record in the same history still withholds the proof.
+            with fixture.store._session_factory() as session:
+                session.add(
+                    LaunchplaneDeploymentRow(
+                        record_id="undated",
+                        context=fixture.context,
+                        instance="testing",
+                        artifact_id="",
+                        source_git_ref="fixture",
+                        deploy_started_at="",
+                        deploy_finished_at="",
+                        payload=fixture.store._payload_dict(fixture.deployment("undated", "")),
+                    )
+                )
+                session.commit()
+            self.assertEqual(len(fixture.snapshot().deployments), 1)
+            self.assertEqual(fixture.read().usage, "unknown")
+            self.assertFalse(fixture.store.publish_collected_disposable_lane_safety(evidence))
+
     def test_concurrent_dispatch_revocation_cannot_leave_a_published_negative(self) -> None:
         import psycopg
 
