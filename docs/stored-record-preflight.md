@@ -69,6 +69,11 @@ candidate's supported readers. Source policy digests are validated first;
 scrubbed digests are recomputed and attest only rehearsal data. This private
 fixture is not a backup, restore or authorization artifact.
 
+Declared cron expressions and preview app-name suffixes receive salted,
+format-valid substitutes so a valid source profile remains readable. Invalid
+historical values remain invalid; scrubbing does not repair them. Arbitrary
+map values with those names receive no format exemption.
+
 ## Candidate rehearsal
 
 `scripts/deploy/stored-record-preflight.sh` takes an immutable candidate, the
