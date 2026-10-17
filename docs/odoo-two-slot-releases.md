@@ -245,7 +245,7 @@ not activate a lane.
 
 The opt-in `tests.test_odoo_slot_startup_rehearsal` exercises the startup adapter
 against real, stopped Docker Compose services. Select an already-local immutable
-image with a `sleep` executable through `LAUNCHPLANE_TEST_STARTUP_IMAGE`; run the
+image through `LAUNCHPLANE_TEST_STARTUP_IMAGE`; run the
 `qualityGate.test.odooStartupRehearsal` command in `.github/github.json`. It
 creates disposable projects without networks, published ports or data mounts,
 uses inert environment values, and removes its projects and files afterward.
@@ -253,11 +253,20 @@ It covers a lost reply after recreation, reconstruction from durable authority,
 zero/multiple stopped container inventories, foreign one-off refusal and
 effective forward/rollback startup payload readback.
 
+The gate refuses an unset image instead of reporting skipped tests as proof.
+The rehearsal requires a local Unix-socket Docker endpoint. If the current
+context or `DOCKER_HOST` selects a remote engine, select an existing local
+context with `DOCKER_CONTEXT` before running it. Context selection follows
+Docker's precedence: an explicit `DOCKER_CONTEXT` overrides `DOCKER_HOST`.
+
 That rehearsal substitutes the Dokploy environment-record API and the guard
 and database observers. Its containers run no Odoo registry or jobs. It does
 not qualify the installed service package, remote transport, actual process
 interruption, physical-database drain, native settings commits or public traffic.
-Those remain part of #3268's installed and full-release qualification.
+Both slots use the same fixture image, so this rehearsal does not qualify
+cross-image slot identity checks. The inline host programs run on the test
+interpreter, not the remote host's Python. Those remain part of #3268's
+installed and full-release qualification.
 
 `configure_startup` merges the selected snapshot and its legacy indexing parameter
 into both slots' durable managed startup payloads, preserves unrelated settings

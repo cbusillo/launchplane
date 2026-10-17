@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 import unittest
 from unittest.mock import patch
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from control_plane.contracts.odoo_cutover import OdooCutoverPlan
@@ -21,12 +22,101 @@ from control_plane.release_compatibility import classify_release_database_compat
 from tests.test_odoo_cutover_website_settings import WebsiteProvider
 
 
+def require_local_docker_endpoint() -> None:
+    context = os.environ.get("DOCKER_CONTEXT")
+    endpoint = os.environ.get("DOCKER_HOST", "")
+    if context or not endpoint:
+        argv = ["docker", "context", "inspect"]
+        if context:
+            argv.append(context)
+        argv.extend(("--format", "{{.Endpoints.docker.Host}}"))
+        endpoint = subprocess.run(
+            argv, text=True, capture_output=True, check=True, timeout=10
+        ).stdout.strip()
+    selected = urlsplit(endpoint)
+    if selected.scheme != "unix" or selected.netloc or not selected.path.startswith("/"):
+        raise ValueError("select an existing local Unix-socket Docker context for this rehearsal")
+
+
+class StartupRehearsalEndpointTests(unittest.TestCase):
+    def test_cleanup_attempts_remaining_projects_after_a_failure(self) -> None:
+        fixture = SlotStartupRehearsalTests()
+        fixture.projects = {
+            "first": ("first", Path("/first")),
+            "second": ("second", Path("/second")),
+        }
+        with (
+            patch.object(
+                fixture, "run_command", side_effect=[RuntimeError("lost reply"), ""]
+            ) as command,
+            self.assertRaises(ExceptionGroup),
+        ):
+            fixture.cleanup_projects()
+        self.assertEqual(command.call_count, len(fixture.projects))
+
+    def test_remote_host_refuses_before_any_docker_command(self) -> None:
+        with (
+            patch.dict(os.environ, {"DOCKER_HOST": "ssh://remote.invalid"}, clear=True),
+            patch.object(subprocess, "run") as command,
+            self.assertRaises(ValueError),
+        ):
+            require_local_docker_endpoint()
+        command.assert_not_called()
+
+    def test_selected_remote_context_overrides_local_host_and_refuses(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DOCKER_CONTEXT": "remote-fixture",
+                    "DOCKER_HOST": "unix:///local.sock",
+                },
+                clear=True,
+            ),
+            patch.object(
+                subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout="tcp://remote.invalid:2376\n",
+                ),
+            ) as command,
+            self.assertRaises(ValueError),
+        ):
+            require_local_docker_endpoint()
+        self.assertIn("remote-fixture", command.call_args.args[0])
+
+    def test_explicit_local_context_overrides_remote_host(self) -> None:
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DOCKER_CONTEXT": "local-fixture",
+                    "DOCKER_HOST": "ssh://remote.invalid",
+                },
+                clear=True,
+            ),
+            patch.object(
+                subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [],
+                    0,
+                    stdout="unix:///local.sock\n",
+                ),
+            ),
+        ):
+            require_local_docker_endpoint()
+
+
 @unittest.skipUnless(
     os.environ.get("LAUNCHPLANE_TEST_STARTUP_IMAGE"),
     "isolated Compose startup image not selected",
 )
 class SlotStartupRehearsalTests(unittest.TestCase):
     def setUp(self) -> None:
+        require_local_docker_endpoint()
         Path("state").mkdir(exist_ok=True)
         temporary = TemporaryDirectory(dir="state")
         self.addCleanup(temporary.cleanup)
@@ -155,8 +245,14 @@ class SlotStartupRehearsalTests(unittest.TestCase):
         )
 
     def cleanup_projects(self) -> None:
+        errors = []
         for compose_id in self.projects:
-            self.run_command(self.compose(compose_id) + ("down", "--remove-orphans"))
+            try:
+                self.run_command(self.compose(compose_id) + ("down", "--remove-orphans"))
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise ExceptionGroup("startup rehearsal cleanup failed", errors)
 
     def target(self, **kwargs: Any) -> dict[str, Any]:
         compose_id = kwargs["target_id"]
@@ -213,9 +309,23 @@ class SlotStartupRehearsalTests(unittest.TestCase):
         self.lose_reply = True
         with self.assertRaises(TimeoutError):
             self.startup(self.plan, self.plan.new, self.plan.website_settings)
+        for target in before:
+            if target.slot_id == self.plan.old.slot_id:
+                observed = self.run_command(
+                    (
+                        "docker",
+                        "ps",
+                        "--all",
+                        "--quiet",
+                        "--no-trunc",
+                        "--filter",
+                        "id=" + target.container,
+                    )
+                )
+                self.assertFalse(observed.strip())
         self.assertTrue(tuple(self.directory.glob("*.json")))
-        # Rebuild against the original, now-deleted IDs. Only durable project
-        # authority plus fresh Docker inventory may recover them.
+        # The reply is lost after old-slot recreation, before the new slot is
+        # touched. Rebuild with those deleted old IDs and the untouched new IDs.
         self.writers = ContainerSlotWriters(self.plan, before, self.execute, lambda _target: 0)
         self.startup = self.adapter()
         guard_calls = []
@@ -235,6 +345,7 @@ class SlotStartupRehearsalTests(unittest.TestCase):
         assert self.plan.website_settings is not None
         assert self.plan.rollback_website_settings is not None
         self.startup(self.plan, self.plan.new, self.plan.website_settings)
+        self.assert_stopped_settings(rollback=False)
         stale = self.writers.targets
         missing, duplicate = stale[0], stale[-1]
         self.run_command(("docker", "container", "rm", missing.container))
@@ -251,6 +362,10 @@ class SlotStartupRehearsalTests(unittest.TestCase):
         self.writers = ContainerSlotWriters(self.plan, stale, self.execute, lambda _target: 0)
         self.startup = self.adapter()
         self.effects.clear()
+        before_files = {
+            directory / ".env": (directory / ".env").read_bytes()
+            for _, directory in self.projects.values()
+        }
         with self.assertRaises(ValueError):
             self.startup.recover(
                 self.plan,
@@ -260,6 +375,7 @@ class SlotStartupRehearsalTests(unittest.TestCase):
                 active_jobs=lambda _slot, _writer: 0,
             )
         self.assertFalse(self.effects)
+        self.assertEqual(before_files, {path: path.read_bytes() for path in before_files})
         self.run_command(("docker", "container", "rm", foreign))
         self.run_command(arguments + (self.image, "sleep", "infinity"))
         self.startup.recover(
