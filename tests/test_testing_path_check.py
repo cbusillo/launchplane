@@ -161,7 +161,7 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("synthetic-overlap-" + key, response.text)
         self.assertEqual(check["state"], "blocked")
         steps = {step["step_id"]: step for step in check["steps"]}
-        self.assertEqual(steps["testing_task_physical_copy_unverified"]["state"], "unknown")
+        self.assertEqual(steps[WalkthroughPrerequisite.PHYSICAL_COPY.value]["state"], "unknown")
 
         # Fix only policy. The other independent blockers remain visible in the next read.
         profile = self.fixture.profile
@@ -189,7 +189,9 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
         response = await self.read()
         steps = {step["step_id"]: step for step in response.json()["check"]["steps"]}
         self.assertEqual(steps["testing_restore_policy"]["state"], "clear")
-        self.assertEqual(steps["testing_credentials"]["code"], "testing_credentials_overlap")
+        self.assertEqual(
+            steps["testing_credentials"]["code"], BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
+        )
         self.assertEqual(steps["testing_resource_allocation"]["state"], "blocked")
 
     async def test_unreadable_credentials_do_not_hide_policy_and_missing_generation(self) -> None:
@@ -201,7 +203,7 @@ class TestingPathCheckHttpTests(unittest.IsolatedAsyncioTestCase):
         steps = {step["step_id"]: step for step in response.json()["check"]["steps"]}
         self.assertEqual(steps["testing_credentials"]["state"], "unknown")
         self.assertEqual(steps["testing_restore_policy"]["state"], "blocked")
-        self.assertEqual(steps["testing_task_generation_unverified"]["state"], "blocked")
+        self.assertEqual(steps[WalkthroughPrerequisite.GENERATION.value]["state"], "blocked")
         self.assertNotIn("private token", response.text)
 
 
