@@ -63,8 +63,12 @@ class RunnerLaneRegistrationRequest(BaseModel):
     lane_name: str
     registration_root: str
     labels: tuple[str, ...]
-    expected_runner_id: int | None = Field(default=None, ge=1)
-    expected_custom_labels: tuple[str, ...] = ()
+    expected_runner_id: int | None = Field(
+        default=None, ge=1, exclude_if=lambda value: value is None
+    )
+    expected_custom_labels: tuple[str, ...] = Field(
+        default=(), exclude_if=lambda values: not values
+    )
     active_run_ids: tuple[int, ...] = ()
     target_worker_active: bool = False
     mutate: bool = False

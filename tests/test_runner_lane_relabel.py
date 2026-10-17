@@ -338,6 +338,22 @@ class RunnerRelabelTests(unittest.TestCase):
                 }
             )
 
+    def test_existing_lifecycle_wire_does_not_gain_relabel_only_defaults(self) -> None:
+        for operation in ("register", "retire"):
+            with self.subTest(operation=operation):
+                legacy = RunnerLaneRegistrationRequest.model_validate(
+                    {
+                        **self.request.model_dump(),
+                        "operation": operation,
+                        "expected_runner_id": None,
+                        "expected_custom_labels": [],
+                    }
+                )
+                wire = legacy.model_dump(mode="json")
+                self.assertNotIn("expected_runner_id", wire)
+                self.assertNotIn("expected_custom_labels", wire)
+                self.assertEqual(RunnerLaneRegistrationRequest.model_validate(wire), legacy)
+
     def test_cli_dry_run_and_service_audit_requirement(self) -> None:
         with TemporaryDirectory() as directory:
             request_path = Path(directory) / "request.json"
