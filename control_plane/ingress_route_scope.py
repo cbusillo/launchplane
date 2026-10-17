@@ -6,6 +6,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
 
 
 class IngressRouteInstanceScopeError(ValueError):
@@ -21,6 +22,8 @@ def validate_ingress_route_instance_scope(
     context: str,
     instance: str,
     requested_domains: tuple[str, ...],
+    private_endpoints: tuple[PrivateHealthEndpointRecord, ...] = (),
+    access_list_id: int = 0,
 ) -> None:
     normalized_context = context.strip()
     normalized_instance = instance.strip()
@@ -38,11 +41,27 @@ def validate_ingress_route_instance_scope(
 
     requested = frozenset(_normalized_domain(domain) for domain in requested_domains)
     lane = matching_lanes[0]
-    authorized_domains = _lane_public_domains(lane, require_domains=True)
+    private_domains = frozenset(
+        _public_https_domain(value=endpoint.url, label="private endpoint")
+        for endpoint in private_endpoints
+        if endpoint.status == "active"
+        and urlsplit(endpoint.url).scheme == "https"
+        and endpoint.product == profile.product
+        and endpoint.context == normalized_context
+        and endpoint.instance == normalized_instance == "testing"
+    )
+    public_domains = _lane_public_domains(lane, require_domains=not private_domains)
+    authorized_domains = public_domains | private_domains
     if not requested.issubset(authorized_domains):
         raise IngressRouteInstanceScopeError(
             code="ingress_route_domain_scope_mismatch",
             message="Ingress route domains are not owned by the requested product lane.",
+        )
+
+    if requested & (private_domains - public_domains) and access_list_id < 1:
+        raise IngressRouteInstanceScopeError(
+            code="private_ingress_access_list_required",
+            message="Private testing ingress requires an existing access list.",
         )
 
     for other_lane in profile.lanes:
@@ -53,6 +72,17 @@ def validate_ingress_route_instance_scope(
                 code="ingress_route_domain_scope_ambiguous",
                 message="Ingress route domains are shared with another product lane.",
             )
+    for endpoint in private_endpoints:
+        if endpoint.status == "active" and (
+            endpoint.product,
+            endpoint.context,
+            endpoint.instance,
+        ) != (profile.product, normalized_context, normalized_instance):
+            if (urlsplit(endpoint.url).hostname or "").rstrip(".").lower() in requested:
+                raise IngressRouteInstanceScopeError(
+                    code="ingress_route_domain_scope_ambiguous",
+                    message="Ingress route domains are shared with another product lane.",
+                )
 
 
 def _lane_public_domains(

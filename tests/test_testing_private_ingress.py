@@ -1,0 +1,391 @@
+"""Exercise testing hostname creation against real records and fake providers."""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any, cast
+import unittest
+from unittest.mock import Mock, patch
+
+from control_plane.contracts.deploy_target import ProviderTargetRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.edge_endpoint_record import EdgeEndpointRecord
+from control_plane.contracts.private_health_endpoint_record import PrivateHealthEndpointRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
+from control_plane.http_app import create_launchplane_fastapi_app
+from control_plane.npmplus import NpmplusCertificate, NpmplusClient, NpmplusProxyHost
+from control_plane.provider_operations import (
+    ProviderOperationLease,
+    ProviderMutationRejectedError,
+    ProviderMutationUnknownError,
+)
+from control_plane.service_auth import LaunchplaneAuthzPolicy
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.testing_private_ingress import (
+    ROUTE,
+    TestingPrivateIngressAdapter,
+    TestingPrivateIngressRequest,
+)
+from tests.http_app_test_support import _local_operator_bearer_config, _RejectingVerifier
+from tests.support.auth import scoped_agent_transport
+from tests.support.http import request
+from tests.support.ingress import _FakeNpmplusIngressClient, _npmplus_proxy_host
+from tests.support.profiles import _generic_site_profile_payload
+
+
+class EdgeClient(_FakeNpmplusIngressClient):
+    def __init__(self) -> None:
+        super().__init__(())
+        self.certificate = NpmplusCertificate(
+            id=47,
+            domain_names=("*.example.test",),
+            expires_on=(datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
+        )
+        self.other_domains: tuple[str, ...] = ()
+
+    def get_certificate(self, certificate_id: int) -> NpmplusCertificate:
+        if certificate_id != self.certificate.id:
+            raise ValueError("Unknown fixture certificate")
+        return self.certificate
+
+    def get_proxy_host(self, host_id: int, *, public_only: bool = False) -> NpmplusProxyHost:
+        return next(host for host in self.proxy_hosts if host.id == host_id)
+
+    def list_other_host_domains(self) -> tuple[str, ...]:
+        return self.other_domains
+
+
+class PrivateIngressFixture(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        temporary = TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.store = PostgresRecordStore(
+            database_url=f"sqlite+pysqlite:///{self.root / 'state.db'}"
+        )
+        self.store.ensure_schema()
+        self.addCleanup(self.store.close)
+        profile = LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+        self.context = profile.lanes[0].context
+        self.profile = profile.model_copy(
+            update={
+                "public_website": "none",
+                "health_path": "/health",
+                "production_use": "live",
+                "lanes": (
+                    ProductLaneProfile(context=self.context, instance="testing"),
+                    ProductLaneProfile(context=self.context, instance="prod"),
+                ),
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        self.target = DokployTargetRecord(
+            context=self.context,
+            instance="testing",
+            target_type="application",
+            target_name="testing-app",
+            updated_at=self.profile.updated_at,
+        )
+        self.target_id = DokployTargetIdRecord(
+            context=self.context,
+            instance="testing",
+            target_id="testing-app-id",
+            updated_at=self.profile.updated_at,
+        )
+        self.provider = ProviderTargetRecord.from_dokploy_records(
+            target_record=self.target,
+            target_id_record=self.target_id,
+        )
+        self.store.write_dokploy_target_record(self.target)
+        self.store.write_dokploy_target_id_record(self.target_id)
+        self.store.write_provider_target_record(self.provider)
+        self.endpoint = PrivateHealthEndpointRecord(
+            endpoint_key="testing-bridge",
+            product=self.profile.product,
+            context=self.context,
+            instance="testing",
+            url="https://bridge-testing.example.test/health",
+            updated_at=self.profile.updated_at,
+        )
+        self.store.write_private_health_endpoint_record(self.endpoint)
+        self.edge = EdgeEndpointRecord(
+            endpoint_key="nonprod-http",
+            server_name="nonprod-server",
+            upstream_host="10.20.30.40",
+            upstream_scheme="http",
+            upstream_port=80,
+            updated_at=self.profile.updated_at,
+        )
+        self.store.write_edge_endpoint_record(self.edge)
+        self.client = EdgeClient()
+        self.body = TestingPrivateIngressRequest(
+            context=self.context,
+            endpoint_key=self.endpoint.endpoint_key,
+            edge_endpoint_key=self.edge.endpoint_key,
+            access_list_id=1,
+            certificate_id=47,
+            reason="Qualify one isolated testing hostname.",
+        )
+        self.domains: list[dict[str, Any]] = []
+        self.dokploy_calls: list[str] = []
+        self.enterContext(
+            patch(
+                "control_plane.testing_private_ingress.source.read_dokploy_config",
+                return_value=("https://provider.example.invalid", "fixture-token"),
+            )
+        )
+        self.actual = {"applicationId": self.target_id.target_id, "serverId": "nonprod-id"}
+        self.enterContext(
+            patch(
+                "control_plane.testing_private_ingress.api.fetch_dokploy_target_payload",
+                side_effect=lambda **_: self.actual,
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.testing_private_ingress.api.fetch_dokploy_application_domains",
+                side_effect=lambda **_: tuple(self.domains),
+            )
+        )
+        self.enterContext(
+            patch(
+                "control_plane.testing_private_ingress.api.dokploy_request",
+                side_effect=self.dokploy_request,
+            )
+        )
+        self.lease = Mock(spec=ProviderOperationLease)
+        self.app = create_launchplane_fastapi_app(
+            verifier=_RejectingVerifier(),
+            authz_policy=LaunchplaneAuthzPolicy(),
+            bearer_identity_config=_local_operator_bearer_config(),
+            record_store_factory=lambda: self.store,
+            control_plane_root_path=self.root,
+        )
+        self.factory = self.enterContext(
+            patch(
+                "control_plane.http_routes.testing_private_ingress.build_npmplus_ingress_client_from_env",
+                return_value=self.client,
+            )
+        )
+
+    def dokploy_request(self, **kwargs: Any) -> dict[str, Any]:
+        path = kwargs["path"]
+        if path == "/api/server.one":
+            return {
+                "serverId": "nonprod-id",
+                "name": self.edge.server_name,
+                "ipAddress": self.edge.upstream_host,
+            }
+        if path == "/api/domain.create":
+            self.dokploy_calls.append(path)
+            domain = {"domainId": "testing-domain", **kwargs["payload"]}
+            self.domains.append(domain)
+            return domain
+        raise AssertionError(f"Unexpected provider mutation {path}")
+
+    def adapter(self, **changes: Any) -> TestingPrivateIngressAdapter:
+        return TestingPrivateIngressAdapter(
+            self.root,
+            self.store,
+            self.profile.product,
+            TestingPrivateIngressRequest.model_validate({**self.body.model_dump(), **changes}),
+            "fixture-trace",
+            cast(NpmplusClient, self.client),
+        )
+
+    def create(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        self.adapter(mode="apply", reviewed_plan_sha256=digest).apply("original-key", self.lease)
+
+    async def post(self, **changes: Any) -> Any:
+        return await request(
+            self.app,
+            "POST",
+            ROUTE.format(product=self.profile.product),
+            payload={**self.body.model_dump(), **changes},
+            headers={
+                "Authorization": "Bearer local-operator-token",
+                "Idempotency-Key": "original-key",
+            },
+        )
+
+
+class PrivateTestingIngressTests(PrivateIngressFixture):
+    def test_create_and_disable_only_the_owned_hostname(self) -> None:
+        original_profile = self.store.read_product_profile_record(self.profile.product)
+        self.create()
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+        self.assertEqual(len(self.client.proxy_hosts), 1)
+        actual = self.client.proxy_hosts[0]
+        self.assertEqual(actual.domain_names, ("bridge-testing.example.test",))
+        self.assertEqual(actual.access_list_id, self.body.access_list_id)
+        self.assertEqual(actual.certificate_id, self.body.certificate_id)
+        self.assertFalse(self.adapter().plan()["deployment_performed"])
+        disable = self.adapter(operation="disable")
+        digest = disable.plan()["plan_sha256"]
+        result = self.adapter(operation="disable", mode="apply", reviewed_plan_sha256=digest).apply(
+            "disable-key", self.lease
+        )
+        self.assertIsInstance(result.response_payload["result"], dict)
+        self.assertTrue(cast(dict[str, object], result.response_payload["result"])["applied"])
+        self.assertFalse(self.client.proxy_hosts[0].enabled)
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+        self.assertEqual(
+            self.store.read_product_profile_record(self.profile.product), original_profile
+        )
+
+    def test_plan_does_not_change_either_provider(self) -> None:
+        self.assertFalse(self.adapter().plan()["applied"])
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertFalse([call for call in self.client.calls if call != "list"])
+
+    def test_refuses_foreign_or_disabled_endpoint_and_public_product(self) -> None:
+        for update in (
+            {"instance": "prod"},
+            {"product": "another-product"},
+            {"status": "disabled"},
+        ):
+            with self.subTest(update=update):
+                self.store.write_private_health_endpoint_record(
+                    self.endpoint.model_copy(update=update)
+                )
+                with self.assertRaises(ValueError):
+                    self.adapter().plan()
+        self.store.write_private_health_endpoint_record(self.endpoint)
+        self.store.write_product_profile_record(
+            self.profile.model_copy(update={"public_website": "required"})
+        )
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
+        self.assertEqual(self.dokploy_calls, [])
+
+    def test_refuses_shared_target_or_hostname_and_changed_placement(self) -> None:
+        sibling = self.provider.model_copy(update={"instance": "prod"})
+        with patch.object(
+            self.store, "list_provider_target_records", return_value=(self.provider, sibling)
+        ):
+            with self.assertRaises(ValueError):
+                self.adapter().plan()
+        self.assertEqual(self.dokploy_calls, [])
+
+    def test_refuses_provider_placement_that_does_not_match_edge(self) -> None:
+        self.actual["serverId"] = "production-server"
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
+
+    def test_refuses_existing_foreign_route_even_if_identical(self) -> None:
+        desired = self.adapter()._desired(self.adapter()._authority())
+        self.client.proxy_hosts = [
+            NpmplusProxyHost.model_validate({"id": 12, **desired.model_dump()})
+        ]
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
+        self.assertFalse([call for call in self.client.calls if call != "list"])
+
+    def test_refuses_wildcard_and_other_host_type_collisions(self) -> None:
+        self.client.proxy_hosts = [
+            _npmplus_proxy_host().model_copy(update={"domain_names": ("*.example.test",)})
+        ]
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
+        self.client.proxy_hosts = []
+        self.client.other_domains = ("bridge-testing.example.test",)
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
+
+    def test_refuses_expired_or_noncovering_certificate(self) -> None:
+        for update in ({"domain_names": ("*.other.test",)}, {"expires_on": "2000-01-01T00:00:00Z"}):
+            with self.subTest(update=update):
+                original = self.client.certificate
+                self.client.certificate = original.model_copy(update=update)
+                with self.assertRaises(ValueError):
+                    self.adapter().plan()
+                self.client.certificate = original
+
+    def test_refuses_configured_application_domain(self) -> None:
+        self.domains = [{"domainId": "foreign", "host": "other.example.test"}]
+        with self.assertRaises(ValueError):
+            self.adapter().plan()
+
+    def test_stale_plan_refuses_before_any_write(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        self.store.write_private_health_endpoint_record(
+            self.endpoint.model_copy(update={"source_label": "changed"})
+        )
+        with self.assertRaises(ProviderMutationRejectedError):
+            self.adapter(mode="apply", reviewed_plan_sha256=digest).apply(
+                "original-key", self.lease
+            )
+        self.assertEqual(self.dokploy_calls, [])
+        self.assertFalse([call for call in self.client.calls if call != "list"])
+
+    def test_lost_create_response_remains_unknown_without_repeating_effect(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        with patch.object(
+            self.client, "create_proxy_host", side_effect=TimeoutError("lost response")
+        ):
+            with self.assertRaises(ProviderMutationUnknownError):
+                self.adapter(mode="apply", reviewed_plan_sha256=digest).apply(
+                    "original-key", self.lease
+                )
+        observation = self.adapter(reviewed_plan_sha256=digest).observe(
+            "original-key", "edge-create", "key"
+        )
+        self.assertEqual(observation.outcome, "unknown")
+        self.assertFalse(observation.retry_safe)
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+
+    def test_original_key_adopts_lost_final_response_without_another_provider_write(self) -> None:
+        digest = self.adapter().plan()["plan_sha256"]
+        create = self.client.create_proxy_host
+
+        def lost_response(payload: Any) -> Any:
+            create(payload)
+            raise TimeoutError("Synthetic lost final response")
+
+        adapter = self.adapter(mode="apply", reviewed_plan_sha256=digest)
+        with patch.object(self.client, "create_proxy_host", side_effect=lost_response):
+            with self.assertRaises(ProviderMutationUnknownError):
+                adapter.apply("original-key", self.lease)
+        wrong_key = adapter.observe("different-key", "edge-create", "key")
+        self.assertEqual(wrong_key.outcome, "unknown")
+        observed = adapter.observe("original-key", "edge-create", "key")
+        self.assertEqual(observed.outcome, "present")
+        self.assertEqual(self.dokploy_calls, ["/api/domain.create"])
+        self.assertEqual(self.client.calls.count("create"), 1)
+        with self.assertRaises(FileNotFoundError):
+            self.adapter(reviewed_plan_sha256="b" * 64).readback()
+
+    def test_owned_route_drift_refuses_disable(self) -> None:
+        self.create()
+        self.client.proxy_hosts[0].access_list_id = 0
+        with self.assertRaises(ValueError):
+            self.adapter(operation="disable").plan()
+        self.assertNotIn("disable:1", self.client.calls)
+
+    async def test_director_can_plan_with_no_ingress_write_grant(self) -> None:
+        response = await self.post()
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertFalse(response.json()["result"]["applied"])
+
+    async def test_scoped_agent_cannot_use_director_private_route(self) -> None:
+        with scoped_agent_transport():
+            response = await self.post()
+        self.assertEqual(response.status_code, 403, response.text)
+        self.factory.assert_not_called()
+        self.assertEqual(self.dokploy_calls, [])
+
+    async def test_apply_refuses_missing_postgres_fencing(self) -> None:
+        response = await self.post(mode="apply", reviewed_plan_sha256="a" * 64)
+        self.assertEqual(response.status_code, 503, response.text)
+        self.assertEqual(self.dokploy_calls, [])
+
+    async def test_request_rejects_non_testing_and_unprotected_route(self) -> None:
+        for update in ({"instance": "prod"}, {"access_list_id": 0}, {"certificate_id": 0}):
+            with self.subTest(update=update):
+                response = await self.post(**update)
+                self.assertEqual(response.status_code, 400, response.text)

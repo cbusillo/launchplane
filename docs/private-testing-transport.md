@@ -4,10 +4,58 @@ title: Private testing HTTPS and WSS through an existing edge
 
 A no-website generic-web service can use an existing TLS edge, including NPMplus,
 for its private testing HTTPS `/health` and WSS `/agent-session/connect` authority.
-The edge keeps its existing certificate, private key and renewal. Launchplane
-publishes the testing runtime's HTTP port on one RFC1918 interface; it generates
-no TLS sidecar, certificate mounts, private issuer or client trust-store changes.
+The edge keeps its existing certificate, private key and renewal. Application
+lanes use their ordinary application edge. The Compose path publishes the testing
+runtime's HTTP port on one RFC1918 interface; neither path generates a TLS
+sidecar, certificate mounts, private issuer or client trust-store changes.
 The product still owns its immutable runtime template and build.
+
+## Application testing lanes
+
+A conventional generic-web application lane uses its recorded non-production
+server's existing HTTP edge. It does not publish a host port or use the Compose
+activation below. `POST /v1/products/{product}/testing-private-ingress` supplies
+`dry-run`, reviewed `apply`, and independent `readback` for the Director agent.
+The request names only `context`, `instance=testing`, the active private health
+`endpoint_key`, the existing `edge_endpoint_key`, positive `access_list_id` and
+`certificate_id`, `operation=create|disable`, and `reason`. Apply/readback also
+require `reviewed_plan_sha256`; apply retains its original Idempotency-Key.
+
+The service derives the one hostname from that lane's active HTTPS `/health`
+endpoint and the application/port from its product and target records. It checks
+exclusive lane and application ownership, actual server placement against the
+edge record, and the existing wildcard certificate's coverage and expiry. It
+creates the application's HTTP hostname and its own edge route; it does not
+rewrite existing application domains or an unrelated edge route. A successful
+receipt owns later disablement. The edge retains its certificate, key, renewal
+and access list. The application owns its HTTP paths and bearer checks; the edge
+preserves authorization and WebSocket headers. Provider readback retains the
+access list, certificate and complete route configuration. No DNS operation is performed.
+The existing scoped ingress planner also accepts an active testing private
+endpoint hostname when an access list is supplied; public-route rules remain.
+
+The edge-to-application hop uses the same plaintext LAN HTTP transport as other
+application testing lanes. Q453 accepted this topology instead of the
+Compose-only upstream binding and its host firewall requirement. It does not
+change the restrictions on the Compose path below or any production record.
+
+Planning changes no provider state. Apply uses the application's existing durable
+provider-operation fence, saves its pending receipt before effects, then records
+independent provider readback. A lost final response can be adopted from the same
+key only when both effects and the pending receipt match. Partial or unavailable
+evidence remains `reconcile_required`; never repeat it with another key. Disable
+uses a fresh reviewed plan on the same lane's owned route and leaves the
+application hostname and bot state in place. Neither operation deploys a workload
+or proves TLS, WSS, remote tailnet access or healthy runtime identity.
+
+The HTTP surface is projected into the agent/admin contract. Installed caller
+support must include this operation before operational use; do not call a raw
+provider API or use an arbitrary local CLI as a substitute. After source delivery,
+qualify the actual route through its access list from the service and intended
+clients, including a remote tailnet peer and public denial. Existing private HTTP
+probes still require RFC1918-only DNS answers; a wildcard resolving to the public
+edge needs a supported probe continuation before monitoring can pass. Do not
+change DNS or weaken that check as a workaround.
 
 ## Endpoint and outbound boundary
 

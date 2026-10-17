@@ -9,6 +9,7 @@ from control_plane.contracts.disposable_lane import (
     TESTING_REPLACEMENT_RESOURCES_ROUTE,
     TESTING_REPLACEMENT_BOOTSTRAP_ROUTE,
     TESTING_PUBLIC_INGRESS_ROUTE,
+    TESTING_PRIVATE_INGRESS_ROUTE,
     TESTING_VERIFICATION_ROUTE,
 )
 from control_plane.merge_train_policy_operations import MERGE_TRAIN_OPERATIONAL_POLICY_ROUTE
@@ -96,6 +97,15 @@ class OperationSpec:
 
 
 OPERATION_SPECS = (
+    OperationSpec(
+        "POST",
+        TESTING_PRIVATE_INGRESS_ROUTE,
+        "Configure only an application testing lane's registered private hostname at its existing access-controlled edge; use its retained wildcard certificate and original-key recovery without deploying.",
+        ("service_api",),
+        ("dry-run", "apply", "readback"),
+        "apply",
+        ("reviewed_plan_sha256",),
+    ),
     OperationSpec(
         "POST",
         PRIVATE_TESTING_ACTIVATION_ROUTE,
