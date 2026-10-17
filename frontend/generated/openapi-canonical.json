@@ -36367,6 +36367,23 @@
             "title": "Blocked Count",
             "type": "integer"
           },
+          "intent": {
+            "anyOf": [
+              {
+                "enum": [
+                  "provision",
+                  "generation",
+                  "testing-replacement"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Intent",
+            "x-launchplane-optional-response": true
+          },
           "path": {
             "enum": [
               "testing",
@@ -91041,6 +91058,27 @@
           },
           {
             "in": "query",
+            "name": "intent",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "provision",
+                    "generation",
+                    "testing-replacement"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Intent"
+            }
+          },
+          {
+            "in": "query",
             "name": "source_mode",
             "required": false,
             "schema": {
@@ -91119,6 +91157,16 @@
               }
             },
             "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
           },
           "401": {
             "content": {

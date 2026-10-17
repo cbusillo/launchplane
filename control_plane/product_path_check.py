@@ -18,7 +18,7 @@ from typing import Literal, Protocol, cast
 
 import click
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.odoo_target_replacement_failures import (
     DEPLOY_BLOCKED_PREFIX,
@@ -72,6 +72,7 @@ GENERIC_WEB_PROMOTION_ACTION = "generic_web_prod_promotion.dispatch"
 
 PathName = Literal["testing", "promote", "rollback"]
 PATH_NAMES: tuple[PathName, ...] = ("testing", "promote", "rollback")
+TestingIntent = Literal["provision", "generation", "testing-replacement"]
 StepState = Literal["clear", "blocked", "unknown"]
 FixKind = Literal["none", "code", "grant", "owner_approval", "client_acceptance", "by_hand", "wait"]
 
@@ -92,6 +93,11 @@ class ProductPathCheck(BaseModel):
 
     product: str
     path: PathName
+    intent: TestingIntent | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     state: StepState
     blocked_count: int
     unknown_count: int
@@ -458,7 +464,7 @@ _PATH_STEPS: dict[PathName, Callable[[PathCheckInputs], list[PathCheckStep]]] = 
 
 
 def build_product_path_check(
-    *, product: str, path: PathName, inputs: PathCheckInputs
+    *, product: str, path: PathName, inputs: PathCheckInputs, intent: TestingIntent | None = None
 ) -> ProductPathCheck:
     steps = tuple(_PATH_STEPS[path](inputs))
     blocked = sum(step.state == "blocked" for step in steps)
@@ -467,6 +473,7 @@ def build_product_path_check(
     return ProductPathCheck(
         product=product,
         path=path,
+        intent=intent,
         state=state,
         blocked_count=blocked,
         unknown_count=unknown,
@@ -497,6 +504,7 @@ def read_path_check_inputs(
     generated_at: str,
     caller_can_use_generic_rollback: bool = False,
     control_plane_root: Path | None = None,
+    intent: Literal["provision", "generation", "testing-replacement"] | None = None,
     source_mode: Literal["ssh", "container-export"] = "container-export",
     task_id: str | None = None,
     operation_id: str | None = None,
@@ -505,19 +513,44 @@ def read_path_check_inputs(
 ) -> PathCheckInputs:
     """Read the evidence ``path`` needs, each read independent of the others."""
     prerequisites: tuple[PathCheckStep, ...] = ()
-    if profile.driver_id == "odoo" and path == "testing" and _lane(profile, "testing"):
+    if (
+        intent is not None
+        and profile.driver_id == "odoo"
+        and path == "testing"
+        and _lane(profile, "testing")
+    ):
         from control_plane.testing_path_check import read_testing_prerequisites
 
-        prerequisites = read_testing_prerequisites(
-            store=cast(PostgresRecordStore, record_store),
-            profile=profile,
-            root=control_plane_root,
-            source_mode=source_mode,
-            task_id=task_id,
-            operation_id=operation_id,
-            action_allowed=action_allowed,
-            caller_can_provision=caller_can_provision,
-            caller_can_generate=caller_can_generate,
+        result = _read(
+            "testing_prerequisites_unread",
+            lambda: read_testing_prerequisites(
+                intent=intent,
+                store=cast(PostgresRecordStore, record_store),
+                profile=profile,
+                root=control_plane_root,
+                source_mode=source_mode,
+                task_id=task_id,
+                operation_id=operation_id,
+                action_allowed=action_allowed,
+                caller_can_provision=caller_can_provision,
+                caller_can_generate=caller_can_generate,
+            ),
+        )
+        prerequisites = (
+            (_unread("testing_prerequisites", result),)
+            if isinstance(result, Unread)
+            else cast(tuple[PathCheckStep, ...], result)
+        )
+
+    if intent is not None and path == "testing" and profile.driver_id != "odoo":
+        prerequisites = (
+            _step(
+                "testing_prerequisites",
+                "unknown",
+                "testing_intent_not_supported",
+                "Operation prerequisites are not implemented for this driver.",
+                "code",
+            ),
         )
     if path == "testing":
         testing_lane = _lane(profile, "testing")

@@ -17,10 +17,17 @@ from control_plane.contracts.odoo_walkthrough import (
     WALKTHROUGH_ACTION,
     WALKTHROUGH_PLAN_ACTION,
 )
-from control_plane.testing_replacement_recovery import service_testing_operation
+from control_plane.testing_replacement_resources import (
+    resource_context,
+    TestingReplacementResourcesRequest,
+)
+from control_plane.odoo_testing_resources import OdooTestingResources
+from control_plane.testing_initial_generation import (
+    require_initial_usage,
+    require_testing_generation_usage,
+    TestingGenerationUsageUnverified,
+)
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.odoo_testing_usage import read_odoo_testing_usage
-from control_plane.lane_usage import evaluate_lane_usage
 from control_plane.testing_replacement_bootstrap import (
     TestingBootstrapPrerequisiteError,
     require_testing_restore_policy,
@@ -46,6 +53,7 @@ _WALKTHROUGH_DESCRIPTIONS = {
 
 def read_testing_prerequisites(
     *,
+    intent: Literal["provision", "generation", "testing-replacement"],
     store: PostgresRecordStore,
     profile: LaunchplaneProductProfileRecord,
     root: Path | None,
@@ -71,8 +79,10 @@ def read_testing_prerequisites(
             state, code = "blocked", "testing_credential_versions_missing"
             description = "Configure the missing managed local passwords before comparing testing and production."
         except TestingBootstrapPrerequisiteError as error:
-            state, code = "blocked", error.code
+            state, code = "unknown" if error.unavailable else "blocked", error.code
             description = str(error)  # Fixed code-owned text, never the underlying exception.
+        except TestingGenerationUsageUnverified:
+            state = "unknown"
         except ValueError:
             state = "blocked"
         except Exception:  # noqa: BLE001 - private provider/storage text never leaves this read.
@@ -96,27 +106,46 @@ def read_testing_prerequisites(
         if not caller_can_provision or not all(allowed):
             raise ValueError("The caller cannot provision testing accounts.")
 
-    check(
-        "testing_provision_authority",
-        "testing_provision_not_allowed",
-        "Use an identity permitted to plan and provision this product's testing task accounts.",
-        provision_authority,
-    )
-    steps[-1] = (
-        steps[-1].model_copy(update={"fix": "grant"}) if steps[-1].state == "blocked" else steps[-1]
-    )
-    steps.append(
-        PathCheckStep(
-            step_id="testing_generation_authority",
-            state="clear" if caller_can_generate else "blocked",
-            code="testing_generation_allowed"
-            if caller_can_generate
-            else "testing_generation_needs_director_agent",
-            description="Initial generation and replacement resource preparation require the Director agent.",
-            fix="none" if caller_can_generate else "by_hand",
+    if intent == "provision":
+        check(
+            "testing_provision_authority",
+            "testing_provision_not_allowed",
+            "Use an identity permitted to plan and provision this product's testing task accounts.",
+            provision_authority,
         )
-    )
+        steps[-1] = (
+            steps[-1].model_copy(update={"fix": "grant"})
+            if steps[-1].state == "blocked"
+            else steps[-1]
+        )
+    if intent != "provision":
+        steps.append(
+            PathCheckStep(
+                step_id="testing_generation_authority",
+                state="clear" if caller_can_generate else "blocked",
+                code="testing_generation_allowed"
+                if caller_can_generate
+                else "testing_generation_needs_director_agent",
+                description="Initial generation and replacement resource preparation require the Director agent.",
+                fix="none" if caller_can_generate else "by_hand",
+            )
+        )
 
+    try:
+        generation = store.read_fresh_odoo_testing_generation(profile.product, context)
+    except Exception:
+        generation = None
+        steps.append(
+            PathCheckStep(
+                step_id="testing_generation_snapshot",
+                state="unknown",
+                code="testing_generation_unread",
+                description="The current generation could not be read; reviewed copy intent is unknown.",
+                fix="wait",
+            )
+        )
+    if generation is not None and generation.operation_id != operation_id:
+        generation = None
     check(
         "testing_restore_policy",
         "testing_restore_policy_unconfigured",
@@ -135,7 +164,7 @@ def read_testing_prerequisites(
         "testing_credentials_unsafe",
         "Verify only lane-local passwords can reach the testing recipient.",
         lambda: require_testing_credential_safety(
-            store, context, testing_credential_omissions(store, context, None)
+            store, context, testing_credential_omissions(store, context, generation)
         ),
     )
 
@@ -143,7 +172,7 @@ def read_testing_prerequisites(
         target = store.read_dokploy_target_record(context_name=context, instance_name="testing")
         # An independent replacement does not inherit env from the retained target.
         testing_restore_source_binding(
-            store, profile, context, target.model_copy(update={"env": {}}), None, source_mode
+            store, profile, context, target.model_copy(update={"env": {}}), generation, source_mode
         )
 
     check(
@@ -179,7 +208,7 @@ def read_testing_prerequisites(
 
     check(
         "testing_resources",
-        "testing_resources_refused",
+        "testing_resource_binding_unverified",
         "Reconcile testing target bindings, aliases and pending route effects before preparing resources.",
         resources,
     )
@@ -191,16 +220,27 @@ def read_testing_prerequisites(
             raise ValueError("Retained resource preparation is missing.")
         if (preparation.product, preparation.context) != (profile.product, context):
             raise ValueError("Retained resource preparation belongs to another lane.")
-        if preparation.initial_request_sha256:
-            store.require_initial_testing_lane_available(preparation, allow_bootstrap_resume=True)
-        else:
-            operation = store.read_odoo_stable_target_replacement_operation_record(operation_id)
-            if (
-                not service_testing_operation(operation)
-                or operation.status != "reconciliation_required"
-            ):
-                raise ValueError("The operation is not eligible for testing replacement.")
-        if not preparation.replacement_target_id or not preparation.resources_binding_sha256:
+        request = TestingReplacementResourcesRequest(
+            context=context,
+            operation_id=operation_id,
+            initial_generation=bool(preparation.initial_request_sha256),
+            source_mode=source_mode,
+            reason="Read current testing prerequisites",
+        )
+        _, _, allocation, _, target_id, _ = resource_context(
+            store, product=profile.product, request=request, allow_bootstrap_resume=True
+        )
+        resources = OdooTestingResources(
+            product=profile.product,
+            context=context,
+            operation_id=operation_id,
+            target_id=allocation.replacement_target_id,
+            namespace=allocation.resource_namespace,
+        )
+        if (
+            target_id.target_id != resources.target_id
+            or allocation.resources_binding_sha256 != resources.binding_sha256
+        ):
             raise ValueError("Independent resources are not qualified yet.")
 
     if operation_id is None:
@@ -228,30 +268,27 @@ def read_testing_prerequisites(
         target_id = store.read_dokploy_target_id_record(
             context_name=context, instance_name="testing"
         )
-        usage = read_odoo_testing_usage(
-            target=target,
-            target_id=target_id,
-            control_plane_root=root,
-            database_url=store.database_url,
+        preparation = (
+            store.read_disposable_resource_preparation(operation_id) if operation_id else None
         )
-        evidence = store.read_disposable_lane_safety(profile.product, context, "testing")
-        known_use = evidence is not None and evidence.usage == "in_use"
-        decision = evaluate_lane_usage(
-            store,
-            profile=profile,
-            target=target,
-            target_id=target_id,
-            instance="testing",
-            usage="in_use" if known_use else usage.usage,
-        )
-        if decision.protected:
-            if (
-                known_use
-                or usage.usage == "in_use"
-                or target.policies.staff_testing_hold is not None
-            ):
-                raise ValueError("Testing use is protected.")
-            raise RuntimeError("Current testing use could not be verified.")
+        if preparation is not None:
+            if (preparation.product, preparation.context) != (profile.product, context):
+                raise ValueError("Preparation belongs to another lane.")
+            require_initial_usage(
+                root,
+                store,
+                profile.product,
+                TestingReplacementResourcesRequest(
+                    context=context,
+                    operation_id=preparation.operation_id,
+                    source_mode=source_mode,
+                    reason="Read current testing prerequisites",
+                ),
+            )
+        else:
+            require_testing_generation_usage(
+                root, store, profile.product, context, target, target_id
+            )
 
     check(
         "testing_generation_use",
@@ -259,6 +296,8 @@ def read_testing_prerequisites(
         "Verify current testing use before replacing or creating a generation; preserve staff holds.",
         current_use,
     )
+    if intent != "provision":
+        return tuple(steps)
     if root is None:
         steps.append(
             PathCheckStep(
@@ -277,12 +316,12 @@ def read_testing_prerequisites(
         if task_id is not None
         else None
     )
-    for code, state in read_walkthrough_prerequisites(
+    for checkpoint, code, state in read_walkthrough_prerequisites(
         store, root, profile.product, context, request
     ):
         steps.append(
             PathCheckStep(
-                step_id=code.value,
+                step_id=checkpoint.value,
                 state=state,
                 code=code.value,
                 description=(

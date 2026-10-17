@@ -5,6 +5,7 @@ from pathlib import Path
 
 from control_plane.contracts.canonical_json import canonical_json_sha256
 from control_plane.contracts.disposable_lane import DisposableTestingResourcePreparation
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.disposable_lanes import (
     disposable_lane_binding_sha256,
@@ -108,27 +109,40 @@ def require_initial_usage(
     if allocation is None or allocation.retained_target_record is None:
         raise ValueError("Original testing custody is unavailable.")
     target = allocation.retained_target_record
-    current = store.read_dokploy_target_record(
-        context_name=request.context, instance_name="testing"
-    )
-    if (
-        target.policies.staff_testing_hold is not None
-        or current.policies.staff_testing_hold is not None
-    ):
-        raise ValueError("A hold protects testing.")
     target_id = DokployTargetIdRecord(
         context=request.context,
         instance="testing",
         target_id=allocation.retained_target_id,
         updated_at=target.updated_at,
     )
+    require_testing_generation_usage(root, store, product, request.context, target, target_id)
+
+
+class TestingGenerationUsageUnverified(ValueError):
+    """The original use cannot be established from current read-only evidence."""
+
+
+def require_testing_generation_usage(
+    root: Path,
+    store: PostgresRecordStore,
+    product: str,
+    context: str,
+    target: DokployTargetRecord,
+    target_id: DokployTargetIdRecord,
+) -> None:
+    current = store.read_dokploy_target_record(context_name=context, instance_name="testing")
+    if (
+        target.policies.staff_testing_hold is not None
+        or current.policies.staff_testing_hold is not None
+    ):
+        raise ValueError("A hold protects testing.")
     usage = read_odoo_testing_usage(
         target=target,
         target_id=target_id,
         control_plane_root=root,
         database_url=store.database_url,
     )
-    evidence = store.read_disposable_lane_safety(product, request.context, "testing")
+    evidence = store.read_disposable_lane_safety(product, context, "testing")
     known_use = evidence is not None and evidence.usage == "in_use"
     decision = evaluate_lane_usage(
         store,
@@ -139,6 +153,8 @@ def require_initial_usage(
         usage="in_use" if known_use else usage.usage,
     )
     if decision.protected:
-        raise ValueError("Original testing use is protected or unverified.")
+        if not known_use and usage.usage == "unknown":
+            raise TestingGenerationUsageUnverified("Original testing use is unverified.")
+        raise ValueError("Original testing use is protected.")
     # Data custody is preserved by construction: only the separately named empty
     # target is ever written. No positive fact is asserted about the old copy.

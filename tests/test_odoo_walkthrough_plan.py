@@ -140,11 +140,12 @@ class WalkthroughPlanTests(unittest.TestCase):
         self.domain.return_value = False
         self.environment.return_value = {"ODOO_DB_NAME": "other-database"}
         self.store.find_secret_record.return_value = self.secret(disabled=True)
-        checks = dict(
-            read_walkthrough_prerequisites(
+        checks = {
+            checkpoint: state
+            for checkpoint, code, state in read_walkthrough_prerequisites(
                 self.store, Path("/fixture"), "example-odoo", "example", task_request()
             )
-        )
+        }
         for code in (
             WalkthroughPrerequisite.ORIGIN,
             WalkthroughPrerequisite.DATABASE,
@@ -163,16 +164,32 @@ class WalkthroughPlanTests(unittest.TestCase):
     ) -> None:
         self.generation_read.return_value = None
         self.hold.side_effect = ValueError("staff protection")
-        checks = dict(
-            read_walkthrough_prerequisites(self.store, Path("/fixture"), "example-odoo", "example")
-        )
-        self.assertEqual(checks[WalkthroughPrerequisite.GENERATION_MISSING], "blocked")
+        checks = {
+            checkpoint: state
+            for checkpoint, code, state in read_walkthrough_prerequisites(
+                self.store, Path("/fixture"), "example-odoo", "example"
+            )
+        }
+        self.assertEqual(checks[WalkthroughPrerequisite.GENERATION], "blocked")
         self.assertEqual(checks[WalkthroughPrerequisite.USE], "blocked")
         self.assertEqual(checks[WalkthroughPrerequisite.RUNTIME], "unknown")
         self.assertEqual(checks[WalkthroughPrerequisite.CREDENTIAL], "unknown")
         self.connect.assert_not_called()
         self.usage.assert_not_called()
         self.store.find_secret_record.assert_not_called()
+
+    def test_preflight_unreadable_use_is_unknown_without_hiding_other_checks(self) -> None:
+        from control_plane.odoo_testing_drill import DrillEvidenceUnavailable
+
+        self.hold.side_effect = DrillEvidenceUnavailable("unreadable")
+        checks = {
+            checkpoint: state
+            for checkpoint, code, state in read_walkthrough_prerequisites(
+                self.store, Path("/fixture"), "example-odoo", "example", task_request()
+            )
+        }
+        self.assertEqual(checks[WalkthroughPrerequisite.USE], "unknown")
+        self.assertEqual(checks[WalkthroughPrerequisite.ORIGIN], "clear")
 
     def test_production_foreign_context_and_origin_aliases_refuse_before_provider(self) -> None:
         with self.assertRaises(ValueError):

@@ -105,8 +105,9 @@ _PREREQUISITE_MESSAGES: dict[BootstrapPrerequisiteCode, str] = {
 class TestingBootstrapPrerequisiteError(ValueError):
     """A fixed prerequisite classification, never a wrapped private exception."""
 
-    def __init__(self, code: BootstrapPrerequisiteCode) -> None:
+    def __init__(self, code: BootstrapPrerequisiteCode, *, unavailable: bool = False) -> None:
         self.code = code
+        self.unavailable = unavailable
         super().__init__(_PREREQUISITE_MESSAGES[code])
 
 
@@ -122,15 +123,16 @@ def _bootstrap_prerequisite(code: BootstrapPrerequisiteCode) -> Iterator[None]:
         raise TestingBootstrapPrerequisiteError(
             BootstrapPrerequisiteCode.CREDENTIALS_OVERLAP
         ) from None
+    except ValueError:
+        raise TestingBootstrapPrerequisiteError(code) from None
     except (
-        ValueError,
         FileNotFoundError,
         RuntimeError,
         OSError,
         click.ClickException,
         LiveTargetRuntimeError,
     ):
-        raise TestingBootstrapPrerequisiteError(code) from None
+        raise TestingBootstrapPrerequisiteError(code, unavailable=True) from None
 
 
 def bootstrap_wire_payload(request: TestingReplacementResourcesRequest) -> dict[str, object]:

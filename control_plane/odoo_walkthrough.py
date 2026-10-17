@@ -38,7 +38,7 @@ from control_plane.odoo_runtime_reads import (
     connect_runtime,
     select_stable_runtime,
 )
-from control_plane.odoo_testing_drill import require_drill_use_unprotected
+from control_plane.odoo_testing_drill import DrillEvidenceUnavailable, require_drill_use_unprotected
 from control_plane.odoo_testing_drill_usage import (
     read_drill_recent_signins,
     testing_drill_environment,
@@ -122,8 +122,15 @@ def read_walkthrough_prerequisites(
     product: str,
     context: str,
     request: OdooWalkthroughRequest | None = None,
-) -> tuple[tuple[WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]], ...]:
-    checks: list[tuple[WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]]] = []
+) -> tuple[
+    tuple[WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]],
+    ...,
+]:
+    checks: list[
+        tuple[
+            WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]
+        ]
+    ] = []
     _walkthrough_preflight(store, root, product, context, request=request, checks=checks)
     return tuple(checks)
 
@@ -136,7 +143,11 @@ def _walkthrough_preflight(
     *,
     request: OdooWalkthroughRequest | None = None,
     actor: str = "",
-    checks: list[tuple[WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]]]
+    checks: list[
+        tuple[
+            WalkthroughPrerequisite, WalkthroughPrerequisite, Literal["clear", "blocked", "unknown"]
+        ]
+    ]
     | None = None,
 ) -> WalkthroughPlan | None:
     operation = request.operation if request is not None else "provision"
@@ -154,21 +165,23 @@ def _walkthrough_preflight(
                 yield True
             return
         if any(item not in passed for item in requires) or (task_required and request is None):
-            checks.append((code, "unknown"))
+            checks.append((code, code, "unknown"))
             yield False
             return
         try:
             yield True
         except WalkthroughPrerequisiteError as error:
-            checks.append((error.code, "blocked"))
+            checks.append((code, error.code, "blocked"))
+        except DrillEvidenceUnavailable:
+            checks.append((code, code, "unknown"))
         except ValueError:
-            checks.append((code, "blocked"))
+            checks.append((code, code, "blocked"))
         except Exception:
             # Unreadable provider/storage evidence is not a known failed predicate.
-            checks.append((code, "unknown"))
+            checks.append((code, code, "unknown"))
         else:
             passed.add(code)
-            checks.append((code, "clear"))
+            checks.append((code, code, "clear"))
 
     selection = None
     generation = None

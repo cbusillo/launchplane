@@ -251,7 +251,7 @@ is a separate post-landing session; source tests and fixture browser evidence
 do not claim any real testing walkthrough passed.
 
 Before a provision or initial-copy attempt, use the product's read-only
-`GET /v1/products/{product}/path-check?path=testing` to see all independent
+`GET /v1/products/{product}/path-check?path=testing&intent=provision` to see all independent
 prerequisites together, including credential overlap even when no generation
 exists. Add `task_id` and the original `operation_id` to check their exact custody
 and resource qualification; select `source_mode=ssh` if that is the intended copy

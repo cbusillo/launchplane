@@ -52,11 +52,21 @@ def register_product_path_check_read_routes(
         path: Annotated[PathName, Query()],
         identity: Annotated[LaunchplaneIdentity, Depends(common.read_identity)],
         record_store: Annotated[object, Depends(common.get_record_store)],
+        intent: Annotated[
+            Literal["provision", "generation", "testing-replacement"] | None, Query()
+        ] = None,
         source_mode: Annotated[Literal["ssh", "container-export"], Query()] = "container-export",
         task_id: Annotated[str | None, Query(pattern=r"^[a-f0-9]{32}$")] = None,
         operation_id: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
     ) -> ProductPathCheckResponse:
         trace_id = common.next_trace_id()
+        if intent is not None and path != "testing":
+            raise common.http_error(
+                status_code=400,
+                trace_id=trace_id,
+                code="invalid_request",
+                message="An operation intent requires the testing path.",
+            )
         try:
             profile = cast(
                 LaunchplaneProductProfileRecord,
@@ -106,6 +116,7 @@ def register_product_path_check_read_routes(
 
         inputs = read_path_check_inputs(
             path=path,
+            intent=intent,
             control_plane_root=dependencies.control_plane_root,
             source_mode=source_mode,
             task_id=task_id,
@@ -130,7 +141,9 @@ def register_product_path_check_read_routes(
         )
         return ProductPathCheckResponse(
             trace_id=trace_id,
-            check=build_product_path_check(product=profile.product, path=path, inputs=inputs),
+            check=build_product_path_check(
+                product=profile.product, path=path, inputs=inputs, intent=intent
+            ),
         )
 
     app.add_api_route(
@@ -140,5 +153,5 @@ def register_product_path_check_read_routes(
         response_model=ProductPathCheckResponse,
         operation_id="read_product_path_check",
         summary="Report every step that stands between the caller and the end of a path",
-        responses={code: {"model": common.error_response_model} for code in (401, 404, 503)},
+        responses={code: {"model": common.error_response_model} for code in (400, 401, 404, 503)},
     )
