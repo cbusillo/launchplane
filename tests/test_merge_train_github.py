@@ -1986,14 +1986,90 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                         }
                     },
                 }
-                transport = RecordingMergeTrainGitHubTransport(responses=(branch,))
+                transport = RecordingMergeTrainGitHubTransport(responses=(branch, []))
 
                 with self.assertRaises(MergeTrainGitHubError):
                     GitHubMergeTrainClient(transport=transport).observe_batch_candidate_checks(
                         candidate=candidate
                     )
 
-                self.assertEqual(len(transport.requests), 1)
+                self.assertEqual(len(transport.requests), 2 if protected else 1)
+
+    def test_observe_ruleset_only_candidate_requires_bound_checks(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        branch = {
+            "protected": True,
+            "protection": {"required_status_checks": {"enforcement_level": "off"}},
+        }
+        rules = [
+            {
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [
+                        {"context": "formula", "integration_id": 15368},
+                    ]
+                },
+            }
+        ]
+        for publisher, conclusion, expected in (
+            (15368, "success", "pass"),
+            (15368, "failure", "fail"),
+            (99999, "success", None),
+        ):
+            with self.subTest(publisher=publisher, conclusion=conclusion):
+                transport = RecordingMergeTrainGitHubTransport(
+                    responses=(
+                        branch,
+                        rules,
+                        _combined_status(),
+                        {
+                            "check_runs": [
+                                _required_check_run(
+                                    "formula", "completed", conclusion, app_id=publisher
+                                ),
+                            ]
+                        },
+                    )
+                )
+                client = GitHubMergeTrainClient(transport=transport)
+                if expected is None:
+                    with self.assertRaisesRegex(MergeTrainGitHubError, "missing required check"):
+                        client.observe_batch_candidate_checks(candidate=candidate)
+                else:
+                    observed = client.observe_batch_candidate_checks(candidate=candidate)
+                    self.assertEqual(observed.required_checks_status, expected)
+
+    def test_ruleset_check_discovery_refuses_incomplete_or_malformed_evidence(self) -> None:
+        from control_plane.merge_train_github import _required_branch_checks
+
+        branch = {
+            "protected": True,
+            "protection": {"required_status_checks": {"enforcement_level": "off"}},
+        }
+        rule_cases: tuple[object, ...] = (
+            [],
+            {},
+            [{}] * 100,
+            [{"type": "required_status_checks", "parameters": {}}],
+            [
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "required_status_checks": [{"context": "formula", "integration_id": True}],
+                    },
+                }
+            ],
+            MergeTrainGitHubError("unreadable", status_code=403),
+        )
+        for rules in rule_cases:
+            with self.subTest(rules=rules):
+                transport = RecordingMergeTrainGitHubTransport(responses=(branch, rules))
+                with self.assertRaises(MergeTrainGitHubError):
+                    _required_branch_checks(
+                        transport=transport, repository_path="owner/repo", base_branch="main"
+                    )
 
     def test_observe_batch_candidate_checks_requires_pinned_check_app(self) -> None:
         candidate = _batch_candidate().model_copy(
