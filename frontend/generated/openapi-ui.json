@@ -39128,10 +39128,39 @@
         "additionalProperties": false,
         "description": "An admin's request to ask the Client about an engineering-only release now.",
         "properties": {
+          "adopt_comment_id": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adopt Comment Id"
+          },
+          "adopt_issue_number": {
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adopt Issue Number"
+          },
           "checklist_digest": {
             "pattern": "^[0-9a-f]{64}$",
             "title": "Checklist Digest",
             "type": "string"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
           },
           "product": {
             "maxLength": 256,

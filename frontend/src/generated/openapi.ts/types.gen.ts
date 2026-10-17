@@ -5102,7 +5102,10 @@ export type TestingHoldRehearsal = {
 };
 
 export type UrgentReleaseReviewEnvelope = {
+    adopt_comment_id?: number | null;
+    adopt_issue_number?: number | null;
     checklist_digest: string;
+    dry_run?: boolean;
     product: string;
     reason: string;
 };
