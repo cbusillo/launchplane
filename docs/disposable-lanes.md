@@ -1202,7 +1202,12 @@ fresh-resource bootstrap. It requires all of the following:
 
 Only their conjunction produces `usage=unused`, reason `never_served`. Session
 and login booleans remain null: this is a separate proof, not an empty-session
-claim. Source reads are complete DB queries, without a history limit. Pure collection
+claim. Source reads are complete DB queries, without a history limit. The database
+filters out only a deployment or check whose indexed time and payload time are
+the same canonical UTC text from a calendar date the filter can verify, in a
+whole second before preparation. Every undated, malformed, offset or
+payload-mismatched record still reaches the full rule, so a long lane history
+costs one indexed-column pass rather than a decoded record each. Pure collection
 reads do not hold the global authority write lock; revoked generations return
 early. Publication and consumption use their existing locked transaction. The proof
 binds to the generation rather than a growing list of failed checks. Failed checks

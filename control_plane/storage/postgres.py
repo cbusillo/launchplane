@@ -64,6 +64,7 @@ from sqlalchemy import (
     or_,
     text,
     select,
+    true,
     union_all,
 )
 from sqlalchemy import cast as sql_cast
@@ -1022,6 +1023,26 @@ def _try_odoo_synchronous_lane_lock(
 
 def _utc_now_timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+# Every match is a real calendar instant: February 29 and days past 28 in
+# shorter months are left to the caller's parser rather than encoded here.
+_CANONICAL_UTC_TIMESTAMP_PATTERN = (
+    r"^[1-9][0-9]{3}-((0[1-9]|1[0-2])-(0[1-9]|1[0-9]|2[0-8])|(0[13-9]|1[0-2])-(29|30)"
+    r"|(0[13578]|1[02])-31)T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\.[0-9]{1,6})?"
+    r"(Z|\+00:00)$"
+)
+
+
+def _utc_history_bound(value: str) -> str | None:
+    """The UTC whole second of an aware timestamp, comparable as canonical text."""
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc).replace(tzinfo=None, microsecond=0).isoformat()
 
 
 class _PayloadRow(Protocol):
@@ -10422,6 +10443,23 @@ class PostgresRecordStore(HumanSessionStore):
         if record.instance == "testing" and record.policies.staff_testing_hold is not None:
             self._invalidate_testing_non_use_in_session(session, context=record.context)
 
+    def _predates_history_bound(self, column: Any, payload_text: Any, bound: str) -> Any:
+        """True only for canonical UTC text whose whole second is before ``bound``.
+
+        Undated, malformed, offset, leap-day or payload-mismatched text stays a
+        candidate for the caller's own parse, so nothing incomplete is hidden.
+        """
+        seconds: Any = func.substr(column, 1, 19)
+        if self.database_dialect_name == "postgresql":
+            seconds = seconds.collate("C")
+        return and_(
+            column.regexp_match(_CANONICAL_UTC_TIMESTAMP_PATTERN),
+            # The suffix test also refuses a trailing newline that ``$`` admits.
+            or_(column.like("%Z"), column.like("%+00:00")),
+            payload_text == column,
+            seconds < bound,
+        )
+
     def read_testing_non_use_records(
         self, product: str, context: str, target_id: str, *, shared_session: Any = None
     ) -> NeverServedRecords | None:
@@ -10481,6 +10519,21 @@ class PostgresRecordStore(HumanSessionStore):
                 or operation is None
             ):
                 return None
+            # Under the authority lock, load only history that could defeat the
+            # proof; the qualifier still parses every returned timestamp.
+            deployments_before = observations_before = false()
+            bound = _utc_history_bound(generation.prepared_at)
+            if bound is not None:
+                deployments_before = self._predates_history_bound(
+                    LaunchplaneDeploymentRow.deploy_started_at,
+                    LaunchplaneDeploymentRow.payload[("deploy", "started_at")].as_string(),
+                    bound,
+                )
+                observations_before = self._predates_history_bound(
+                    LaunchplanePublicIngressObservationRow.observed_at,
+                    LaunchplanePublicIngressObservationRow.payload["observed_at"].as_string(),
+                    bound,
+                )
             return NeverServedRecords(
                 generation=generation,
                 allocation=DisposableTestingResourcePreparation.model_validate(
@@ -10503,6 +10556,7 @@ class PostgresRecordStore(HumanSessionStore):
                         select(LaunchplaneDeploymentRow).where(
                             LaunchplaneDeploymentRow.context == context,
                             LaunchplaneDeploymentRow.instance == "testing",
+                            deployments_before.is_not(true()),
                         )
                     ).all()
                 ),
@@ -10513,6 +10567,7 @@ class PostgresRecordStore(HumanSessionStore):
                             LaunchplanePublicIngressObservationRow.product == product,
                             LaunchplanePublicIngressObservationRow.context == context,
                             LaunchplanePublicIngressObservationRow.instance == "testing",
+                            observations_before.is_not(true()),
                         )
                     ).all()
                 ),

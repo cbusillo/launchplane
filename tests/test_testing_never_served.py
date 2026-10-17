@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import unittest
 from typing import cast
 
+from sqlalchemy import delete
+
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetStaffTestingHold
 from control_plane.contracts.promotion_record import DeploymentEvidence
@@ -24,6 +26,10 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
 )
 from control_plane.odoo_testing_restore import generation_binding
+from control_plane.storage.postgres import (
+    LaunchplaneDeploymentRow,
+    LaunchplanePublicIngressObservationRow,
+)
 from control_plane.storage.product_authority_bundle import ProductAuthorityBundle
 from control_plane.testing_never_served import (
     NON_USE_EVIDENCE_PREFIX,
@@ -270,6 +276,111 @@ class NeverServedTestingTests(unittest.TestCase):
         self.assertIsNone(result.authenticated_sessions)
         self.assertTrue(result.proof_sha256)
         self.assertEqual(self.read(), result)
+
+    def add_history(self, *, deployments: int = 0, checks: int = 0, at: str | None = None) -> None:
+        """History written before tracking began, as an older generation left it."""
+        started_at = (self.at - timedelta(days=30)).isoformat() if at is None else at
+        rows: list[object] = []
+        for index in range(deployments):
+            record = self.deployment(f"old-deploy-{index}", started_at)
+            rows.append(
+                LaunchplaneDeploymentRow(
+                    record_id=record.record_id,
+                    context=record.context,
+                    instance=record.instance,
+                    artifact_id="",
+                    source_git_ref=record.source_git_ref,
+                    deploy_started_at=record.deploy.started_at,
+                    deploy_finished_at=record.deploy.finished_at,
+                    payload=self.store._payload_dict(record),
+                )
+            )
+        public = self.check("public_http", passed=True)
+        for index in range(checks):
+            rows.append(
+                LaunchplanePublicIngressObservationRow(
+                    record_id=f"old-check-{index}",
+                    product=public.product,
+                    context=public.context,
+                    instance=public.instance,
+                    status=public.status,
+                    observed_at=started_at,
+                    check_kind=public.check_kind,
+                    payload=self.store._payload_dict(
+                        public.model_copy(
+                            update={"record_id": f"old-check-{index}", "observed_at": started_at}
+                        )
+                    ),
+                )
+            )
+        with self.store._session_factory() as session:
+            session.add_all(rows)
+            session.commit()
+
+    def remove_history(self) -> None:
+        with self.store._session_factory() as session:
+            for model in (LaunchplaneDeploymentRow, LaunchplanePublicIngressObservationRow):
+                session.execute(delete(model).where(model.record_id.like("old-%")))
+            session.commit()
+
+    def deployment(self, record_id: str, started_at: str) -> DeploymentRecord:
+        return DeploymentRecord(
+            record_id=record_id,
+            context=self.context,
+            instance="testing",
+            source_git_ref="fixture",
+            deploy=DeploymentEvidence(
+                target_name="fixture",
+                target_type="compose",
+                deploy_mode="compose",
+                status="pass",
+                started_at=started_at,
+            ),
+        )
+
+    def test_locked_snapshot_loads_only_history_that_could_defeat_the_proof(self) -> None:
+        self.add_history(deployments=40, checks=40)
+        records = self.snapshot()
+        self.assertEqual(records.deployments, ())
+        self.assertEqual(
+            {check.record_id for check in records.checks}, {"public_http-fail", "private_http-fail"}
+        )
+        self.assertEqual(self.read().usage, "unused")
+
+    def test_history_text_that_cannot_prove_its_order_still_reaches_the_qualifier(self) -> None:
+        later = self.at + timedelta(minutes=30)
+        earlier = (self.at - timedelta(days=1)).isoformat()
+        for started_at in (
+            "",
+            # Later instants whose text sorts before the generation's.
+            later.astimezone(timezone(timedelta(hours=-1))).isoformat(),
+            later.isoformat(sep=" "),
+            # Earlier-looking text that is not a readable instant.
+            "2025-02-29T00:00:00+00:00",
+            earlier + "\n",
+            earlier.replace("+00:00", "z"),
+        ):
+            with self.subTest(started_at=started_at):
+                self.add_history(deployments=1, at=started_at)
+                try:
+                    self.assertEqual(len(self.snapshot().deployments), 1)
+                    self.assertEqual(self.read().usage, "unknown")
+                finally:
+                    self.remove_history()
+        # The indexed column alone cannot hide a later payload.
+        self.add_history(deployments=1, at=earlier)
+        with self.store._session_factory() as session:
+            row = session.get(LaunchplaneDeploymentRow, "old-deploy-0")
+            assert row is not None
+            row.payload = self.store._payload_dict(
+                self.deployment("old-deploy-0", later.isoformat())
+            )
+            session.commit()
+        self.assertEqual(self.read().usage, "unknown")
+        self.remove_history()
+        self.add_history(checks=1, at=later.astimezone(timezone(timedelta(hours=-1))).isoformat())
+        self.assertEqual(len(self.snapshot().checks), 3)
+        self.assertEqual(self.read().usage, "unknown")
 
     def test_served_once_stays_unknown_even_after_later_failed_checks(self) -> None:
         for kind in ("public_http", "private_http"):
