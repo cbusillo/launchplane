@@ -83,6 +83,7 @@ class OdooPreviewProviderMutationAdapter:
         observe_apply: ObserveOdooPreviewApply = observe_odoo_preview_apply_result,
         pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
         qualify_existing_refresh: bool = False,
+        disposable_cleanup: bool = False,
     ) -> None:
         self._control_plane_root = control_plane_root
         self._pre_mutation_guard = pre_mutation_guard
@@ -397,6 +398,7 @@ class OdooPreviewApplyOperation:
     trace_id: str
     adapter: OdooPreviewProviderMutationAdapter
     target_supersession: ProviderTargetSupersession
+    disposable_cleanup: bool = False
     route_path: str = ODOO_PREVIEW_APPLY_ROUTE
 
     def run(
@@ -422,6 +424,50 @@ class OdooPreviewApplyOperation:
             if check is None:
                 return DurableProviderOperationResult("in_progress", None, 409, {})
             check()
+            if self.disposable_cleanup and existing is None and allow_mutation:
+                if (
+                    self.adapter._pre_mutation_guard is None
+                    or self.adapter._issued_plan.operation != "destroy"
+                ):
+                    raise ValueError("Disposable cleanup requires a guarded destroy.")
+                self.adapter._pre_mutation_guard()
+                # Observe expiry through the existing CAS transition while the
+                # old executor is excluded. Never erase a running lease.
+                from control_plane.contracts.idempotency_record import (
+                    parse_launchplane_mutation_timestamp,
+                )
+                from datetime import timedelta
+
+                for held in store.list_held_odoo_preview_reservations(
+                    product=self.adapter._profile.product
+                ):
+                    if (
+                        held.provider_target_key != self.adapter.target_key()
+                        or not held.reconciliation_key
+                        or held.state != "running"
+                    ):
+                        continue
+                    lookup = store.lookup_existing_mutation_reservation(
+                        route_path=held.route_path,
+                        idempotency_key=held.idempotency_key,
+                        request_fingerprint=held.request_fingerprint,
+                    )
+                    if lookup.record != held or not held.lease_expires_at:
+                        continue
+                    if parse_launchplane_mutation_timestamp(
+                        held.lease_expires_at, field_name="lease_expires_at"
+                    ) + timedelta(
+                        seconds=ODOO_PREVIEW_SUPERSESSION_GRACE_SECONDS
+                    ) <= parse_launchplane_mutation_timestamp(
+                        lookup.observed_at, field_name="observed_at"
+                    ):
+                        marked = store.mark_mutation_reconcile_required(
+                            reservation=held, reconciliation_key=held.reconciliation_key
+                        )
+                        if marked.status != "updated":
+                            return DurableProviderOperationResult(
+                                "target_busy", marked.record, 409, {}
+                            )
             if existing is None:
                 self.adapter.capture_schedule_binding()
             elif isinstance(retained_intent.get("schedule_binding"), dict):
@@ -474,6 +520,7 @@ def prepare_odoo_preview_apply_operation(
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
     qualify_existing_refresh: bool = False,
+    disposable_cleanup: bool = False,
 ) -> OdooPreviewApplyOperation:
     """Build the adapter and supersession policy for a service-issued plan.
 
@@ -499,11 +546,49 @@ def prepare_odoo_preview_apply_operation(
         observe_apply=observe_apply,
         pre_mutation_guard=pre_mutation_guard,
         qualify_existing_refresh=qualify_existing_refresh,
+        disposable_cleanup=disposable_cleanup,
     )
 
     def qualified_supersession(reservation: object) -> bool:
         if pre_mutation_guard is not None:
             pre_mutation_guard()
+        if disposable_cleanup:
+            from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+            from control_plane.preview_reservation_recovery import classify_preview_reservation
+
+            if (
+                issued_plan.operation != "destroy"
+                or pre_mutation_guard is None
+                or not isinstance(reservation, LaunchplaneIdempotencyRecord)
+            ):
+                return False
+            classification = classify_preview_reservation(
+                reservation, profile=profile, store=record_store
+            )
+            if (
+                classification.get("target_pull_request_number")
+                != issued_plan.plan_request.pr_number
+            ):
+                return False
+            from control_plane.storage.postgres import PostgresRecordStore
+
+            if classification.get("original_action_available") or cast(
+                PostgresRecordStore, record_store
+            ).read_original_mutation_intent(reservation):
+                return _original_supersession_is_quiescent(
+                    reservation=reservation,
+                    profile=profile,
+                    request=apply_request,
+                    root=control_plane_root,
+                    database_url=database_url,
+                    check=supersession_is_quiescent,
+                    store=record_store,
+                )
+            return supersession_is_quiescent(
+                control_plane_root_path=control_plane_root,
+                request=apply_request,
+                database_url=database_url,
+            )
         return _original_supersession_is_quiescent(
             reservation=reservation,
             profile=profile,
@@ -538,6 +623,7 @@ def prepare_odoo_preview_apply_operation(
         trace_id=trace_id,
         adapter=adapter,
         target_supersession=target_supersession,
+        disposable_cleanup=disposable_cleanup,
     )
 
 
@@ -614,6 +700,7 @@ def run_odoo_preview_apply_operation(
     ),
     pre_mutation_guard: OdooPreviewPreMutationGuard | None = None,
     allow_mutation: bool = True,
+    disposable_cleanup: bool = False,
 ) -> DurableProviderOperationResult:
     """Run a service-issued Odoo preview apply/destroy durably, in-process.
 
@@ -635,4 +722,5 @@ def run_odoo_preview_apply_operation(
         observe_apply=observe_apply,
         supersession_is_quiescent=supersession_is_quiescent,
         pre_mutation_guard=pre_mutation_guard,
+        disposable_cleanup=disposable_cleanup,
     ).run(store, allow_mutation=allow_mutation)

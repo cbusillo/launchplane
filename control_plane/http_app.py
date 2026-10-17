@@ -24148,20 +24148,35 @@ def create_launchplane_fastapi_app(
                     "product": profile.product,
                     "binding_sha256": fingerprint,
                     "observed_by": launchplane_identity_actor(identity),
-                    "observer_kind": "director_agent",
+                    "observer_kind": "director_agent_preview_cleanup"
+                    if preview is not None
+                    else "director_agent",
                     "observed_at": now,
                     "expires_at": now + timedelta(seconds=observation.lifetime_seconds),
                     "replaced_target_id": retained_target,
-                    # References supplied by an agent are assertions, not
-                    # verified occupancy/custody/physical-isolation records.
-                    # There is no complete authoritative collector yet.
-                    "usage": "unknown",
-                    "data": "unknown",
-                    "production_resources": "unknown",
+                    # The authenticated Director agent can record its observed
+                    # facts for this exact owned disposable preview. Testing
+                    # retains its independent service-collector requirement.
+                    "usage": observation.usage if preview is not None else "unknown",
+                    "data": observation.data if preview is not None else "unknown",
+                    "production_resources": observation.production_resources
+                    if preview is not None
+                    else "unknown",
                 }
             )
             if not store.publish_collected_disposable_lane_safety(evidence):
                 raise ValueError("Protected usage evidence cannot be cleared by assertions.")
+            if preview is not None:
+                from control_plane.contracts.product_reconcile import ProductReconcileTarget
+
+                store.request_product_reconcile(
+                    ProductReconcileTarget(
+                        product=profile.product,
+                        target_kind="preview",
+                        pull_request_number=preview.anchor_pr_number,
+                    ),
+                    now.isoformat(),
+                )
             return accepted_evidence_response(
                 trace_id=trace_id,
                 records={"product_profile": profile.product},
@@ -24169,11 +24184,14 @@ def create_launchplane_fastapi_app(
                     "mode": "record",
                     "binding_sha256": fingerprint,
                     "observed_by": evidence.observed_by,
+                    "observer_kind": evidence.observer_kind,
                     "usage": evidence.usage,
                     "data": evidence.data,
                     "production_resources": evidence.production_resources,
                     "provider_mutation": False,
                     "automatic_fact_collection": "unavailable",
+                    "source_coverage": disposable_collection_coverage(),
+                    "reconcile_requested": preview is not None,
                 },
             )
         except FileNotFoundError as error:
