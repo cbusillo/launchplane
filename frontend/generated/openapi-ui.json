@@ -28806,7 +28806,8 @@
               "recovered",
               "monitoring_intent_changed",
               "migration_baseline",
-              "duplicate_reconciled"
+              "duplicate_reconciled",
+              "request_refused"
             ],
             "title": "Reason",
             "type": "string"
@@ -29498,7 +29499,8 @@
                 "enum": [
                   "recovered",
                   "monitoring_intent_changed",
-                  "duplicate_reconciled"
+                  "duplicate_reconciled",
+                  "request_refused"
                 ],
                 "type": "string"
               },

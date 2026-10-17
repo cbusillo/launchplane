@@ -459,8 +459,9 @@ class GenericWebHttpTests(unittest.TestCase):
                     self.assertEqual(payload["error"]["code"], "promotion_required")
                     deploy.assert_not_called()
                     incidents = store.list_public_ingress_incident_records(status="open")
-                    self.assertEqual(len(incidents), 1)
-                    self.assertIn(payload["trace_id"], incidents[0].summary)
+                    self.assertEqual(incidents, ())
+                    refusals = store.list_public_ingress_observation_records()
+                    self.assertTrue(any(payload["trace_id"] in event.summary for event in refusals))
                     self.assertEqual(store.list_deployment_records(), ())
                     with (
                         patch(
