@@ -1910,6 +1910,12 @@ material-event deliveries in the same transaction as the observation and inciden
 Production delivery has separate `production-delivery-*` provider incidents.
 Rejected production deploy/promotion requests record a bounded reason code and
 the caller's trace even when refusal precedes deployment-record creation.
+The pre-effect promotion guard's HTTP 409 `promotion_required` is a correct
+refusal, not a failed delivery: it records a skipped
+`production-request-refused-*` observation with the trace and sends no failure
+notification. It neither changes production nor resolves any existing incident.
+Failures after a deploy starts, other rejections, and uncertain outcomes remain
+delivery incidents.
 The service's independent delivery-monitor thread checks terminal deployment,
 promotion and queued Odoo release failures once per minute, including products
 without HTTP health checks. As with other incidents, existing matching
@@ -1973,6 +1979,37 @@ incident. A later verified source read resolves only that monitoring incident.
 Explicit lifecycle retirement resolves automatic delivery monitoring; prelaunch
 products have no automatic production deadline. This is notification evidence,
 never acceptance or a release gate.
+
+Historical promotion-guard incidents can be disposed of once their caller is
+retired and production remains healthy. Use the deployed service's existing
+`POST /v1/products/public-ingress-monitor/run-once` with its existing
+`public_ingress_monitor.run_once` authority and an `Idempotency-Key`. Add
+`refused_production_requests`, a list of objects containing `incident_id`,
+`caller_retired: true`, `caller_retired_at` (a timezone-aware timestamp), and
+`caller_retirement_evidence` (the merged change or other explicit evidence that
+the admin checked). Caller retirement is an admin attestation, never an
+inference from health or elapsed time. Verify all old callers/in-flight jobs have
+stopped before attesting it. No new grant, release, or hand-edited record is needed.
+
+That run first performs normal monitoring. Reconciliation then requires every
+effective production check to be fresh and passing after caller retirement,
+with current runtime identity verified. It rejects continuing refusal observations,
+non-refusal or mixed/uncertain incident history, changed lane authority, and
+concurrent incident changes. It shares the delivery monitor's lane lock. Each
+qualified occurrence resolves independently through the normal atomic incident,
+event and reminder transition, with “Production request refused, nothing changed”
+and the retirement evidence in its summary. Its original observations and trace
+remain linked; `resolution_reason=request_refused` records the refusal disposition,
+not a successful deployment. The safe incident API summary says “refused, nothing changed”. The response's
+`refused_production_requests_resolved` lists the disposed occurrences. A blocked
+entry returns 409 `refused_request_reconciliation_blocked`; earlier entries may
+already have resolved. Read back before retrying; entries already resolved as
+`request_refused` are harmless. Incidents resolved by another outcome keep that
+outcome and refuse reclassification. Reconciliation sends no recovery notification. The normal outbox worker
+skips its queued failure notices before resolving a destination; interrupted
+provider sends retain an unknown outcome. Read the incident list/detail APIs to
+verify the resulting disposition. Deploying the source alone does not clear the
+historical incidents.
 
 Exact replays of an unresolved candidate retain its original reason and trace and
 reuse the incident/outbox. A different failure stage updates that incident, and
@@ -3417,6 +3454,33 @@ mark-apply` require `--allow-direct-db-mutation` before they persist local DB
   in the same transaction, and preserves pending website intent and apply snapshots.
   A conflicting destination's scope, status, or safety metadata requires explicit
   local/bootstrap repair before retry. No secret values or versions are copied.
+- For a former relabel that omitted metadata, use `odoo-overrides
+  migrate-secret-transport --context C --instance I
+  --repair-metadata-from-relabel-history` to review one exact lane without
+  writing. Add `--apply --allow-direct-db-mutation` only for an explicitly
+  authorized local/bootstrap repair; arbitrary-checkout live repair is unsupported.
+  This covers both partial and completed pointer transitions. It fills missing
+  classification, sharing evidence and value-source metadata from the retained
+  disabled source binding, preserving explicit destination fields. Sharing
+  evidence follows only an agreeing classification. It requires a unique
+  retained relabel audit naming both bindings and keys, matching secret and lane
+  identities, unchanged relabel timestamps, and current secret metadata no newer
+  than that audit. Missing, ambiguous, edited or rotated provenance refuses with
+  the binding id and the explicit local/bootstrap continuation; never infer safety
+  from a key name. The atomic write guards the override, whole binding set and
+  current secret metadata. It changes no value/version or source activation,
+  records a metadata-only audit, and is idempotent after repair. Historical
+  sources that never recorded classification or value origin cannot establish it.
+  Add repeatable `--repair-binding-id ID` to recover only selected referenced
+  destinations when unrelated legacy bindings have no relabel history. Unknown
+  destination ids refuse. Context-wide bindings, re-relabels and source metadata
+  missing classification or value origin are outside this bounded recovery.
+  For refused records, use the supported installed helper's
+  `product-config-dry-run` then `product-config-apply` value-writing path with
+  a separately authorized supplied value and `secret_class`; value origin is
+  established by that writer, never by a forced metadata edit. This issue grants
+  no value-write authority and asks for no credential. Current explicit edits
+  with later timestamps refuse and remain untouched.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to Odoo as one typed payload env var. Deploy-phase payloads are
   persisted to the Dokploy compose target environment before the web container

@@ -27,7 +27,7 @@ from control_plane.merge_train_controller_run_once import (
     _reflow_stale_candidate_record,
     try_reflow_failed_merge_train_candidate,
 )
-from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import GitHubMergeTrainClient, MergeTrainGitHubError
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.contracts.merge_train_controller_state import MergeTrainControllerLeaseLostError
@@ -78,9 +78,16 @@ class _RerunProvider(_BatchProvider):
 
 class FailedBatchRecoveryTests(unittest.TestCase):
     def setUp(self) -> None:
+        self._prepare()
+
+    def _prepare(self, *, singleton: bool = False) -> None:
         self.snapshot = _FakeExpandedMergeTrainSnapshotReader(
             transport=object()
         ).read_merge_train_snapshot(repository="cbusillo/sellyouroutboard", base_branch="main")
+        if singleton:
+            self.snapshot = self.snapshot.model_copy(
+                update={"pull_requests": self.snapshot.pull_requests[:1]}
+            )
         self.policy = build_test_merge_train_policy()
         self.candidate = build_merge_train_batch_candidate(
             dry_run_result=build_merge_train_dry_run_result(
@@ -218,7 +225,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         self.assertEqual([entry.pull_request_number for entry in replacement.held_out], [2, 3, 4])
         self.reflow_client.add_pull_request_label.assert_not_called()
 
-    def test_lowered_cap_recovers_by_refreshing_behind_first_branch(self) -> None:
+    def test_lowered_cap_isolates_behind_singleton_without_refreshing(self) -> None:
         failed = self._four_member_failed_candidate()
         self.snapshot = self.snapshot.model_copy(
             update={
@@ -236,10 +243,13 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
             result = self._reflow(store, failed)
-            self.assertEqual(store.list_merge_train_batch_candidate_records(status="active"), ())
-        self.assertEqual(result["controller_action"], "update_branch")
-        self.assertEqual(result["dry_run_result"]["queue_order"], [1])
-        self.reflow_client.update_pull_request_branch.assert_called_once()
+            active = store.list_merge_train_batch_candidate_records(status="active")
+            self.assertEqual(
+                [entry.pull_request_number for entry in active[0].candidate.entries], [1]
+            )
+        self.assertEqual(result["controller_action"], "plan_candidate")
+        self.assertEqual(result["reason_code"], "failure_isolation")
+        self.reflow_client.update_pull_request_branch.assert_not_called()
         self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_changed_queue_does_not_wait_on_client_outside_lowered_cap(self) -> None:
@@ -267,6 +277,61 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         self.reflow_client.add_pull_request_label.assert_not_called()
 
     def test_passing_exact_sha_rebuilds_closed_unchanged_batch_without_blame(self) -> None:
+        self._check_passing_exact_sha_rebuilds_closed_candidate()
+
+    def test_passing_exact_sha_rebuilds_closed_singleton_without_reopening_it(self) -> None:
+        self._prepare(singleton=True)
+        self._check_passing_exact_sha_rebuilds_closed_candidate()
+
+    def test_legacy_singleton_without_generated_pr_reobserves_its_exact_sha(self) -> None:
+        self._prepare(singleton=True)
+        self.provider.created = False
+        self.provider.checks_failed = False
+        self.provider.requests.clear()
+        with TemporaryDirectory() as directory:
+            result = self._reflow(
+                FilesystemRecordStore(state_dir=Path(directory)),
+                self.candidate,
+                observe_checks=True,
+            )
+        self.assertEqual(result["controller_action"], "observe_candidate")
+        self.assertEqual(result["candidate"]["candidate_sha"], self.candidate.candidate_sha)
+        self.assertEqual(result["candidate"]["status"], "passed")
+        self.assertTrue(all(method == "GET" for method, _, _ in self.provider.requests))
+
+    def test_unbound_closed_singleton_is_not_legacy_reobservation(self) -> None:
+        self._prepare(singleton=True)
+        self.provider.checks_failed = False
+        self.provider.body = "manually edited generated PR"
+        self.provider.batch_head_sha = "different-generated-head"
+        with TemporaryDirectory() as directory:
+            result = self._reflow(
+                FilesystemRecordStore(state_dir=Path(directory)),
+                self.candidate,
+                observe_checks=True,
+            )
+        self.assertEqual(result["controller_action"], "candidate_failed")
+        self.assertTrue(all(method == "GET" for method, _, _ in self.provider.requests))
+
+    def test_legacy_singleton_discovery_error_keeps_recovery_stopped(self) -> None:
+        self._prepare(singleton=True)
+        self.provider.created = False
+        self.provider.checks_failed = False
+        with (
+            TemporaryDirectory() as directory,
+            patch(
+                "control_plane.merge_train_controller_run_once.has_batch_pull_request",
+                side_effect=MergeTrainGitHubError("unavailable", status_code=503),
+            ),
+        ):
+            result = self._reflow(
+                FilesystemRecordStore(state_dir=Path(directory)),
+                self.candidate,
+                observe_checks=True,
+            )
+        self.assertEqual(result["controller_action"], "candidate_failed")
+
+    def _check_passing_exact_sha_rebuilds_closed_candidate(self) -> None:
         failed_observation = self.client.observe_batch_candidate_checks(candidate=self.candidate)
         self.assertEqual(failed_observation.required_checks_status, "fail")
         self.provider.checks_failed = False
@@ -936,7 +1001,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                     # retry is still active and the queue now matches it again.
                     client.read_merge_train_snapshot.side_effect = None
                     client.read_merge_train_snapshot.return_value = self.snapshot
-                result = _reflow_stale_candidate_record(**kwargs)
+                result, _ = _reflow_stale_candidate_record(**kwargs)
                 assert result is not None
                 self.assertEqual(result["reason_code"], "candidate_retry_resumed")
                 candidate = MergeTrainBatchCandidate.model_validate(result["candidate"])
@@ -1040,7 +1105,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 self._fresh_plan(store, mutate=True, observe_checks=True, lease=lease)
             self.assertEqual(store.list_merge_train_batch_candidate_records(), before)
 
-    def test_reobserved_singleton_retains_new_conflict_holds(self) -> None:
+    def test_rebuilt_singleton_retains_new_conflict_holds(self) -> None:
         self.snapshot = self.snapshot.model_copy(
             update={"pull_requests": self.snapshot.pull_requests[:1]}
         )
@@ -1072,7 +1137,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
                 ).model_copy(update={"status": "superseded"})
             )
             result = self._fresh_plan(store, mutate=True, observe_checks=True, conflicts=(hold,))
-            self.assertEqual(result["controller_action"], "observe_candidate")
+            self.assertEqual(result["controller_action"], "plan_candidate")
             self.assertEqual(
                 store.list_merge_train_batch_candidate_records(status="active")[
                     0
@@ -1352,7 +1417,7 @@ class FailedBatchRecoveryTests(unittest.TestCase):
         with TemporaryDirectory() as directory:
             store = FilesystemRecordStore(state_dir=Path(directory))
             store.write_merge_train_batch_candidate_record(record)
-            result = _reflow_stale_candidate_record(
+            result, _ = _reflow_stale_candidate_record(
                 request=MergeTrainControllerRunOnceEnvelope(
                     repository=snapshot.repository, base_branch=snapshot.base_branch, mutate=True
                 ),

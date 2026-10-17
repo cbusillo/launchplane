@@ -23,6 +23,7 @@ from control_plane.contracts.runtime_dependency_health import RuntimeDependencyH
 
 # Historical source-age incidents are retained as evidence, never failure alerts.
 RETIRED_PRODUCTION_DELIVERY_LAG_CHECK = "production-delivery-lag"
+PRODUCTION_REQUEST_REFUSED: Literal["request_refused"] = "request_refused"
 
 PublicIngressObservationStatus = Literal["pass", "fail", "skipped"]
 PublicIngressObservationPurpose = Literal["probe", "reconciliation"]
@@ -31,6 +32,7 @@ PublicIngressIncidentResolutionReason = Literal[
     "recovered",
     "monitoring_intent_changed",
     "duplicate_reconciled",
+    "request_refused",
 ]
 PublicIngressIncidentEvent = Literal["opened", "updated", "reminder", "resolved"]
 PublicIngressIncidentEventKind = PublicIngressIncidentEvent | Literal["baseline"]
@@ -42,6 +44,7 @@ PublicIngressIncidentEventReason = Literal[
     "monitoring_intent_changed",
     "migration_baseline",
     "duplicate_reconciled",
+    "request_refused",
 ]
 PublicIngressIncidentSeverity = Literal["warning", "critical"]
 PublicIngressIncidentNotificationState = Literal["active", "acknowledged", "silenced"]

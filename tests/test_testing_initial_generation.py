@@ -140,9 +140,16 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_missing_copy_prerequisite_refuses_before_allocation_effects(self) -> None:
+        from control_plane.testing_replacement_bootstrap import BootstrapPrerequisiteCode
+
         self.credentials.side_effect = ValueError("fixture unavailable local credentials")
         response = await self.post()
         self.assertEqual(response.status_code, 409, response.text)
+        self.assertEqual(
+            response.json()["error"]["code"], BootstrapPrerequisiteCode.CREDENTIALS_UNVERIFIED
+        )
+        self.assertNotIn("fixture unavailable local credentials", response.text)
+        self.usage.assert_not_called()
         self.assertEqual(
             self.store.read_odoo_stable_target_replacement_operation_record(
                 self.success.operation_id
@@ -153,6 +160,48 @@ class InitialTestingGenerationHttpTests(unittest.IsolatedAsyncioTestCase):
             product=self.fixture.profile.product, context=self.fixture.context, instance="testing"
         ) as owner:
             self.assertIsNone(owner)
+
+    async def test_initial_refusals_identify_the_failed_checkpoint_without_private_details(
+        self,
+    ) -> None:
+        from control_plane.testing_initial_generation import InitialTestingPrerequisiteCode
+
+        scenarios = (
+            (
+                "control_plane.storage.postgres.PostgresRecordStore.prepare_initial_testing_generation",
+                InitialTestingPrerequisiteCode.PREPARATION_UNAVAILABLE,
+            ),
+            (
+                "control_plane.testing_initial_generation.require_initial_bootstrap_prerequisites",
+                InitialTestingPrerequisiteCode.COPY_PREREQUISITE_UNVERIFIED,
+            ),
+            (
+                "control_plane.testing_initial_generation.require_initial_usage",
+                InitialTestingPrerequisiteCode.USAGE_UNVERIFIED,
+            ),
+        )
+        for target, code in scenarios:
+            self.usage.reset_mock()
+            with (
+                self.subTest(checkpoint=code),
+                patch(target, side_effect=ValueError("private topology and credential detail")),
+            ):
+                response = await self.post()
+                self.assertEqual(response.status_code, 409, response.text)
+                self.assertEqual(response.json()["error"]["code"], code)
+                self.assertNotIn("private topology and credential detail", response.text)
+                self.usage.assert_not_called()
+                self.assertIsNone(
+                    self.store.read_fresh_odoo_testing_generation(
+                        self.fixture.profile.product, self.fixture.context
+                    )
+                )
+                with self.store.odoo_synchronous_lane_reservation(
+                    product=self.fixture.profile.product,
+                    context=self.fixture.context,
+                    instance="testing",
+                ) as owner:
+                    self.assertIsNone(owner)
 
     async def test_provider_usage_denial_is_not_reclassified_as_safety_unknown(self) -> None:
         from control_plane.dokploy.native_copy_stream import NativeSourceAuthorizationDenied

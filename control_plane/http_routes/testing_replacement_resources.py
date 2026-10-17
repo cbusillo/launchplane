@@ -75,12 +75,17 @@ def register_testing_replacement_resource_routes(
                 "Resource qualification needs PostgreSQL concurrency guards.",
             )
         if body.initial_generation:
+            from control_plane.testing_replacement_bootstrap import (
+                TestingBootstrapPrerequisiteError,
+            )
             from control_plane.testing_initial_generation import (
+                InitialTestingPrerequisiteCode,
                 initial_preparation_id,
                 require_initial_usage,
                 require_initial_bootstrap_prerequisites,
             )
 
+            checkpoint = InitialTestingPrerequisiteCode.PREPARATION_UNAVAILABLE
             try:
                 initial_id = initial_preparation_id(
                     product, body.context, idempotency_scope(identity), idempotency_key
@@ -94,9 +99,11 @@ def register_testing_replacement_resource_routes(
                             product=product, request=body, prepared_by=idempotency_scope(identity)
                         )
                     )
+                    checkpoint = InitialTestingPrerequisiteCode.COPY_PREREQUISITE_UNVERIFIED
                     await run_in_worker_thread(
                         lambda: require_initial_bootstrap_prerequisites(record_store, product, body)
                     )
+                    checkpoint = InitialTestingPrerequisiteCode.USAGE_UNVERIFIED
                     await run_in_worker_thread(
                         lambda: require_initial_usage(root, record_store, product, body)
                     )
@@ -106,10 +113,12 @@ def register_testing_replacement_resource_routes(
                     "authorization_denied",
                     "The provider refused the Odoo testing usage read. Preserve the trace and original request.",
                 )
+            except TestingBootstrapPrerequisiteError as error:
+                refuse(409, error.code, str(error))
             except (ValueError, FileNotFoundError, RuntimeError, OSError, click.ClickException):
                 refuse(
                     409,
-                    "testing_resources_refused",
+                    checkpoint,
                     "Initial testing custody or current use could not be verified.",
                 )
         if body.mode == "release":

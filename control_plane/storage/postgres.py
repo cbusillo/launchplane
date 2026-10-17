@@ -11386,9 +11386,33 @@ class PostgresRecordStore(HumanSessionStore):
                     "published",
                     "qualified_at",
                     "published_target",
+                    "generated_configuration_sha256",
                 }
                 if previous.model_dump(exclude=mutable) != record.model_dump(exclude=mutable):
                     raise ValueError("Testing activation identities are immutable.")
+                if (
+                    previous.generated_configuration_sha256 != record.generated_configuration_sha256
+                    and (
+                        previous.generated_configuration_sha256
+                        or not record.generated_configuration_sha256
+                        or previous.published
+                        or previous.configuration_version != 3
+                        or bundle is None
+                        or not bundle.secret_records
+                        or any(
+                            (secret.scope, secret.context, secret.instance)
+                            != ("context_instance", record.context, "testing")
+                            for secret in bundle.secret_records
+                        )
+                        or any(
+                            binding.value_source != "generated"
+                            for binding in bundle.secret_bindings
+                        )
+                    )
+                ):
+                    raise ValueError(
+                        "Generated activation credentials require their one-time atomic bundle."
+                    )
                 for key in (
                     "project_id",
                     "environment_id",
@@ -28269,8 +28293,30 @@ class PostgresRecordStore(HumanSessionStore):
         ):
             raise ValueError("Source completion cannot change other target fields.")
         with self._session_factory() as session:
-            self._begin_serialized_write(session)
+            self._lock_odoo_stable_lane(
+                session,
+                product=expected_profile.product,
+                context=expected_record.context,
+                instance=expected_record.instance,
+            )
             self._lock_product_authority_bundle_write(session)
+            if (
+                self._active_odoo_stable_lane_operation_owner(
+                    session,
+                    product=expected_profile.product,
+                    context=expected_record.context,
+                    instance=expected_record.instance,
+                )
+                is not None
+            ):
+                raise ValueError("A lane operation still owns testing source or recovery.")
+            if any(
+                row.payload.get("retained_target_id") == expected_target_id.target_id
+                for row in session.scalars(
+                    select(LaunchplaneDisposableReplacementPreparationRow)
+                ).all()
+            ):
+                raise ValueError("Testing source remains reserved by retained-target custody.")
             self._lock_landing_authority(
                 session, landing_authority.product_profile(expected_profile.product)
             )

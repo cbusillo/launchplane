@@ -16,6 +16,7 @@ from control_plane.odoo_runtime_reads import (
 from control_plane.odoo_testing_restore import FreshOdooTestingGeneration
 from control_plane.odoo_walkthrough import (
     plan_walkthrough,
+    read_walkthrough_prerequisites,
     WALKTHROUGH_SECRET_INTEGRATION,
     WalkthroughPrerequisite,
     WalkthroughPrerequisiteError,
@@ -134,6 +135,123 @@ class WalkthroughPlanTests(unittest.TestCase):
             created_at=created,
             updated_at=created,
         )
+
+    def test_preflight_keeps_independent_runtime_blockers_and_skips_missing_evidence(self) -> None:
+        self.domain.return_value = False
+        self.environment.return_value = {"ODOO_DB_NAME": "other-database"}
+        self.store.find_secret_record.return_value = self.secret(disabled=True)
+        checks = {
+            checkpoint: state
+            for checkpoint, code, state in read_walkthrough_prerequisites(
+                self.store, Path("/fixture"), "example-odoo", "example", task_request()
+            )
+        }
+        for code in (
+            WalkthroughPrerequisite.ORIGIN,
+            WalkthroughPrerequisite.DATABASE,
+            WalkthroughPrerequisite.CREDENTIAL,
+        ):
+            self.assertEqual(checks[code], "blocked")
+        self.assertEqual(checks[WalkthroughPrerequisite.ISOLATION_OR_USAGE], "unknown")
+        self.unused.assert_not_called()
+        # Action planning retains the first refusal and cannot consume diagnostic clearance.
+        with self.assertRaises(WalkthroughPrerequisiteError) as caught:
+            self.plan()
+        self.assertEqual(caught.exception.code, WalkthroughPrerequisite.ORIGIN)
+
+    def test_preflight_missing_generation_does_not_hide_hold_or_probe_dependent_runtime(
+        self,
+    ) -> None:
+        self.generation_read.return_value = None
+        self.hold.side_effect = ValueError("staff protection")
+        checks = {
+            checkpoint: state
+            for checkpoint, code, state in read_walkthrough_prerequisites(
+                self.store, Path("/fixture"), "example-odoo", "example"
+            )
+        }
+        self.assertEqual(checks[WalkthroughPrerequisite.GENERATION], "blocked")
+        self.assertEqual(checks[WalkthroughPrerequisite.USE], "blocked")
+        self.assertEqual(checks[WalkthroughPrerequisite.RUNTIME], "unknown")
+        self.assertEqual(checks[WalkthroughPrerequisite.CREDENTIAL], "unknown")
+        self.connect.assert_not_called()
+        self.usage.assert_not_called()
+        self.store.find_secret_record.assert_not_called()
+
+    def test_preflight_unreadable_use_is_unknown_without_hiding_other_checks(self) -> None:
+        from control_plane.odoo_testing_drill import DrillEvidenceUnavailable
+
+        self.hold.side_effect = DrillEvidenceUnavailable("unreadable")
+        checks = {
+            checkpoint: state
+            for checkpoint, code, state in read_walkthrough_prerequisites(
+                self.store, Path("/fixture"), "example-odoo", "example", task_request()
+            )
+        }
+        self.assertEqual(checks[WalkthroughPrerequisite.USE], "unknown")
+        self.assertEqual(checks[WalkthroughPrerequisite.ORIGIN], "clear")
+
+    def test_completed_provision_generation_does_not_require_copy_preparation(self) -> None:
+        from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+        from control_plane.testing_path_check import read_testing_prerequisites
+        from tests.support.profiles import _odoo_profile_payload_with_prod_lane
+
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _odoo_profile_payload_with_prod_lane("example-odoo")
+        )
+        profile = profile.model_copy(
+            update={
+                "lanes": tuple(
+                    lane.model_copy(update={"context": "example"})
+                    if lane.instance == "testing"
+                    else lane
+                    for lane in profile.lanes
+                )
+            }
+        )
+        steps = read_testing_prerequisites(
+            intent="provision",
+            store=self.store,
+            profile=profile,
+            root=Path("/fixture"),
+            source_mode="container-export",
+            task_id=task_request().task_id,
+            operation_id=None,
+            action_allowed=lambda *args: True,
+            caller_can_provision=True,
+            caller_can_generate=False,
+        )
+        self.assertTrue(all(step.state == "clear" for step in steps))
+        self.store.read_disposable_resource_preparation.assert_not_called()
+        self.store.read_fresh_odoo_testing_generation.assert_not_called()
+
+    def test_preflight_transient_runtime_and_history_reads_remain_unknown(self) -> None:
+        from control_plane.odoo_runtime_reads import OdooRuntimeReadError
+        from control_plane.odoo_testing_drill_usage import DrillUsageUnreadable
+
+        for dependency, error, checkpoint in (
+            (
+                self.connect,
+                OdooRuntimeReadError("container_unavailable", "private host", 503),
+                WalkthroughPrerequisite.RUNTIME,
+            ),
+            (
+                self.usage,
+                DrillUsageUnreadable("private history"),
+                WalkthroughPrerequisite.PHYSICAL_COPY,
+            ),
+        ):
+            dependency.side_effect = error
+            try:
+                checks = {
+                    step: state
+                    for step, code, state in read_walkthrough_prerequisites(
+                        self.store, Path("/fixture"), "example-odoo", "example", task_request()
+                    )
+                }
+                self.assertEqual(checks[checkpoint], "unknown")
+            finally:
+                dependency.side_effect = None
 
     def test_production_foreign_context_and_origin_aliases_refuse_before_provider(self) -> None:
         with self.assertRaises(ValueError):

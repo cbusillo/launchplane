@@ -97,14 +97,11 @@ from control_plane.odoo_release_recovery import (
 )
 from control_plane.odoo_stable_lane import OdooStableLaneOperationConflictError
 from control_plane.release_review import (
-    ReleaseReviewStore,
     current_release_review,
     release_version,
     checklist_blockers,
 )
 from control_plane.release_review_record import publish_release_decision
-from control_plane.release_invitation import ReleaseInvitationBackoff, publish_release_invitation
-from control_plane.release_invitation_changes import ReleaseInvitationNotesUnavailable
 from control_plane.generic_web_promotion_http import (
     GENERIC_WEB_PROD_PROMOTION_ROUTE,
     GenericWebProdPromotionEnvelope,
@@ -1089,7 +1086,6 @@ def advance_client_releases(
     control_plane_root: Path,
     stop_event: Event | None = None,
     standing_review_backoff: StandingReleaseReviewBackoff | None = None,
-    invitation_backoff: ReleaseInvitationBackoff | None = None,
 ) -> tuple[str, ...]:
     """Queue the next step of every Client release that is ready for one.
 
@@ -1154,32 +1150,6 @@ def advance_client_releases(
             continue
         if operation_id:
             queued.append(operation_id)
-    # Queue accepted releases before potentially slow invitation lookups.
-    for profile in profiles:
-        if stop_event is not None and stop_event.is_set():
-            break
-        try:
-            publish_release_invitation(
-                store=cast(ReleaseReviewStore, store),
-                control_plane_root=control_plane_root,
-                profile=profile,
-                backoff=invitation_backoff,
-            )
-        except ReleaseInvitationNotesUnavailable as error:
-            # Fixed diagnostic wording plus recorded repository/PR identifiers;
-            # never log a PR body or an arbitrary provider exception message.
-            _LOGGER.warning(
-                "release invitation unavailable product=%s error_type=%s reason=%s",
-                profile.product,
-                type(error).__name__,
-                error,
-            )
-        except Exception as error:
-            _LOGGER.warning(
-                "release invitation unavailable product=%s error_type=%s",
-                profile.product,
-                type(error).__name__,
-            )
     return tuple(queued)
 
 

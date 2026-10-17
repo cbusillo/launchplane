@@ -374,7 +374,11 @@ class MergeTrainControllerFeedbackTests(TestCase):
         cases = (
             ({"required_checks_status": "pending"}, "wait_for_checks", "waiting"),
             (
-                {"required_checks_status": "pass", "branch_update_required": True},
+                {
+                    "required_checks_status": "pass",
+                    "branch_update_required": True,
+                    "requires_individual_landing": True,
+                },
                 "update_branch",
                 "blocked",
             ),

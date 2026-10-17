@@ -56,6 +56,11 @@ recording a Client decision or sending a review invitation. A later review label
 missing notes, or real test notes restores the corresponding review gate on the
 same head when the check refreshes. Until then, an engineering-only check cannot
 satisfy required Client acceptance. An existing Client rejection stays visible.
+The train independently reads saved current-head decisions for the product's
+current Client at admission and immediately before merging. A Request changes
+decision blocks even after notes are edited to engineering-only or while its
+GitHub projection is stale. A later Accept on that head clears the veto;
+decisions for another head, product or former Client do not veto this change.
 The consuming product's release acceptance remains required.
 The signed-in GitHub user's immutable id must equal `owner.github_id` before
 Launchplane accepts a product-review decision.
@@ -108,10 +113,34 @@ The form explains that new decisions and feedback are shared on the pull request
 
 ## Carried acceptance
 
+Per-change Client acceptance remains required. Release acceptance is a separate
+final check; it does not replace the decision about each change.
+
+For a later descendant head, acceptance carries only when every intervening
+commit has one `Client-impact: none` git trailer in its final trailer paragraph.
+`Client-impact: visible`, missing or ambiguous trailers need a new decision,
+even when the final patch happens to match. Agents declare the impact and the
+second-model review checks it against the actual changes. A test-only follow-up
+can therefore carry without asking the Client to accept the same feature twice.
+Launchplane requires a complete, ordered single-parent history from the accepted
+head to the new head (at most 250 commits); incomplete history never carries.
+A merge trailer alone cannot prove it was conflict-free, so unproven merges,
+including conflict-resolving merges, need a new decision. The existing clean
+merge-train refresh proof below continues to apply.
+If recorded train refreshes and invisible commits are mixed between status
+publishes, neither proof covers the whole history and a new decision is needed.
+
+This carry records reason `client_impact_none` and every commit SHA with its
+`client_impact` trailer value in `carried_from.commits`, in order. The Client sees
+a short note that later commits were marked as having no Client-visible changes
+and their acceptance still applies. The recorded Client, original acceptance
+and delivered feedback remain the source, rather than inventing a new decision.
+The same-current-Client, delivered-feedback and unchanged-base checks below apply.
+
 The Client accepts a feature, seen on its preview. A base update or rebase may
 change its commit without changing the feature. Launchplane carries the
-acceptance to that new head instead of asking again, whether the update was
-made by the train, an agent, or another source-control flow. It carries only
+acceptance across a recorded train refresh or rewritten history (such as a
+rebase) instead of asking again. This existing unchanged-patch proof carries only
 when all of these hold:
 
 - The pull request still targets the base branch the acceptance was given on.

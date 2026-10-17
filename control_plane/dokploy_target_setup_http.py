@@ -445,6 +445,7 @@ def execute_dokploy_target_setup(
     disposable_checkpoint: Callable[[], None] | None = None,
     disposable_before_create: Callable[[str], None] | None = None,
     disposable_placement: tuple[str, str] | None = None,
+    director_source_completion: bool = False,
 ) -> dict[str, object]:
     def mutate_setup(
         host: str, token: str, path: str, payload: dict[str, dokploy_api.JsonValue]
@@ -479,6 +480,7 @@ def execute_dokploy_target_setup(
             control_plane_root_path=control_plane_root_path,
             record_store=record_store,
             request=request,
+            director_agent=director_source_completion,
         )
     source_profile = None
     source_url = ""

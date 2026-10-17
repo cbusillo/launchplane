@@ -1,6 +1,7 @@
 """Fresh generation continuation against real record transactions and fake provider IO."""
 
 from pathlib import Path
+import os
 from datetime import datetime, timedelta
 from typing import Any
 import unittest
@@ -44,6 +45,16 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
         self.addCleanup(self.fixture.doCleanups)
         fixture = self.fixture
         self.store = fixture.store
+        from tests.support.stores import _write_runtime_key_safety_policy
+        from control_plane import secrets
+
+        self.enterContext(
+            patch.dict(
+                os.environ,
+                {secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "testing-bootstrap-fixture-key"},
+            )
+        )
+        _write_runtime_key_safety_policy(database_url=self.store.database_url)
         profile = self.store.read_product_profile_record(fixture.profile.product)
         source_lane = next(lane for lane in profile.lanes if lane.instance == "prod")
         self.profile = profile.model_copy(
@@ -61,6 +72,23 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
                     if lane.instance == "testing"
                     else lane
                     for lane in profile.lanes
+                )
+            }
+        )
+        self.store.write_product_profile_record(self.profile)
+        from control_plane.contracts.product_profile_record import ProductSecretConfigRequirement
+
+        self.profile = self.profile.model_copy(
+            update={
+                "expected_config": self.profile.expected_config.model_copy(
+                    update={
+                        "managed_secret_bindings": (
+                            *self.profile.expected_config.managed_secret_bindings,
+                            ProductSecretConfigRequirement(
+                                binding_key="EXTRA_LOCAL_SECRET", testing_local_credential=True
+                            ),
+                        )
+                    }
                 )
             }
         )
@@ -322,6 +350,14 @@ class FreshTestingBootstrapScenario(unittest.TestCase):
         self.assertEqual(self.route_writes, 1)
         result = self.adapter().readback()
         self.assertTrue(result["applied"])
+        self.assertFalse(
+            any(
+                binding.binding_key == "EXTRA_LOCAL_SECRET"
+                for binding in self.store.list_secret_bindings(
+                    context_name=self.fixture.context, instance_name="testing"
+                )
+            )
+        )
         held = self.store.read_odoo_stable_target_replacement_operation_record(
             self.fixture.operation.operation_id
         )

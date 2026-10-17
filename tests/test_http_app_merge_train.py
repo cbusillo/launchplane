@@ -2214,7 +2214,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry["pull_request_number"] for entry in plan["entries"]], [1, 2])
         self.assertEqual(calls, ["batch_pr", "checks", "batch_pr"])
 
-    async def test_controller_refreshes_a_lone_behind_base_pull_request(self) -> None:
+    async def test_controller_refreshes_an_owned_behind_base_pull_request(self) -> None:
         branch_updates: list[tuple[int, str]] = []
         head_sha = "1" * 40
 
@@ -2226,7 +2226,11 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                     update={
                         "pull_requests": (
                             pull_request.model_copy(
-                                update={"branch_update_required": True, "head_sha": head_sha}
+                                update={
+                                    "branch_update_required": True,
+                                    "head_sha": head_sha,
+                                    "requires_individual_landing": True,
+                                }
                             ),
                         )
                     }
@@ -3643,7 +3647,7 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(probe_executor.ref_events[-1], ("delete", probe_executor.probe_ref))
 
-    async def test_failed_candidate_does_not_block_a_behind_base_queue_head(self) -> None:
+    async def test_failed_candidate_does_not_block_an_owned_behind_base_queue_head(self) -> None:
         branch_updates: list[tuple[int, str]] = []
 
         class BehindBaseReader(_FakeMergeTrainSnapshotReader):
@@ -3653,7 +3657,12 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 return snapshot.model_copy(
                     update={
                         "pull_requests": (
-                            pull_request.model_copy(update={"branch_update_required": True}),
+                            pull_request.model_copy(
+                                update={
+                                    "branch_update_required": True,
+                                    "requires_individual_landing": True,
+                                }
+                            ),
                         )
                     }
                 )
@@ -4004,9 +4013,15 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
             passed_record_id = responses[2].json()["records"][
                 "merge_train_batch_candidate_record_id"
             ]
-            with patch(
-                "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
-                UnknownMergeabilitySnapshotReader,
+            with (
+                patch(
+                    "control_plane.merge_train_github.GitHubMergeTrainSnapshotReader",
+                    UnknownMergeabilitySnapshotReader,
+                ),
+                patch(
+                    "control_plane.merge_train_controller_run_once.GitHubMergeTrainClient",
+                    _FakeMergeTrainGitHubClient,
+                ),
             ):
                 landing_response = await _post_merge_train_controller_run_once(app, request_payload)
             candidate_records = store.list_merge_train_batch_candidate_records(
@@ -4646,7 +4661,9 @@ class FastApiMergeTrainControllerRunOnceTests(unittest.IsolatedAsyncioTestCase):
                 snapshot = super().read_merge_train_snapshot(
                     repository=repository, base_branch=base_branch
                 )
-                root = snapshot.pull_requests[0]
+                root = snapshot.pull_requests[0].model_copy(
+                    update={"requires_individual_landing": True}
+                )
                 if refreshed["value"]:
                     root = root.model_copy(update={"head_sha": "refreshed-root-head"})
                 else:

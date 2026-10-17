@@ -402,12 +402,8 @@ class MergeTrainBatchLandingPlan(BaseModel):
         if positions != list(range(1, len(positions) + 1)):
             raise ValueError("merge train batch landing plan positions must be contiguous")
         if self.candidate_pull_request_number is not None:
-            if len(self.entries) < 2 or any(
-                entry.merge_method != "merge" for entry in self.entries
-            ):
-                raise ValueError(
-                    "protected batch PR landing requires multiple merge-method entries"
-                )
+            if any(entry.merge_method != "merge" for entry in self.entries):
+                raise ValueError("protected batch PR landing requires merge-method entries")
             if self.candidate_pull_request_number in {
                 entry.pull_request_number for entry in self.entries
             }:

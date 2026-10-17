@@ -3109,6 +3109,7 @@ export type ProductConfigSecretResult = {
     sharing_reason?: {
         [key: string]: string;
     } | null;
+    value_source?: 'generated' | null;
 };
 
 export type ProductConfigWriteAvailability = {
@@ -3381,7 +3382,7 @@ export type ProductIncidentEventSummary = {
     observation_id: string;
     occurred_at: string;
     previous_material_fingerprint_sha256: string;
-    reason: 'incident_opened' | 'material_change' | 'reminder_due' | 'recovered' | 'monitoring_intent_changed' | 'migration_baseline' | 'duplicate_reconciled';
+    reason: 'incident_opened' | 'material_change' | 'reminder_due' | 'recovered' | 'monitoring_intent_changed' | 'migration_baseline' | 'duplicate_reconciled' | 'request_refused';
     reminder_window_ended_at: string;
     reminder_window_index: number | null;
     reminder_window_started_at: string;
@@ -3475,7 +3476,7 @@ export type ProductIncidentSummary = {
     product: string;
     provenance: DataProvenance;
     recovery_observation_threshold: number;
-    resolution_reason: 'recovered' | 'monitoring_intent_changed' | 'duplicate_reconciled' | '';
+    resolution_reason: 'recovered' | 'monitoring_intent_changed' | 'duplicate_reconciled' | 'request_refused' | '';
     resolved_at: string;
     schema_version: number;
     severity: 'warning' | 'critical';
@@ -4066,11 +4067,17 @@ export type ProductRetirementRequest = {
 };
 
 export type ProductReviewCarry = {
+    commits: Array<ProductReviewCarryCommit>;
     comparison_base_sha: string;
     head_sha: string;
-    reason: 'merge_train_base_refresh' | 'unchanged_patch_base_update';
+    reason: 'merge_train_base_refresh' | 'unchanged_patch_base_update' | 'client_impact_none';
     record_id: string;
     refresh_record_ids: Array<string>;
+};
+
+export type ProductReviewCarryCommit = {
+    client_impact: 'none';
+    sha: string;
 };
 
 export type ProductReviewDecisionEnvelope = {
@@ -4176,6 +4183,7 @@ export type ProductSecretConfigRequirement = {
     instance: string;
     integration: string;
     owner_input: ProductOwnerSecretInput | null;
+    testing_local_credential?: boolean;
 };
 
 export type ProductSecretConfigRequirementRemoval = {
@@ -4887,7 +4895,7 @@ export type SecretBinding = {
     sharing_reason: SecretSharingReason | null;
     status: 'configured' | 'disabled';
     updated_at: string;
-    value_source: 'supplied' | 'copy' | 'provider' | null;
+    value_source: 'supplied' | 'copy' | 'provider' | 'generated' | null;
 };
 
 export type SecretSharingReason = {
@@ -5102,7 +5110,10 @@ export type TestingHoldRehearsal = {
 };
 
 export type UrgentReleaseReviewEnvelope = {
+    adopt_comment_id?: number | null;
+    adopt_issue_number?: number | null;
     checklist_digest: string;
+    dry_run?: boolean;
     product: string;
     reason: string;
 };

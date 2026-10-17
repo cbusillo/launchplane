@@ -74,6 +74,10 @@ class DrillSkipped(ValueError):
     """Protected lane use or custody refuses the next dispatch."""
 
 
+class DrillEvidenceUnavailable(DrillSkipped):
+    """A required read failed; this is not evidence of protected use."""
+
+
 class DrillPrerequisite(ValueError):
     """A fixed, value-free prerequisite code for the lane and its Discord alert."""
 
@@ -199,7 +203,7 @@ def require_drill_use_unprotected(
             )
         )
     except Exception as error:
-        raise DrillSkipped("staff_hold_or_protection_check_unreadable") from error
+        raise DrillEvidenceUnavailable("staff_hold_or_protection_check_unreadable") from error
     if hold is not None:
         raise DrillSkipped("staff_testing_hold")
     if recorded is not None and (protected or recorded.data == "only_copy"):

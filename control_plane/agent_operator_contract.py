@@ -103,7 +103,7 @@ OPERATION_SPECS = (
         ("service_api", "local_cli"),
         ("dry-run", "apply", "readback"),
         "apply",
-        ("expected_plan_sha256", "host_review", "custody_review", "trust_review"),
+        ("expected_plan_sha256", "host_review"),
     ),
     OperationSpec(
         "POST",

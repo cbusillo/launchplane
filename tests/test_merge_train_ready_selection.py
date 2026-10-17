@@ -42,9 +42,7 @@ class ReadySelectionTests(unittest.TestCase):
                     assert result.selected_pr is not None
                     self.assertEqual(result.selected_pr.number, ready.number)
                     self.assertEqual(result.selected_pr.head_sha, ready.head_sha)
-                    self.assertEqual(
-                        result.intended_next_action, "update_branch" if refresh else "merge"
-                    )
+                    self.assertEqual(result.intended_next_action, "merge")
                     deferred = result.queue[0]
                     self.assertFalse(deferred.eligible)
                     self.assertTrue(deferred.ineligible_reasons)
@@ -63,10 +61,10 @@ class ReadySelectionTests(unittest.TestCase):
             assert result.selected_pr is not None
             self.assertEqual(result.selected_pr.head_sha, refreshed_head)
 
-    def test_refreshed_later_head_must_pass_its_new_checks(self) -> None:
+    def test_pushed_later_head_must_pass_its_new_checks(self) -> None:
         waiting = _pull_request(1, required_checks_status="pending")
         later = _pull_request(2, branch_update_required=True)
-        self.assertEqual(self._select(waiting, later).intended_next_action, "update_branch")
+        self.assertEqual(self._select(waiting, later).intended_next_action, "merge")
         refreshed = later.model_copy(
             update={
                 "head_sha": "refreshed-head",
@@ -203,7 +201,7 @@ class ReadySelectionControllerTests(unittest.IsolatedAsyncioTestCase):
                     result = dry.json()["result"]
                     self.assertEqual(
                         result["controller_action"],
-                        "update_branch" if refresh else "plan_candidate",
+                        "plan_candidate",
                     )
                     self.assertEqual(result["dry_run_result"]["queue_order"], [2])
                     self.assertFalse(store.list_merge_train_batch_candidate_records())

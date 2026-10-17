@@ -91,6 +91,74 @@ class StoredRecordSnapshotTests(unittest.TestCase):
         LaunchplaneProductProfileRecord.model_validate(profile)
         self.assertEqual(before, self.store.list_authz_policy_records()[0].model_dump_json())
 
+    def test_lifecycle_schedules_and_preview_suffix_remain_readable_after_scrubbing(self) -> None:
+        from control_plane.stored_record_snapshot_codec import iter_snapshot_rows
+
+        payload = product_profile_payload()
+        suffix = "-private-preview"
+        expression = "17 4 * * 2"
+        schedule = {
+            "name": "private-maintenance",
+            "command": "private-command --secret-option",
+            "cron_expression": expression,
+        }
+        preview = payload["preview"]
+        lanes = payload["lanes"]
+        assert isinstance(preview, dict) and isinstance(lanes, (list, tuple))
+        preview["app_name_suffix"] = suffix
+        for target in (*lanes, preview):
+            target["generic_web_extensions"] = {"schedules": [schedule]}
+        self.store.write_product_profile_record(
+            LaunchplaneProductProfileRecord.model_validate(payload)
+        )
+        for version in (1, 2):
+            with self.subTest(format_version=version):
+                snapshot = self.store.export_stored_record_snapshot(format_version=version)
+                raw = next(
+                    row["payload"]
+                    for family, row in iter_snapshot_rows(snapshot)
+                    if family == "launchplane_product_profiles"
+                )
+                profile = LaunchplaneProductProfileRecord.model_validate(raw)
+                encoded = json.dumps(raw)
+                for private in (suffix, expression, schedule["name"], schedule["command"]):
+                    self.assertNotIn(private, encoded)
+                self.assertTrue(profile.preview.app_name_suffix.startswith("-"))
+                self.assertEqual(
+                    profile.preview.generic_web_extensions.schedules,
+                    profile.lanes[0].generic_web_extensions.schedules,
+                )
+
+    def test_invalid_historical_schedule_and_suffix_still_fail_after_scrubbing(self) -> None:
+        from control_plane.stored_record_snapshot import _Scrubber
+
+        payload = product_profile_payload()
+        preview = payload["preview"]
+        lanes = payload["lanes"]
+        assert isinstance(preview, dict) and isinstance(lanes, (list, tuple))
+        preview["app_name_suffix"] = "invalid-suffix"
+        lanes[0]["generic_web_extensions"] = {
+            "schedules": [{"name": "old", "command": "old", "cron_expression": "invalid"}]
+        }
+        schema = LaunchplaneProductProfileRecord.model_json_schema()
+        scrubbed = _Scrubber().scrub(payload, schema, schema)
+        with self.assertRaises(ValidationError) as result:
+            LaunchplaneProductProfileRecord.model_validate(scrubbed)
+        locations = {tuple(item["loc"]) for item in result.exception.errors()}
+        self.assertIn(("preview", "app_name_suffix"), locations)
+        self.assertIn(("lanes", 0, "generic_web_extensions", "schedules", 0), locations)
+        maximum = schema["$defs"]["ProductPreviewProfile"]["properties"]["app_name_suffix"][
+            "maxLength"
+        ]
+        preview["app_name_suffix"] = "-" + "x" * maximum
+        scrubbed = _Scrubber().scrub(payload, schema, schema)
+        with self.assertRaises(ValidationError) as oversized:
+            LaunchplaneProductProfileRecord.model_validate(scrubbed)
+        self.assertIn(
+            ("preview", "app_name_suffix"),
+            {tuple(item["loc"]) for item in oversized.exception.errors()},
+        )
+
     def test_aggregate_product_scopes_include_history_without_current_profiles(self) -> None:
         from sqlalchemy import insert
         from control_plane.storage.postgres import LaunchplaneOwnerAcceptanceSubjectSequenceRow

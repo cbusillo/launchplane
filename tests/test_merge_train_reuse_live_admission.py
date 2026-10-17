@@ -10,7 +10,7 @@ from control_plane.contracts.merge_train_batch import (
 )
 from control_plane.merge_admission import GuardedMergeAdmission, MergeAdmissionDeniedError
 from control_plane.merge_admission_live import LiveMergeAdmissionEvaluator
-from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainDryRunSnapshot, build_merge_train_dry_run_result
 from control_plane.merge_train_controller_run_once import (
     MergeTrainControllerRunOnceEnvelope,
     MergeTrainControllerLeaseContext,
@@ -128,7 +128,25 @@ class ReuseLiveAdmissionTests(unittest.TestCase):
                 patch.object(lease, "checkpoint"),
                 patch(
                     "control_plane.merge_train_controller_run_once._reflow_stale_candidate_record",
-                    return_value=None,
+                    return_value=(
+                        None,
+                        build_merge_train_dry_run_result(
+                            policy=policy.policy,
+                            snapshot=MergeTrainDryRunSnapshot(
+                                repository=REPOSITORY,
+                                base_branch="main",
+                                base_sha=BASE_SHA,
+                                pull_requests=(
+                                    _queued_pull_request(
+                                        number=plan.entries[0].pull_request_number,
+                                        head_sha=HEAD_SHA,
+                                        created_at=candidate.created_at,
+                                    ),
+                                ),
+                            ),
+                            batch_landing=True,
+                        ),
+                    ),
                 ),
             ):
                 advanced = _advance_passed_candidate_record(

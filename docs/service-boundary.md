@@ -2046,9 +2046,13 @@ profile permissions; no Client or workflow permission expands. See
 for the bounded client and separate isolation/sanitization requirements.
 
 Expected-config apply is a narrower metadata mutation for runtime contract
-requirements already owned by product profiles. It requires
+requirements already owned by product profiles. The authenticated Director's
+`local_operator` credential can add declarations on any product, including Live products,
+without an additional grant. This exception cannot remove requirements or
+publish Client credential requests through `owner_input`, and does not extend
+to other agent identities. Other callers and removals require
 `product_profile.expected_config.apply` for the target product in the
-Launchplane service context, loads the existing DB-backed product profile,
+Launchplane service context. The route loads the existing DB-backed product profile,
 appends supplied runtime keys or managed secret binding requirements only when
 absent, and removes requirements named in `remove_runtime_environment_keys` or
 `remove_managed_secret_bindings`. Adding and removing the same identity in one
@@ -2057,10 +2061,16 @@ request asks for removals, each section also reports `removed` and `absent`
 (named but not declared), and the secret section reports `still_bound`:
 configured stored bindings for a removed requirement, which this route never
 unbinds or deletes. Dry-run returns the same redacted summary without writing. Apply updates only the profile `expected_config`, `updated_at`, and
-`source` fields; callers must use the live-target-runtime workflow afterward to
-sync live provider environment. The route does not accept secret plaintext,
-runtime values, or checked-in product catalogs, and workflow authority for real
-products must be granted through admin-supplied authz input.
+`source` fields. Requirements must come from the intended application contract,
+not simply every currently configured key. Declaring a required key that is
+missing from the lane can block a later delivery until it is configured or
+the declaration is corrected. Inspect config status when reviewing the plan.
+Declared keys are also protected from provider-key retirement. An incorrect
+Live-product requirement needs an admin to remove it.
+Runtime delivery is a separate
+operation through the supported runtime-sync path and its own authorization;
+declaring requirements does not start it. The route does not accept secret
+plaintext, runtime values, release settings, or caller-supplied identity markers.
 
 Client apply names or clears the product's Client and changes only the
 profile `owner`, `updated_at`, and `source` fields. It requires
@@ -2233,6 +2243,13 @@ and rejects cross-product/context/instance overwrites for an existing endpoint
 key. The accepted response preserves the legacy private-health apply envelope:
 the endpoint key/status remain in `result`, while `records` stays empty for
 compatibility with existing replays.
+
+[Testing local credential generation](testing-local-credentials.md) uses this
+same product-config route with `generate: "testing_local"` instead of a value.
+`GET /v1/testing-credentials` and
+`GET /v1/products/{product}/testing-credentials` provide names-only overlap
+audit and provenance readback; they authorize all participating product lanes
+before inspecting values. Neither route returns a value or value fingerprint.
 
 Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
@@ -4302,6 +4319,29 @@ plan is not held. It cites the artifact id without inventing a deploy operation.
 Missing or inconsistent provenance, or a request that is not done, stays unknown.
 This cites saved reconciliation evidence, not a fresh provider observation;
 a later manual deployment requires reconciliation before this evidence is current.
+For Odoo, select `intent=provision|generation|testing-replacement` on the testing
+path to report the prerequisites for task provisioning, initial
+fresh generation, and testing replacement together. It independently reads restore
+policy, opaque credential separation and lane-local safety, selected copy source,
+target bindings, resource qualification, current use, and every walkthrough
+checkpoint. The default copy source is `container-export`; use `source_mode=ssh`
+to inspect that source instead. Supply `operation_id` for the original resource
+preparation/replacement and `task_id` for the exact provision task when available.
+Unselected operation/task evidence and checks that depend on unavailable evidence
+are explicitly unknown. A missing generation does not hide a policy, resource,
+credential or current-use failure. `intent=provision` checks the current generation
+and all walkthrough checkpoints; when the generation is not qualified it also
+reports copy prerequisites. A qualified generation needs no new copy preparation.
+`generation` and `testing-replacement` check copy/resource eligibility without
+requiring a task account. The default testing deploy path is unchanged. A selected
+intent is echoed in the response; ordinary reads omit that optional field. The
+helper exposes the same optional arguments after the companion helper update.
+
+These reads reuse execution validators and perform only observations: they do not
+reserve resources, issue credentials, create accounts, acquire an execution fence,
+or persist a dry-run plan. A passing diagnostic never substitutes for the action's
+own reviewed intent, concurrency checks, authorization or live safety gates.
+
 `promote` checks the caller's own promotion grant, Client acceptance, the prod
 lane's backup authority and the last promotion's failure. A step whose evidence
 cannot be read is `unknown`, never `clear`, and the response never carries

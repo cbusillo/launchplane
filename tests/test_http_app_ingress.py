@@ -866,7 +866,7 @@ class FastApiEndpointApplyTests(unittest.IsolatedAsyncioTestCase):
     async def test_private_health_endpoint_apply_rejects_public_url(self) -> None:
         payload = _private_health_endpoint_apply_payload(mode="apply")
         endpoint = cast(dict[str, object], payload["endpoint"])
-        endpoint["url"] = "https://repairshopr-sync.example.test/health"
+        endpoint["url"] = "https://93.184.216.34/health"
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
             app = create_launchplane_fastapi_app(
