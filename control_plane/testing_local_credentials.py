@@ -11,6 +11,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     product_config_requirement_applies_to_lane,
 )
+from control_plane.contracts.secret_record import SecretSharingKind
 from control_plane.product_secret_copy import ProductSecretCopyStore, require_product_lanes
 from control_plane.product_config import ProductConfigStore
 from control_plane.runtime_environments import site_delivered_secret_bindings_from_store
@@ -257,6 +258,9 @@ class CredentialOverlap(BaseModel):
     production_context: str
     production_key: str
     production_product: str
+    # The testing binding's recorded sharing decision; set only for an external key.
+    # Only a read-only source may stay on testing; other kinds are shown but still fail.
+    sharing_kind: SecretSharingKind | None = None
 
 
 class TestingCredentialAudit(BaseModel):
@@ -331,7 +335,12 @@ def audit_testing_credentials(
             bindings = site_delivered_secret_bindings_from_store(
                 record_store=store, context_name=lane.context, instance_name="testing"
             )
-            testing_values = _lane_values(store, product, lane.context, "testing")
+            # Compare what the lane receives; a retired provider key is never delivered.
+            testing_values = {
+                key: value
+                for key, value in _lane_values(store, product, lane.context, "testing").items()
+                if key in bindings
+            }
             report.missing_keys = sorted(local_keys.difference(testing_values))
             report.generated_keys = sorted(
                 key
@@ -351,6 +360,7 @@ def audit_testing_credentials(
                     source_values
                 )
                 for key, value in testing_values.items():
+                    sharing = None if key in local_keys else bindings[key].sharing_reason
                     for source_key, source_value in source_values.items():
                         if (
                             value
@@ -363,11 +373,12 @@ def audit_testing_credentials(
                                     production_context=source.context,
                                     production_key=source_key,
                                     production_product=source_profile.product,
+                                    sharing_kind=sharing.kind if sharing else None,
                                 )
                             )
             report.status = (
                 "overlap"
-                if report.overlaps
+                if any(overlap.sharing_kind != "read_only_source" for overlap in report.overlaps)
                 else "unavailable"
                 if report.missing_keys
                 else "pass"

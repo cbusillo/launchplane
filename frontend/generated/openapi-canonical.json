@@ -4758,6 +4758,26 @@
             "title": "Production Product",
             "type": "string"
           },
+          "sharing_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "dev_store",
+                  "read_only_source",
+                  "pre_live"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "site_shared",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sharing Kind"
+          },
           "testing_key": {
             "title": "Testing Key",
             "type": "string"
