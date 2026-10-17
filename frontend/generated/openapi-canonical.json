@@ -4743,6 +4743,35 @@
         "title": "ConsumerVerificationResponse",
         "type": "object"
       },
+      "CredentialOverlap": {
+        "additionalProperties": false,
+        "properties": {
+          "production_context": {
+            "title": "Production Context",
+            "type": "string"
+          },
+          "production_key": {
+            "title": "Production Key",
+            "type": "string"
+          },
+          "production_product": {
+            "title": "Production Product",
+            "type": "string"
+          },
+          "testing_key": {
+            "title": "Testing Key",
+            "type": "string"
+          }
+        },
+        "required": [
+          "testing_key",
+          "production_context",
+          "production_key",
+          "production_product"
+        ],
+        "title": "CredentialOverlap",
+        "type": "object"
+      },
       "DataProvenance": {
         "additionalProperties": false,
         "properties": {
@@ -32661,6 +32690,19 @@
             ],
             "title": "Sharing Reason",
             "x-launchplane-optional-response": true
+          },
+          "value_source": {
+            "anyOf": [
+              {
+                "const": "generated",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Source",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -39136,6 +39178,12 @@
                 "type": "null"
               }
             ]
+          },
+          "testing_local_credential": {
+            "default": false,
+            "title": "Testing Local Credential",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -47881,7 +47929,8 @@
                 "enum": [
                   "supplied",
                   "copy",
-                  "provider"
+                  "provider",
+                  "generated"
                 ],
                 "type": "string"
               },
@@ -50471,6 +50520,162 @@
           "reason"
         ],
         "title": "TestingActivationRequest",
+        "type": "object"
+      },
+      "TestingCredentialAudit": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "title": "Context",
+            "type": "string"
+          },
+          "generated_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Generated Keys",
+            "type": "array"
+          },
+          "instance": {
+            "const": "testing",
+            "default": "testing",
+            "title": "Instance",
+            "type": "string"
+          },
+          "local_binding_names": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "default": {},
+            "title": "Local Binding Names",
+            "type": "object"
+          },
+          "local_keys": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Local Keys",
+            "type": "array"
+          },
+          "missing_keys": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Keys",
+            "type": "array"
+          },
+          "overlaps": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CredentialOverlap"
+            },
+            "title": "Overlaps",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "production_keys": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "default": {},
+            "title": "Production Keys",
+            "type": "object"
+          },
+          "status": {
+            "enum": [
+              "pass",
+              "overlap",
+              "unavailable",
+              "no_production"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "context",
+          "status",
+          "local_keys"
+        ],
+        "title": "TestingCredentialAudit",
+        "type": "object"
+      },
+      "TestingCredentialAuditResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/TestingCredentialAudit"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "product",
+          "lanes"
+        ],
+        "title": "TestingCredentialAuditResponse",
+        "type": "object"
+      },
+      "TestingCredentialInventoryResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "lanes": {
+            "items": {
+              "$ref": "#/components/schemas/TestingCredentialAudit"
+            },
+            "title": "Lanes",
+            "type": "array"
+          },
+          "products": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "status": {
+            "const": "ok",
+            "default": "ok",
+            "title": "Status",
+            "type": "string"
+          },
+          "trace_id": {
+            "title": "Trace Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "trace_id",
+          "products",
+          "lanes"
+        ],
+        "title": "TestingCredentialInventoryResponse",
         "type": "object"
       },
       "TestingExclusionFacet": {
@@ -80846,6 +81051,18 @@
                         "title": "Description",
                         "type": "string"
                       },
+                      "generate": {
+                        "anyOf": [
+                          {
+                            "const": "testing_local",
+                            "type": "string"
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ],
+                        "title": "Generate"
+                      },
                       "instance": {
                         "anyOf": [
                           {
@@ -83344,6 +83561,12 @@
                             "type": "null"
                           }
                         ]
+                      },
+                      "testing_local_credential": {
+                        "default": false,
+                        "title": "Testing Local Credential",
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
                       }
                     },
                     "required": [
@@ -83864,6 +84087,12 @@
                             "type": "null"
                           }
                         ]
+                      },
+                      "testing_local_credential": {
+                        "default": false,
+                        "title": "Testing Local Credential",
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
                       }
                     },
                     "required": [
@@ -92539,6 +92768,105 @@
         "summary": "Activate a qualified independent testing recipient while retaining historical effects"
       }
     },
+    "/v1/products/{product}/testing-credentials": {
+      "get": {
+        "operationId": "read_testing_credentials",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "product",
+            "required": true,
+            "schema": {
+              "title": "Product",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingCredentialAuditResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Audit testing credential separation without values or fingerprints"
+      }
+    },
     "/v1/products/{product}/testing-generation-retirement": {
       "post": {
         "operationId": "retire_incomplete_testing_generation",
@@ -96821,6 +97149,86 @@
           }
         },
         "summary": "Apply or dry-run a trusted-maintenance policy record"
+      }
+    },
+    "/v1/testing-credentials": {
+      "get": {
+        "operationId": "audit_testing_credentials",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Authorization",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Authorization",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "Cookie",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Cookie",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestingCredentialInventoryResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LaunchplaneErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Audit all products' testing lanes without credential values"
       }
     },
     "/v1/work-graph/github/issues": {

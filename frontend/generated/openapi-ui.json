@@ -27200,6 +27200,19 @@
             ],
             "title": "Sharing Reason",
             "x-launchplane-optional-response": true
+          },
+          "value_source": {
+            "anyOf": [
+              {
+                "const": "generated",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value Source",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -33874,6 +33887,12 @@
                 "type": "null"
               }
             ]
+          },
+          "testing_local_credential": {
+            "default": false,
+            "title": "Testing Local Credential",
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -37897,7 +37916,8 @@
                 "enum": [
                   "supplied",
                   "copy",
-                  "provider"
+                  "provider",
+                  "generated"
                 ],
                 "type": "string"
               },

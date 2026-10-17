@@ -131,6 +131,8 @@ not describe runtime authority until it is implemented, deployed, and activated.
   image and secret boundary, and ongoing public hygiene.
 - [secrets.md](secrets.md) — Managed secrets, key rotation, plaintext exposure,
   and local contract.
+- [testing-local-credentials.md](testing-local-credentials.md) — Service-generated
+  testing passwords, creation/rebuild integration and names-only overlap audit.
 - [testing-local-consumer.md](testing-local-consumer.md) — Recipient-encrypted
   delivery of one testing bridge credential to a local client.
 - [private-testing-transport.md](private-testing-transport.md) — private testing

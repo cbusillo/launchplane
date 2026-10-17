@@ -70,6 +70,7 @@ class ProductConfigSecretInput(BaseModel):
     binding_key: str | None = None
     value: str | None = Field(default=None, repr=False)
     copy_from: ProductSecretCopyFrom | None = None
+    generate: Literal["testing_local"] | None = None
     adopt_from_provider: Literal[True] | None = Field(
         default=None,
         description=(
@@ -85,11 +86,11 @@ class ProductConfigSecretInput(BaseModel):
     def _require_secret_identity(self) -> "ProductConfigSecretInput":
         if not (self.name or "").strip() and not (self.binding_key or "").strip():
             raise ValueError("Product config secrets require name or binding_key.")
-        sources = (self.value, self.copy_from, self.adopt_from_provider)
+        sources = (self.value, self.copy_from, self.adopt_from_provider, self.generate)
         if sum(source is not None for source in sources) != 1:
             raise ValueError(
                 "Product config secrets require exactly one value, copy_from or "
-                "adopt_from_provider."
+                "adopt_from_provider or generate."
             )
         return self
 
@@ -227,6 +228,11 @@ class ProductConfigSecretResult(BaseModel):
     context: str
     instance: str
     secret_id: str = ""
+    value_source: Literal["generated"] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
     copy_from: ProductSecretCopyFrom | None = Field(
         default=None,
         exclude_if=lambda value: value is None,

@@ -3109,6 +3109,7 @@ export type ProductConfigSecretResult = {
     sharing_reason?: {
         [key: string]: string;
     } | null;
+    value_source?: 'generated' | null;
 };
 
 export type ProductConfigWriteAvailability = {
@@ -4182,6 +4183,7 @@ export type ProductSecretConfigRequirement = {
     instance: string;
     integration: string;
     owner_input: ProductOwnerSecretInput | null;
+    testing_local_credential?: boolean;
 };
 
 export type ProductSecretConfigRequirementRemoval = {
@@ -4893,7 +4895,7 @@ export type SecretBinding = {
     sharing_reason: SecretSharingReason | null;
     status: 'configured' | 'disabled';
     updated_at: string;
-    value_source: 'supplied' | 'copy' | 'provider' | null;
+    value_source: 'supplied' | 'copy' | 'provider' | 'generated' | null;
 };
 
 export type SecretSharingReason = {

@@ -696,8 +696,24 @@ class TestingReplacementBootstrapAdapter:
                 checkpoint(generation.domain_host, domain_id, profile.runtime_port)
 
             check()
+            from control_plane.testing_local_credentials import with_generated_credentials
+
+            credential_bundle = with_generated_credentials(
+                ProductAuthorityBundle(),
+                self.store,
+                profile,
+                self.request.context,
+                actor="service:testing-bootstrap",
+                generation=generation.operation_id,
+                only_keys=FRESH_TESTING_LOCAL_CREDENTIAL_KEYS,
+            )
             self.store.write_product_public_hosts_bundle(
                 ProductAuthorityBundle(
+                    secret_records=credential_bundle.secret_records,
+                    secret_versions=credential_bundle.secret_versions,
+                    secret_bindings=credential_bundle.secret_bindings,
+                    secret_audit_events=credential_bundle.secret_audit_events,
+                    secret_delivery_read_sets=credential_bundle.secret_delivery_read_sets,
                     required_context_owner=(self.product, self.request.context),
                     expected_product_profiles=(profile,),
                     product_profiles=(updated_profile,),
