@@ -479,3 +479,20 @@ class CandidateApplicationTests(unittest.TestCase):
         ):
             self.inputs(persisted, "production")
         self.fixture.assert_serving_unchanged()
+
+    def test_global_runtime_change_cannot_rebind_an_original_candidate(self) -> None:
+        allocation = self.allocate()
+        original = self.inputs(allocation)
+        persisted = allocation.model_copy(
+            update={"application": TestingCandidateApplication(plan=original.plan)}
+        )
+        self.store.compare_and_write_testing_candidate(allocation, persisted)
+        self.store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="global", env={"ODOO_WORKERS": "3"}, updated_at=self.profile.updated_at
+            )
+        )
+        self.fixture.before = self.fixture.authority()
+        with self.assertRaises(ValueError):
+            self.inputs(persisted)
+        self.fixture.assert_serving_unchanged()

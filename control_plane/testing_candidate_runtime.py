@@ -40,6 +40,7 @@ from control_plane.runtime_environments import (
     site_delivered_secret_bindings_from_store,
 )
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.product_authority_bundle import RuntimeEnvironmentSetExpectation
 from control_plane.testing_candidate_allocation import (
     candidate_resources,
     require_candidate_target_custody,
@@ -263,14 +264,20 @@ def candidate_runtime_inputs(
             source_binding_sha256=source_binding,
         )
     )
+    runtime_selection = RuntimeEnvironmentSetExpectation(
+        contexts=(allocation.context,),
+        instances=((allocation.context, "testing"),),
+        include_global=True,
+        records=(),
+    )
     authority_binding = canonical_json_sha256(
         {
             "profile": profile.model_dump(mode="json"),
             "target": target.model_dump(mode="json"),
             "runtime": [
                 item.model_dump(mode="json")
-                for item in store.list_runtime_environment_records(context_name=allocation.context)
-                if item.instance in {"", "testing"}
+                for item in store.list_runtime_environment_records()
+                if runtime_selection.includes(item)
             ],
             "credentials": credential_binding,
             "native": authority.model_dump(mode="json") if authority is not None else None,
