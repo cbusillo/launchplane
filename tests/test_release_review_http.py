@@ -528,7 +528,15 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def open_urgent(
-        self, *, actor: str = "operator", github_id: int = 9003, reason: str = "", digest: str = ""
+        self,
+        *,
+        actor: str = "operator",
+        github_id: int = 9003,
+        reason: str = "",
+        digest: str = "",
+        adopt_issue_number: int | None = None,
+        adopt_comment_id: int | None = None,
+        dry_run: bool = False,
     ) -> Response:
         session = self.sessions.issue(_human(login=actor, github_id=github_id))
         current = build_release_review(store=self.store, profile=profile(), read=github_read)
@@ -541,7 +549,48 @@ class ReleaseReviewHttpTests(unittest.IsolatedAsyncioTestCase):
                 "product": "example-site",
                 "checklist_digest": digest or current.checklist_digest,
                 "reason": reason,
+                "adopt_issue_number": adopt_issue_number,
+                "adopt_comment_id": adopt_comment_id,
+                "dry_run": dry_run,
             },
+        )
+
+    async def test_receipt_adoption_reuses_admin_gate_and_never_opens_a_second_invitation(
+        self,
+    ) -> None:
+        with (
+            patch("control_plane.http_app.adopt_release_invitation", return_value=True) as adopt,
+            patch("control_plane.http_app.publish_release_invitation") as publish,
+        ):
+            denied = await self.open_urgent(
+                actor="site-owner",
+                github_id=9001,
+                reason="Adopt existing request.",
+                adopt_issue_number=91,
+                adopt_comment_id=600,
+            )
+            self.assertEqual(denied.status_code, 403)
+            stale = await self.open_urgent(
+                reason="Adopt existing request.",
+                digest="f" * 64,
+                adopt_issue_number=91,
+                adopt_comment_id=600,
+            )
+            self.assertEqual(stale.status_code, 409)
+            adopt.assert_not_called()
+            for dry_run in (True, False):
+                result = await self.open_urgent(
+                    reason="Adopt existing request.",
+                    adopt_issue_number=91,
+                    adopt_comment_id=600,
+                    dry_run=dry_run,
+                )
+                self.assertEqual(result.status_code, 200, result.text)
+                self.assertEqual(adopt.call_args.kwargs["dry_run"], dry_run)
+                self.assertEqual(adopt.call_args.kwargs["reason"], "Adopt existing request.")
+            publish.assert_not_called()
+        self.assertEqual(
+            self.store.list_release_review_decision_records(product="example-site"), ()
         )
 
     async def test_only_an_admin_with_a_reason_opens_an_urgent_review(self) -> None:
