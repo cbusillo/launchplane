@@ -4177,7 +4177,7 @@ export type ProductSecretConfigRequirement = {
     instance: string;
     integration: string;
     owner_input: ProductOwnerSecretInput | null;
-    testing_local_credential: boolean;
+    testing_local_credential?: boolean;
 };
 
 export type ProductSecretConfigRequirementRemoval = {

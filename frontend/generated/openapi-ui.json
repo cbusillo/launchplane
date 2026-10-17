@@ -33859,7 +33859,8 @@
           "testing_local_credential": {
             "default": false,
             "title": "Testing Local Credential",
-            "type": "boolean"
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -33867,8 +33868,7 @@
           "context",
           "instance",
           "integration",
-          "owner_input",
-          "testing_local_credential"
+          "owner_input"
         ],
         "title": "ProductSecretConfigRequirement",
         "type": "object"

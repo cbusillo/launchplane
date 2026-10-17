@@ -39146,7 +39146,8 @@
           "testing_local_credential": {
             "default": false,
             "title": "Testing Local Credential",
-            "type": "boolean"
+            "type": "boolean",
+            "x-launchplane-optional-response": true
           }
         },
         "required": [
@@ -83517,7 +83518,8 @@
                       "testing_local_credential": {
                         "default": false,
                         "title": "Testing Local Credential",
-                        "type": "boolean"
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
                       }
                     },
                     "required": [
@@ -84042,7 +84044,8 @@
                       "testing_local_credential": {
                         "default": false,
                         "title": "Testing Local Credential",
-                        "type": "boolean"
+                        "type": "boolean",
+                        "x-launchplane-optional-response": true
                       }
                     },
                     "required": [

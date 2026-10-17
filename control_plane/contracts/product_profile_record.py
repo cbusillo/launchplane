@@ -583,7 +583,11 @@ class ProductSecretConfigRequirement(BaseModel):
     context: str = ""
     instance: str = ""
     owner_input: ProductOwnerSecretInput | None = None
-    testing_local_credential: bool = Field(default=False, exclude_if=lambda value: not value)
+    testing_local_credential: bool = Field(
+        default=False,
+        exclude_if=lambda value: not value,
+        json_schema_extra={"x-launchplane-optional-response": True},
+    )
 
     @model_validator(mode="after")
     def _validate_requirement(self) -> "ProductSecretConfigRequirement":
